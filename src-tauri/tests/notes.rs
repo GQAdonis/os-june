@@ -32,6 +32,31 @@ async fn updates_title_body_and_active_tab() {
 }
 
 #[tokio::test]
+async fn generated_note_returns_to_notes_tab() {
+    let repos = repos().await;
+    let note = repos.create_note(None).await.expect("note");
+    repos
+        .update_note(&note.id, None, None, Some("transcription".to_string()))
+        .await
+        .expect("tab update");
+
+    let generated = repos
+        .set_generated_note(
+            &note.id,
+            Some("Generated title".to_string()),
+            "Generated content".to_string(),
+        )
+        .await
+        .expect("generated note");
+
+    assert_eq!(generated.active_tab.as_deref(), Some("notes"));
+    assert_eq!(
+        generated.generated_content.as_deref(),
+        Some("Generated content")
+    );
+}
+
+#[tokio::test]
 async fn get_note_returns_transcript_and_audio_metadata() {
     let repos = repos().await;
     let note = repos.create_note(None).await.expect("note");

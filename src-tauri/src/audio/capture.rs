@@ -11,7 +11,10 @@ use std::{
     fs::File,
     io::BufWriter,
     path::PathBuf,
-    sync::{Arc, LazyLock, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, LazyLock, Mutex,
+    },
     time::{Duration, Instant},
 };
 use uuid::Uuid;
@@ -47,6 +50,7 @@ struct ActiveRecording {
     active_since: Option<Instant>,
     accumulated_active: Duration,
     paused: bool,
+    paused_flag: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>,
     stats: Arc<Mutex<CaptureStats>>,
     _stream: cpal::Stream,
@@ -123,8 +127,10 @@ pub fn start_capture(paths: &AppPaths, note_id: String) -> Result<StartedRecordi
 
     let writer = Arc::new(Mutex::new(Some(writer)));
     let stats = Arc::new(Mutex::new(CaptureStats::default()));
+    let paused_flag = Arc::new(AtomicBool::new(false));
     let writer_for_callback = Arc::clone(&writer);
     let stats_for_callback = Arc::clone(&stats);
+    let paused_for_callback = Arc::clone(&paused_flag);
     let err_fn = |error| eprintln!("audio stream error: {error}");
 
     let stream = match config.sample_format() {
@@ -135,6 +141,7 @@ pub fn start_capture(paths: &AppPaths, note_id: String) -> Result<StartedRecordi
                     data.iter().map(|sample| *sample),
                     &writer_for_callback,
                     &stats_for_callback,
+                    &paused_for_callback,
                 )
             },
             err_fn,
@@ -147,6 +154,7 @@ pub fn start_capture(paths: &AppPaths, note_id: String) -> Result<StartedRecordi
                     data.iter().map(|sample| *sample as f32 / i16::MAX as f32),
                     &writer_for_callback,
                     &stats_for_callback,
+                    &paused_for_callback,
                 )
             },
             err_fn,
@@ -160,6 +168,7 @@ pub fn start_capture(paths: &AppPaths, note_id: String) -> Result<StartedRecordi
                         .map(|sample| (*sample as f32 - 32768.0) / 32768.0),
                     &writer_for_callback,
                     &stats_for_callback,
+                    &paused_for_callback,
                 )
             },
             err_fn,
@@ -199,6 +208,7 @@ pub fn start_capture(paths: &AppPaths, note_id: String) -> Result<StartedRecordi
         active_since: Some(Instant::now()),
         accumulated_active: Duration::ZERO,
         paused: false,
+        paused_flag,
         writer,
         stats,
         _stream: stream,
@@ -222,6 +232,7 @@ pub fn pause_capture(session_id: &str) -> Result<RecordingStatusDto, AppError> {
             recording.accumulated_active += active_since.elapsed();
         }
         recording.paused = true;
+        recording.paused_flag.store(true, Ordering::Release);
     }
     Ok(recording.status())
 }
@@ -232,6 +243,7 @@ pub fn resume_capture(session_id: &str) -> Result<RecordingStatusDto, AppError> 
     if recording.paused {
         recording.active_since = Some(Instant::now());
         recording.paused = false;
+        recording.paused_flag.store(false, Ordering::Release);
     }
     Ok(recording.status())
 }
@@ -277,9 +289,11 @@ pub fn finish_capture(session_id: &str) -> Result<FinishedRecording, AppError> {
         partial_path,
         final_path,
         writer,
+        paused_flag,
         _stream,
         ..
     } = recording;
+    paused_flag.store(true, Ordering::Release);
     drop(_stream);
     if let Some(writer) = writer
         .lock()
@@ -305,9 +319,13 @@ fn write_input_data<I>(
     data: I,
     writer: &Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>,
     stats: &Arc<Mutex<CaptureStats>>,
+    paused: &Arc<AtomicBool>,
 ) where
     I: Iterator<Item = f32>,
 {
+    if paused.load(Ordering::Acquire) {
+        return;
+    }
     let Ok(mut writer_guard) = writer.lock() else {
         return;
     };

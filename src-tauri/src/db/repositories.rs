@@ -272,7 +272,7 @@ impl Repositories {
             current.title
         };
         sqlx::query(
-            "UPDATE notes SET title = ?, generated_content = ?, processing_status = 'ready', last_error = NULL, updated_at = ? WHERE id = ?",
+            "UPDATE notes SET title = ?, generated_content = ?, active_tab = 'notes', processing_status = 'ready', last_error = NULL, updated_at = ? WHERE id = ?",
         )
         .bind(title)
         .bind(content)
