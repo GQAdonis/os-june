@@ -100,7 +100,7 @@ pub fn validate_audio_artifact(
         result.rms_amplitude = (sum_square / samples as f64).sqrt() as f32;
     }
     result.non_silent_signal = result.rms_amplitude >= config.silence_rms_threshold
-        || result.peak_amplitude >= config.silence_rms_threshold * 3.0;
+        && result.peak_amplitude >= config.silence_rms_threshold * 3.0;
     if !result.non_silent_signal {
         result.warnings.push("audio appears silent".to_string());
     }

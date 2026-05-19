@@ -48,6 +48,8 @@ extension AudioObjectID {
 
 final class SystemAudioRecorder {
     private let outputURL: URL?
+    private let statusURL: URL?
+    private let pidURL: URL?
     private let queue = DispatchQueue(label: "network.opensoftware.os-notetaker.system-audio", qos: .userInitiated)
     private let pauseLock = NSLock()
 
@@ -61,8 +63,15 @@ final class SystemAudioRecorder {
     private var isPaused = false
     private var lastLevelEmit = Date.distantPast
 
-    init(outputURL: URL?) {
+    init(outputURL: URL?, statusURL: URL?, pidURL: URL?) {
         self.outputURL = outputURL
+        self.statusURL = statusURL
+        self.pidURL = pidURL
+    }
+
+    func writePid() {
+        guard let pidURL else { return }
+        try? "\(getpid())".write(to: pidURL, atomically: true, encoding: .utf8)
     }
 
     func pause() {
@@ -224,6 +233,8 @@ final class SystemAudioRecorder {
         let data = try! JSONSerialization.data(withJSONObject: object)
         print(String(data: data, encoding: .utf8)!)
         fflush(stdout)
+        guard let statusURL else { return }
+        try? data.write(to: statusURL)
     }
 }
 
@@ -234,21 +245,35 @@ func argumentValue(_ name: String, from arguments: [String]) -> String? {
     return arguments[index + 1]
 }
 
-guard #available(macOS 14.2, *) else {
-    let data = try! JSONSerialization.data(withJSONObject: ["event": "error", "message": "System audio recording requires macOS 14.2 or later."])
+func emitProcessStatus(_ object: [String: String], statusPath: String?) {
+    let data = try! JSONSerialization.data(withJSONObject: object)
     print(String(data: data, encoding: .utf8)!)
+    fflush(stdout)
+    guard let statusPath else { return }
+    try? data.write(to: URL(fileURLWithPath: statusPath))
+}
+
+let statusPath = argumentValue("--status", from: CommandLine.arguments)
+
+guard #available(macOS 14.2, *) else {
+    emitProcessStatus(["event": "error", "message": "System audio recording requires macOS 14.2 or later."], statusPath: statusPath)
     exit(2)
 }
 
 let checkOnly = CommandLine.arguments.contains("--check")
 let outputPath = argumentValue("--output", from: CommandLine.arguments)
+let pidPath = argumentValue("--pid", from: CommandLine.arguments)
 if !checkOnly && outputPath == nil {
-    let data = try! JSONSerialization.data(withJSONObject: ["event": "error", "message": "Usage: os-notetaker-system-audio-recorder --output /path/to/recording.wav"])
-    print(String(data: data, encoding: .utf8)!)
+    emitProcessStatus(["event": "error", "message": "Usage: os-notetaker-system-audio-recorder --output /path/to/recording.wav"], statusPath: statusPath)
     exit(2)
 }
 
-let recorder = SystemAudioRecorder(outputURL: outputPath.map { URL(fileURLWithPath: $0) })
+let recorder = SystemAudioRecorder(
+    outputURL: outputPath.map { URL(fileURLWithPath: $0) },
+    statusURL: statusPath.map { URL(fileURLWithPath: $0) },
+    pidURL: pidPath.map { URL(fileURLWithPath: $0) }
+)
+recorder.writePid()
 
 let terminateSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
 let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
@@ -285,8 +310,7 @@ do {
         exit(0)
     }
 } catch {
-    let data = try! JSONSerialization.data(withJSONObject: ["event": "error", "message": error.localizedDescription])
-    print(String(data: data, encoding: .utf8)!)
+    emitProcessStatus(["event": "error", "message": error.localizedDescription], statusPath: statusPath)
     exit(1)
 }
 

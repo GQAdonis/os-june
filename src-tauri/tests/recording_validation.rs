@@ -25,6 +25,22 @@ fn write_wav(path: &Path, amplitude: i16, duration_ms: u32) {
     writer.finalize().expect("wav finalize");
 }
 
+fn write_impulse_wav(path: &Path, impulse_amplitude: i16, duration_ms: u32) {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 16_000,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    let mut writer = WavWriter::create(path, spec).expect("wav writer");
+    let samples = (spec.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
+    for i in 0..samples {
+        let sample = if i == 20 { impulse_amplitude } else { 0 };
+        writer.write_sample(sample).expect("sample write");
+    }
+    writer.finalize().expect("wav finalize");
+}
+
 #[test]
 fn accepts_readable_non_silent_wav_with_expected_duration() {
     let dir = tempdir().expect("tempdir");
@@ -84,6 +100,25 @@ fn rejects_silent_audio() {
         .expect("validation should run");
 
     assert!(result.readable_audio);
+    assert!(!result.non_silent_signal);
+    assert!(result
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("silent")));
+}
+
+#[test]
+fn rejects_isolated_peak_without_sustained_signal() {
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("single-click.wav");
+    write_impulse_wav(&path, i16::MAX, 1_500);
+
+    let result = validate_audio_artifact(&path, 1_500, AudioValidationConfig::default())
+        .expect("validation should run");
+
+    assert!(result.readable_audio);
+    assert!(result.peak_amplitude > 0.9);
+    assert!(result.rms_amplitude < AudioValidationConfig::default().silence_rms_threshold);
     assert!(!result.non_silent_signal);
     assert!(result
         .warnings
