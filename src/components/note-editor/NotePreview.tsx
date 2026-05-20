@@ -107,9 +107,9 @@ export function NotePreview({
 
     const text = blockEl.textContent ?? "";
     if (text.startsWith("# ")) {
-      replaceBlockWithTag(blockEl, "h1", text.slice(2));
+      applyBlockCommand(blockEl, "h1", 2);
     } else if (text.startsWith("- ") || text.startsWith("* ")) {
-      replaceBlockWithBullet(blockEl, text.slice(2));
+      applyBlockCommand(blockEl, "bullet", 2);
     }
   }
 
@@ -332,69 +332,46 @@ function applyBlockShortcut(
   pre.setEnd(range.startContainer, range.startOffset);
   const marker = pre.toString();
 
-  const tag =
+  const command: "h1" | "bullet" | null =
     marker === "#"
       ? "h1"
       : marker === "-" || marker === "*"
-        ? "li"
+        ? "bullet"
         : null;
-  if (!tag) return;
+  if (!command) return;
 
   event.preventDefault();
-  const rest = (blockEl.textContent ?? "").slice(marker.length);
+  applyBlockCommand(blockEl, command, marker.length);
+}
 
-  if (tag === "li") {
-    const li = document.createElement("li");
-    li.textContent = rest;
-    const prev = blockEl.previousElementSibling;
-    if (prev && prev.tagName === "UL") {
-      prev.appendChild(li);
-      blockEl.remove();
+/* Single point of truth: strip the markdown marker, drop the caret inside
+ * the block, then defer to the same execCommand path the toolbar uses so
+ * keyboard- and toolbar-triggered headings/lists are byte-identical. */
+function applyBlockCommand(
+  blockEl: HTMLElement,
+  command: "h1" | "bullet",
+  markerLen: number,
+) {
+  if (markerLen > 0) {
+    const first = blockEl.firstChild;
+    if (first && first.nodeType === Node.TEXT_NODE) {
+      first.textContent = (first.textContent ?? "").slice(markerLen);
     } else {
-      const ul = document.createElement("ul");
-      ul.appendChild(li);
-      blockEl.replaceWith(ul);
+      blockEl.textContent = (blockEl.textContent ?? "").slice(markerLen);
     }
-    placeCaretAtEnd(li);
-    return;
   }
-
-  const heading = document.createElement(tag);
-  heading.textContent = rest;
-  blockEl.replaceWith(heading);
-  placeCaretAtEnd(heading);
-}
-
-function replaceBlockWithTag(blockEl: HTMLElement, tag: string, text: string) {
-  const heading = document.createElement(tag);
-  heading.textContent = text;
-  blockEl.replaceWith(heading);
-  placeCaretAtEnd(heading);
-}
-
-function replaceBlockWithBullet(blockEl: HTMLElement, text: string) {
-  const li = document.createElement("li");
-  li.textContent = text;
-  const prev = blockEl.previousElementSibling;
-  if (prev && prev.tagName === "UL") {
-    prev.appendChild(li);
-    blockEl.remove();
-  } else {
-    const ul = document.createElement("ul");
-    ul.appendChild(li);
-    blockEl.replaceWith(ul);
-  }
-  placeCaretAtEnd(li);
-}
-
-function placeCaretAtEnd(el: HTMLElement) {
   const selection = window.getSelection();
   if (!selection) return;
-  const range = document.createRange();
-  range.selectNodeContents(el);
-  range.collapse(false);
+  const caret = document.createRange();
+  caret.selectNodeContents(blockEl);
+  caret.collapse(false);
   selection.removeAllRanges();
-  selection.addRange(range);
+  selection.addRange(caret);
+  if (command === "h1") {
+    document.execCommand("formatBlock", false, "h1");
+  } else {
+    document.execCommand("insertUnorderedList");
+  }
 }
 
 function htmlToMarkdown(root: HTMLElement): string {
