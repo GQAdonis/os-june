@@ -67,13 +67,88 @@ select {
   cursor: pointer;
 }
 
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.icon-button.danger {
+  color: #8c1d18;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.icon-button.danger:hover {
+  border-color: rgba(185, 28, 28, 0.24);
+  background: rgba(254, 226, 226, 0.86);
+}
+
+.sidebar button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.folder-create-form {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(31, 35, 42, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.folder-create-form label {
+  display: grid;
+  gap: 6px;
+  color: #646a73;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.folder-create-form input {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(36, 38, 43, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #171717;
+}
+
+.folder-create-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
 .folder-nav {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.sidebar .active {
+.folder-nav-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  gap: 6px;
+  align-items: center;
+  border-radius: 8px;
+}
+
+.folder-nav-item > button:first-child {
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 10px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar .active,
+.folder-nav-item.active > button:first-child {
   background: rgba(28, 99, 214, 0.12);
   border-color: rgba(28, 99, 214, 0.18);
 }
@@ -115,16 +190,30 @@ select {
   background: rgba(255, 255, 255, 0.44);
 }
 
-.notes-list > button:not(.primary-action) {
+.note-list-item {
   display: grid;
-  gap: 5px;
+  grid-template-columns: minmax(0, 1fr) 30px;
+  gap: 8px;
+  align-items: stretch;
   min-height: 68px;
-  padding: 12px;
-  text-align: left;
   border: 1px solid rgba(31, 35, 42, 0.1);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.58);
+}
+
+.note-select-button {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  text-align: left;
+  border: 0;
+  background: transparent;
   cursor: pointer;
+}
+
+.note-list-item .icon-button {
+  align-self: start;
+  margin: 8px 8px 0 0;
 }
 
 .notes-list .selected {
@@ -471,4 +560,62 @@ select {
 .recovery-actions {
   display: flex;
   gap: 8px;
+}
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(17, 24, 39, 0.28);
+  backdrop-filter: blur(8px);
+}
+
+.confirmation-dialog {
+  display: grid;
+  gap: 14px;
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid rgba(31, 35, 42, 0.14);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 24px 72px rgba(17, 24, 39, 0.2);
+}
+
+.confirmation-dialog h2,
+.confirmation-dialog p {
+  margin: 0;
+}
+
+.confirmation-dialog h2 {
+  font-size: 18px;
+}
+
+.confirmation-dialog p {
+  color: #4b5563;
+  line-height: 1.45;
+}
+
+.dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.dialog-actions button {
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid rgba(36, 38, 43, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.84);
+  cursor: pointer;
+}
+
+.dialog-actions .danger-action {
+  color: #ffffff;
+  border-color: rgba(127, 29, 29, 0.26);
+  background: #b42318;
 }

@@ -66,6 +66,89 @@ describe("notesReducer", () => {
     expect(state.selectedNote?.editedContent).toBe("Clean notes");
   });
 
+  it("keeps updated notes visible when they remain in the selected folder", () => {
+    const initial = notesReducer(createInitialState(), {
+      type: "folderSelected",
+      folderId: "folder-1",
+    });
+    const loaded = notesReducer(initial, {
+      type: "noteLoaded",
+      note: note({ folderIds: ["folder-1"] }),
+    });
+
+    const state = notesReducer(loaded, {
+      type: "noteUpdated",
+      note: note({ title: "In folder", folderIds: ["folder-1"] }),
+    });
+
+    expect(state.notes.map((item) => item.id)).toEqual(["note-1"]);
+    expect(state.selectedNote?.title).toBe("In folder");
+  });
+
+  it("removes updated notes from the current folder view when unassigned", () => {
+    const initial = notesReducer(createInitialState(), {
+      type: "folderSelected",
+      folderId: "folder-1",
+    });
+    const loaded = notesReducer(initial, {
+      type: "noteLoaded",
+      note: note({ folderIds: ["folder-1"] }),
+    });
+
+    const state = notesReducer(loaded, {
+      type: "noteUpdated",
+      note: note({ folderIds: [] }),
+    });
+
+    expect(state.notes).toEqual([]);
+    expect(state.selectedNoteId).toBeUndefined();
+    expect(state.selectedNote).toBeUndefined();
+  });
+
+  it("clears the selected note when it is deleted", () => {
+    const loaded = notesReducer(createInitialState(), {
+      type: "noteLoaded",
+      note: note({ id: "note-1" }),
+    });
+
+    const state = notesReducer(loaded, {
+      type: "noteDeleted",
+      noteId: "note-1",
+    });
+
+    expect(state.notes).toEqual([]);
+    expect(state.selectedNoteId).toBeUndefined();
+    expect(state.selectedNote).toBeUndefined();
+  });
+
+  it("clears selected folder and note membership when a folder is deleted", () => {
+    const initial = notesReducer(createInitialState(), {
+      type: "bootstrapLoaded",
+      payload: {
+        folders: [
+          { id: "folder-1", name: "Work", createdAt: now, updatedAt: now },
+        ],
+        notes: [note({ folderIds: ["folder-1"] })],
+        activeRecoveries: [],
+        providerConfigured: true,
+      },
+    });
+    const selected = notesReducer(initial, {
+      type: "folderSelected",
+      folderId: "folder-1",
+    });
+
+    const state = notesReducer(selected, {
+      type: "folderDeleted",
+      folderId: "folder-1",
+      deleteNotes: false,
+    });
+
+    expect(state.folders).toEqual([]);
+    expect(state.selectedFolderId).toBeUndefined();
+    expect(state.notes[0].folderIds).toEqual([]);
+  });
+
   it("tracks recording status transitions without changing selected note", () => {
     const initial = notesReducer(createInitialState(), {
       type: "noteLoaded",

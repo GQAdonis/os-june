@@ -42,6 +42,7 @@ describe("folders UI", () => {
         folders={folders}
         selectedFolderId={undefined}
         onCreateFolder={vi.fn()}
+        onDeleteFolder={vi.fn()}
         onSelectAll={vi.fn()}
         onSelectFolder={onSelectFolder}
       />,
@@ -60,26 +61,85 @@ describe("folders UI", () => {
     expect(onSelectFolder).toHaveBeenCalledWith("folder-1");
   });
 
-  it("shows notes with placeholders and empty folder action", () => {
+  it("creates folders from the sidebar form", async () => {
+    const user = userEvent.setup();
+    const onCreateFolder = vi.fn();
+    render(
+      <Sidebar
+        folders={folders}
+        selectedFolderId={undefined}
+        onCreateFolder={onCreateFolder}
+        onDeleteFolder={vi.fn()}
+        onSelectAll={vi.fn()}
+        onSelectFolder={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "+ New Folder" }));
+    await user.type(screen.getByLabelText("Folder name"), "Research");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(onCreateFolder).toHaveBeenCalledWith("Research");
+  });
+
+  it("deletes folders from the sidebar delete action", async () => {
+    const user = userEvent.setup();
+    const onDeleteFolder = vi.fn();
+    render(
+      <Sidebar
+        folders={folders}
+        selectedFolderId={undefined}
+        onCreateFolder={vi.fn()}
+        onDeleteFolder={onDeleteFolder}
+        onSelectAll={vi.fn()}
+        onSelectFolder={vi.fn()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Delete folder Ideas" }),
+    );
+
+    expect(onDeleteFolder).toHaveBeenCalledWith(folders[0]);
+  });
+
+  it("shows notes with placeholders and delete actions", async () => {
+    const user = userEvent.setup();
+    const onDeleteNote = vi.fn();
     const { container } = render(
       <NotesList
         notes={notes}
         selectedNoteId="note-2"
         onSelectNote={vi.fn()}
+        onDeleteNote={onDeleteNote}
         onCreateNote={vi.fn()}
       />,
     );
     const list = within(container.querySelector(".notes-list") as HTMLElement);
 
-    expect(list.getByRole("button", { name: /Second/ })).toBeInTheDocument();
+    expect(
+      list.getByRole("button", { name: "Second Second preview" }),
+    ).toBeInTheDocument();
     expect(
       list.getAllByRole("button", { name: /New note/ }).length,
     ).toBeGreaterThanOrEqual(1);
+    expect(
+      list.getByRole("button", { name: "Delete note Second" }),
+    ).toBeInTheDocument();
+
+    await user.click(list.getByRole("button", { name: "Delete note Second" }));
+
+    expect(onDeleteNote).toHaveBeenCalledWith(notes[0]);
   });
 
   it("shows empty state with create action", () => {
     render(
-      <NotesList notes={[]} onSelectNote={vi.fn()} onCreateNote={vi.fn()} />,
+      <NotesList
+        notes={[]}
+        onSelectNote={vi.fn()}
+        onDeleteNote={vi.fn()}
+        onCreateNote={vi.fn()}
+      />,
     );
 
     expect(screen.getByText("No notes yet")).toBeInTheDocument();

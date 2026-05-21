@@ -9,6 +9,8 @@ import {
   checkRecordingSourceReadiness,
   createFolder,
   createNote,
+  deleteFolder,
+  deleteNote,
   finishRecording,
   getRecordingStatus,
   getNote,
@@ -21,13 +23,22 @@ import {
   startRecording,
   updateNote,
 } from "../lib/tauri";
-import type { NoteDto, RecordingStatusDto } from "../lib/tauri";
+import type {
+  FolderDto,
+  NoteDto,
+  NoteListItemDto,
+  RecordingStatusDto,
+} from "../lib/tauri";
 import type {
   RecordingSourceMode,
   RecordingSourceReadinessDto,
 } from "../lib/tauri";
 import { shouldPollProcessingStatus } from "./processing-polling";
 import { createInitialState, notesReducer } from "./state/app-state";
+
+type PendingDeletion =
+  | { kind: "note"; note: NoteListItemDto }
+  | { kind: "folder"; folder: FolderDto };
 
 export function App() {
   const [state, dispatch] = useReducer(
@@ -41,6 +52,7 @@ export function App() {
   const [sourceReadiness, setSourceReadiness] =
     useState<RecordingSourceReadinessDto>();
   const [checkingSourceReadiness, setCheckingSourceReadiness] = useState(false);
+  const [pendingDeletion, setPendingDeletion] = useState<PendingDeletion>();
   const selectedNote = state.selectedNote;
 
   useEffect(() => {
@@ -112,6 +124,20 @@ export function App() {
     }
   }
 
+  function handleDeleteNote(note: NoteListItemDto) {
+    setPendingDeletion({ kind: "note", note });
+  }
+
+  async function confirmDeleteNote(note: NoteListItemDto) {
+    try {
+      await deleteNote(note.id);
+      dispatch({ type: "noteDeleted", noteId: note.id });
+      setPendingDeletion(undefined);
+    } catch (err) {
+      setError(messageFromError(err));
+    }
+  }
+
   async function handleSelectFolder(folderId?: string) {
     dispatch({ type: "folderSelected", folderId });
     try {
@@ -122,14 +148,36 @@ export function App() {
     }
   }
 
-  async function handleCreateFolder() {
-    const name = window.prompt("Folder name");
-    if (!name?.trim()) return;
+  async function handleCreateFolder(name: string) {
     try {
       const folder = await createFolder(name);
       dispatch({ type: "folderCreated", folder });
       const response = await listNotes(folder.id);
       dispatch({ type: "notesLoaded", notes: response.items });
+    } catch (err) {
+      setError(messageFromError(err));
+      throw err;
+    }
+  }
+
+  function handleDeleteFolder(folder: FolderDto) {
+    setPendingDeletion({ kind: "folder", folder });
+  }
+
+  async function confirmDeleteFolder(folder: FolderDto, deleteNotes: boolean) {
+    const deletingSelectedFolder = state.selectedFolderId === folder.id;
+    try {
+      await deleteFolder(folder.id, deleteNotes);
+      dispatch({
+        type: "folderDeleted",
+        folderId: folder.id,
+        deleteNotes,
+      });
+      if (deletingSelectedFolder) {
+        const response = await listNotes(undefined);
+        dispatch({ type: "notesLoaded", notes: response.items });
+      }
+      setPendingDeletion(undefined);
     } catch (err) {
       setError(messageFromError(err));
     }
@@ -218,7 +266,8 @@ export function App() {
       <Sidebar
         folders={state.folders}
         selectedFolderId={state.selectedFolderId}
-        onCreateFolder={() => void handleCreateFolder()}
+        onCreateFolder={(name) => handleCreateFolder(name)}
+        onDeleteFolder={(folder) => void handleDeleteFolder(folder)}
         onSelectAll={() => void handleSelectFolder(undefined)}
         onSelectFolder={(folderId) => void handleSelectFolder(folderId)}
       />
@@ -247,7 +296,11 @@ export function App() {
           <NotesList
             notes={state.notes}
             selectedNoteId={state.selectedNoteId}
+            emptyTitle={
+              state.selectedFolderId ? "No notes in this folder yet" : undefined
+            }
             onSelectNote={(noteId) => void handleSelectNote(noteId)}
+            onDeleteNote={(note) => void handleDeleteNote(note)}
             onCreateNote={() => void handleCreateNote()}
           />
           {selectedNote ? (
@@ -313,7 +366,95 @@ export function App() {
           )}
         </div>
       </section>
+      {pendingDeletion ? (
+        <DeletionDialog
+          pendingDeletion={pendingDeletion}
+          onCancel={() => setPendingDeletion(undefined)}
+          onDeleteNote={(note) => void confirmDeleteNote(note)}
+          onDeleteFolder={(folder, deleteNotes) =>
+            void confirmDeleteFolder(folder, deleteNotes)
+          }
+        />
+      ) : null}
     </main>
+  );
+}
+
+function DeletionDialog({
+  pendingDeletion,
+  onCancel,
+  onDeleteNote,
+  onDeleteFolder,
+}: {
+  pendingDeletion: PendingDeletion;
+  onCancel: () => void;
+  onDeleteNote: (note: NoteListItemDto) => void;
+  onDeleteFolder: (folder: FolderDto, deleteNotes: boolean) => void;
+}) {
+  if (pendingDeletion.kind === "note") {
+    const title = pendingDeletion.note.title.trim() || "New note";
+    return (
+      <div className="dialog-backdrop">
+        <section
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="delete-note-title"
+          className="confirmation-dialog"
+        >
+          <h2 id="delete-note-title">{`Delete "${title}"?`}</h2>
+          <p>This cannot be undone.</p>
+          <div className="dialog-actions">
+            <button type="button" onClick={onCancel}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="danger-action"
+              onClick={() => onDeleteNote(pendingDeletion.note)}
+            >
+              Delete note
+            </button>
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="delete-folder-title"
+        className="confirmation-dialog"
+      >
+        <h2 id="delete-folder-title">
+          {`Delete folder "${pendingDeletion.folder.name}"?`}
+        </h2>
+        <p>
+          You can keep the notes in All Notes or delete the notes in this folder
+          too.
+        </p>
+        <div className="dialog-actions">
+          <button type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => onDeleteFolder(pendingDeletion.folder, false)}
+          >
+            Keep notes
+          </button>
+          <button
+            type="button"
+            className="danger-action"
+            onClick={() => onDeleteFolder(pendingDeletion.folder, true)}
+          >
+            Delete notes too
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }
 
