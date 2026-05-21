@@ -404,6 +404,7 @@ pub async fn finish_recording(
         )
         .await?;
     let note = repos.get_note(&finished.note_id).await?;
+    let existing_generated_note = note.generated_content.clone();
     let manual_notes = manual_notes_for_generation(&note);
     let task_repos = repos.clone();
     let task_note_id = finished.note_id.clone();
@@ -424,6 +425,7 @@ pub async fn finish_recording(
                 &artifact_id,
                 path,
                 title,
+                existing_generated_note,
                 manual_notes,
             )
             .await
@@ -435,6 +437,7 @@ pub async fn finish_recording(
                 task_source_mode,
                 valid_sources,
                 title,
+                existing_generated_note,
                 manual_notes,
             )
             .await
@@ -592,6 +595,7 @@ pub async fn recover_recording(
             return Ok(repos.get_note(&info.note_id).await?);
         }
         let note = repos.get_note(&info.note_id).await?;
+        let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
         return process_saved_source_audio(
             &repos,
@@ -600,6 +604,7 @@ pub async fn recover_recording(
             info.source_mode,
             valid_sources,
             note.title,
+            existing_generated_note,
             manual_notes,
         )
         .await;
@@ -667,6 +672,7 @@ pub async fn recover_recording(
         )
         .await?;
     let note = repos.get_note(&info.note_id).await?;
+    let existing_generated_note = note.generated_content.clone();
     let manual_notes = manual_notes_for_generation(&note);
     process_saved_audio(
         &repos,
@@ -675,6 +681,7 @@ pub async fn recover_recording(
         &artifact.id,
         path,
         note.title,
+        existing_generated_note,
         manual_notes,
     )
     .await

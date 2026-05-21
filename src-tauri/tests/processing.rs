@@ -75,6 +75,7 @@ async fn generation_uses_transcript_without_inventing_extra_sections() {
     let generated = generate_note_from_transcript(GenerationRequest {
         provider: "mock".to_string(),
         title: "Launch notes".to_string(),
+        existing_generated_note: None,
         transcript: "We decided to ship the Tauri notes MVP after validation.".to_string(),
         manual_notes: None,
         language: Some("en".to_string()),
@@ -83,7 +84,7 @@ async fn generation_uses_transcript_without_inventing_extra_sections() {
     .expect("mock generation should succeed");
 
     assert!(generated.content.contains("We decided to ship"));
-    assert_eq!(generated.prompt_version, "notes-mvp-v2");
+    assert_eq!(generated.prompt_version, "notes-mvp-v3");
 }
 
 #[tokio::test]
@@ -91,6 +92,7 @@ async fn generation_combines_manual_notes_with_transcript() {
     let generated = generate_note_from_transcript(GenerationRequest {
         provider: "mock".to_string(),
         title: "Meeting notes".to_string(),
+        existing_generated_note: Some("Existing generated note".to_string()),
         transcript: "System: The launch deadline is Friday.".to_string(),
         manual_notes: Some("Ask Marta about the release checklist.".to_string()),
         language: Some("en".to_string()),
@@ -146,6 +148,7 @@ async fn generation_rejects_empty_transcript() {
     let err = generate_note_from_transcript(GenerationRequest {
         provider: "mock".to_string(),
         title: "Empty".to_string(),
+        existing_generated_note: None,
         transcript: "   ".to_string(),
         manual_notes: None,
         language: None,

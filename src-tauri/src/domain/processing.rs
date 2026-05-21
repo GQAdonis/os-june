@@ -13,7 +13,7 @@ use crate::{
 };
 use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
-pub const PROMPT_VERSION: &str = "notes-mvp-v2";
+pub const PROMPT_VERSION: &str = "notes-mvp-v3";
 const TRANSCRIPT_COHERENCE_GAP_MS: i64 = 2_500;
 const TRANSCRIPTION_CONTEXT_MAX_CHARS: usize = 1_200;
 const TRANSCRIPTION_CONTEXT_MAX_TURNS: usize = 6;
@@ -160,6 +160,7 @@ pub async fn process_saved_audio(
     audio_artifact_id: &str,
     audio_path: PathBuf,
     title: String,
+    existing_generated_note: Option<String>,
     manual_notes: Option<String>,
 ) -> Result<NoteDto, AppError> {
     repos
@@ -202,6 +203,7 @@ pub async fn process_saved_audio(
     let generated = match generate_note_from_transcript(GenerationRequest {
         provider,
         title,
+        existing_generated_note,
         transcript: transcript.text,
         manual_notes,
         language: transcript.language,
@@ -248,6 +250,7 @@ pub async fn process_saved_source_audio(
     source_mode: RecordingSourceMode,
     sources: Vec<(String, String, PathBuf)>,
     title: String,
+    existing_generated_note: Option<String>,
     manual_notes: Option<String>,
 ) -> Result<NoteDto, AppError> {
     repos
@@ -366,6 +369,7 @@ pub async fn process_saved_source_audio(
     let generated = match generate_note_from_transcript(GenerationRequest {
         provider,
         title,
+        existing_generated_note,
         transcript: labeled_transcript,
         manual_notes,
         language: None,
@@ -428,6 +432,7 @@ pub async fn retry_from_saved_audio(
             &audio_artifact_id,
             PathBuf::from(audio_path),
             note.title,
+            note.generated_content,
             manual_notes,
         )
         .await;
@@ -446,6 +451,7 @@ pub async fn retry_from_saved_audio(
             .map(|(id, source, path, _session_id)| (id, source, PathBuf::from(path)))
             .collect(),
         note.title,
+        note.generated_content,
         manual_notes,
     )
     .await
