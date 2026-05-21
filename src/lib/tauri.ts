@@ -249,6 +249,12 @@ export async function createFolder(name: string) {
   return invoke<FolderDto>("create_folder", { request: { name } });
 }
 
+export async function deleteFolder(folderId: string, deleteNotes: boolean) {
+  return invoke<void>("delete_folder", {
+    request: { folderId, deleteNotes },
+  });
+}
+
 export async function listFolders() {
   return invoke<FolderDto[]>("list_folders");
 }
@@ -273,6 +279,10 @@ export async function getNote(noteId: string) {
   return invoke<NoteDto>("get_note", { request: { noteId } });
 }
 
+export async function deleteNote(noteId: string) {
+  return invoke<void>("delete_note", { request: { noteId } });
+}
+
 export async function updateNote(input: {
   noteId: string;
   title?: string;
@@ -280,10 +290,6 @@ export async function updateNote(input: {
   activeTab?: "notes" | "transcription";
 }) {
   return invoke<NoteDto>("update_note", { request: input });
-}
-
-export async function deleteNote(noteId: string) {
-  return invoke<void>("delete_note", { request: { noteId } });
 }
 
 export async function checkRecordingSourceReadiness(
