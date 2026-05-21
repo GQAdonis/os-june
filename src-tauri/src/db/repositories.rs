@@ -1265,8 +1265,18 @@ fn strip_generated_addition_prefixes<'a>(
     manual_tail: Option<&str>,
     content: &'a str,
 ) -> &'a str {
-    let content = strip_manual_tail_echo(manual_tail, content);
-    strip_duplicate_generated_heading(title, manual_tail, content)
+    let mut content = content;
+    loop {
+        let next = strip_duplicate_generated_heading(
+            title,
+            manual_tail,
+            strip_manual_tail_line_echo(manual_tail, strip_manual_tail_echo(manual_tail, content)),
+        );
+        if next == content {
+            return content;
+        }
+        content = next;
+    }
 }
 
 fn strip_manual_tail_echo<'a>(manual_tail: Option<&str>, content: &'a str) -> &'a str {
@@ -1277,6 +1287,40 @@ fn strip_manual_tail_echo<'a>(manual_tail: Option<&str>, content: &'a str) -> &'
         return content;
     };
     rest.strip_prefix(':').unwrap_or(rest).trim_start()
+}
+
+fn strip_manual_tail_line_echo<'a>(manual_tail: Option<&str>, content: &'a str) -> &'a str {
+    let Some(manual_tail) = manual_tail.map(str::trim).filter(|value| !value.is_empty()) else {
+        return content;
+    };
+    let Some((line, rest)) = content.split_once('\n') else {
+        return content;
+    };
+    if manual_echo_matches(line, manual_tail) {
+        rest.trim_start()
+    } else {
+        content
+    }
+}
+
+fn manual_echo_matches(line: &str, manual_tail: &str) -> bool {
+    let manual_tail = manual_echo_text(manual_tail);
+    let line = manual_echo_text(line);
+    !manual_tail.is_empty() && line.eq_ignore_ascii_case(&manual_tail)
+}
+
+fn manual_echo_text(value: &str) -> String {
+    let mut text = value.trim();
+    if let Some(heading) = markdown_heading_text(text) {
+        text = heading;
+    }
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim();
+            break;
+        }
+    }
+    text.trim_end_matches(':').trim().to_string()
 }
 
 fn strip_duplicate_generated_heading<'a>(
@@ -1314,6 +1358,7 @@ fn is_duplicate_generated_heading(title: &str, manual_tail: Option<&str>, headin
     let heading = heading.trim();
     let title = title.trim();
     heading.eq_ignore_ascii_case("New note")
+        || heading.eq_ignore_ascii_case("Note")
         || heading.eq_ignore_ascii_case("Generated note")
         || (!title.is_empty() && heading.eq_ignore_ascii_case(title))
         || manual_tail
@@ -1323,16 +1368,32 @@ fn is_duplicate_generated_heading(title: &str, manual_tail: Option<&str>, headin
 }
 
 fn manual_tail_for_append(generated: Option<&str>, edited: Option<&str>) -> Option<String> {
-    let generated = generated?.trim();
     let edited = edited?.trim();
-    if generated.is_empty() || edited == generated {
+    if edited.is_empty() {
         return None;
     }
-    edited
-        .strip_prefix(generated)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+    let Some(generated) = generated.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Some(edited.to_string());
+    };
+    if edited == generated {
+        return None;
+    }
+    if let Some(rest) = edited.strip_prefix(generated) {
+        let rest = rest.trim();
+        return if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
+    }
+    edited.find(generated).and_then(|index| {
+        let rest = edited[index + generated.len()..].trim();
+        if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        }
+    })
 }
 
 #[derive(Debug, Clone)]

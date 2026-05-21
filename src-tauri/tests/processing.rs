@@ -128,6 +128,19 @@ fn manual_notes_for_generation_ignores_existing_edited_note_body() {
     assert_eq!(manual_notes_for_generation(&note), None);
 }
 
+#[test]
+fn manual_notes_for_generation_uses_new_tail_after_manual_preface() {
+    let note = note(|note| {
+        note.generated_content = Some("- Generated transcript note".to_string());
+        note.edited_content = Some("Test 1:\n\n- Generated transcript note\n\nTest 2".to_string());
+    });
+
+    assert_eq!(
+        manual_notes_for_generation(&note).as_deref(),
+        Some("Test 2")
+    );
+}
+
 #[tokio::test]
 async fn generation_rejects_empty_transcript() {
     let err = generate_note_from_transcript(GenerationRequest {

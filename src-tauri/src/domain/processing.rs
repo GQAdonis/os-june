@@ -135,11 +135,22 @@ pub fn manual_notes_for_generation(note: &NoteDto) -> Option<String> {
     if edited == generated {
         return None;
     }
-    edited
-        .strip_prefix(generated)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+    if let Some(rest) = edited.strip_prefix(generated) {
+        let rest = rest.trim();
+        return if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        };
+    }
+    edited.find(generated).and_then(|index| {
+        let rest = edited[index + generated.len()..].trim();
+        if rest.is_empty() {
+            None
+        } else {
+            Some(rest.to_string())
+        }
+    })
 }
 
 pub async fn process_saved_audio(
