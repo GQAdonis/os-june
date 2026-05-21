@@ -25,11 +25,6 @@ let smoothedLevel = 0.2;
 
 const idleLevels = [0.22, 0.38, 0.58, 0.78, 0.48, 0.34, 0.2];
 const barWeights = [0.45, 0.64, 0.86, 1, 0.82, 0.58, 0.4];
-const silentErrorCodes = new Set([
-  "no_speech",
-  "no_transcription",
-  "empty_transcript",
-]);
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -136,22 +131,10 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 
   if (dictationEvent.type === "error") {
-    const errorCode = dictationEvent.payload?.code || "";
     const errorMessage = dictationEvent.payload?.message || "";
-    const isEmptyTranscriptError =
-      silentErrorCodes.has(errorCode) ||
-      errorMessage === "OpenAI did not return any transcript text.";
-
-    if (isEmptyTranscriptError) {
-      setHud("silent-error", "No transcript returned");
-      await showHud();
-      hideSoon(900);
-      return;
-    }
-
-    setHud("error", "Needs attention", errorMessage || "Dictation failed.");
+    setHud("error", errorMessage || "Dictation failed.");
     await showHud();
-    hideSoon(2200);
+    hideSoon(900);
   }
 }
 

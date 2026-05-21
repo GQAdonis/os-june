@@ -168,38 +168,21 @@ body {
 }
 
 .hud[data-state="success"],
-.hud[data-state="silent-error"] {
+.hud[data-state="silent-error"],
+.hud[data-state="error"] {
   min-width: 29px;
   padding-inline: 6px;
 }
 
 .hud[data-state="success"] .hud-success,
-.hud[data-state="silent-error"] .hud-error-mark {
+.hud[data-state="silent-error"] .hud-error-mark,
+.hud[data-state="error"] .hud-error-mark {
   display: block;
 }
 
 .hud[data-state="silent-error"],
 .hud[data-state="error"] {
   border-color: color-mix(in oklch, var(--hud-danger) 36%, var(--border));
-}
-
-.hud[data-state="error"] {
-  width: 120px;
-  min-height: 32px;
-  padding: 6px 8px;
-}
-
-.hud[data-state="error"] .hud-message {
-  display: block;
-  width: 100%;
-  max-height: 20px;
-  margin: 0;
-  overflow: hidden;
-  color: var(--hud-danger);
-  font-size: 0.41rem;
-  font-weight: 650;
-  line-height: 1.28;
-  text-align: center;
 }
 
 @keyframes hud-spin {
