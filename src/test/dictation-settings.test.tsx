@@ -201,6 +201,25 @@ describe("DictationSettings", () => {
     );
   });
 
+  it("updates activation mode separately from the shortcut", async () => {
+    const user = userEvent.setup();
+    render(<DictationSettings />);
+
+    expect(
+      await screen.findByRole("button", { name: "Push-to-talk" }),
+    ).toHaveAttribute("aria-pressed", "true");
+
+    await user.click(screen.getByRole("button", { name: "Toggle" }));
+
+    await waitFor(() =>
+      expect(mocks.setDictationActivationMode).toHaveBeenCalledWith("toggle"),
+    );
+    expect(mocks.setDictationShortcut).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("Activation mode set to Toggle."),
+    ).toBeInTheDocument();
+  });
+
   it("shows native Fn monitor errors", async () => {
     render(<DictationSettings />);
 
