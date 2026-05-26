@@ -48,20 +48,20 @@ The app data directory is resolved by Tauri at runtime. In development, inspect 
 
 ## Dictation
 
-Dictation is paste-only: it does not create notes or store transcript records. Press the configured global shortcut from another app to start microphone dictation, press it again to stop, and OS Scribe transcribes the temporary m4a recording through the same Rust transcription provider used by note recording. On success, the helper temporarily places the transcript on the clipboard, activates the last focused external app, posts Cmd+V, and restores the previous clipboard when possible.
+Dictation is paste-only: it does not create notes or store transcript records. Double-tap the configured shortcut from another app to start or stop microphone dictation, or hold Fn/Globe for push-to-talk when the bare Fn shortcut is selected. OS Scribe transcribes the temporary m4a recording through the same Rust transcription provider used by note recording. On success, the helper temporarily places the transcript on the clipboard, activates the last focused external app, posts Cmd+V, and restores the previous clipboard when possible.
 
 Dictation requires real transcription. If `OPENAI_API_KEY` is not visible to the Tauri process, dictation reports a configuration error instead of pasting the local mock transcript used by offline note-recording tests. During development, put the key in `.env` or export it in the shell before running `pnpm tauri:dev`.
 
-The default shortcut is `Fn+Space`. If macOS cannot register it, the app falls back to `Ctrl+Opt+Space`. The Dictation settings page can save another shortcut with Cmd, Ctrl, Opt, or Shift plus one supported non-modifier key.
+The default shortcut is bare `Fn`/Globe. If macOS opens emoji, input-source, or system dictation UI when pressing Fn, set System Settings > Keyboard > "Press Fn key to" or "Press Globe key to" to `Do Nothing`. The Dictation settings page can switch back to `Fn+Space` or save another shortcut with Cmd, Ctrl, Opt, or Shift plus one supported non-modifier key.
 
 Manual validation:
 
 1. Launch with `OPENAI_API_KEY` configured.
 2. Grant microphone and Accessibility permissions.
 3. Focus a text field in TextEdit, VS Code, or a browser.
-4. Press the configured shortcut to start dictation.
+4. Double-tap Fn/Globe to start dictation, or hold Fn/Globe for push-to-talk.
 5. Speak a short sentence.
-6. Press the configured shortcut again to stop.
+6. Double-tap Fn/Globe again to stop, or release Fn/Globe if using push-to-talk.
 7. Confirm the HUD transitions through listening, transcribing, pasting, and success.
 8. Confirm the transcript appears in the original focused text field.
 9. Select a microphone in Dictation settings, restart, and confirm the selection persists.
