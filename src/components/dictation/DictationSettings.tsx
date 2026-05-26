@@ -6,10 +6,12 @@ import {
   dictationHelperCommand,
   dictationHotkeyStatus,
   dictationSettings,
+  setDictationActivationMode,
   setDictationMicrophone,
   setDictationShortcut,
 } from "../../lib/tauri";
 import type {
+  DictationActivationMode,
   DictationHelperEvent,
   DictationMicrophoneDeviceDto,
   DictationSettingsDto,
@@ -113,6 +115,11 @@ const SHORTCUT_PRESETS = [
   { value: "fn", label: "Fn / Globe" },
   { value: "fn_space", label: "Fn+Space" },
   { value: "custom", label: "Custom" },
+] as const;
+
+const ACTIVATION_MODE_OPTIONS = [
+  { value: "push_to_talk", label: "Push-to-talk" },
+  { value: "toggle", label: "Toggle" },
 ] as const;
 
 export function DictationSettings() {
@@ -252,6 +259,18 @@ export function DictationSettings() {
     }
   }
 
+  async function selectActivationMode(activationMode: DictationActivationMode) {
+    try {
+      const next = await setDictationActivationMode(activationMode);
+      setSettings(next);
+      setStatus(
+        `Activation mode set to ${activationModeLabel(next.activationMode)}.`,
+      );
+    } catch (error) {
+      setStatus(messageFromError(error));
+    }
+  }
+
   function selectShortcutPreset(preset: ShortcutPreset) {
     if (preset === "fn") {
       setCapturing(false);
@@ -337,6 +356,23 @@ export function DictationSettings() {
                   options={SHORTCUT_PRESETS}
                   onValueChange={selectShortcutPreset}
                   aria-label="Dictation shortcut preset"
+                />
+              </div>
+            </div>
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">Activation mode</h3>
+                <p className="settings-row-description">
+                  Choose whether the shortcut records while held or toggles on
+                  each press.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <SegmentedControl
+                  value={settings.activationMode}
+                  options={ACTIVATION_MODE_OPTIONS}
+                  onValueChange={selectActivationMode}
+                  aria-label="Dictation activation mode"
                 />
               </div>
             </div>
@@ -486,6 +522,10 @@ function keyLabel(code: string, key: string) {
   if (code.startsWith("Key")) return code.slice(3);
   if (code.startsWith("Digit")) return code.slice(5);
   return key.length === 1 ? key.toUpperCase() : code;
+}
+
+function activationModeLabel(mode: DictationActivationMode) {
+  return mode === "toggle" ? "Toggle" : "Push-to-talk";
 }
 
 function shortcutPreset(shortcut: DictationShortcutSetting): ShortcutPreset {

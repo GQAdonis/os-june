@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   dictationHotkeyStatus: vi.fn(),
   dictationHelperCommand: vi.fn(),
   setDictationShortcut: vi.fn(),
+  setDictationActivationMode: vi.fn(),
   setDictationMicrophone: vi.fn(),
   listen: vi.fn(),
   eventHandler: undefined as ((event: { payload: string }) => void) | undefined,
@@ -19,6 +20,7 @@ vi.mock("../lib/tauri", () => ({
   dictationHotkeyStatus: mocks.dictationHotkeyStatus,
   dictationHelperCommand: mocks.dictationHelperCommand,
   setDictationShortcut: mocks.setDictationShortcut,
+  setDictationActivationMode: mocks.setDictationActivationMode,
   setDictationMicrophone: mocks.setDictationMicrophone,
 }));
 
@@ -56,6 +58,12 @@ describe("DictationSettings", () => {
       ...baseSettings,
       shortcut,
     }));
+    mocks.setDictationActivationMode.mockImplementation(
+      async (activationMode) => ({
+        ...baseSettings,
+        activationMode,
+      }),
+    );
     mocks.setDictationMicrophone.mockImplementation(async (id, name) => ({
       ...baseSettings,
       microphone: { id, name },
@@ -80,6 +88,7 @@ describe("DictationSettings", () => {
             function: false,
           },
         },
+        activationMode: "push_to_talk",
         microphone: { id: "airpods", name: "AirPods Pro" },
       },
     });
