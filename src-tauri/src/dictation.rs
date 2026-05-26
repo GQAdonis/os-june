@@ -1,7 +1,8 @@
 use crate::domain::types::AppError;
 use crate::providers::{
-    configured_provider, MOCK_PROVIDER,
+    configured_provider,
     transcription::{transcribe_saved_audio, TranscriptionProviderResult, TranscriptionRequest},
+    MOCK_PROVIDER,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use std::{
@@ -13,7 +14,7 @@ use std::{
     ptr,
     sync::Mutex,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
@@ -39,10 +40,17 @@ pub struct HotkeyStatus {
     event: Mutex<serde_json::Value>,
 }
 
+pub struct FnActivationState {
+    controller: Mutex<FnActivationController>,
+}
+
 #[cfg(target_os = "macos")]
 pub struct HotkeyManager {
     hotkeys: Mutex<Option<carbon_hotkeys::CarbonHotkeys>>,
 }
+
+const FN_HOLD_THRESHOLD_MS: u64 = 175;
+const FN_DOUBLE_TAP_WINDOW_MS: u64 = 350;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -54,7 +62,7 @@ pub struct DictationSettings {
 impl Default for DictationSettings {
     fn default() -> Self {
         Self {
-            shortcut: DictationShortcutSetting::fn_space(),
+            shortcut: DictationShortcutSetting::bare_fn(),
             microphone: DictationMicrophoneSetting::default(),
         }
     }
@@ -102,6 +110,10 @@ impl<'de> Deserialize<'de> for DictationShortcutSetting {
 }
 
 impl DictationShortcutSetting {
+    fn bare_fn() -> Self {
+        DictationShortcutPreset::BareFn.into()
+    }
+
     fn fn_space() -> Self {
         DictationShortcutPreset::FnSpace.into()
     }
@@ -132,6 +144,7 @@ pub struct DictationShortcutInput {
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum DictationShortcutPreset {
+    BareFn,
     FnSpace,
     ControlOptionSpace,
 }
@@ -139,6 +152,7 @@ enum DictationShortcutPreset {
 impl DictationShortcutPreset {
     fn from_id(id: &str) -> Option<Self> {
         match id {
+            "bare_fn" | "fn" => Some(Self::BareFn),
             "fn_space" => Some(Self::FnSpace),
             "control_option_space" => Some(Self::ControlOptionSpace),
             _ => None,
@@ -147,6 +161,7 @@ impl DictationShortcutPreset {
 
     fn label(self) -> &'static str {
         match self {
+            Self::BareFn => "Fn",
             Self::FnSpace => "Fn+Space",
             Self::ControlOptionSpace => "Ctrl+Opt+Space",
         }
@@ -156,6 +171,15 @@ impl DictationShortcutPreset {
 impl From<DictationShortcutPreset> for DictationShortcutSetting {
     fn from(shortcut: DictationShortcutPreset) -> Self {
         match shortcut {
+            DictationShortcutPreset::BareFn => Self {
+                key_code: 0,
+                code: "Fn".to_string(),
+                modifiers: DictationShortcutModifiers {
+                    function: true,
+                    ..DictationShortcutModifiers::default()
+                },
+                label: shortcut.label().to_string(),
+            },
             DictationShortcutPreset::FnSpace => Self {
                 key_code: 0x31,
                 code: "Space".to_string(),
@@ -192,6 +216,102 @@ pub struct DictationSettingsResponse {
     pub settings: DictationSettings,
 }
 
+#[derive(Debug, Default)]
+struct FnActivationController {
+    is_down: bool,
+    hold_started: bool,
+    active_press_id: Option<u64>,
+    next_press_id: u64,
+    last_short_tap_at: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FnActivationEffect {
+    None,
+    ScheduleHold { press_id: u64 },
+    Command(FnDictationCommand),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FnDictationCommand {
+    StartListening,
+    StopAndPaste,
+    ToggleListening,
+}
+
+impl FnActivationController {
+    fn key_down(&mut self) -> FnActivationEffect {
+        if self.is_down {
+            return FnActivationEffect::None;
+        }
+
+        self.is_down = true;
+        self.hold_started = false;
+        self.next_press_id = self.next_press_id.saturating_add(1);
+        let press_id = self.next_press_id;
+        self.active_press_id = Some(press_id);
+        FnActivationEffect::ScheduleHold { press_id }
+    }
+
+    fn hold_elapsed(&mut self, press_id: u64) -> Option<FnDictationCommand> {
+        if !self.is_down || self.active_press_id != Some(press_id) || self.hold_started {
+            return None;
+        }
+
+        self.hold_started = true;
+        self.last_short_tap_at = None;
+        Some(FnDictationCommand::StartListening)
+    }
+
+    fn key_up(&mut self, now: Instant) -> FnActivationEffect {
+        if !self.is_down {
+            return FnActivationEffect::None;
+        }
+
+        self.is_down = false;
+        self.active_press_id = None;
+
+        if self.hold_started {
+            self.hold_started = false;
+            self.last_short_tap_at = None;
+            return FnActivationEffect::Command(FnDictationCommand::StopAndPaste);
+        }
+
+        let is_double_tap = self
+            .last_short_tap_at
+            .and_then(|last| now.checked_duration_since(last))
+            .is_some_and(|elapsed| elapsed <= Duration::from_millis(FN_DOUBLE_TAP_WINDOW_MS));
+
+        if is_double_tap {
+            self.last_short_tap_at = None;
+            FnActivationEffect::Command(FnDictationCommand::ToggleListening)
+        } else {
+            self.last_short_tap_at = Some(now);
+            FnActivationEffect::None
+        }
+    }
+
+    fn reset(&mut self) {
+        self.is_down = false;
+        self.hold_started = false;
+        self.active_press_id = None;
+        self.last_short_tap_at = None;
+    }
+}
+
+impl FnDictationCommand {
+    fn helper_command(self) -> serde_json::Value {
+        match self {
+            Self::StartListening => serde_json::json!({ "type": "start_listening" }),
+            Self::StopAndPaste => serde_json::json!({ "type": "stop_and_paste" }),
+            Self::ToggleListening => serde_json::json!({
+                "type": "toggle_listening",
+                "shortcut": "Fn",
+            }),
+        }
+    }
+}
+
 impl DictationShortcutInput {
     fn into_setting(self) -> Result<DictationShortcutSetting, AppError> {
         if self.code.trim().is_empty() || self.label.trim().is_empty() {
@@ -199,6 +319,10 @@ impl DictationShortcutInput {
                 "dictation_shortcut_incomplete",
                 "Shortcut is incomplete.",
             ));
+        }
+
+        if is_bare_fn_input(&self.code, &self.modifiers) {
+            return Ok(DictationShortcutSetting::bare_fn());
         }
 
         let key_code = key_code_for_code(&self.code).ok_or_else(|| {
@@ -229,6 +353,20 @@ impl DictationShortcutInput {
     }
 }
 
+fn is_bare_fn_input(code: &str, modifiers: &DictationShortcutModifiers) -> bool {
+    code.eq_ignore_ascii_case("Fn") && modifiers.function && no_standard_modifiers(modifiers)
+}
+
+fn is_bare_fn_shortcut(shortcut: &DictationShortcutSetting) -> bool {
+    shortcut.code.eq_ignore_ascii_case("Fn")
+        && shortcut.modifiers.function
+        && no_standard_modifiers(&shortcut.modifiers)
+}
+
+fn no_standard_modifiers(modifiers: &DictationShortcutModifiers) -> bool {
+    !modifiers.command && !modifiers.control && !modifiers.option && !modifiers.shift
+}
+
 pub fn setup(app: &mut tauri::App) {
     if let Err(error) = configure_hud_window(app.handle()) {
         eprintln!("failed to configure dictation HUD: {error}");
@@ -236,6 +374,9 @@ pub fn setup(app: &mut tauri::App) {
     manage_settings(app.handle());
     app.manage(LastDictationEvent {
         event: Mutex::new(None),
+    });
+    app.manage(FnActivationState {
+        controller: Mutex::new(FnActivationController::default()),
     });
 
     let helper = spawn_helper(app.handle()).ok();
@@ -267,43 +408,50 @@ pub fn setup(app: &mut tauri::App) {
             .settings
             .lock()
             .map(|settings| settings.shortcut.clone())
-            .unwrap_or_else(|_| DictationShortcutSetting::fn_space());
-        let hotkeys = carbon_hotkeys::register(app.handle(), shortcut.clone()).or_else(|error| {
-            if shortcut != DictationShortcutSetting::fn_space() {
-                return Err(error);
-            }
+            .unwrap_or_else(|_| DictationShortcutSetting::bare_fn());
 
-            carbon_hotkeys::register(app.handle(), DictationShortcutSetting::control_option_space())
-                .map(|hotkeys| {
-                    if let Err(settings_error) = update_settings(&settings, |settings| {
-                        settings.shortcut = DictationShortcutSetting::control_option_space();
-                    }) {
-                        let message = format!(
-                            "Could not save fallback shortcut: {}",
-                            settings_error.message
-                        );
-                        eprintln!("{message}");
-                        let _ = app.emit(
-                            "dictation-event",
-                            hotkey_error_event(message).to_string(),
-                        );
+        let event = if is_bare_fn_shortcut(&shortcut) {
+            hotkey_ready_event(&shortcut)
+        } else {
+            let hotkeys =
+                carbon_hotkeys::register(app.handle(), shortcut.clone()).or_else(|error| {
+                    if shortcut != DictationShortcutSetting::fn_space() {
+                        return Err(error);
                     }
-                    hotkeys
-                })
-                .map_err(|fallback_error| format!("{error} {fallback_error}"))
-        });
 
-        let event = match hotkeys {
-            Ok(hotkeys) => {
-                let shortcut = hotkeys.shortcut().clone();
-                if let Some(manager) = app.try_state::<HotkeyManager>() {
-                    if let Ok(mut active_hotkeys) = manager.hotkeys.lock() {
-                        *active_hotkeys = Some(hotkeys);
+                    carbon_hotkeys::register(
+                        app.handle(),
+                        DictationShortcutSetting::control_option_space(),
+                    )
+                    .map(|hotkeys| {
+                        if let Err(settings_error) = update_settings(&settings, |settings| {
+                            settings.shortcut = DictationShortcutSetting::control_option_space();
+                        }) {
+                            let message = format!(
+                                "Could not save fallback shortcut: {}",
+                                settings_error.message
+                            );
+                            eprintln!("{message}");
+                            let _ = app
+                                .emit("dictation-event", hotkey_error_event(message).to_string());
+                        }
+                        hotkeys
+                    })
+                    .map_err(|fallback_error| format!("{error} {fallback_error}"))
+                });
+
+            match hotkeys {
+                Ok(hotkeys) => {
+                    let shortcut = hotkeys.shortcut().clone();
+                    if let Some(manager) = app.try_state::<HotkeyManager>() {
+                        if let Ok(mut active_hotkeys) = manager.hotkeys.lock() {
+                            *active_hotkeys = Some(hotkeys);
+                        }
                     }
+                    hotkey_ready_event(&shortcut)
                 }
-                hotkey_ready_event(&shortcut)
+                Err(error) => hotkey_error_event(error),
             }
-            Err(error) => hotkey_error_event(error),
         };
 
         app.manage(HotkeyStatus {
@@ -346,19 +494,26 @@ pub fn set_dictation_shortcut(
         return Ok(current_settings);
     }
 
-    let next_hotkeys = carbon_hotkeys::register(&app, shortcut.clone()).map_err(|error| {
-        AppError::new("dictation_hotkey_registration_failed", error.to_string())
-    })?;
+    let next_hotkeys = if is_bare_fn_shortcut(&shortcut) {
+        None
+    } else {
+        Some(
+            carbon_hotkeys::register(&app, shortcut.clone()).map_err(|error| {
+                AppError::new("dictation_hotkey_registration_failed", error.to_string())
+            })?,
+        )
+    };
     let settings = update_settings(&state, |settings| {
         settings.shortcut = shortcut;
     })?;
+    reset_fn_activation(&app);
 
     {
         let mut active_hotkeys = hotkey_manager
             .hotkeys
             .lock()
             .map_err(|_| AppError::new("dictation_hotkey_unavailable", "Hotkey lock failed."))?;
-        *active_hotkeys = Some(next_hotkeys);
+        *active_hotkeys = next_hotkeys;
     }
 
     set_hotkey_status(&hotkey_status, hotkey_ready_event(&settings.shortcut));
@@ -452,6 +607,118 @@ fn apply_microphone_setting(
             "name": microphone.name,
         }),
     )
+}
+
+fn handle_fn_key_event(app: &AppHandle, event_type: Option<&str>) {
+    let Some(event_type) = event_type else {
+        return;
+    };
+
+    let effect = match event_type {
+        "fn_key_down" => {
+            if !selected_shortcut_is_bare_fn(app) {
+                reset_fn_activation(app);
+                return;
+            }
+            app.try_state::<FnActivationState>()
+                .and_then(|state| {
+                    state
+                        .controller
+                        .lock()
+                        .ok()
+                        .map(|mut state| state.key_down())
+                })
+                .unwrap_or(FnActivationEffect::None)
+        }
+        "fn_key_up" => {
+            if !selected_shortcut_is_bare_fn(app) {
+                reset_fn_activation(app);
+                return;
+            }
+            let now = Instant::now();
+            app.try_state::<FnActivationState>()
+                .and_then(|state| {
+                    state
+                        .controller
+                        .lock()
+                        .ok()
+                        .map(|mut state| state.key_up(now))
+                })
+                .unwrap_or(FnActivationEffect::None)
+        }
+        _ => return,
+    };
+
+    apply_fn_activation_effect(app, effect);
+}
+
+fn selected_shortcut_is_bare_fn(app: &AppHandle) -> bool {
+    app.try_state::<DictationSettingsState>()
+        .and_then(|state| {
+            state
+                .settings
+                .lock()
+                .ok()
+                .map(|settings| is_bare_fn_shortcut(&settings.shortcut))
+        })
+        .unwrap_or(false)
+}
+
+fn reset_fn_activation(app: &AppHandle) {
+    if let Some(state) = app.try_state::<FnActivationState>() {
+        if let Ok(mut controller) = state.controller.lock() {
+            controller.reset();
+        }
+    }
+}
+
+fn apply_fn_activation_effect(app: &AppHandle, effect: FnActivationEffect) {
+    match effect {
+        FnActivationEffect::None => {}
+        FnActivationEffect::Command(command) => send_fn_dictation_command(app, command),
+        FnActivationEffect::ScheduleHold { press_id } => schedule_fn_hold(app, press_id),
+    }
+}
+
+fn schedule_fn_hold(app: &AppHandle, press_id: u64) {
+    let app = app.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(FN_HOLD_THRESHOLD_MS));
+
+        if !selected_shortcut_is_bare_fn(&app) {
+            reset_fn_activation(&app);
+            return;
+        }
+
+        let command = app.try_state::<FnActivationState>().and_then(|state| {
+            state
+                .controller
+                .lock()
+                .ok()
+                .and_then(|mut state| state.hold_elapsed(press_id))
+        });
+
+        if let Some(command) = command {
+            send_fn_dictation_command(&app, command);
+        }
+    });
+}
+
+fn send_fn_dictation_command(app: &AppHandle, command: FnDictationCommand) {
+    let Some(state) = app.try_state::<HelperState>() else {
+        emit_dictation_event_value(
+            app,
+            app_error_event(AppError::new(
+                "dictation_helper_unavailable",
+                "Dictation helper process is not running.",
+            )),
+        );
+        return;
+    };
+
+    if let Err(error) = send_helper_command(&state, command.helper_command()) {
+        emit_dictation_event_value(app, app_error_event(error));
+    }
 }
 
 fn settings_path(app: &AppHandle) -> Option<PathBuf> {
@@ -575,12 +842,18 @@ fn spawn_helper(app: &AppHandle) -> Result<HelperProcess, AppError> {
         .map_err(|error| {
             AppError::new(
                 "dictation_helper_start_failed",
-                format!("Failed to start helper at {}: {error}", helper_path.display()),
+                format!(
+                    "Failed to start helper at {}: {error}",
+                    helper_path.display()
+                ),
             )
         })?;
 
     let stdin = child.stdin.take().ok_or_else(|| {
-        AppError::new("dictation_helper_start_failed", "Helper stdin was unavailable.")
+        AppError::new(
+            "dictation_helper_start_failed",
+            "Helper stdin was unavailable.",
+        )
     })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         AppError::new(
@@ -621,6 +894,8 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
         .and_then(|event| event.get("type"))
         .and_then(serde_json::Value::as_str);
 
+    handle_fn_key_event(app, event_type);
+
     if matches!(event_type, Some("recording_ready")) {
         if let Some(event) = event.as_ref() {
             match recording_path_from_event(event) {
@@ -652,10 +927,7 @@ async fn transcribe_recording_ready(app: AppHandle, audio_path: PathBuf) {
         Ok(provider) => provider,
         Err(error) => {
             let state = app.state::<HelperState>();
-            let _ = send_helper_command(
-                &state,
-                serde_json::json!({ "type": "discard_recording" }),
-            );
+            let _ = send_helper_command(&state, serde_json::json!({ "type": "discard_recording" }));
             emit_dictation_event_value(&app, app_error_event(error));
             return;
         }
@@ -746,11 +1018,7 @@ fn emit_dictation_event_value(app: &AppHandle, event: serde_json::Value) {
     let _ = app.emit("dictation-event", line);
 }
 
-fn update_hud_window(
-    app: &AppHandle,
-    event_type: Option<&str>,
-    event: Option<&serde_json::Value>,
-) {
+fn update_hud_window(app: &AppHandle, event_type: Option<&str>, event: Option<&serde_json::Value>) {
     match dictation_event_visibility(event_type) {
         DictationEventVisibility::Show if should_show_hud_window_for_type(event_type) => {
             show_hud_window(app)
@@ -1278,11 +1546,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_use_fn_space() {
+    fn default_settings_use_bare_fn() {
         let settings = DictationSettings::default();
 
-        assert_eq!(settings.shortcut.label, "Fn+Space");
-        assert_eq!(settings.shortcut.code, "Space");
+        assert_eq!(settings.shortcut.label, "Fn");
+        assert_eq!(settings.shortcut.code, "Fn");
+        assert_eq!(settings.shortcut.key_code, 0);
         assert!(settings.shortcut.modifiers.function);
     }
 
@@ -1296,6 +1565,32 @@ mod tests {
         assert_eq!(settings.shortcut.label, "Ctrl+Opt+Space");
         assert!(settings.shortcut.modifiers.control);
         assert!(settings.shortcut.modifiers.option);
+    }
+
+    #[test]
+    fn deserializes_bare_fn_shortcut_preset() {
+        let settings: DictationSettings =
+            serde_json::from_str(r#"{"shortcut":"bare_fn","microphone":{"id":null,"name":null}}"#)
+                .expect("preset should deserialize");
+
+        assert_eq!(settings.shortcut, DictationShortcutSetting::bare_fn());
+        assert!(is_bare_fn_shortcut(&settings.shortcut));
+    }
+
+    #[test]
+    fn shortcut_input_accepts_bare_fn() {
+        let shortcut = DictationShortcutInput {
+            code: "Fn".to_string(),
+            modifiers: DictationShortcutModifiers {
+                function: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Fn".to_string(),
+        }
+        .into_setting()
+        .expect("bare Fn should be accepted");
+
+        assert_eq!(shortcut, DictationShortcutSetting::bare_fn());
     }
 
     #[test]
@@ -1325,6 +1620,80 @@ mod tests {
         .expect_err("unsupported key should fail");
 
         assert_eq!(err.code, "dictation_shortcut_unsupported");
+    }
+
+    #[test]
+    fn fn_activation_double_tap_toggles() {
+        let mut controller = FnActivationController::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            controller.key_down(),
+            FnActivationEffect::ScheduleHold { press_id: 1 }
+        );
+        assert_eq!(controller.key_up(now), FnActivationEffect::None);
+        assert_eq!(
+            controller.key_down(),
+            FnActivationEffect::ScheduleHold { press_id: 2 }
+        );
+        assert_eq!(
+            controller.key_up(now + Duration::from_millis(120)),
+            FnActivationEffect::Command(FnDictationCommand::ToggleListening)
+        );
+    }
+
+    #[test]
+    fn fn_activation_hold_starts_and_release_stops() {
+        let mut controller = FnActivationController::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            controller.key_down(),
+            FnActivationEffect::ScheduleHold { press_id: 1 }
+        );
+        assert_eq!(
+            controller.hold_elapsed(1),
+            Some(FnDictationCommand::StartListening)
+        );
+        assert_eq!(
+            controller.key_up(now + Duration::from_millis(FN_HOLD_THRESHOLD_MS)),
+            FnActivationEffect::Command(FnDictationCommand::StopAndPaste)
+        );
+    }
+
+    #[test]
+    fn fn_activation_release_before_threshold_cancels_hold() {
+        let mut controller = FnActivationController::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            controller.key_down(),
+            FnActivationEffect::ScheduleHold { press_id: 1 }
+        );
+        assert_eq!(controller.key_up(now), FnActivationEffect::None);
+        assert_eq!(controller.hold_elapsed(1), None);
+    }
+
+    #[test]
+    fn fn_activation_ignores_duplicate_edges() {
+        let mut controller = FnActivationController::default();
+        let now = Instant::now();
+
+        assert_eq!(
+            controller.key_down(),
+            FnActivationEffect::ScheduleHold { press_id: 1 }
+        );
+        assert_eq!(controller.key_down(), FnActivationEffect::None);
+        assert_eq!(
+            controller.hold_elapsed(1),
+            Some(FnDictationCommand::StartListening)
+        );
+        assert_eq!(controller.hold_elapsed(1), None);
+        assert_eq!(
+            controller.key_up(now),
+            FnActivationEffect::Command(FnDictationCommand::StopAndPaste)
+        );
+        assert_eq!(controller.key_up(now), FnActivationEffect::None);
     }
 
     #[test]
