@@ -132,7 +132,7 @@ export function NoteEditor({
   // System audio is optional — the record button only blocks when the
   // microphone itself isn't ready. handleStartRecording re-checks on
   // click and silently falls back to mic-only if system audio is denied.
-  const recordDisabled = processingLock || !!recovery || micDenied;
+  const recordDisabled = processingLock || !!recovery;
 
   return (
     <article className="note-editor">
@@ -263,134 +263,134 @@ export function NoteEditor({
             }
           />
         ) : (
-        <div
-          className="record-shell"
-          data-state={shellState}
-          data-options-open={
-            !recordingForNote && !processingLock && optionsOpen
-          }
-        >
-          {!recordingForNote && !processingLock ? (
-            <div
-              className="record-options-panel"
-              data-open={optionsOpen}
-              aria-hidden={!optionsOpen}
-            >
-              <div className="record-options-panel-inner">
-                {systemUnsupported ? (
-                  <p className="record-options-unsupported">
-                    System audio requires macOS 14.2 or later.
-                  </p>
-                ) : (
-                  <div
-                    className="record-options-row"
-                    data-locked={systemDenied || undefined}
-                  >
-                    <Switch
-                      checked={systemOn}
-                      disabled={systemDenied}
-                      aria-labelledby="record-options-system"
-                      onCheckedChange={(next) =>
-                        onSourceModeChange(
-                          next ? "microphonePlusSystem" : "microphoneOnly",
-                        )
-                      }
-                    />
-                    <span
-                      id="record-options-system"
-                      className="record-options-label"
+          <div
+            className="record-shell"
+            data-state={shellState}
+            data-options-open={
+              !recordingForNote && !processingLock && optionsOpen
+            }
+          >
+            {!recordingForNote && !processingLock ? (
+              <div
+                className="record-options-panel"
+                data-open={optionsOpen}
+                aria-hidden={!optionsOpen}
+              >
+                <div className="record-options-panel-inner">
+                  {systemUnsupported ? (
+                    <p className="record-options-unsupported">
+                      System audio requires macOS 14.2 or later.
+                    </p>
+                  ) : (
+                    <div
+                      className="record-options-row"
+                      data-locked={systemDenied || undefined}
                     >
-                      Capture system audio
-                    </span>
-                    {systemDenied ? (
+                      <Switch
+                        checked={systemOn}
+                        disabled={systemDenied}
+                        aria-labelledby="record-options-system"
+                        onCheckedChange={(next) =>
+                          onSourceModeChange(
+                            next ? "microphonePlusSystem" : "microphoneOnly",
+                          )
+                        }
+                      />
+                      <span
+                        id="record-options-system"
+                        className="record-options-label"
+                      >
+                        Capture system audio
+                      </span>
+                      {systemDenied ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost record-options-enable"
+                          onClick={onEnableSystemAudio}
+                        >
+                          Enable
+                        </button>
+                      ) : null}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            <div className="record-stage">
+              <AnimatePresence initial={false}>
+                {recordingForNote ? (
+                  <motion.div
+                    key="recorder"
+                    className="record-state record-state-recorder"
+                    initial={{ opacity: 0 }}
+                    animate={{
+                      opacity: 1,
+                      transition: {
+                        duration: 0.22,
+                        delay: 0.14,
+                        ease: [0.22, 1, 0.36, 1],
+                      },
+                    }}
+                    exit={{
+                      opacity: 0,
+                      transition: { duration: 0.12, ease: [0.22, 1, 0.36, 1] },
+                    }}
+                  >
+                    <RecorderBar
+                      status={recordingForNote}
+                      onPause={onPauseRecording}
+                      onResume={onResumeRecording}
+                      onDone={onFinishRecording}
+                    />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="idle"
+                    className="record-state record-state-idle"
+                    initial={{ opacity: 0 }}
+                    animate={{
+                      opacity: 1,
+                      // Symmetric to the recorder enter — delay the reveal
+                      // so the idle pill resolves as the shell finishes
+                      // collapsing back, not while it's still wide.
+                      transition: {
+                        duration: 0.22,
+                        delay: 0.12,
+                        ease: [0.22, 1, 0.36, 1],
+                      },
+                    }}
+                    exit={{
+                      opacity: 0,
+                      transition: { duration: 0.12, ease: [0.22, 1, 0.36, 1] },
+                    }}
+                  >
+                    <div className="record-idle">
                       <button
                         type="button"
-                        className="btn btn-ghost record-options-enable"
-                        onClick={onEnableSystemAudio}
+                        className="record-button"
+                        aria-label="Record"
+                        title="Record"
+                        disabled={recordDisabled}
+                        onClick={onStartRecording}
                       >
-                        Enable
+                        <IconMicrophone size={20} />
                       </button>
-                    ) : null}
-                  </div>
+                      <button
+                        type="button"
+                        className="record-options-trigger"
+                        aria-label="Recording options"
+                        aria-expanded={optionsOpen}
+                        data-rotated={optionsOpen}
+                        onClick={() => setOptionsOpen((value) => !value)}
+                      >
+                        <IconChevronBottom size={16} />
+                      </button>
+                    </div>
+                  </motion.div>
                 )}
-              </div>
+              </AnimatePresence>
             </div>
-          ) : null}
-          <div className="record-stage">
-            <AnimatePresence initial={false}>
-              {recordingForNote ? (
-                <motion.div
-                  key="recorder"
-                  className="record-state record-state-recorder"
-                  initial={{ opacity: 0 }}
-                  animate={{
-                    opacity: 1,
-                    transition: {
-                      duration: 0.22,
-                      delay: 0.14,
-                      ease: [0.22, 1, 0.36, 1],
-                    },
-                  }}
-                  exit={{
-                    opacity: 0,
-                    transition: { duration: 0.12, ease: [0.22, 1, 0.36, 1] },
-                  }}
-                >
-                  <RecorderBar
-                    status={recordingForNote}
-                    onPause={onPauseRecording}
-                    onResume={onResumeRecording}
-                    onDone={onFinishRecording}
-                  />
-                </motion.div>
-              ) : (
-                <motion.div
-                  key="idle"
-                  className="record-state record-state-idle"
-                  initial={{ opacity: 0 }}
-                  animate={{
-                    opacity: 1,
-                    // Symmetric to the recorder enter — delay the reveal
-                    // so the idle pill resolves as the shell finishes
-                    // collapsing back, not while it's still wide.
-                    transition: {
-                      duration: 0.22,
-                      delay: 0.12,
-                      ease: [0.22, 1, 0.36, 1],
-                    },
-                  }}
-                  exit={{
-                    opacity: 0,
-                    transition: { duration: 0.12, ease: [0.22, 1, 0.36, 1] },
-                  }}
-                >
-                  <div className="record-idle">
-                    <button
-                      type="button"
-                      className="record-button"
-                      aria-label="Record"
-                      title="Record"
-                      disabled={recordDisabled}
-                      onClick={onStartRecording}
-                    >
-                      <IconMicrophone size={20} />
-                    </button>
-                    <button
-                      type="button"
-                      className="record-options-trigger"
-                      aria-label="Recording options"
-                      aria-expanded={optionsOpen}
-                      data-rotated={optionsOpen}
-                      onClick={() => setOptionsOpen((value) => !value)}
-                    >
-                      <IconChevronBottom size={16} />
-                    </button>
-                  </div>
-                </motion.div>
-              )}
-            </AnimatePresence>
           </div>
-        </div>
         )}
       </div>
     </article>
