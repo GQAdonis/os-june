@@ -407,6 +407,7 @@ fn spawn_helper(app: &AppHandle) -> Result<MeetingDetectorProcess, AppError> {
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
         for line in reader.lines().map_while(Result::ok) {
+            eprintln!("{line}");
             let _ = error_app.emit("meeting-detector-stderr", line);
         }
     });
@@ -431,6 +432,7 @@ fn handle_helper_line(app: &AppHandle, line: &str) {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("Meeting detection failed.")
                 .to_string();
+            eprintln!("[meeting-detection] helper error: {message}");
             let error = AppError::new("meeting_detection_failed", message);
             let _ = app.emit("meeting-detection-error", &error);
         }
@@ -439,6 +441,7 @@ fn handle_helper_line(app: &AppHandle, line: &str) {
 }
 
 fn handle_snapshot(app: &AppHandle, processes: Vec<ProcessSnapshot>) {
+    log_snapshot(&processes);
     let Some(state) = app.try_state::<MeetingDetectionState>() else {
         return;
     };
@@ -452,6 +455,13 @@ fn handle_snapshot(app: &AppHandle, processes: Vec<ProcessSnapshot>) {
     };
     match engine_event {
         EngineEvent::Detected(candidate) => {
+            eprintln!(
+                "[meeting-detection] detected app={} bundle={} pid={} title={}",
+                candidate.app_name,
+                candidate.bundle_id,
+                candidate.pid,
+                candidate.window_title.as_deref().unwrap_or("none")
+            );
             let event = event_for_candidate("detected", candidate);
             if let Ok(mut latest) = state.latest_event.lock() {
                 *latest = Some(event.clone());
@@ -459,6 +469,10 @@ fn handle_snapshot(app: &AppHandle, processes: Vec<ProcessSnapshot>) {
             let _ = app.emit("meeting-detection-event", event);
         }
         EngineEvent::Ended(candidate) => {
+            eprintln!(
+                "[meeting-detection] ended app={} bundle={} pid={}",
+                candidate.app_name, candidate.bundle_id, candidate.pid
+            );
             if let Ok(mut latest) = state.latest_event.lock() {
                 if latest
                     .as_ref()
@@ -474,6 +488,33 @@ fn handle_snapshot(app: &AppHandle, processes: Vec<ProcessSnapshot>) {
                 event_for_candidate("ended", candidate),
             );
         }
+    }
+}
+
+fn log_snapshot(processes: &[ProcessSnapshot]) {
+    if processes.is_empty() {
+        eprintln!("[meeting-detection] snapshot input_candidates=0");
+        return;
+    }
+    eprintln!(
+        "[meeting-detection] snapshot input_candidates={}",
+        processes.len()
+    );
+    for process in processes {
+        let classification = if candidate_from_snapshot(process).is_some() {
+            "candidate"
+        } else {
+            "ignored"
+        };
+        eprintln!(
+            "[meeting-detection] input {classification} pid={} app={} bundle={} foreground={} accessibility={} title={}",
+            process.pid,
+            process.app_name.as_deref().unwrap_or("unknown"),
+            process.bundle_id.as_deref().unwrap_or("unknown"),
+            process.is_foreground,
+            process.accessibility_trusted,
+            process.window_title.as_deref().unwrap_or("none")
+        );
     }
 }
 

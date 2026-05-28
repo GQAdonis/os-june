@@ -139,6 +139,11 @@ func emit(_ type: String, _ payload: HelperEvent.Payload) {
     fflush(stdout)
 }
 
+func log(_ message: String) {
+    fputs("[meeting-detector] \(message)\n", stderr)
+    fflush(stderr)
+}
+
 func frontmostPID() -> pid_t? {
     NSWorkspace.shared.frontmostApplication?.processIdentifier
 }
@@ -264,7 +269,8 @@ func coreGraphicsWindowTitle(pid: pid_t) -> String? {
 
 func collectSnapshots() throws -> [ProcessSnapshot] {
     let listedProcessObjects = try AudioObjectID.system.readProcessList()
-    let translatedProcessObjects = NSWorkspace.shared.runningApplications.compactMap {
+    let runningApplications = NSWorkspace.shared.runningApplications
+    let translatedProcessObjects = runningApplications.compactMap {
         AudioObjectID.system.readProcessObject(for: $0.processIdentifier)
     }
     var seenProcessObjects = Set<AudioObjectID>()
@@ -279,6 +285,12 @@ func collectSnapshots() throws -> [ProcessSnapshot] {
     let foregroundTitle = foregroundPID.map {
         activeWindowTitle(pid: $0, accessibilityTrusted: accessibilityTrusted)
     } ?? nil
+    log(
+        "foreground pid=\(foregroundPID.map(String.init) ?? "none") app=\(foregroundAppName ?? "unknown") bundle=\(foregroundBundleID ?? "unknown") accessibility=\(accessibilityTrusted ? "trusted" : "missing") title=\(foregroundTitle ?? "none")"
+    )
+    log(
+        "coreaudio listed=\(listedProcessObjects.count) translated=\(translatedProcessObjects.count) merged=\(processObjects.count) runningApps=\(runningApplications.count)"
+    )
     var snapshots: [ProcessSnapshot] = processObjects.compactMap { objectID in
         guard objectID.readRunningInput(), let pid = objectID.readPID() else {
             return nil
@@ -306,6 +318,9 @@ func collectSnapshots() throws -> [ProcessSnapshot] {
        let foregroundBundleID,
        isBrowserBundle(foregroundBundleID),
        meetingTitleLike(foregroundTitle) {
+        log(
+            "browser-fallback candidate pid=\(foregroundPID) app=\(foregroundAppName ?? "unknown") bundle=\(foregroundBundleID) title=\(foregroundTitle ?? "none")"
+        )
         snapshots.append(
             ProcessSnapshot(
                 pid: foregroundPID,
@@ -317,6 +332,16 @@ func collectSnapshots() throws -> [ProcessSnapshot] {
                 windowTitle: foregroundTitle
             )
         )
+    }
+    if snapshots.isEmpty {
+        log("input snapshots=0")
+    } else {
+        log("input snapshots=\(snapshots.count)")
+        for snapshot in snapshots {
+            log(
+                "input pid=\(snapshot.pid) app=\(snapshot.appName ?? "unknown") bundle=\(snapshot.bundleId ?? "unknown") foreground=\(snapshot.isForeground) title=\(snapshot.windowTitle ?? "none")"
+            )
+        }
     }
     return snapshots
 }
