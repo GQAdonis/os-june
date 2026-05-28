@@ -1,0 +1,89 @@
+name: desktop-dmg
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/desktop-dmg.yml"
+      - "hud.html"
+      - "index.html"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "public/**"
+      - "scripts/**"
+      - "src/**"
+      - "src-tauri/**"
+      - "tsconfig.json"
+      - "vite.config.ts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build macOS DMG
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: cargo-registry-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-registry-${{ runner.os }}-
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target
+          key: tauri-target-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            tauri-target-${{ runner.os }}-
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build DMG
+        run: pnpm tauri build --bundles dmg
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: os-scribe-dmg-${{ github.sha }}
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+
+      - name: Summary
+        run: |
+          {
+            echo "### macOS DMG"
+            for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+              [ -e "$dmg" ] || continue
+              echo "- \`$dmg\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"

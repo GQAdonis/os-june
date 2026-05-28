@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --bundles app",
+    "tauri:build": "tauri build --bundles app,dmg",
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:ui": "vitest run",
