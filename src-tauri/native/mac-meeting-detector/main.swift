@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreAudio
+import CoreGraphics
 import Foundation
 
 extension String: @retroactive Error {}
@@ -57,6 +58,30 @@ extension AudioObjectID {
         }
         guard err == noErr else { throw "Could not read CoreAudio process list: \(err)" }
         return processIDs.filter { $0 != AudioObjectID(kAudioObjectUnknown) }
+    }
+
+    func readProcessObject(for pid: pid_t) -> AudioObjectID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslatePIDToProcessObject,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var qualifier = pid
+        var processID = AudioObjectID(kAudioObjectUnknown)
+        var dataSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        let qualifierSize = UInt32(MemoryLayout<pid_t>.size)
+        let err = AudioObjectGetPropertyData(
+            self,
+            &address,
+            qualifierSize,
+            &qualifier,
+            &dataSize,
+            &processID
+        )
+        guard err == noErr, processID != AudioObjectID(kAudioObjectUnknown) else {
+            return nil
+        }
+        return processID
     }
 
     func readPID() -> pid_t? {
@@ -119,11 +144,15 @@ func frontmostPID() -> pid_t? {
 }
 
 func activeWindowTitle(pid: pid_t, accessibilityTrusted: Bool) -> String? {
-    guard accessibilityTrusted else { return nil }
-    let app = AXUIElementCreateApplication(pid)
-    return titleForAttribute(app, kAXFocusedWindowAttribute)
-        ?? titleForAttribute(app, kAXMainWindowAttribute)
-        ?? firstWindowTitle(app)
+    if accessibilityTrusted {
+        let app = AXUIElementCreateApplication(pid)
+        if let title = titleForAttribute(app, kAXFocusedWindowAttribute)
+            ?? titleForAttribute(app, kAXMainWindowAttribute)
+            ?? firstWindowTitle(app) {
+            return title
+        }
+    }
+    return coreGraphicsWindowTitle(pid: pid)
 }
 
 func titleForAttribute(_ app: AXUIElement, _ attribute: String) -> String? {
@@ -171,8 +200,77 @@ func isRelatedBrowserProcess(_ bundleID: String?, foregroundBundleID: String?) -
     return bundleID.lowercased().hasPrefix("\(foregroundBundleID).".lowercased())
 }
 
+func isBrowserBundle(_ bundleID: String?) -> Bool {
+    guard let bundleID else { return false }
+    return [
+        "com.google.Chrome",
+        "com.google.Chrome.canary",
+        "org.chromium.Chromium",
+        "com.brave.Browser",
+        "com.microsoft.edgemac",
+        "com.apple.Safari",
+        "com.apple.SafariTechnologyPreview",
+        "com.operasoftware.Opera",
+        "company.thebrowser.Browser",
+    ].contains(bundleID)
+}
+
+func meetingTitleLike(_ title: String?) -> Bool {
+    guard let title else { return false }
+    let normalized = title.lowercased()
+    return [
+        "google meet",
+        "meet.google",
+        "meet.google.com",
+        "meet -",
+        "meet |",
+        "zoom meeting",
+        "zoom webinar",
+        "microsoft teams",
+        "teams meeting",
+        "whereby",
+        "webex",
+        "jitsi",
+        "around",
+        "slack huddle",
+        "discord",
+    ].contains { normalized.contains($0) }
+}
+
+func coreGraphicsWindowTitle(pid: pid_t) -> String? {
+    guard
+        let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+            as? [[String: Any]]
+    else {
+        return nil
+    }
+    for window in windows {
+        guard
+            let ownerPID = window[kCGWindowOwnerPID as String] as? pid_t,
+            ownerPID == pid,
+            let layer = window[kCGWindowLayer as String] as? Int,
+            layer == 0,
+            let title = window[kCGWindowName as String] as? String
+        else {
+            continue
+        }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            return trimmed
+        }
+    }
+    return nil
+}
+
 func collectSnapshots() throws -> [ProcessSnapshot] {
-    let processObjects = try AudioObjectID.system.readProcessList()
+    let listedProcessObjects = try AudioObjectID.system.readProcessList()
+    let translatedProcessObjects = NSWorkspace.shared.runningApplications.compactMap {
+        AudioObjectID.system.readProcessObject(for: $0.processIdentifier)
+    }
+    var seenProcessObjects = Set<AudioObjectID>()
+    let processObjects = (listedProcessObjects + translatedProcessObjects).filter {
+        seenProcessObjects.insert($0).inserted
+    }
     let foreground = NSWorkspace.shared.frontmostApplication
     let foregroundPID = foreground?.processIdentifier
     let foregroundBundleID = foreground?.bundleIdentifier
@@ -181,7 +279,7 @@ func collectSnapshots() throws -> [ProcessSnapshot] {
     let foregroundTitle = foregroundPID.map {
         activeWindowTitle(pid: $0, accessibilityTrusted: accessibilityTrusted)
     } ?? nil
-    return processObjects.compactMap { objectID in
+    var snapshots: [ProcessSnapshot] = processObjects.compactMap { objectID in
         guard objectID.readRunningInput(), let pid = objectID.readPID() else {
             return nil
         }
@@ -200,6 +298,27 @@ func collectSnapshots() throws -> [ProcessSnapshot] {
             windowTitle: effectiveForeground ? foregroundTitle : nil
         )
     }
+    let hasForegroundBrowserCandidate = snapshots.contains {
+        isRelatedBrowserProcess($0.bundleId, foregroundBundleID: foregroundBundleID)
+    }
+    if !hasForegroundBrowserCandidate,
+       let foregroundPID,
+       let foregroundBundleID,
+       isBrowserBundle(foregroundBundleID),
+       meetingTitleLike(foregroundTitle) {
+        snapshots.append(
+            ProcessSnapshot(
+                pid: foregroundPID,
+                bundleId: foregroundBundleID,
+                appName: foregroundAppName,
+                isRunningInput: true,
+                isForeground: true,
+                accessibilityTrusted: true,
+                windowTitle: foregroundTitle
+            )
+        )
+    }
+    return snapshots
 }
 
 final class Detector {
