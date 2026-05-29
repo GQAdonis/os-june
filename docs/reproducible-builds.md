@@ -27,7 +27,7 @@ models exist:
 so the verifier never trusts the registry:
 
 ```
-git clone @<commit> ──► deterministic build ──► digest D
+clone repo, checkout <commit> ──► deterministic build ──► digest D
                                                   ║ compare
 Trust Center attestation ──► attested compose ──► pins @sha256:D ?  ✅
 ```
@@ -36,7 +36,7 @@ Trust Center attestation ──► attested compose ──► pins @sha256:D ?  
 the chain has one extra hop — resolve the tag in the registry:
 
 ```
-git clone @<commit> ──► deterministic build ──► digest D
+clone repo, checkout <commit> ──► deterministic build ──► digest D
 Trust Center attestation ──► attested compose ──► pins :<sha_short>
 registry: :<sha_short> ──► resolves to digest D' ;  D == D' ?  ✅
 ```
@@ -99,11 +99,12 @@ not the whole build.
 
 ## Phase A — make the build deterministic
 
-> **Already done in #44:** `provenance: false` + `sbom: false` (plain image, no
-> attestation index). `strip = true`, `codegen-units = 1`, and
-> `rust-toolchain.toml` (1.95.0) were already in the repo.
+> **Already in the repo (no change in this PR):** `provenance: false` + `sbom: false`
+> (#44), plus `[profile.release] strip = true` / `codegen-units = 1` and
+> `rust-toolchain.toml` (`channel = "1.95.0"`). Keep that channel in sync with the
+> pinned `rust:1.95-bookworm` digest's `rustc` — bump both together.
 
-The items below are **implemented in this PR** (validate with a CI build):
+The numbered items below are what **this PR actually adds** (validate with a CI build):
 
 ### 1. Pin base images by digest — `scribe-api/Dockerfile`
 
@@ -128,24 +129,7 @@ COPY . .
 RUN cargo build --release --bin scribe
 ```
 
-### 3. Strip the binary — `scribe-api/Cargo.toml`
-
-```toml
-[profile.release]
-strip = true        # drop symbol table → deterministic + smaller
-```
-
-### 4. Pin the toolchain for non-Docker rebuilds — `scribe-api/rust-toolchain.toml` (new)
-
-```toml
-[toolchain]
-channel = "1.95.0"   # must match the pinned rust base image's rustc
-```
-
-(The CI/Docker build's exact `rustc` is locked by the base-image digest; this
-file makes a *local* `cargo build` outside Docker match.)
-
-### 5. Replace apt certs with a copy — `scribe-api/Dockerfile` (runtime stage)
+### 3. Replace apt certs with a copy — `scribe-api/Dockerfile` (runtime stage)
 
 ```dockerfile
 FROM debian:bookworm-slim@sha256:<…> AS runtime
@@ -164,7 +148,7 @@ CMD ["serve"]
 (The `rust` base ships `ca-certificates`, so the bundle is copied from a pinned
 stage — no network fetch, no version drift.)
 
-### 6. Reproducible image export — `.github/workflows/build-scribe-api.yml`
+### 4. Reproducible image export — `.github/workflows/build-scribe-api.yml`
 
 `provenance: false`/`sbom: false` already merged (#44). Remaining work: compute
 the commit epoch and enable timestamp rewriting. Note we deploy by **tag**
@@ -203,10 +187,11 @@ form must keep pushing both (`name=img:<sha>,img:staging`):
 ```
 Usage: verify-reproducible.sh <git-ref>
   1. git worktree add /tmp/verify <git-ref>
+     trap 'git worktree remove /tmp/verify --force' EXIT   # always clean up
   2. SOURCE_DATE_EPOCH=$(git -C /tmp/verify log -1 --pretty=%ct) \
        docker buildx build --provenance=false --sbom=false \
        --output type=image,rewrite-timestamp=true,push=false \
-       --metadata-file /tmp/meta.json scribe-api
+       --metadata-file /tmp/meta.json /tmp/verify/scribe-api   # build the worktree, NOT cwd
   3. local=$(jq -r '.["containerimage.digest"]' /tmp/meta.json)
   # Because we deploy by tag, the "expected" digest comes from resolving the
   # deployed tag (what the attestation references) — not from the attestation
@@ -215,6 +200,7 @@ Usage: verify-reproducible.sh <git-ref>
      expected=$(docker buildx imagetools inspect "ghcr.io/open-software-network/scribe-api:$sha" \
                   --format '{{.Manifest.digest}}')
   5. [ "$local" = "$expected" ] && echo PASS || { echo "FAIL $local != $expected"; exit 1; }
+     # (worktree removed by the EXIT trap regardless of pass/fail)
 ```
 
 ### CI guard — double-build job

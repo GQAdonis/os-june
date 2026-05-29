@@ -121,8 +121,15 @@ jobs:
         run: |
           set -euo pipefail
           tag="deploy/staging/${SHA_SHORT}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -fa "$tag" -m "staging deploy: ${IMG} = ${DIGEST} (commit ${FULL_SHA})"
-          git push -f origin "refs/tags/${tag}"
-          echo "Recorded \`${tag}\` → \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+          # Create-once so the record is genuinely immutable. A reproducible build
+          # means the same commit always yields the same digest, so a re-run for an
+          # existing tag is a no-op — never force-overwrite.
+          if git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null 2>&1; then
+            echo "Tag \`${tag}\` already recorded; left unchanged." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$tag" -m "staging deploy: ${IMG} = ${DIGEST} (commit ${FULL_SHA})"
+            git push origin "refs/tags/${tag}"
+            echo "Recorded \`${tag}\` → \`${DIGEST}\`" >> "$GITHUB_STEP_SUMMARY"
+          fi
