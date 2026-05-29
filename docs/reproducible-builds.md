@@ -1,6 +1,9 @@
 # Reproducible builds for `scribe-api`
 
-> **Status:** plan — under review. Phase A not yet implemented.
+> **Status:** plan + implementation. This PR ships **Phase A** (deterministic
+> build) and **anchor (b)** (digest recorded as a git tag on deploy). Both need a
+> CI build/deploy to validate. **Phase B** (reproducibility proof) and **anchor
+> (c)** (digest-in-compose) are still open.
 
 ## Why
 
@@ -97,9 +100,10 @@ not the whole build.
 ## Phase A — make the build deterministic
 
 > **Already done in #44:** `provenance: false` + `sbom: false` (plain image, no
-> attestation index). The items below are the remaining build-determinism work.
+> attestation index). `strip = true`, `codegen-units = 1`, and
+> `rust-toolchain.toml` (1.95.0) were already in the repo.
 
-Concrete changes (all reviewable before any CI run):
+The items below are **implemented in this PR** (validate with a CI build):
 
 ### 1. Pin base images by digest — `scribe-api/Dockerfile`
 
