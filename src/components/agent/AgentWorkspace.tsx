@@ -451,6 +451,48 @@ export function AgentWorkspace() {
     }
   }
 
+  const managementPanel =
+    activePanel === "skills" ? (
+      <SkillsToolsPanel
+        loading={capabilityLoading}
+        query={capabilityQuery}
+        saving={capabilitySaving}
+        skills={skills}
+        toolsets={toolsets}
+        onQueryChange={setCapabilityQuery}
+        onRefresh={() => void loadCapabilities()}
+        onToggleSkill={(skill, enabled) => void setSkillEnabled(skill, enabled)}
+        onToggleToolset={(toolset, enabled) =>
+          void setToolsetEnabled(toolset, enabled)
+        }
+      />
+    ) : activePanel === "messaging" ? (
+      <MessagingPanel
+        loading={capabilityLoading}
+        platforms={messagingPlatforms}
+        query={capabilityQuery}
+        saving={capabilitySaving}
+        selectedPlatformId={selectedMessagingPlatformId}
+        envEdits={messagingEnvEdits}
+        onQueryChange={setCapabilityQuery}
+        onRefresh={() => void loadMessagingPlatforms()}
+        onSelectPlatform={(platform) => {
+          setSelectedMessagingPlatformId(platform.id);
+          setMessagingEnvEdits({});
+        }}
+        onEditEnv={(key, value) =>
+          setMessagingEnvEdits((current) => ({
+            ...current,
+            [key]: value,
+          }))
+        }
+        onSaveEnv={(platform) => void saveMessagingPlatformEnv(platform)}
+        onToggle={(platform, enabled) =>
+          void setMessagingPlatformEnabled(platform, enabled)
+        }
+      />
+    ) : null;
+
   return (
     <section className="agent-workspace" aria-label="Agent">
       <aside className="agent-task-rail" aria-label="Agent tasks">
@@ -463,30 +505,31 @@ export function AgentWorkspace() {
                 : "Desktop tasks with private local-tool policy."}
             </p>
           </div>
+          <PanelTabs activePanel={activePanel} onChange={setActivePanel} />
           <div className="agent-rail-actions">
-            <button
-              type="button"
-              className="agent-new-task"
-              disabled={bridgeStarting || bridge.running}
-              onClick={() => void startBridge()}
-            >
-              {bridgeStarting
-                ? "Starting"
-                : bridge.running
-                  ? "Hermes on"
-                  : "Retry Hermes"}
-            </button>
-            <button
-              type="button"
-              className="agent-new-task"
-              onClick={() => void startNewTask()}
-            >
-              New task
-            </button>
+            {activePanel === "chat" ? (
+              <button
+                type="button"
+                className="agent-new-task"
+                onClick={() => void startNewTask()}
+              >
+                New session
+              </button>
+            ) : null}
+            {!bridge.running ? (
+              <button
+                type="button"
+                className="agent-new-task"
+                disabled={bridgeStarting}
+                onClick={() => void startBridge()}
+              >
+                {bridgeStarting ? "Starting Hermes" : "Start Hermes"}
+              </button>
+            ) : null}
           </div>
         </header>
 
-        {loading ? (
+        {activePanel !== "chat" ? null : loading ? (
           <div className="agent-loading">
             <Spinner size={16} />
           </div>
@@ -523,7 +566,7 @@ export function AgentWorkspace() {
 
       <section className="agent-main" aria-label="Agent task details">
         {error ? <p className="error-banner">{error}</p> : null}
-        {selectedTask ? (
+        {managementPanel ?? (selectedTask ? (
           <>
             <header className="agent-detail-header">
               <div className="agent-detail-title">
@@ -534,7 +577,6 @@ export function AgentWorkspace() {
                 </div>
               </div>
               <div className="agent-actions">
-                <PanelTabs activePanel={activePanel} onChange={setActivePanel} />
                 {selectedTask.status !== "cancelled" &&
                 selectedTask.status !== "completed" ? (
                   <button
@@ -559,72 +601,26 @@ export function AgentWorkspace() {
                 ) : null}
               </div>
             </header>
-            {activePanel === "chat" ? (
-              <div ref={listRef} className="agent-timeline">
-                <SafetyPanel />
-                {mergeTimeline(
-                  selectedTask.messages,
-                  selectedTask.toolEvents,
-                  liveEvents[selectedTask.id] ?? [],
-                ).map((item) =>
-                  item.kind === "message" ? (
-                    <MessageBubble
-                      key={item.message.id}
-                      message={item.message}
-                    />
-                  ) : item.kind === "tool" ? (
-                    <ToolEventRow key={item.event.id} event={item.event} />
-                  ) : item.kind === "hermes-message" ? (
-                    <HermesMessageRow key={item.item.id} item={item.item} />
-                  ) : item.kind === "hermes-tool" ? (
-                    <HermesToolRow key={item.item.id} item={item.item} />
-                  ) : (
-                    <HermesNoteRow key={item.item.id} item={item.item} />
-                  ),
-                )}
-              </div>
-            ) : activePanel === "skills" ? (
-              <SkillsToolsPanel
-                loading={capabilityLoading}
-                query={capabilityQuery}
-                saving={capabilitySaving}
-                skills={skills}
-                toolsets={toolsets}
-                onQueryChange={setCapabilityQuery}
-                onRefresh={() => void loadCapabilities()}
-                onToggleSkill={(skill, enabled) =>
-                  void setSkillEnabled(skill, enabled)
-                }
-                onToggleToolset={(toolset, enabled) =>
-                  void setToolsetEnabled(toolset, enabled)
-                }
-              />
-            ) : (
-              <MessagingPanel
-                loading={capabilityLoading}
-                platforms={messagingPlatforms}
-                query={capabilityQuery}
-                saving={capabilitySaving}
-                selectedPlatformId={selectedMessagingPlatformId}
-                envEdits={messagingEnvEdits}
-                onQueryChange={setCapabilityQuery}
-                onRefresh={() => void loadMessagingPlatforms()}
-                onSelectPlatform={(platform) => {
-                  setSelectedMessagingPlatformId(platform.id);
-                  setMessagingEnvEdits({});
-                }}
-                onEditEnv={(key, value) =>
-                  setMessagingEnvEdits((current) => ({
-                    ...current,
-                    [key]: value,
-                  }))
-                }
-                onSaveEnv={(platform) => void saveMessagingPlatformEnv(platform)}
-                onToggle={(platform, enabled) =>
-                  void setMessagingPlatformEnabled(platform, enabled)
-                }
-              />
-            )}
+            <div ref={listRef} className="agent-timeline">
+              <SafetyPanel />
+              {mergeTimeline(
+                selectedTask.messages,
+                selectedTask.toolEvents,
+                liveEvents[selectedTask.id] ?? [],
+              ).map((item) =>
+                item.kind === "message" ? (
+                  <MessageBubble key={item.message.id} message={item.message} />
+                ) : item.kind === "tool" ? (
+                  <ToolEventRow key={item.event.id} event={item.event} />
+                ) : item.kind === "hermes-message" ? (
+                  <HermesMessageRow key={item.item.id} item={item.item} />
+                ) : item.kind === "hermes-tool" ? (
+                  <HermesToolRow key={item.item.id} item={item.item} />
+                ) : (
+                  <HermesNoteRow key={item.item.id} item={item.item} />
+                ),
+              )}
+            </div>
           </>
         ) : (
           <div className="agent-compose-empty">
@@ -635,33 +631,34 @@ export function AgentWorkspace() {
               label="Start an agent task"
             />
           </div>
-        )}
+        ))}
 
-        <form
-          className="agent-composer"
-          data-hidden={selectedTask ? activePanel !== "chat" : false}
-          onSubmit={(event) => void submit(event)}
-        >
-          <textarea
-            value={draft}
-            onChange={(event) => setDraft(event.currentTarget.value)}
-            placeholder={
-              selectedTask
-                ? "Send a follow-up"
-                : "Ask the agent to complete a desktop task"
-            }
-            rows={2}
-            onKeyDown={(event) => {
-              if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                event.currentTarget.form?.requestSubmit();
+        {activePanel === "chat" ? (
+          <form
+            className="agent-composer"
+            onSubmit={(event) => void submit(event)}
+          >
+            <textarea
+              value={draft}
+              onChange={(event) => setDraft(event.currentTarget.value)}
+              placeholder={
+                selectedTask
+                  ? "Send a follow-up"
+                  : "Ask the agent to complete a desktop task"
               }
-            }}
-          />
-          <button type="submit" disabled={submitting || !draft.trim()}>
-            {submitting ? <Spinner size={15} /> : <SendIcon size={15} />}
-            <span>{selectedTask ? "Send" : "Create"}</span>
-          </button>
-        </form>
+              rows={2}
+              onKeyDown={(event) => {
+                if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                  event.currentTarget.form?.requestSubmit();
+                }
+              }}
+            />
+            <button type="submit" disabled={submitting || !draft.trim()}>
+              {submitting ? <Spinner size={15} /> : <SendIcon size={15} />}
+              <span>{selectedTask ? "Send" : "Create"}</span>
+            </button>
+          </form>
+        ) : null}
       </section>
     </section>
   );
