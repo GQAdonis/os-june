@@ -63,10 +63,29 @@ export function currentVersionFromPackageJson(contents) {
   return JSON.parse(contents).version;
 }
 
+// Index of the `version = "..."` line inside the [package] table specifically,
+// so a [workspace]/[dependencies] table's own version is never matched. The bare
+// /^version/m first-match was fragile to table ordering.
+function packageVersionLineIndex(lines) {
+  let inPackage = false;
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("[")) {
+      inPackage = trimmed === "[package]";
+      continue;
+    }
+    if (inPackage && /^\s*version\s*=\s*"[^"]*"/.test(lines[i])) return i;
+  }
+  return -1;
+}
+
 export function currentVersionFromCargoToml(contents) {
-  const match = /^version\s*=\s*"([^"]+)"/m.exec(contents);
-  if (!match) throw new Error("Could not find package version in Cargo.toml.");
-  return match[1];
+  const lines = contents.split("\n");
+  const index = packageVersionLineIndex(lines);
+  if (index === -1) {
+    throw new Error("Could not find [package] version in Cargo.toml.");
+  }
+  return /"([^"]+)"/.exec(lines[index])[1];
 }
 
 // The three version-bearing files must already agree before a bump — otherwise
@@ -92,14 +111,16 @@ function replaceJsonVersion(contents, requestedVersion) {
 }
 
 function replaceCargoPackageVersion(contents, requestedVersion) {
-  const next = contents.replace(
-    /^version\s*=\s*"[^"]+"/m,
+  const lines = contents.split("\n");
+  const index = packageVersionLineIndex(lines);
+  if (index === -1) {
+    throw new Error("Could not find [package] version in Cargo.toml.");
+  }
+  lines[index] = lines[index].replace(
+    /version\s*=\s*"[^"]*"/,
     `version = "${requestedVersion}"`,
   );
-  if (next === contents) {
-    throw new Error("Could not find package version in Cargo.toml.");
-  }
-  return next;
+  return lines.join("\n");
 }
 
 async function main() {

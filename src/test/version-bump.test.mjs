@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   bumpVersionContents,
+  currentVersionFromCargoToml,
   readCurrentVersion,
   validateRequestedVersion,
 } from "../../scripts/bump-version.mjs";
@@ -55,5 +56,21 @@ describe("readCurrentVersion", () => {
       cargoToml: '[package]\nname = "os-scribe"\nversion = "0.1.1"\n',
     };
     expect(readCurrentVersion(drifted).ok).toBe(false);
+  });
+});
+
+describe("currentVersionFromCargoToml", () => {
+  it("reads the [package] version, not another table's version", () => {
+    const cargo =
+      '[workspace.package]\nversion = "9.9.9"\n\n[package]\nname = "os-scribe"\nversion = "0.1.0"\n';
+    expect(currentVersionFromCargoToml(cargo)).toBe("0.1.0");
+  });
+
+  it("bumps the [package] version while leaving other tables untouched", () => {
+    const cargo =
+      '[workspace.package]\nversion = "9.9.9"\n\n[package]\nname = "os-scribe"\nversion = "0.1.0"\n';
+    const next = bumpVersionContents({ ...files, cargoToml: cargo }, "0.2.0");
+    expect(next.cargoToml).toContain('[workspace.package]\nversion = "9.9.9"');
+    expect(next.cargoToml).toContain('[package]\nname = "os-scribe"\nversion = "0.2.0"');
   });
 });

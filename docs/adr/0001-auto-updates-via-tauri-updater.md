@@ -42,6 +42,5 @@ accepted
   auto-update for all installs and forces a manual reinstall — back it up.
 - Builds are **`aarch64`-only** for now; Intel Macs find no matching `platforms`
   entry in `latest.json` and silently will not auto-update.
-- The shipped `0.1.0` predates the updater and cannot auto-update. The first
-  updater-capable build is `0.2.0`; existing internal users do one manual
-  reinstall, automatic thereafter.
+- Builds that predate the updater cannot auto-update; the first updater-capable
+  build must be installed manually once, automatic for every release thereafter.

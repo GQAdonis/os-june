@@ -5,8 +5,10 @@ OS Scribe ships signed, notarized macOS builds with in-app auto-updates through
 signatures, the DMG, and `latest.json` are published to the public
 `open-software-network/os-scribe-releases` repo.
 
-The first updater-capable release is `0.2.0`. Users on `0.1.0` must manually
-install that build once; later releases update in place.
+The first updater-capable build must be installed manually once — earlier builds
+ship without the updater, so they can't pull it in — and every release after that
+updates in place. Choose the release version per semver when you run the release
+workflow; don't hard-code a specific number in this runbook.
 
 ## One-time prerequisites
 

@@ -1098,6 +1098,7 @@ export function App() {
             reportProgress: setUpdateProgress,
             reportFailure: (message) => {
               setInstallingUpdate(false);
+              setUpdateProgress(null);
               setUpdateStatus(`Update failed: ${message}`);
             },
           });

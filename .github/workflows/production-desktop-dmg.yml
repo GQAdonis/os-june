@@ -129,9 +129,11 @@ jobs:
           VERSION_INPUT: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          re='^[0-9]+\.[0-9]+\.[0-9]+$'
+          # Reject leading zeros so this gate matches bump-version.mjs's VERSION_RE
+          # exactly — invalid inputs fail here, not later with a murkier error.
+          re='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           if [[ ! "$VERSION_INPUT" =~ $re ]]; then
-            echo "::error::Version must be semver X.Y.Z (digits only), got: $VERSION_INPUT"
+            echo "::error::Version must be semver X.Y.Z (no leading zeros), got: $VERSION_INPUT"
             exit 1
           fi
           # Stash the validated value. Every downstream step uses $VERSION (run:)
@@ -189,7 +191,10 @@ jobs:
           releaseName: OS Scribe v${{ env.VERSION }}
           releaseBody: "Stable OS Scribe release v${{ env.VERSION }}."
           releaseCommitish: main
-          generateReleaseNotes: true
+          # Plain notes only: the in-app update dialog renders latest.json's
+          # `notes` as plain text, so GitHub's auto-generated markdown would show
+          # raw (## headings, @-mentions). Keep notes = the plain releaseBody.
+          generateReleaseNotes: false
           args: --bundles app,dmg --target aarch64-apple-darwin
           uploadUpdaterJson: true
           uploadUpdaterSignatures: true
@@ -207,6 +212,9 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add package.json pnpm-lock.yaml src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
           git commit -m "release: v$VERSION"
+          # Rebase onto anything that landed on main during the (~15 min) build so
+          # the push isn't rejected non-fast-forward after the release is live.
+          git pull --rebase origin main
           git push origin main
 
       - name: Summary
