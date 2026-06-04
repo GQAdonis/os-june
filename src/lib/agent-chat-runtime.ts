@@ -30,10 +30,20 @@ export type AgentChatToolPart = {
   status: "running" | "complete" | "failed";
 };
 
+export type AgentChatApprovalPart = {
+  type: "approval";
+  id: string;
+  command: string;
+  description: string;
+  allowPermanent: boolean;
+  status: "pending" | "resolved";
+};
+
 export type AgentChatPart =
   | AgentChatTextPart
   | AgentChatReasoningPart
-  | AgentChatToolPart;
+  | AgentChatToolPart
+  | AgentChatApprovalPart;
 
 export type AgentChatTurn = {
   id: string;
@@ -248,6 +258,25 @@ function appendLiveHermesEvents(
       continue;
     }
 
+    if (event.type === "approval.request") {
+      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
+      currentAssistant.status = "running";
+      const payload = event.payload as Record<string, unknown> | undefined;
+      upsertApprovalPart(currentAssistant.parts, {
+        id:
+          stringValue(payload?.request_id) ??
+          stringValue(payload?.id) ??
+          `approval:${event.receivedAt}`,
+        command: stringValue(payload?.command, true) ?? "",
+        description:
+          stringValue(payload?.description, true) ??
+          "Hermes needs approval before continuing.",
+        allowPermanent: payload?.allow_permanent !== false,
+        status: "pending",
+      });
+      continue;
+    }
+
     if (event.type === "error" && text) {
       currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
       upsertToolPart(currentAssistant.parts, {
@@ -338,6 +367,8 @@ function completeRunningParts(parts: AgentChatPart[]) {
     if (part.type === "text") part.status = "complete";
     if (part.type === "tool" && part.status === "running")
       part.status = "complete";
+    if (part.type === "approval" && part.status === "pending")
+      part.status = "resolved";
   }
 }
 
@@ -364,6 +395,34 @@ function upsertToolPart(
     id: next.id,
     name: next.name,
     text: next.text,
+    status: next.status,
+  });
+}
+
+function upsertApprovalPart(
+  parts: AgentChatPart[],
+  next: Pick<
+    AgentChatApprovalPart,
+    "id" | "command" | "description" | "allowPermanent" | "status"
+  >,
+) {
+  const existing = parts.find(
+    (part): part is AgentChatApprovalPart =>
+      part.type === "approval" && part.id === next.id,
+  );
+  if (existing) {
+    existing.command = next.command || existing.command;
+    existing.description = next.description || existing.description;
+    existing.allowPermanent = next.allowPermanent;
+    existing.status = next.status;
+    return;
+  }
+  parts.push({
+    type: "approval",
+    id: next.id,
+    command: next.command,
+    description: next.description,
+    allowPermanent: next.allowPermanent,
     status: next.status,
   });
 }
@@ -534,6 +593,7 @@ function toolStatus(status: AgentToolEventStatus): AgentChatToolPart["status"] {
 
 function partText(part: AgentChatPart) {
   if (part.type === "tool") return part.text;
+  if (part.type === "approval") return part.command || part.description;
   return part.text;
 }
 

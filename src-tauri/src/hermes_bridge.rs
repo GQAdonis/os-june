@@ -225,15 +225,18 @@ async fn start_hermes_bridge_inner(
         "ws://127.0.0.1:{port}/api/ws?token={}",
         urlencoding::encode(&token)
     );
+    let hermes_home = resolve_scribe_hermes_home(app)?;
+    let default_cwd = hermes_home.join("workspace");
+    std::fs::create_dir_all(&default_cwd)
+        .map_err(|error| AppError::new("hermes_bridge_workspace_failed", error.to_string()))?;
     let cwd = request
         .cwd
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok());
-    let cwd_display = cwd.as_ref().map(|path| path.to_string_lossy().into_owned());
-    let hermes_home = resolve_scribe_hermes_home(app)?;
+        .unwrap_or(default_cwd);
+    let cwd_display = Some(cwd.to_string_lossy().into_owned());
     let provider_proxy = start_scribe_provider_proxy().await?;
     sync_hermes_config(&hermes_home, provider_proxy.port)?;
 
@@ -251,9 +254,7 @@ async fn start_hermes_bridge_inner(
     .stdout(Stdio::null())
     .stderr(Stdio::null());
     apply_isolated_hermes_env(&mut cmd, &hermes_home, &token);
-    if let Some(cwd) = cwd {
-        cmd.current_dir(cwd);
-    }
+    cmd.current_dir(cwd);
 
     let child = cmd.spawn().map_err(|error| {
         AppError::new(
@@ -677,6 +678,12 @@ struct FilesystemRootCandidate {
 fn filesystem_roots(hermes_home: &Path) -> Result<Vec<FilesystemRootCandidate>, AppError> {
     let mut roots = Vec::new();
     for (id, label, relative, description) in [
+        (
+            "workspace",
+            "Workspace",
+            "workspace",
+            "Hermes scratch files and generated outputs.",
+        ),
         (
             "memory",
             "Memory",

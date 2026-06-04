@@ -916,7 +916,8 @@ input:focus-visible,
 
 .agent-safety-panel,
 .agent-tool-event,
-.agent-hermes-event {
+.agent-hermes-event,
+.agent-approval-card {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: var(--sp-4);
@@ -924,6 +925,60 @@ input:focus-visible,
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
   background: var(--surface-subtle);
+}
+
+.agent-approval-card {
+  border-color: color-mix(
+    in oklch,
+    var(--warm-strong) 32%,
+    var(--border-subtle)
+  );
+  background: color-mix(in oklch, var(--warm-soft) 10%, var(--surface-subtle));
+}
+
+.agent-approval-card p {
+  margin: var(--sp-2) 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-approval-card pre {
+  overflow: auto;
+  max-height: 220px;
+  margin: var(--sp-3) 0 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.agent-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+.agent-approval-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  padding: 0 var(--sp-3);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-approval-actions button:disabled {
+  opacity: 0.55;
 }
 
 .agent-safety-panel h3 {
