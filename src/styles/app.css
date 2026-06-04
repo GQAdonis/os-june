@@ -861,6 +861,34 @@ input:focus-visible,
   align-self: flex-start;
 }
 
+.agent-assistant-turn {
+  width: min(760px, 100%);
+  align-self: flex-start;
+  color: var(--foreground);
+}
+
+.agent-assistant-turn-meta {
+  display: flex;
+  gap: var(--sp-3);
+  margin: 0 0 var(--sp-2);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.agent-assistant-turn-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--sp-4);
+  font-size: var(--fs-md);
+  line-height: 1.55;
+}
+
+.agent-assistant-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+}
+
 .agent-message-meta {
   display: flex;
   gap: var(--sp-3);
@@ -1026,6 +1054,73 @@ input:focus-visible,
   font-size: var(--fs-sm);
   line-height: 1.4;
   white-space: pre-wrap;
+}
+
+.agent-reasoning {
+  width: 100%;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-reasoning summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--sp-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.agent-reasoning summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-reasoning summary svg {
+  align-self: center;
+  color: var(--muted-foreground);
+}
+
+.agent-reasoning summary span {
+  font-weight: 650;
+}
+
+.agent-reasoning summary p {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-reasoning[data-status="running"] summary span {
+  color: var(--warm-strong);
+}
+
+.agent-reasoning-body {
+  overflow: auto;
+  max-height: 180px;
+  margin: var(--sp-2) 0 0 calc(var(--control-sm) + var(--sp-2));
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.agent-tool-live-status {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-pill);
+  padding: 0 var(--sp-2);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.agent-tool-live-status[data-status="running"] {
+  color: var(--warm-strong);
+}
+
+.agent-tool-live-status[data-status="failed"] {
+  color: var(--danger);
 }
 
 .agent-tool-title {

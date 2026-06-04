@@ -51,16 +51,19 @@ import {
   type HermesGatewayEvent,
   type HermesSessionCreateResponse,
 } from "../../lib/hermes-gateway";
+import {
+  buildAgentChatTurns,
+  completedHermesMessageText as completedHermesRuntimeMessageText,
+  type AgentChatPart,
+  type AgentChatTurn,
+  type LiveHermesEvent,
+} from "../../lib/agent-chat-runtime";
 
 const POLLED_STATUSES = new Set<AgentTaskStatus>([
   "queued",
   "running",
   "waitingForUser",
 ]);
-
-type LiveHermesEvent = HermesGatewayEvent & {
-  receivedAt: string;
-};
 
 type AgentPanel = "chat" | "skills" | "messaging";
 
@@ -82,6 +85,9 @@ export function AgentWorkspace() {
   const [liveEvents, setLiveEvents] = useState<
     Record<string, LiveHermesEvent[]>
   >({});
+  const [workingTaskIds, setWorkingTaskIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [skills, setSkills] = useState<HermesSkillInfo[] | null>(null);
   const [toolsets, setToolsets] = useState<HermesToolsetInfo[] | null>(null);
   const [messagingPlatforms, setMessagingPlatforms] = useState<
@@ -99,6 +105,18 @@ export function AgentWorkspace() {
   const liveEventsRef = useRef<Record<string, LiveHermesEvent[]>>({});
   const hydratedTaskIdsRef = useRef<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement | null>(null);
+
+  const setTaskWorking = useCallback((taskId: string, working: boolean) => {
+    setWorkingTaskIds((current) => {
+      const next = new Set(current);
+      if (working) {
+        next.add(taskId);
+      } else {
+        next.delete(taskId);
+      }
+      return next;
+    });
+  }, []);
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedTaskId),
@@ -263,6 +281,7 @@ export function AgentWorkspace() {
         ).session_id;
       if (!sessionId) throw new Error("Hermes did not create a session.");
       setHermesSessions((prev) => ({ ...prev, [task.id]: sessionId }));
+      setTaskWorking(task.id, true);
       if (sessionId !== task.hermesSessionId) {
         saveAgentHermesSession({
           taskId: task.id,
@@ -285,10 +304,13 @@ export function AgentWorkspace() {
         setLiveEvents(liveEventsRef.current);
         if (event.type === "message.complete") {
           unlisten();
-          const completedText = completedHermesMessageText(nextTaskEvents);
+          setTaskWorking(task.id, false);
+          const completedText = completedHermesRuntimeMessageText(nextTaskEvents);
           if (completedText) {
             void persistHermesAssistantMessage(task.id, completedText);
           }
+        } else if (event.type === "error") {
+          setTaskWorking(task.id, false);
         }
       });
       await gateway.request("prompt.submit", {
@@ -296,6 +318,7 @@ export function AgentWorkspace() {
         text: content,
       });
     } catch (err) {
+      setTaskWorking(task.id, false);
       setError(messageFromError(err));
     }
   }
@@ -546,12 +569,12 @@ export function AgentWorkspace() {
               >
                 <span className="agent-task-row-title">{task.title}</span>
                 <span className="agent-task-row-meta">
-                  <ActivityIndicator status={task.status} />
+                  <ActivityIndicator active={workingTaskIds.has(task.id)} />
                   <span>{relativeDate(task.updatedAt)}</span>
                 </span>
-                {isTaskActive(task.status) ? (
+                {workingTaskIds.has(task.id) ? (
                   <span className="agent-task-row-summary">
-                    {taskActivitySummary(task)}
+                    Working now.
                   </span>
                 ) : null}
               </button>
@@ -573,11 +596,14 @@ export function AgentWorkspace() {
           <>
             <header className="agent-detail-header">
               <div className="agent-detail-title">
-                <ActivityIndicator status={selectedTask.status} large />
+                <ActivityIndicator
+                  active={workingTaskIds.has(selectedTask.id)}
+                  large
+                />
                 <div>
                   <h2>{selectedTask.title}</h2>
-                  {isTaskActive(selectedTask.status) ? (
-                    <p>{taskActivitySummary(selectedTask)}</p>
+                  {workingTaskIds.has(selectedTask.id) ? (
+                    <p>Working now.</p>
                   ) : null}
                 </div>
               </div>
@@ -608,23 +634,13 @@ export function AgentWorkspace() {
             </header>
             <div ref={listRef} className="agent-timeline">
               <SafetyPanel />
-              {mergeTimeline(
+              {buildAgentChatTurns(
                 selectedTask.messages,
                 selectedTask.toolEvents,
                 liveEvents[selectedTask.id] ?? [],
-              ).map((item) =>
-                item.kind === "message" ? (
-                  <MessageBubble key={item.message.id} message={item.message} />
-                ) : item.kind === "tool" ? (
-                  <ToolEventRow key={item.event.id} event={item.event} />
-                ) : item.kind === "hermes-message" ? (
-                  <HermesMessageRow key={item.item.id} item={item.item} />
-                ) : item.kind === "hermes-tool" ? (
-                  <HermesToolRow key={item.item.id} item={item.item} />
-                ) : (
-                  <HermesNoteRow key={item.item.id} item={item.item} />
-                ),
-              )}
+              ).map((turn) => (
+                <AgentChatTurnRow key={turn.id} turn={turn} />
+              ))}
             </div>
           </>
         ) : (
@@ -1431,6 +1447,109 @@ function MessageBubble({ message }: { message: AgentMessageDto }) {
   );
 }
 
+function AgentChatTurnRow({ turn }: { turn: AgentChatTurn }) {
+  const textParts = turn.parts.filter(
+    (part): part is Extract<AgentChatPart, { type: "text" }> =>
+      part.type === "text",
+  );
+  const nonTextParts = turn.parts.filter((part) => part.type !== "text");
+
+  if (turn.role === "user") {
+    return (
+      <article className="agent-message" data-role="user">
+        <div className="agent-message-meta">
+          You
+          <span>{relativeDate(turn.createdAt)}</span>
+        </div>
+        {textParts.map((part, index) => (
+          <MarkdownContent key={`${turn.id}:text:${index}`} markdown={part.text} />
+        ))}
+      </article>
+    );
+  }
+
+  return (
+    <article className="agent-assistant-turn" data-status={turn.status}>
+      <div className="agent-assistant-turn-meta">
+        Agent
+        <span>{relativeDate(turn.createdAt)}</span>
+      </div>
+      <div className="agent-assistant-turn-body">
+        {turn.parts.map((part, index) =>
+          part.type === "text" ? (
+            <MarkdownContent
+              key={`${turn.id}:text:${index}`}
+              markdown={part.text}
+            />
+          ) : part.type === "reasoning" ? (
+            <ReasoningPart
+              key={`${turn.id}:reasoning:${index}`}
+              part={part}
+            />
+          ) : (
+            <AgentToolPartRow key={`${turn.id}:tool:${part.id}`} part={part} />
+          ),
+        )}
+        {textParts.length === 0 && nonTextParts.length === 0 ? (
+          <p className="agent-assistant-empty">Waiting for Hermes...</p>
+        ) : null}
+      </div>
+    </article>
+  );
+}
+
+function ReasoningPart({
+  part,
+}: {
+  part: Extract<AgentChatPart, { type: "reasoning" }>;
+}) {
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
+  const open = userOpen ?? part.status === "running";
+  const preview = part.text.replace(/\s+/g, " ").trim();
+  return (
+    <details
+      className="agent-reasoning"
+      data-status={part.status}
+      open={open}
+      onToggle={(event) => setUserOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <BotIcon size={14} />
+        <span>Thinking</span>
+        <p>{preview}</p>
+      </summary>
+      <div className="agent-reasoning-body">{part.text}</div>
+    </details>
+  );
+}
+
+function AgentToolPartRow({
+  part,
+}: {
+  part: Extract<AgentChatPart, { type: "tool" }>;
+}) {
+  return (
+    <article className="agent-hermes-event" data-status={part.status}>
+      <span className="agent-tool-icon">
+        <TerminalIcon size={14} />
+      </span>
+      <div>
+        <div className="agent-tool-title">
+          <span>{part.name}</span>
+          <span className="agent-tool-live-status" data-status={part.status}>
+            {part.status === "running"
+              ? "Running"
+              : part.status === "failed"
+                ? "Failed"
+                : "Done"}
+          </span>
+        </div>
+        {part.text ? <p>{part.text}</p> : null}
+      </div>
+    </article>
+  );
+}
+
 function MarkdownContent({ markdown }: { markdown: string }) {
   return <div className="agent-markdown">{renderMarkdownBlocks(markdown)}</div>;
 }
@@ -1823,13 +1942,13 @@ function StatusPill({
 }
 
 function ActivityIndicator({
+  active,
   large = false,
-  status,
 }: {
+  active: boolean;
   large?: boolean;
-  status: AgentTaskStatus;
 }) {
-  if (!isTaskActive(status)) return null;
+  if (!active) return null;
   return (
     <span className="agent-activity-indicator" data-large={large}>
       <span aria-hidden="true" />
