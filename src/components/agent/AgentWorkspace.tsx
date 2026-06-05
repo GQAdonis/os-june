@@ -1646,7 +1646,7 @@ function FilesystemPanel({
     <section className="agent-management-panel" aria-label="Agent filesystem">
       <ManagementToolbar
         loading={loading}
-        placeholder="Search files, memory, skills"
+        placeholder="Search workspace and memory"
         query={query}
         onQueryChange={onQueryChange}
         onRefresh={onRefresh}

@@ -690,42 +690,6 @@ fn filesystem_roots(hermes_home: &Path) -> Result<Vec<FilesystemRootCandidate>, 
             "memories",
             "Persistent Hermes memory files and stores.",
         ),
-        (
-            "skills",
-            "Skills",
-            "skills",
-            "Installed Hermes skills available to new sessions.",
-        ),
-        (
-            "sessions",
-            "Sessions",
-            "sessions",
-            "Saved Hermes conversations and task artifacts.",
-        ),
-        (
-            "artifacts",
-            "Artifacts",
-            "artifacts",
-            "Files created by Hermes during agent work.",
-        ),
-        (
-            "cache",
-            "Cache",
-            "cache",
-            "Hermes-generated screenshots and temporary task context.",
-        ),
-        (
-            "logs",
-            "Logs",
-            "logs",
-            "Runtime logs for Scribe's isolated Hermes process.",
-        ),
-        (
-            "cron",
-            "Scheduled jobs",
-            "cron",
-            "Hermes cron and scheduled automation files.",
-        ),
     ] {
         roots.push(FilesystemRootCandidate {
             id: id.to_string(),
@@ -733,17 +697,6 @@ fn filesystem_roots(hermes_home: &Path) -> Result<Vec<FilesystemRootCandidate>, 
             path: hermes_home.join(relative),
             description: description.to_string(),
         });
-    }
-    for filename in ["SOUL.md", "MEMORY.md", "USER.md", "state.db", "config.yaml"] {
-        let path = hermes_home.join(filename);
-        if path.exists() {
-            roots.push(FilesystemRootCandidate {
-                id: format!("file:{filename}"),
-                label: filename.to_string(),
-                path,
-                description: "Important Hermes runtime file.".to_string(),
-            });
-        }
     }
     Ok(dedupe_filesystem_roots(roots))
 }
