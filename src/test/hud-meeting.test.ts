@@ -163,6 +163,21 @@ describe("meeting detection HUD", () => {
     await vi.advanceTimersByTimeAsync(900);
     expect(hudElement().dataset.state).toBe("exiting");
   });
+
+  it("hides when a Hey June prompt starts an agent session", async () => {
+    vi.useFakeTimers();
+    await loadHud();
+    await emit("dictation-event", { type: "finalizing_transcript" });
+
+    await emit("dictation-event", {
+      type: "agent_session_prompt",
+      payload: { prompt: "summarize the open document." },
+    });
+
+    expect(hudElement().dataset.state).toBe("exiting");
+    await vi.advanceTimersByTimeAsync(160);
+    expect(mocks.hide).toHaveBeenCalledOnce();
+  });
 });
 
 async function loadHud() {

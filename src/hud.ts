@@ -377,6 +377,11 @@ async function handleDictationEventPayload(payload: unknown) {
     return;
   }
 
+  if (dictationEvent.type === "agent_session_prompt") {
+    void hideHud();
+    return;
+  }
+
   if (dictationEvent.type === "error") {
     // Rust pre-classifies via payload.silent so the HUD has one source of
     // truth for what counts as a "Nothing recorded" case.

@@ -1857,7 +1857,9 @@ fn dictation_event_visibility(event_type: Option<&str>) -> DictationEventVisibil
             | "final_transcript"
             | "paste_target",
         ) => DictationEventVisibility::Show,
-        Some("paste_completed" | "error" | "shutdown_ack") => DictationEventVisibility::Hide,
+        Some("paste_completed" | "agent_session_prompt" | "error" | "shutdown_ack") => {
+            DictationEventVisibility::Hide
+        }
         _ => DictationEventVisibility::Ignore,
     }
 }
@@ -2460,6 +2462,14 @@ mod tests {
             outcome.transcript.as_ref().map(|item| item.text.as_str()),
             Some("Hey, June, summarize the open document.")
         );
+    }
+
+    #[test]
+    fn agent_session_prompt_hides_dictation_hud() {
+        assert!(matches!(
+            dictation_event_visibility(Some("agent_session_prompt")),
+            DictationEventVisibility::Hide
+        ));
     }
 
     #[test]
