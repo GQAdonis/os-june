@@ -116,7 +116,12 @@ function setHud(state: string, status: string) {
   // click pass-through whenever the state changes.
   if (state !== previous && hud) {
     hud.offsetWidth;
-    pushPillBoundsToNative();
+    if (state === "meeting") {
+      clearStopHover();
+      clearPillBounds();
+    } else {
+      pushPillBoundsToNative();
+    }
   }
 }
 
@@ -277,8 +282,13 @@ async function showHud() {
   await appWindow.show();
   // Force a layout flush before reading rects.
   hud?.offsetWidth;
-  pushPillBoundsToNative();
-  pushStopBoundsToNative();
+  if (hud?.dataset.state === "meeting") {
+    clearStopHover();
+    clearPillBounds();
+  } else {
+    pushPillBoundsToNative();
+    pushStopBoundsToNative();
+  }
 }
 
 function hideSoon(delay = 900) {
@@ -370,6 +380,31 @@ async function handleDictationEventPayload(payload: unknown) {
   }
 }
 
+async function handleMeetingDetectionEventPayload(payload: unknown) {
+  const meetingEvent = parseEvent(payload);
+  if (!meetingEvent) return;
+
+  if (meetingEvent.type === "meeting_detected") {
+    if (!canShowMeetingPrompt(hud?.dataset.state)) return;
+    setHud("meeting", "Start transcription");
+    await showHud();
+    return;
+  }
+
+  if (meetingEvent.type === "meeting_cleared" && hud?.dataset.state === "meeting") {
+    void hideHud();
+  }
+}
+
+function canShowMeetingPrompt(state: string | undefined) {
+  return (
+    state === undefined ||
+    state === "idle" ||
+    state === "meeting" ||
+    state === "exiting"
+  );
+}
+
 function parseEvent(payload: unknown): DictationHudEvent | undefined {
   try {
     if (typeof payload === "string") {
@@ -408,6 +443,10 @@ stopButton?.addEventListener("click", async (event) => {
 
 void listen("dictation-event", async (event) => {
   await handleDictationEventPayload(event.payload);
+});
+
+void listen("meeting-detection-event", async (event) => {
+  await handleMeetingDetectionEventPayload(event.payload);
 });
 
 void listen<boolean>("hud-stop-hover", (event) => {

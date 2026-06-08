@@ -225,6 +225,16 @@ body {
   transform: translateY(-0.5px);
 }
 
+.hud-meeting-text {
+  display: none;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  transform: translateY(-0.5px);
+}
+
 /* Stop button ---------------------------------------------------------- */
 .hud-stop {
   position: relative;
@@ -301,6 +311,20 @@ body {
 /* State machine ------------------------------------------------------- */
 .hud[data-state="error"] .hud-handle {
   display: none;
+}
+
+.hud[data-state="meeting"] {
+  padding-inline: var(--sp-3);
+}
+
+.hud[data-state="meeting"] .hud-handle,
+.hud[data-state="meeting"] .hud-viz,
+.hud[data-state="meeting"] .hud-stop {
+  display: none;
+}
+
+.hud[data-state="meeting"] .hud-meeting-text {
+  display: block;
 }
 
 /* Text-only shaking pill for hard errors. */
