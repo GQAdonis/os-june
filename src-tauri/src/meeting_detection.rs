@@ -544,6 +544,13 @@ mod tests {
         MicrophoneInputProcess::new(pid, bundle_id.to_string()).expect("valid process")
     }
 
+    fn allowed_pids(processes: &[MicrophoneInputProcess]) -> Vec<u32> {
+        active_allowed_external_processes(processes, &BTreeSet::new())
+            .into_iter()
+            .map(|process| process.pid)
+            .collect()
+    }
+
     #[test]
     fn active_allowed_external_processes_excludes_owned_processes() {
         let owned = BTreeSet::from([10, 20]);
@@ -565,6 +572,53 @@ mod tests {
                 .map(|process| process.pid)
                 .collect::<Vec<_>>(),
             vec![30, 40]
+        );
+    }
+
+    #[test]
+    fn chrome_mic_process_triggers_detection_filter() {
+        let exact = input_process(30, "com.google.Chrome");
+        let helper = input_process(31, "COM.GOOGLE.CHROME.helper");
+
+        assert_eq!(exact.app_label, "Chrome");
+        assert_eq!(helper.app_label, "Chrome");
+        assert_eq!(allowed_pids(&[exact, helper]), vec![30, 31]);
+    }
+
+    #[test]
+    fn arc_mic_process_triggers_detection_filter() {
+        let exact = input_process(40, "company.thebrowser.Browser");
+        let helper = input_process(41, "company.thebrowser.Browser.helper");
+
+        assert_eq!(exact.app_label, "Arc");
+        assert_eq!(helper.app_label, "Arc");
+        assert_eq!(allowed_pids(&[exact, helper]), vec![40, 41]);
+    }
+
+    #[test]
+    fn unlisted_mic_process_does_not_trigger_detection_filter() {
+        assert!(allowed_pids(&[
+            input_process(50, "us.zoom.xos"),
+            input_process(51, "com.apple.FaceTime"),
+            input_process(52, "com.google.ChromeRemoteDesktop"),
+        ])
+        .is_empty());
+    }
+
+    #[test]
+    fn detector_clears_when_allowed_mic_process_becomes_unlisted() {
+        let mut state = MeetingDetectionState::default();
+        let active_allowed = allowed_pids(&[input_process(60, "com.google.Chrome")]);
+        let active_unlisted = allowed_pids(&[input_process(61, "us.zoom.xos")]);
+
+        assert_eq!(
+            state.update(!active_allowed.is_empty(), false),
+            Some(MeetingDetectionEvent::Detected)
+        );
+        assert_eq!(state.update(!active_unlisted.is_empty(), false), None);
+        assert_eq!(
+            state.update(!active_unlisted.is_empty(), false),
+            Some(MeetingDetectionEvent::Cleared)
         );
     }
 
