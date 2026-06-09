@@ -555,8 +555,9 @@ pub async fn start_recording(
             started.device_label.clone(),
         )
         .await?;
+    let mut live_sources = Vec::new();
     for source in &started.sources {
-        repos
+        let artifact = repos
             .create_pending_source_artifact(
                 &note.id,
                 &started.session_id,
@@ -565,7 +566,21 @@ pub async fn start_recording(
                 &source.final_path.to_string_lossy(),
             )
             .await?;
+        live_sources.push(crate::domain::live_transcription::LiveSourceInput {
+            artifact_id: artifact.id,
+            source: source.source.as_db().to_string(),
+            partial_path: source.partial_path.clone(),
+        });
     }
+    // Dual-source recordings start transcribing completed turns while the
+    // recording is still running; failures there never affect capture.
+    crate::domain::live_transcription::start_live_transcription(
+        repos.clone(),
+        note.id.clone(),
+        started.session_id.clone(),
+        source_mode,
+        live_sources,
+    );
     Ok(RecordingSessionDto {
         id: started.session_id,
         note_id: note.id,
@@ -619,6 +634,10 @@ async fn finish_recording_session(
     finished: crate::audio::capture::FinishedRecording,
     finalization_started: Instant,
 ) -> Result<FinishRecordingResponse, AppError> {
+    // Stop the live transcription loop now that the partial files are being
+    // finalized; its in-flight work is drained before final processing reads
+    // the session's persisted turn transcripts.
+    let live_handle = crate::domain::live_transcription::signal_stop(&finished.session_id);
     let finalization_ms = finalization_started
         .elapsed()
         .as_millis()
@@ -761,6 +780,11 @@ async fn finish_recording_session(
         .await?;
 
     if valid_sources.is_empty() {
+        if let Some(handle) = live_handle {
+            tokio::spawn(async move {
+                crate::domain::live_transcription::drain(handle).await;
+            });
+        }
         repos
             .set_note_status(
                 &finished.note_id,
@@ -819,6 +843,11 @@ async fn finish_recording_session(
     let task_session_id = finished.session_id.clone();
     let task_source_mode = finished.source_mode;
     tokio::spawn(async move {
+        // Wait for any in-flight live turn transcription to land before the
+        // final pass reads the session's persisted turn transcripts.
+        if let Some(handle) = live_handle {
+            crate::domain::live_transcription::drain(handle).await;
+        }
         let queue_lock = ticket.lock();
         let _guard = queue_lock.lock().await;
         // Now that earlier jobs on this note are done, read the latest note so
@@ -925,6 +954,39 @@ fn recording_source_readiness(source_mode: RecordingSourceMode) -> RecordingSour
 
 fn should_probe_system_audio_permission(system_ready: bool, capture_active: bool) -> bool {
     system_ready && !capture_active
+}
+
+/// Frontend-observed processing checkpoints (e.g. when polling first sees a
+/// terminal status). Whitelisted so arbitrary kinds can't pollute the
+/// development latency timeline.
+const UI_CHECKPOINT_KINDS: [&str; 1] = ["ui_polling_complete"];
+
+#[tauri::command]
+pub async fn record_ui_checkpoint(
+    app: AppHandle,
+    request: crate::domain::types::RecordUiCheckpointRequest,
+) -> Result<(), AppError> {
+    if !UI_CHECKPOINT_KINDS.contains(&request.kind.as_str()) {
+        return Err(AppError::new(
+            "invalid_checkpoint_kind",
+            format!("Unknown UI checkpoint kind: {}", request.kind),
+        ));
+    }
+    repositories(&app)
+        .await?
+        .add_checkpoint(
+            &request.session_id,
+            &request.kind,
+            Some(
+                serde_json::json!({
+                    "durationMs": request.duration_ms,
+                    "status": request.status,
+                })
+                .to_string(),
+            ),
+        )
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]

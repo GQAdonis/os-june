@@ -50,6 +50,7 @@ import {
   osAccountsLogout,
   osAccountsTopUp,
   pauseRecording,
+  recordUiCheckpoint,
   removeNoteFromFolder,
   recoverRecording,
   renameFolder,
@@ -798,15 +799,25 @@ export function App() {
       getNote(noteId)
         .then((note) => {
           if (cancelled) return;
-          if (
-            import.meta.env.DEV &&
-            !shouldPollProcessingStatus(note.processingStatus)
-          ) {
-            console.debug("[processing] polling complete", {
-              noteId,
-              status: note.processingStatus,
-              durationMs: Math.round(performance.now() - startedAt),
-            });
+          if (!shouldPollProcessingStatus(note.processingStatus)) {
+            const durationMs = Math.round(performance.now() - startedAt);
+            if (import.meta.env.DEV) {
+              console.debug("[processing] polling complete", {
+                noteId,
+                status: note.processingStatus,
+                durationMs,
+              });
+            }
+            const sessionId = note.recording?.id;
+            if (sessionId) {
+              // Dev-latency checkpoint only; failures are ignored.
+              recordUiCheckpoint(
+                sessionId,
+                "ui_polling_complete",
+                durationMs,
+                note.processingStatus,
+              ).catch(() => {});
+            }
           }
           dispatch({ type: "noteUpdated", note });
         })

@@ -2,7 +2,7 @@ use crate::domain::types::AppError;
 use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::path::{Path, PathBuf};
 
-const WINDOW_MS: i64 = 30;
+pub(crate) const WINDOW_MS: i64 = 30;
 const TRANSCRIPTION_COHERENCE_GAP_MS: i64 = 2_500;
 const NORMALIZE_TARGET_PEAK: f32 = 0.75;
 const NORMALIZE_MIN_GAIN: f32 = 1.25;
@@ -33,7 +33,7 @@ pub struct AudioTurn {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SourceDetectionConfig {
+pub(crate) struct SourceDetectionConfig {
     start_active_ms: i64,
     end_silence_ms: i64,
     min_turn_ms: i64,
@@ -308,13 +308,33 @@ fn detect_source_turns(
     config: SourceDetectionConfig,
 ) -> Result<Vec<AudioTurn>, AppError> {
     let windows = read_rms_windows(&source.path)?;
+    Ok(active_intervals_from_windows(&windows, config)
+        .into_iter()
+        .map(|(start_ms, end_ms)| AudioTurn {
+            artifact_id: source.artifact_id.clone(),
+            source: source.source.clone(),
+            source_path: source.path.clone(),
+            start_ms,
+            end_ms,
+            turn_index: 0,
+        })
+        .collect())
+}
+
+/// Detects active speech intervals from a sequence of [`WINDOW_MS`] RMS
+/// windows. Shared between finalized-WAV turn detection and live detection on
+/// in-progress recordings so both produce the same boundaries.
+pub(crate) fn active_intervals_from_windows(
+    windows: &[f32],
+    config: SourceDetectionConfig,
+) -> Vec<(i64, i64)> {
     if windows.is_empty() {
-        return Ok(Vec::new());
+        return Vec::new();
     }
-    let threshold = activity_threshold(&windows, config);
+    let threshold = activity_threshold(windows, config);
     let start_windows = windows_for_ms(config.start_active_ms);
     let silence_windows = windows_for_ms(config.end_silence_ms);
-    let mut turns = Vec::new();
+    let mut intervals = Vec::new();
     let mut active_run = 0_i64;
     let mut silence_run = 0_i64;
     let mut current_start: Option<i64> = None;
@@ -333,9 +353,8 @@ fn detect_source_turns(
                 silence_run += 1;
                 if silence_run >= silence_windows {
                     let end_ms = window_start - ((silence_windows - 1) * WINDOW_MS);
-                    push_turn_if_long_enough(
-                        &mut turns,
-                        source,
+                    push_interval_if_long_enough(
+                        &mut intervals,
                         current_start.take().unwrap(),
                         end_ms,
                         config,
@@ -347,15 +366,14 @@ fn detect_source_turns(
     }
 
     if let Some(start_ms) = current_start {
-        push_turn_if_long_enough(
-            &mut turns,
-            source,
+        push_interval_if_long_enough(
+            &mut intervals,
             start_ms,
             windows.len() as i64 * WINDOW_MS,
             config,
         );
     }
-    Ok(merge_close_turns(turns, config.merge_gap_ms))
+    merge_close_intervals(intervals, config.merge_gap_ms)
 }
 
 fn read_rms_windows(path: &Path) -> Result<Vec<f32>, AppError> {
@@ -368,15 +386,29 @@ fn read_rms_windows(path: &Path) -> Result<Vec<f32>, AppError> {
             "Only 16-bit PCM WAV turn detection is supported.",
         ));
     }
-    let channels = spec.channels.max(1) as usize;
-    let sample_rate = spec.sample_rate.max(1) as usize;
+    Ok(rms_windows_from_samples(
+        reader.samples::<i16>().map(|sample| sample.unwrap_or(0)),
+        spec.channels.max(1) as usize,
+        spec.sample_rate.max(1) as usize,
+    ))
+}
+
+/// Computes [`WINDOW_MS`] RMS windows from interleaved 16-bit samples. Shared
+/// with live detection so partial recordings produce identical windows.
+pub(crate) fn rms_windows_from_samples(
+    samples: impl Iterator<Item = i16>,
+    channels: usize,
+    sample_rate: usize,
+) -> Vec<f32> {
+    let channels = channels.max(1);
+    let sample_rate = sample_rate.max(1);
     let frames_per_window = ((sample_rate as i64 * WINDOW_MS) / 1000).max(1) as usize;
     let mut windows = Vec::new();
     let mut sum_square = 0.0_f64;
     let mut frames = 0_usize;
     let mut channel_index = 0_usize;
-    for sample in reader.samples::<i16>() {
-        let normalized = sample.unwrap_or(0) as f32 / i16::MAX as f32;
+    for sample in samples {
+        let normalized = sample as f32 / i16::MAX as f32;
         sum_square += (normalized as f64).powi(2);
         channel_index += 1;
         if channel_index == channels {
@@ -392,7 +424,7 @@ fn read_rms_windows(path: &Path) -> Result<Vec<f32>, AppError> {
     if frames > 0 {
         windows.push((sum_square / (frames * channels) as f64).sqrt() as f32);
     }
-    Ok(windows)
+    windows
 }
 
 fn activity_threshold(windows: &[f32], config: SourceDetectionConfig) -> f32 {
@@ -405,9 +437,8 @@ fn activity_threshold(windows: &[f32], config: SourceDetectionConfig) -> f32 {
         .max(config.min_rms)
 }
 
-fn push_turn_if_long_enough(
-    turns: &mut Vec<AudioTurn>,
-    source: &DetectionSource,
+fn push_interval_if_long_enough(
+    intervals: &mut Vec<(i64, i64)>,
     start_ms: i64,
     end_ms: i64,
     config: SourceDetectionConfig,
@@ -415,26 +446,19 @@ fn push_turn_if_long_enough(
     if end_ms - start_ms < config.min_turn_ms {
         return;
     }
-    turns.push(AudioTurn {
-        artifact_id: source.artifact_id.clone(),
-        source: source.source.clone(),
-        source_path: source.path.clone(),
-        start_ms: start_ms.max(0),
-        end_ms: end_ms.max(start_ms),
-        turn_index: 0,
-    });
+    intervals.push((start_ms.max(0), end_ms.max(start_ms)));
 }
 
-fn merge_close_turns(turns: Vec<AudioTurn>, merge_gap_ms: i64) -> Vec<AudioTurn> {
-    let mut merged: Vec<AudioTurn> = Vec::new();
-    for turn in turns {
-        if let Some(last) = merged.last_mut() {
-            if turn.start_ms - last.end_ms <= merge_gap_ms {
-                last.end_ms = last.end_ms.max(turn.end_ms);
+fn merge_close_intervals(intervals: Vec<(i64, i64)>, merge_gap_ms: i64) -> Vec<(i64, i64)> {
+    let mut merged: Vec<(i64, i64)> = Vec::new();
+    for (start_ms, end_ms) in intervals {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start_ms - *last_end <= merge_gap_ms {
+                *last_end = (*last_end).max(end_ms);
                 continue;
             }
         }
-        merged.push(turn);
+        merged.push((start_ms, end_ms));
     }
     merged
 }
@@ -443,7 +467,7 @@ fn windows_for_ms(duration_ms: i64) -> i64 {
     ((duration_ms + WINDOW_MS - 1) / WINDOW_MS).max(1)
 }
 
-fn config_for_source(source: &str) -> SourceDetectionConfig {
+pub(crate) fn config_for_source(source: &str) -> SourceDetectionConfig {
     if source == "system" {
         SourceDetectionConfig {
             start_active_ms: 180,

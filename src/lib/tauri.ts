@@ -859,6 +859,18 @@ export async function getNote(noteId: string) {
   return invoke<NoteDto>("get_note", { request: { noteId } });
 }
 
+/** Records a frontend-observed processing checkpoint (dev latency timeline). */
+export async function recordUiCheckpoint(
+  sessionId: string,
+  kind: "ui_polling_complete",
+  durationMs: number,
+  status?: string,
+) {
+  return invoke<void>("record_ui_checkpoint", {
+    request: { sessionId, kind, durationMs, status },
+  });
+}
+
 export async function deleteNote(noteId: string) {
   return invoke<void>("delete_note", { request: { noteId } });
 }

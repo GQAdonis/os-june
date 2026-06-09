@@ -111,6 +111,7 @@ pub fn run() {
             commands::finish_recording,
             commands::retry_processing,
             commands::recover_recording,
+            commands::record_ui_checkpoint,
             dictation::dictation_settings,
             dictation::list_dictation_history,
             dictation::delete_dictation_history_item,

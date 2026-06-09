@@ -1633,6 +1633,46 @@ impl Repositories {
             .collect())
     }
 
+    /// Deletes a session's turn-transcript rows whose (source, turn_index)
+    /// is not in `keep`. Used after final turn detection to drop provisional
+    /// rows persisted during live transcription that matched no final turn.
+    pub async fn prune_source_turn_transcripts(
+        &self,
+        session_id: &str,
+        keep: &[(String, i64)],
+    ) -> Result<u64, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, source, turn_index FROM transcripts
+             WHERE recording_session_id = ? AND turn_index IS NOT NULL",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let keep: std::collections::HashSet<(&str, i64)> = keep
+            .iter()
+            .map(|(source, turn_index)| (source.as_str(), *turn_index))
+            .collect();
+        let mut pruned = 0_u64;
+        for row in rows {
+            let source: Option<String> = row.get("source");
+            let turn_index: Option<i64> = row.get("turn_index");
+            let kept = match (source.as_deref(), turn_index) {
+                (Some(source), Some(turn_index)) => keep.contains(&(source, turn_index)),
+                _ => true,
+            };
+            if kept {
+                continue;
+            }
+            let id: String = row.get("id");
+            sqlx::query("DELETE FROM transcripts WHERE id = ?")
+                .bind(&id)
+                .execute(&self.pool)
+                .await?;
+            pruned += 1;
+        }
+        Ok(pruned)
+    }
+
     pub async fn successful_source_turn_transcripts_for_session(
         &self,
         session_id: &str,

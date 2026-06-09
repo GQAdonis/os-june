@@ -66,15 +66,101 @@ fn source_transcript_input_from_row(row: &TranscriptDto) -> SourceTranscriptInpu
     }
 }
 
-fn turn_cache_key(source: &str, turn_index: i64) -> String {
-    format!("{source}:{turn_index}")
+/// Tolerances for reusing a transcript persisted during the live recording
+/// (or a previous retry) for a final-detection turn. Live boundaries can
+/// drift slightly from final ones because the dynamic noise floor is computed
+/// over a shorter prefix of the audio.
+const REUSE_START_TOLERANCE_MS: i64 = 1_200;
+const REUSE_END_TOLERANCE_MS: i64 = 1_500;
+/// Persisted rows must cover at least this share of the final turn's range;
+/// anything less means part of the turn was never transcribed, so it is
+/// transcribed fresh from the saved audio.
+const REUSE_MIN_COVERAGE: f64 = 0.8;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ReusedTranscript {
+    pub(crate) text: String,
+    pub(crate) language: Option<String>,
 }
 
-fn elapsed_ms(started: Instant) -> i64 {
+/// Matches already-persisted successful turn transcripts to a final turn by
+/// time range: rows of the same source contained within the turn (with small
+/// boundary tolerances) are joined in chronological order when they cover
+/// enough of the turn. Exact matches (retry of the same audio) are the
+/// trivial single-row case.
+pub(crate) fn reuse_persisted_transcript_text(
+    existing: &[TranscriptDto],
+    source: &str,
+    start_ms: i64,
+    end_ms: i64,
+) -> Option<ReusedTranscript> {
+    let turn_len = end_ms - start_ms;
+    if turn_len <= 0 {
+        // Whole-source fallback turns carry no real range; only a row with
+        // the identical degenerate range can stand in for them.
+        return existing
+            .iter()
+            .find(|row| {
+                row.source.as_deref() == Some(source)
+                    && row.start_ms == Some(start_ms)
+                    && row.end_ms == Some(end_ms)
+            })
+            .map(|row| ReusedTranscript {
+                text: row.text.trim().to_string(),
+                language: row.language.clone(),
+            });
+    }
+    let mut candidates = existing
+        .iter()
+        .filter_map(|row| {
+            if row.source.as_deref() != Some(source) {
+                return None;
+            }
+            let row_start = row.start_ms?;
+            let row_end = row.end_ms?;
+            (row_end > row_start
+                && row_start >= start_ms - REUSE_START_TOLERANCE_MS
+                && row_end <= end_ms + REUSE_END_TOLERANCE_MS)
+                .then_some((row_start, row_end, row))
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|(row_start, row_end, _)| (*row_start, *row_end));
+    let mut covered = 0_i64;
+    let mut cursor = start_ms;
+    for (row_start, row_end, _) in &candidates {
+        let overlap_start = (*row_start).max(cursor);
+        let overlap_end = (*row_end).min(end_ms);
+        if overlap_end > overlap_start {
+            covered += overlap_end - overlap_start;
+            cursor = cursor.max(overlap_end);
+        }
+    }
+    if (covered as f64) < (turn_len as f64) * REUSE_MIN_COVERAGE {
+        return None;
+    }
+    let text = candidates
+        .iter()
+        .map(|(_, _, row)| row.text.trim())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.is_empty() {
+        return None;
+    }
+    Some(ReusedTranscript {
+        text,
+        language: candidates[0].2.language.clone(),
+    })
+}
+
+pub(crate) fn elapsed_ms(started: Instant) -> i64 {
     started.elapsed().as_millis().min(i64::MAX as u128) as i64
 }
 
-fn session_temp_dir(prefix: &str, session_id: &str) -> PathBuf {
+pub(crate) fn session_temp_dir(prefix: &str, session_id: &str) -> PathBuf {
     let safe_session_id = safe_temp_path_segment(session_id);
     std::env::temp_dir().join(format!("{prefix}-{safe_session_id}"))
 }
@@ -438,35 +524,51 @@ pub async fn process_saved_source_audio(
     let existing_transcripts = repos
         .successful_source_turn_transcripts_for_session(session_id)
         .await?;
-    let existing_by_turn = existing_transcripts
-        .into_iter()
-        .filter_map(|transcript| {
-            Some((
-                turn_cache_key(transcript.source.as_deref()?, transcript.turn_index?),
-                transcript,
-            ))
-        })
-        .collect::<HashMap<_, _>>();
+    // Final detection's turn keys; provisional rows persisted during the live
+    // recording that match none of them are pruned after reconciliation.
+    let final_turn_keys = turns
+        .iter()
+        .map(|turn| (turn.source.clone(), turn.turn_index))
+        .collect::<Vec<_>>();
     let mut transcription_jobs = Vec::new();
     let mut cached_candidates = Vec::new();
     for turn in turns {
-        if let Some(existing) = existing_by_turn.get(&turn_cache_key(&turn.source, turn.turn_index))
-        {
+        if let Some(reused) = reuse_persisted_transcript_text(
+            &existing_transcripts,
+            &turn.source,
+            turn.start_ms,
+            turn.end_ms,
+        ) {
+            // Re-persist under the final boundaries and index so live
+            // (provisional) rows and retry caches converge on final
+            // detection for display, assembly, and future reuse.
+            repos
+                .upsert_successful_source_turn_transcript(
+                    note_id,
+                    session_id,
+                    &turn.artifact_id,
+                    source_mode,
+                    &turn.source,
+                    &reused.text,
+                    reused.language.clone(),
+                    &transcription_provider,
+                    turn.start_ms,
+                    turn.end_ms,
+                    turn.turn_index,
+                )
+                .await?;
             cached_candidates.push(TranscriptCandidate {
                 artifact_id: turn.artifact_id,
-                language: existing.language.clone(),
+                language: reused.language,
                 provider: transcription_provider.clone(),
                 input: SourceTranscriptInput {
-                    source: existing
-                        .source
-                        .clone()
-                        .unwrap_or_else(|| turn.source.clone()),
-                    text: existing.text.clone(),
-                    valid: existing.status == "succeeded" && !existing.text.trim().is_empty(),
+                    source: turn.source.clone(),
+                    text: reused.text,
+                    valid: true,
                     warning: None,
-                    start_ms: existing.start_ms.or(Some(turn.start_ms)),
-                    end_ms: existing.end_ms.or(Some(turn.end_ms)),
-                    turn_index: existing.turn_index.or(Some(turn.turn_index)),
+                    start_ms: Some(turn.start_ms),
+                    end_ms: Some(turn.end_ms),
+                    turn_index: Some(turn.turn_index),
                 },
             });
             continue;
@@ -609,6 +711,12 @@ pub async fn process_saved_source_audio(
             )
             .await?;
     }
+
+    // Reconciliation is done: drop provisional live-transcription rows that
+    // matched no final turn so the session's rows mirror final detection.
+    repos
+        .prune_source_turn_transcripts(session_id, &final_turn_keys)
+        .await?;
 
     let persisted_transcripts = repos
         .successful_source_turn_transcripts_for_session(session_id)
@@ -828,31 +936,32 @@ struct TurnTranscriptionJob {
     turn_index: i64,
 }
 
-type TranscriptionFuture =
+pub(crate) type TranscriptionFuture =
     Pin<Box<dyn Future<Output = Result<TranscriptionProviderResult, AppError>> + Send>>;
-type TurnTranscriber = Arc<dyn Fn(TranscriptionRequest) -> TranscriptionFuture + Send + Sync>;
+pub(crate) type TurnTranscriber =
+    Arc<dyn Fn(TranscriptionRequest) -> TranscriptionFuture + Send + Sync>;
 type TurnResultFuture = Pin<Box<dyn Future<Output = Result<(), AppError>> + Send>>;
 type TurnResultSink = Arc<dyn Fn(CompletedTurnTranscription) -> TurnResultFuture + Send + Sync>;
 
-fn default_turn_transcriber() -> TurnTranscriber {
+pub(crate) fn default_turn_transcriber() -> TurnTranscriber {
     Arc::new(|request| Box::pin(transcribe_saved_audio(request)))
 }
 
-struct TranscribePreparedAudioRequest {
-    provider: String,
-    audio_path: PathBuf,
-    temp_dir: PathBuf,
-    chunk_stem: String,
-    title: String,
-    base_context: Option<String>,
-    operation_id: String,
-    source: String,
-    start_ms: Option<i64>,
-    end_ms: Option<i64>,
-    turn_index: Option<i64>,
+pub(crate) struct TranscribePreparedAudioRequest {
+    pub(crate) provider: String,
+    pub(crate) audio_path: PathBuf,
+    pub(crate) temp_dir: PathBuf,
+    pub(crate) chunk_stem: String,
+    pub(crate) title: String,
+    pub(crate) base_context: Option<String>,
+    pub(crate) operation_id: String,
+    pub(crate) source: String,
+    pub(crate) start_ms: Option<i64>,
+    pub(crate) end_ms: Option<i64>,
+    pub(crate) turn_index: Option<i64>,
 }
 
-async fn transcribe_prepared_audio(
+pub(crate) async fn transcribe_prepared_audio(
     transcriber: TurnTranscriber,
     request: TranscribePreparedAudioRequest,
 ) -> Result<TranscriptionProviderResult, AppError> {
@@ -1449,7 +1558,7 @@ fn join_transcript_text(left: &str, right: &str) -> String {
     format!("{left} {right}")
 }
 
-async fn maybe_post_process_note_transcript(
+pub(crate) async fn maybe_post_process_note_transcript(
     provider: &str,
     mut transcript: TranscriptionProviderResult,
     context: Option<&str>,
@@ -1963,6 +2072,89 @@ mod tests {
             covers_full_source: false,
             ..test_job(path, source, turn_index)
         }
+    }
+
+    fn persisted_row(
+        source: &str,
+        start_ms: i64,
+        end_ms: i64,
+        text: &str,
+    ) -> crate::domain::types::TranscriptDto {
+        crate::domain::types::TranscriptDto {
+            id: uuid::Uuid::new_v4().to_string(),
+            text: text.to_string(),
+            source_mode: None,
+            source: Some(source.to_string()),
+            start_ms: Some(start_ms),
+            end_ms: Some(end_ms),
+            turn_index: Some(start_ms),
+            language: Some("en".to_string()),
+            status: "succeeded".to_string(),
+            last_error: None,
+        }
+    }
+
+    #[test]
+    fn reuses_exactly_matching_persisted_transcript() {
+        let existing = vec![persisted_row("microphone", 1_000, 5_000, "hello world")];
+        let reused = reuse_persisted_transcript_text(&existing, "microphone", 1_000, 5_000)
+            .expect("exact match should be reused");
+        assert_eq!(reused.text, "hello world");
+        assert_eq!(reused.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn reuses_persisted_transcript_with_small_boundary_drift() {
+        // Live detection ran on a prefix of the audio, so the noise floor —
+        // and with it the boundaries — drifted slightly from final detection.
+        let existing = vec![persisted_row("microphone", 1_400, 4_800, "drifted")];
+        let reused = reuse_persisted_transcript_text(&existing, "microphone", 1_000, 5_000)
+            .expect("drift within tolerance should be reused");
+        assert_eq!(reused.text, "drifted");
+    }
+
+    #[test]
+    fn joins_live_rows_covered_by_a_coalesced_final_turn() {
+        // Final detection coalesced two live turns (gap below the coherence
+        // threshold) into one; their texts are joined in order.
+        let existing = vec![
+            persisted_row("microphone", 6_000, 8_000, "second part."),
+            persisted_row("microphone", 1_000, 5_800, "First part."),
+        ];
+        let reused = reuse_persisted_transcript_text(&existing, "microphone", 1_000, 8_000)
+            .expect("covering rows should be joined");
+        assert_eq!(reused.text, "First part. second part.");
+    }
+
+    #[test]
+    fn does_not_reuse_rows_that_cover_too_little_of_the_turn() {
+        // The live row only saw the first third of the final turn; reusing it
+        // would silently drop the rest of the speech.
+        let existing = vec![persisted_row("microphone", 0, 3_000, "early fragment")];
+        assert!(reuse_persisted_transcript_text(&existing, "microphone", 0, 12_000).is_none());
+    }
+
+    #[test]
+    fn does_not_reuse_rows_from_another_source() {
+        let existing = vec![persisted_row("system", 1_000, 5_000, "system speech")];
+        assert!(reuse_persisted_transcript_text(&existing, "microphone", 1_000, 5_000).is_none());
+    }
+
+    #[test]
+    fn does_not_reuse_rows_extending_outside_the_turn() {
+        // A row reaching well past the turn end belongs to different
+        // boundaries; mixing it in would duplicate text across turns.
+        let existing = vec![persisted_row("microphone", 1_000, 9_000, "overlapping")];
+        assert!(reuse_persisted_transcript_text(&existing, "microphone", 1_000, 5_000).is_none());
+    }
+
+    #[test]
+    fn degenerate_turns_only_match_identical_rows() {
+        let existing = vec![persisted_row("microphone", 0, 0, "full source")];
+        let reused = reuse_persisted_transcript_text(&existing, "microphone", 0, 0)
+            .expect("identical degenerate row matches");
+        assert_eq!(reused.text, "full source");
+        assert!(reuse_persisted_transcript_text(&existing, "microphone", 0, 1_000).is_none());
     }
 
     #[test]

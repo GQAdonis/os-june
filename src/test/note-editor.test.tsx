@@ -137,6 +137,45 @@ describe("NoteEditor", () => {
     expect(screen.getByText("Microphone response")).toBeInTheDocument();
   });
 
+  it("shows partial turn transcripts while the note is still transcribing", () => {
+    render(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          processingStatus: "transcribing",
+          generatedContent: undefined,
+          sourceTranscripts: [
+            {
+              id: "turn-1",
+              text: "First turn arrived early",
+              source: "microphone",
+              startMs: 0,
+              endMs: 2000,
+              turnIndex: 0,
+              status: "succeeded",
+            },
+            {
+              id: "turn-2",
+              text: "Second turn while later ones still run",
+              source: "system",
+              startMs: 2500,
+              endMs: 5000,
+              turnIndex: 5000,
+              status: "succeeded",
+            },
+          ],
+        })}
+      />,
+    );
+
+    // Partial rows render before processing finishes, in order.
+    expect(screen.getByText("First turn arrived early")).toBeInTheDocument();
+    expect(
+      screen.getByText("Second turn while later ones still run"),
+    ).toBeInTheDocument();
+  });
+
   it("shows friendly source transcript failure reasons", () => {
     render(
       <NoteEditor

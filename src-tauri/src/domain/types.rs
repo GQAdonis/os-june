@@ -242,6 +242,16 @@ pub struct FinishRecordingResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RecordUiCheckpointRequest {
+    pub session_id: String,
+    pub kind: String,
+    pub duration_ms: i64,
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RetryProcessingRequest {
     pub note_id: String,
     pub step: Option<String>,
