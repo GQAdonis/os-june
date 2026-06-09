@@ -2449,11 +2449,36 @@ function AgentChatTurnRow({
     (part): part is Extract<AgentChatPart, { type: "text" }> =>
       part.type === "text",
   );
+  const contextParts = turn.parts.filter(
+    (part): part is Extract<AgentChatPart, { type: "context" }> =>
+      part.type === "context",
+  );
   const nonTextParts = turn.parts.filter((part) => part.type !== "text");
   const mentionedArtifacts = artifactsMentionedInText(
     artifacts ?? [],
-    turn.parts.map((part) => ("text" in part ? part.text : "")).join("\n"),
+    turn.parts
+      .map((part) =>
+        part.type !== "context" && "text" in part ? part.text : "",
+      )
+      .join("\n"),
   );
+
+  if (
+    contextParts.length &&
+    turn.parts.every((part) => part.type === "context")
+  ) {
+    return (
+      <>
+        {contextParts.map((part, index) => (
+          <ContextCompactionPart
+            key={`${turn.id}:context:${index}`}
+            createdAt={turn.createdAt}
+            part={part}
+          />
+        ))}
+      </>
+    );
+  }
 
   if (turn.role === "user") {
     return (
@@ -2486,6 +2511,12 @@ function AgentChatTurnRow({
             </div>
           ) : part.type === "reasoning" ? (
             <ReasoningPart key={`${turn.id}:reasoning:${index}`} part={part} />
+          ) : part.type === "context" ? (
+            <ContextCompactionPart
+              key={`${turn.id}:context:${index}`}
+              createdAt={turn.createdAt}
+              part={part}
+            />
           ) : part.type === "approval" ? (
             <ApprovalPart
               key={`${turn.id}:approval:${part.id}`}
@@ -2513,6 +2544,26 @@ function AgentChatTurnRow({
         ) : null}
       </div>
     </article>
+  );
+}
+
+function ContextCompactionPart({
+  createdAt,
+  part,
+}: {
+  createdAt: string;
+  part: Extract<AgentChatPart, { type: "context" }>;
+}) {
+  return (
+    <details className="agent-context-summary">
+      <summary>
+        <BotIcon size={14} />
+        <span>Context compacted</span>
+        <p>{part.preview}</p>
+        <time>{relativeDate(createdAt)}</time>
+      </summary>
+      <MarkdownContent markdown={part.text} />
+    </details>
   );
 }
 

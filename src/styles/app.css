@@ -1259,6 +1259,64 @@ input:focus-visible,
   text-decoration: none;
 }
 
+.agent-context-summary {
+  width: min(760px, 100%);
+  padding: 0 var(--sp-2);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-context-summary summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: var(--sp-2);
+  cursor: pointer;
+  list-style: none;
+}
+
+.agent-context-summary summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-context-summary svg {
+  align-self: center;
+  color: var(--muted-foreground);
+}
+
+.agent-context-summary span {
+  font-weight: 650;
+}
+
+.agent-context-summary p {
+  overflow: hidden;
+  margin: 0;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-context-summary time {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.agent-context-summary > .agent-markdown {
+  overflow: auto;
+  max-height: 320px;
+  margin: var(--sp-2) 0 0 calc(var(--control-sm) + var(--sp-2));
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-context-summary:not([open]) > .agent-markdown {
+  display: none;
+}
+
+.agent-context-summary[open] summary p {
+  display: none;
+}
+
 .agent-hermes-note {
   width: min(760px, 100%);
   padding: 0 var(--sp-2);
