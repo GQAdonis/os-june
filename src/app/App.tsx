@@ -410,6 +410,16 @@ export function App() {
     void openPrivacySettings("microphone");
   }
 
+  function handleEnableAccessibility() {
+    void dictationHelperCommand({ type: "request_accessibility_permission" })
+      .catch(() => undefined)
+      .finally(() => {
+        window.setTimeout(() => {
+          void openPrivacySettings("accessibility");
+        }, 200);
+      });
+  }
+
   useEffect(() => {
     if (
       !state.recordingStatus ||
@@ -938,9 +948,13 @@ export function App() {
                 sourceMode={sourceMode}
                 sourceReadiness={sourceReadiness}
                 checkingSourceReadiness={checkingSourceReadiness}
+                microphonePermissionStatus={microphoneStatus}
+                accessibilityPermissionStatus={accessibilityStatus}
                 onAccountChanged={handleAccountChanged}
                 onAccountRefresh={refreshAccount}
                 onSourceModeChange={handleSourceModeChange}
+                onEnableMicrophone={handleEnableMicrophone}
+                onEnableAccessibility={handleEnableAccessibility}
                 onEnableSystemAudio={handleEnableSystemAudio}
               />
             ) : activeView === "dictation" ? (

@@ -129,6 +129,7 @@ type SettingsTab =
   | "account"
   | "dictation"
   | "audio"
+  | "permissions"
   | "models"
   | "agent"
   | "about";
@@ -137,6 +138,7 @@ const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "account", label: "Account" },
   { id: "dictation", label: "Dictation" },
   { id: "audio", label: "Audio" },
+  { id: "permissions", label: "Permissions" },
   { id: "models", label: "Models" },
   { id: "agent", label: "Agent" },
   { id: "about", label: "About" },
@@ -148,9 +150,13 @@ type AppSettingsProps = {
   sourceMode: RecordingSourceMode;
   sourceReadiness?: RecordingSourceReadinessDto;
   checkingSourceReadiness: boolean;
+  microphonePermissionStatus?: string;
+  accessibilityPermissionStatus?: string;
   onAccountChanged: (next: AccountStatus) => void;
   onAccountRefresh: () => Promise<AccountStatus | undefined>;
   onSourceModeChange: (mode: RecordingSourceMode) => void;
+  onEnableMicrophone?: () => void;
+  onEnableAccessibility?: () => void;
   onEnableSystemAudio: () => void;
 };
 
@@ -160,9 +166,13 @@ export function AppSettings({
   sourceMode,
   sourceReadiness,
   checkingSourceReadiness,
+  microphonePermissionStatus,
+  accessibilityPermissionStatus,
   onAccountChanged,
   onAccountRefresh,
   onSourceModeChange,
+  onEnableMicrophone,
+  onEnableAccessibility,
   onEnableSystemAudio,
 }: AppSettingsProps) {
   const [settings, setSettings] =
@@ -192,6 +202,9 @@ export function AppSettings({
   const systemOn = sourceMode === "microphonePlusSystem";
   const systemReadiness = sourceReadiness?.sources.find(
     (source) => source.source === "system",
+  );
+  const microphoneReadiness = sourceReadiness?.sources.find(
+    (source) => source.source === "microphone",
   );
   const systemState = systemReadiness?.permissionState;
   const systemDenied = systemState === "denied" || systemState === "restricted";
@@ -681,6 +694,48 @@ export function AppSettings({
           </section>
         ) : null}
 
+        {activeTab === "permissions" ? (
+          <section
+            className="settings-group"
+            aria-labelledby="permissions-heading"
+          >
+            <h2 id="permissions-heading" className="settings-group-heading">
+              System permissions
+            </h2>
+            <p className="settings-group-description">
+              macOS access used for recording audio, pasting dictation, and
+              capturing system sound.
+            </p>
+            <div className="settings-card">
+              <div className="settings-rows">
+                <PermissionRow
+                  title="Microphone"
+                  description="Record dictation and note audio."
+                  status={permissionStatus(
+                    microphonePermissionStatus ??
+                      microphoneReadiness?.permissionState,
+                  )}
+                  onManage={onEnableMicrophone}
+                />
+
+                <PermissionRow
+                  title="Accessibility"
+                  description="Paste dictated text into the active app."
+                  status={permissionStatus(accessibilityPermissionStatus)}
+                  onManage={onEnableAccessibility}
+                />
+
+                <PermissionRow
+                  title="System audio"
+                  description="Record audio from other apps when system audio is enabled."
+                  status={sourcePermissionStatus(systemReadiness)}
+                  onManage={onEnableSystemAudio}
+                />
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         {activeTab === "models" ? (
           <>
             <ModelPickerDialog
@@ -766,6 +821,83 @@ export function AppSettings({
       </div>
     </div>
   );
+}
+
+type PermissionStatusTone =
+  | "allowed"
+  | "attention"
+  | "blocked"
+  | "unsupported"
+  | "unknown";
+
+type PermissionStatusView = {
+  label: string;
+  tone: PermissionStatusTone;
+};
+
+function PermissionRow({
+  title,
+  description,
+  status,
+  onManage,
+}: {
+  title: string;
+  description: string;
+  status: PermissionStatusView;
+  onManage?: () => void;
+}) {
+  const actionDisabled = status.tone === "unsupported" || !onManage;
+  return (
+    <div className="settings-row">
+      <div className="settings-row-info">
+        <h3 className="settings-row-title">{title}</h3>
+        <p className="settings-row-description">{description}</p>
+      </div>
+      <div className="settings-row-control settings-permission-control">
+        <span className="settings-permission-status" data-status={status.tone}>
+          {status.label}
+        </span>
+        <button
+          type="button"
+          className="btn btn-secondary"
+          disabled={actionDisabled}
+          aria-label={`Manage ${title} permission`}
+          onClick={onManage}
+        >
+          Manage
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function permissionStatus(state?: string): PermissionStatusView {
+  switch (state) {
+    case "granted":
+      return { label: "Allowed", tone: "allowed" };
+    case "denied":
+      return { label: "Blocked", tone: "blocked" };
+    case "restricted":
+      return { label: "Restricted", tone: "blocked" };
+    case "missing":
+      return { label: "Needs access", tone: "attention" };
+    case "not_determined":
+      return { label: "Not requested", tone: "attention" };
+    case "unsupported":
+      return { label: "Unsupported", tone: "unsupported" };
+    case "unknown":
+      return { label: "Unknown", tone: "unknown" };
+    default:
+      return { label: "Checking", tone: "unknown" };
+  }
+}
+
+function sourcePermissionStatus(
+  source?: RecordingSourceReadinessDto["sources"][number],
+): PermissionStatusView {
+  if (!source) return { label: "Checking", tone: "unknown" };
+  if (source.ready) return { label: "Allowed", tone: "allowed" };
+  return permissionStatus(source.permissionState);
 }
 
 function ModelRow({

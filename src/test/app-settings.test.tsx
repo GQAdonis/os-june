@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AppSettings } from "../components/settings/AppSettings";
@@ -319,6 +319,99 @@ describe("AppSettings", () => {
       screen.getByRole("switch", { name: "Capture system audio for notes" }),
     );
     expect(onSourceModeChange).toHaveBeenCalledWith("microphonePlusSystem");
+  });
+
+  it("lists system permissions with status and manage actions", async () => {
+    const user = userEvent.setup();
+    const onEnableMicrophone = vi.fn();
+    const onEnableAccessibility = vi.fn();
+    const onEnableSystemAudio = vi.fn();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        sourceReadiness={{
+          sourceMode: "microphonePlusSystem",
+          ready: false,
+          checkedAt: "2026-06-08T12:00:00Z",
+          sources: [
+            {
+              source: "microphone",
+              required: true,
+              ready: false,
+              permissionState: "denied",
+              deviceAvailable: false,
+              captureAvailable: false,
+              recoveryAction: "openMicrophoneSettings",
+            },
+            {
+              source: "system",
+              required: true,
+              ready: false,
+              permissionState: "denied",
+              deviceAvailable: true,
+              captureAvailable: false,
+              recoveryAction: "openSystemAudioSettings",
+            },
+          ],
+        }}
+        checkingSourceReadiness={false}
+        microphonePermissionStatus="denied"
+        accessibilityPermissionStatus="missing"
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableMicrophone={onEnableMicrophone}
+        onEnableAccessibility={onEnableAccessibility}
+        onEnableSystemAudio={onEnableSystemAudio}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Permissions" }));
+
+    const microphoneRow = screen
+      .getByText("Microphone")
+      .closest(".settings-row");
+    const accessibilityRow = screen
+      .getByText("Accessibility")
+      .closest(".settings-row");
+    const systemAudioRow = screen
+      .getByText("System audio")
+      .closest(".settings-row");
+
+    expect(microphoneRow).not.toBeNull();
+    expect(accessibilityRow).not.toBeNull();
+    expect(systemAudioRow).not.toBeNull();
+    expect(
+      within(microphoneRow as HTMLElement).getByText("Blocked"),
+    ).toBeInTheDocument();
+    expect(
+      within(accessibilityRow as HTMLElement).getByText("Needs access"),
+    ).toBeInTheDocument();
+    expect(
+      within(systemAudioRow as HTMLElement).getByText("Blocked"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(microphoneRow as HTMLElement).getByRole("button", {
+        name: "Manage Microphone permission",
+      }),
+    );
+    await user.click(
+      within(accessibilityRow as HTMLElement).getByRole("button", {
+        name: "Manage Accessibility permission",
+      }),
+    );
+    await user.click(
+      within(systemAudioRow as HTMLElement).getByRole("button", {
+        name: "Manage System audio permission",
+      }),
+    );
+
+    expect(onEnableMicrophone).toHaveBeenCalledTimes(1);
+    expect(onEnableAccessibility).toHaveBeenCalledTimes(1);
+    expect(onEnableSystemAudio).toHaveBeenCalledTimes(1);
   });
 
   it("records push-to-talk and toggle dictation shortcuts in settings", async () => {

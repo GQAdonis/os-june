@@ -4349,6 +4349,54 @@ input:focus-visible,
   justify-content: flex-end;
 }
 
+.settings-permission-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.settings-permission-status[data-status="allowed"] {
+  border-color: color-mix(in oklch, var(--success) 24%, var(--border-subtle));
+  background: color-mix(in oklch, var(--success) 10%, var(--surface-subtle));
+  color: color-mix(in oklch, var(--success) 76%, var(--foreground));
+}
+
+.settings-permission-status[data-status="attention"] {
+  border-color: color-mix(
+    in oklch,
+    var(--warm-strong) 28%,
+    var(--border-subtle)
+  );
+  background: color-mix(
+    in oklch,
+    var(--warm-strong) 12%,
+    var(--surface-subtle)
+  );
+  color: color-mix(in oklch, var(--warm-strong) 76%, var(--foreground));
+}
+
+.settings-permission-status[data-status="blocked"] {
+  border-color: color-mix(
+    in oklch,
+    var(--destructive) 26%,
+    var(--border-subtle)
+  );
+  background: color-mix(
+    in oklch,
+    var(--destructive) 10%,
+    var(--surface-subtle)
+  );
+  color: color-mix(in oklch, var(--destructive) 76%, var(--foreground));
+}
+
 .settings-model-control {
   width: min(420px, 44vw);
   justify-content: flex-end;
