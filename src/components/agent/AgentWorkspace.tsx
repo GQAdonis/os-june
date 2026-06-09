@@ -159,6 +159,11 @@ type AgentWorkspaceProps = {
   pendingReply?: AgentReplyDetail;
 };
 
+// Module-scoped so a remount of AgentWorkspace (e.g. navigating away from the
+// agent view and back) does not re-submit a mascot reply that App still holds
+// in its pendingReply state.
+const handledMascotReplyIds = new Set<string>();
+
 export function AgentWorkspace({
   initialSession,
   pendingReply,
@@ -247,7 +252,6 @@ export function AgentWorkspace({
   const sessionGatewayUnlistenRef = useRef<Map<string, () => void>>(new Map());
   const liveEventsRef = useRef<Record<string, LiveHermesEvent[]>>({});
   const hydratedTaskIdsRef = useRef<Set<string>>(new Set());
-  const handledMascotReplyIdsRef = useRef<Set<string>>(new Set());
   const newSessionModeRef = useRef(false);
   const sessionTitleOverridesRef = useRef<Record<string, string>>({});
   const titleSuggestionSessionIdsRef = useRef<Set<string>>(new Set());
@@ -461,8 +465,8 @@ export function AgentWorkspace({
 
   useEffect(() => {
     if (!pendingReply?.text.trim()) return;
-    if (handledMascotReplyIdsRef.current.has(pendingReply.requestId)) return;
-    handledMascotReplyIdsRef.current.add(pendingReply.requestId);
+    if (handledMascotReplyIds.has(pendingReply.requestId)) return;
+    handledMascotReplyIds.add(pendingReply.requestId);
     void submitMascotReply(pendingReply);
   }, [pendingReply]);
 
@@ -766,7 +770,13 @@ export function AgentWorkspace({
 
   async function submitMascotReply(reply: AgentReplyDetail) {
     const message = reply.text.trim();
-    if (!message || submitting || importingFiles) return;
+    if (!message) return;
+    if (submitting || importingFiles) {
+      // Another submission is in flight; keep the reply in the composer
+      // instead of dropping it silently.
+      setDraft(message);
+      return;
+    }
     const targetSession = reply.session;
     setActivePanel("chat");
     setSelectedTaskId(undefined);

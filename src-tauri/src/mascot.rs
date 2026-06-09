@@ -1,6 +1,8 @@
 use serde::Deserialize;
 use serde_json::json;
-use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Size, WebviewWindow};
+use tauri::{
+    AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, PhysicalSize, Size, WebviewWindow,
+};
 
 const MASCOT_WINDOW_LABEL: &str = "mascot";
 const MAIN_WINDOW_LABEL: &str = "main";
@@ -50,7 +52,12 @@ pub fn mascot_set_layout(app: AppHandle, request: MascotLayoutRequest) -> Result
     window
         .set_size(Size::Logical(LogicalSize::new(width, height)))
         .map_err(|error| error.to_string())?;
-    position_mascot_window(&window)
+    // Position with the size we just requested: set_size applies
+    // asynchronously on macOS, so outer_size() may still report the
+    // previous frame here.
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let size = LogicalSize::new(width, height).to_physical::<u32>(scale);
+    position_mascot_window_with_size(&window, size)
 }
 
 #[tauri::command]
@@ -105,11 +112,18 @@ fn configure_mascot_window(app: &AppHandle) -> Result<(), String> {
 }
 
 fn position_mascot_window(window: &WebviewWindow) -> Result<(), String> {
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    position_mascot_window_with_size(window, size)
+}
+
+fn position_mascot_window_with_size(
+    window: &WebviewWindow,
+    size: PhysicalSize<u32>,
+) -> Result<(), String> {
     const MARGIN_X: f64 = 18.0;
     const MARGIN_Y: f64 = 14.0;
 
     let scale = window.scale_factor().map_err(|error| error.to_string())?;
-    let size = window.outer_size().map_err(|error| error.to_string())?;
     let monitor = window
         .cursor_position()
         .ok()
