@@ -330,6 +330,12 @@ impl VeniceChat {
             let stream_options = object
                 .entry("stream_options")
                 .or_insert_with(|| serde_json::json!({}));
+            // Replace a non-object `stream_options` instead of leaving it:
+            // without `include_usage` the stream carries no usage frame, so
+            // metering fails after the upstream call has already been made.
+            if !stream_options.is_object() {
+                *stream_options = serde_json::json!({});
+            }
             if let Some(options) = stream_options.as_object_mut() {
                 options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
             }
@@ -740,18 +746,20 @@ fn strip_scaffolding_tags(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        VeniceGenerator, VeniceModelsApiResponse, cleanup_source_text, strip_scaffolding_tags,
-        venice_priced_model_items,
+        VeniceAgentChat, VeniceGenerator, VeniceModelsApiResponse, cleanup_source_text,
+        strip_scaffolding_tags, venice_priced_model_items,
     };
     use crate::http;
     use pretty_assertions::assert_eq;
     use scribe_config::ModelType;
     use scribe_config::UpstreamConfig;
-    use scribe_domain::{GenerationRequest, Generator, ModelId};
+    use scribe_domain::{
+        AgentChatCompleter, AgentChatRequest, GenerationRequest, Generator, ModelId,
+    };
     use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
+        matchers::{body_string_contains, header, method, path},
     };
 
     #[tokio::test]
@@ -805,6 +813,46 @@ mod tests {
                 5
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn agent_chat_replaces_non_object_stream_options() {
+        // A non-object `stream_options` used to silently skip the
+        // `include_usage` insert, leaving streamed responses without a usage
+        // frame and failing metering after the upstream call.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(body_string_contains(r#""include_usage":true"#))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "choices": [{ "message": { "content": "hi" } }],
+                "usage": { "prompt_tokens": 1, "completion_tokens": 2 }
+            })))
+            .mount(&server)
+            .await;
+        let agent = VeniceAgentChat::from_config(
+            http::default_client(),
+            &UpstreamConfig {
+                api_key: "venice_key".to_string(),
+                base_url: server.uri(),
+            },
+        );
+
+        let completion = agent
+            .complete(AgentChatRequest {
+                body: json!({
+                    "model": "text-model",
+                    "stream": true,
+                    "stream_options": "bogus",
+                    "messages": [{ "role": "user", "content": "hi" }],
+                }),
+                model: ModelId("text-model".to_string()),
+            })
+            .await
+            .expect("completion succeeds");
+
+        assert_eq!(completion.usage.prompt_tokens, 1);
+        assert_eq!(completion.usage.completion_tokens, 2);
     }
 
     #[test]

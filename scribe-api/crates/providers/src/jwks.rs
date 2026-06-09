@@ -75,17 +75,47 @@ impl JwksTokenVerifier {
 
     async fn key_for_kid(&self, kid: &str) -> Result<DecodingKey, AuthError> {
         if let Some(key) = self.cached_key(kid)? {
-            return Ok(key);
+            if self.cache_is_fresh()? {
+                return Ok(key);
+            }
+            return self.refresh_stale_hit(kid, key).await;
         }
         if !self.can_refresh()? {
             return Err(AuthError::InvalidToken);
         }
         let _refresh_guard = self.refresh_lock.lock().await;
-        // Re-check after acquiring the lock: another caller may have refreshed.
+        // Re-check after acquiring the lock: another caller may have refreshed
+        // (and the backoff window may have started) while we were queued.
         if let Some(key) = self.cached_key(kid)? {
             return Ok(key);
         }
+        if !self.can_refresh()? {
+            return Err(AuthError::InvalidToken);
+        }
         self.refresh_jwks().await?;
+        self.cached_key(kid)?.ok_or(AuthError::InvalidToken)
+    }
+
+    /// The kid was found but the cached set is past its refresh interval:
+    /// refetch (rate-limited) so keys rotated out upstream stop verifying,
+    /// falling back to the stale key while the endpoint is unreachable.
+    async fn refresh_stale_hit(
+        &self,
+        kid: &str,
+        stale_key: DecodingKey,
+    ) -> Result<DecodingKey, AuthError> {
+        if !self.can_refresh()? {
+            return Ok(stale_key);
+        }
+        let _refresh_guard = self.refresh_lock.lock().await;
+        if self.cache_is_fresh()? || !self.can_refresh()? {
+            // Another caller refreshed (or attempted and started the backoff
+            // window) while we were queued; trust the current cache state.
+            return self.cached_key(kid)?.ok_or(AuthError::InvalidToken);
+        }
+        if self.refresh_jwks().await.is_err() {
+            return Ok(stale_key);
+        }
         self.cached_key(kid)?.ok_or(AuthError::InvalidToken)
     }
 
@@ -105,18 +135,25 @@ impl JwksTokenVerifier {
             .map_err(|_| AuthError::InvalidToken)
     }
 
+    fn cache_is_fresh(&self) -> Result<bool, AuthError> {
+        let cache = self.cache.lock().map_err(|_| AuthError::InvalidToken)?;
+        Ok(cache
+            .jwks
+            .as_ref()
+            .is_some_and(|cached| cached.fetched_at.elapsed() < self.refresh_interval))
+    }
+
     fn can_refresh(&self) -> Result<bool, AuthError> {
         let cache = self.cache.lock().map_err(|_| AuthError::InvalidToken)?;
-        if let Some(cached) = cache.jwks.as_ref()
-            && cached.fetched_at.elapsed() < self.refresh_interval
-        {
-            // The set was refreshed recently; if the kid wasn't in it we
-            // shouldn't refetch on every random kid an attacker forges.
-            if let Some(last) = cache.last_attempt {
-                return Ok(last.elapsed() >= self.miss_min_backoff);
-            }
+        // Rate-limit fetches by the last attempt regardless of cache state:
+        // we shouldn't refetch on every random kid an attacker forges, and
+        // that holds just as much when the cache is empty or stale (e.g. the
+        // JWKS endpoint is down) — otherwise every unauthenticated request
+        // triggers an outbound fetch.
+        match cache.last_attempt {
+            Some(last) => Ok(last.elapsed() >= self.miss_min_backoff),
+            None => Ok(true),
         }
-        Ok(true)
     }
 
     async fn refresh_jwks(&self) -> Result<(), AuthError> {
@@ -126,6 +163,8 @@ impl JwksTokenVerifier {
             .get(&self.jwks_url)
             .send()
             .await
+            .map_err(|_| AuthError::InvalidToken)?
+            .error_for_status()
             .map_err(|_| AuthError::InvalidToken)?
             .json::<JwkSet>()
             .await
@@ -307,6 +346,101 @@ mod tests {
             request_count <= 1,
             "unexpected refresh count: {request_count}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_cache_misses_do_not_amplify_jwks_refreshes() -> Result<(), Box<dyn Error>> {
+        // Regression: with no cached JWKS (startup, or the endpoint erroring)
+        // every request used to trigger an outbound fetch — an unauthenticated
+        // request-amplification vector. The miss backoff must apply here too.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let verifier = build_verifier(&server.uri(), "issuer", "scribe-api");
+        let token = test_token("ec01", "usr_123", "issuer", "scribe-api")?;
+
+        for _ in 0..5 {
+            let _ = verifier.verify(&token).await;
+        }
+
+        let request_count = server
+            .received_requests()
+            .await
+            .map(|requests| requests.len())
+            .unwrap_or_default();
+        assert!(
+            request_count <= 1,
+            "unexpected refresh count: {request_count}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_cache_refresh_drops_rotated_keys() -> Result<(), Box<dyn Error>> {
+        // A key removed from the upstream JWKS must stop verifying once the
+        // cached set goes stale — refresh is no longer purely miss-driven.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body()))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "keys": [] })))
+            .mount(&server)
+            .await;
+        let verifier = JwksTokenVerifier::new(JwksTokenVerifierParams {
+            http: http::jwks_client(),
+            jwks_url: format!("{}/.well-known/jwks.json", server.uri()),
+            issuer: "issuer".to_string(),
+            audience: "scribe-api".to_string(),
+            refresh_interval: Duration::ZERO,
+            miss_min_backoff: Duration::ZERO,
+        });
+        let token = test_token("ec01", "usr_123", "issuer", "scribe-api")?;
+
+        verifier.verify(&token).await?;
+        let second = verifier.verify(&token).await;
+
+        assert_eq!(second, Err(AuthError::InvalidToken));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_cache_falls_back_to_cached_key_within_backoff() -> Result<(), Box<dyn Error>> {
+        // A stale hit inside the backoff window must keep serving the cached
+        // key (availability during JWKS endpoint outages) without refetching.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/.well-known/jwks.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(jwks_body()))
+            .mount(&server)
+            .await;
+        let verifier = JwksTokenVerifier::new(JwksTokenVerifierParams {
+            http: http::jwks_client(),
+            jwks_url: format!("{}/.well-known/jwks.json", server.uri()),
+            issuer: "issuer".to_string(),
+            audience: "scribe-api".to_string(),
+            refresh_interval: Duration::ZERO,
+            miss_min_backoff: Duration::from_mins(1),
+        });
+        let token = test_token("ec01", "usr_123", "issuer", "scribe-api")?;
+
+        verifier.verify(&token).await?;
+        verifier.verify(&token).await?;
+
+        let request_count = server
+            .received_requests()
+            .await
+            .map(|requests| requests.len())
+            .unwrap_or_default();
+        assert_eq!(request_count, 1);
         Ok(())
     }
 
