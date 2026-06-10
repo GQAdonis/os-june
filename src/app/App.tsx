@@ -254,8 +254,10 @@ export function App() {
   const [onboardingDone, setOnboardingDone] = useState(() =>
     isOnboardingComplete(),
   );
-  const onboardingRequired =
-    !accountLoading && !signInRequired && !onboardingDone;
+  // The wizard handles sign-in and the free trial itself, so it gates on
+  // onboarding state alone; AccountGate/TrialGate remain for users who
+  // finished onboarding and later signed out or lapsed.
+  const onboardingRequired = !accountLoading && !onboardingDone;
   // Onboarding counts as blocked so bootstrap, update checks, and the eager
   // permission probes hold off until the wizard finishes — the wizard owns
   // the permission prompts while it's on screen.
@@ -1466,6 +1468,28 @@ export function App() {
     );
   }
 
+  if (onboardingRequired) {
+    return (
+      <main className="account-gate-shell">
+        <div
+          className="titlebar-drag"
+          aria-hidden
+          data-tauri-drag-region
+          onPointerDown={handleTitlebarPointerDown}
+        />
+        <OnboardingFlow
+          account={account}
+          onAccountChanged={handleAccountChanged}
+          onRefreshAccount={refreshAccount}
+          onComplete={() => {
+            markOnboardingComplete();
+            setOnboardingDone(true);
+          }}
+        />
+      </main>
+    );
+  }
+
   if (signInRequired) {
     return (
       <main className="account-gate-shell">
@@ -1479,26 +1503,6 @@ export function App() {
           account={account}
           loading={accountLoading}
           onAccountChanged={handleAccountChanged}
-        />
-      </main>
-    );
-  }
-
-  if (onboardingRequired) {
-    return (
-      <main className="account-gate-shell">
-        <div
-          className="titlebar-drag"
-          aria-hidden
-          data-tauri-drag-region
-          onPointerDown={handleTitlebarPointerDown}
-        />
-        <OnboardingFlow
-          account={account}
-          onComplete={() => {
-            markOnboardingComplete();
-            setOnboardingDone(true);
-          }}
         />
       </main>
     );

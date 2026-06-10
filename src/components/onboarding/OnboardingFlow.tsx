@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
-import { setAgentRiskAcknowledged } from "../../lib/onboarding";
+import {
+  onboardingResumeStep,
+  setAgentRiskAcknowledged,
+  setOnboardingResumeStep,
+} from "../../lib/onboarding";
 import { dictationSettings } from "../../lib/tauri";
 import type { AccountStatus } from "../../lib/tauri";
+import { isSubscriptionActive } from "../../lib/trial-checkout";
 import { FinishStep } from "./steps/FinishStep";
 import {
   AgentHonestyStep,
@@ -12,15 +17,17 @@ import {
 import { PermissionsStep } from "./steps/PermissionSteps";
 import { DataPracticesStep, PrivacyStep } from "./steps/PrivacySteps";
 import { SetupStep } from "./steps/SetupStep";
-import { WelcomeStep } from "./steps/WelcomeSteps";
+import { SignInStep } from "./steps/SignInStep";
+import { TrialStep } from "./steps/TrialStep";
 import { usePermissionStatuses } from "./use-permission-status";
 
 type StepId =
-  | "welcome"
+  | "sign-in"
   | "privacy"
   | "data-practices"
   | "permissions"
   | "setup"
+  | "trial"
   | "dictation-practice"
   | "meeting-notes"
   | "agent-intro"
@@ -32,16 +39,21 @@ const STAGES = [
   "Privacy",
   "Permissions",
   "Set up",
+  "Free trial",
   "Learn",
   "Finish",
 ] as const;
 
+// The trial sits after permissions/setup (the user has invested) and right
+// before the hands-on practice — which runs the real, metered pipeline and
+// therefore needs the trial's credits. Pay, then immediately feel the payoff.
 const STEPS: { id: StepId; stage: (typeof STAGES)[number] }[] = [
-  { id: "welcome", stage: "Welcome" },
+  { id: "sign-in", stage: "Welcome" },
   { id: "privacy", stage: "Privacy" },
   { id: "data-practices", stage: "Privacy" },
   { id: "permissions", stage: "Permissions" },
   { id: "setup", stage: "Set up" },
+  { id: "trial", stage: "Free trial" },
   { id: "dictation-practice", stage: "Learn" },
   { id: "meeting-notes", stage: "Learn" },
   { id: "agent-intro", stage: "Learn" },
@@ -51,16 +63,43 @@ const STEPS: { id: StepId; stage: (typeof STAGES)[number] }[] = [
 
 type Props = {
   account: AccountStatus;
+  onAccountChanged: (next: AccountStatus) => void;
+  onRefreshAccount: () => Promise<AccountStatus | undefined>;
   onComplete: () => void;
 };
 
-export function OnboardingFlow({ account, onComplete }: Props) {
-  const [stepIndex, setStepIndex] = useState(0);
+function initialStepIndex(): number {
+  const saved = onboardingResumeStep();
+  if (!saved) return 0;
+  const index = STEPS.findIndex((step) => step.id === saved);
+  return index === -1 ? 0 : index;
+}
+
+export function OnboardingFlow({
+  account,
+  onAccountChanged,
+  onRefreshAccount,
+  onComplete,
+}: Props) {
+  const [stepIndex, setStepIndex] = useState(initialStepIndex);
   const [shortcutLabel, setShortcutLabel] = useState("fn");
   const [language, setLanguage] = useState("");
 
   const step = STEPS[stepIndex];
   const stageIndex = STAGES.indexOf(step.stage);
+
+  // Everything past sign-in needs an account; a resume point past it with a
+  // signed-out account (keychain cleared, signed out elsewhere) would strand
+  // the user on steps that can't work.
+  useEffect(() => {
+    if (!account.signedIn && step.id !== "sign-in") {
+      setStepIndex(0);
+    }
+  }, [account.signedIn, step.id]);
+
+  useEffect(() => {
+    setOnboardingResumeStep(step.id);
+  }, [step.id]);
 
   // Only poll the helper while the user is on the permissions screen.
   const permissionStatuses = usePermissionStatuses(step.id === "permissions");
@@ -86,7 +125,15 @@ export function OnboardingFlow({ account, onComplete }: Props) {
   }
 
   function goBack() {
-    setStepIndex((index) => Math.max(index - 1, 0));
+    setStepIndex((index) => {
+      let next = Math.max(index - 1, 0);
+      // The trial step auto-skips forward for subscribed users; stepping
+      // back onto it would just bounce, so hop over it instead.
+      if (STEPS[next].id === "trial" && isSubscriptionActive(account)) {
+        next = Math.max(next - 1, 0);
+      }
+      return next;
+    });
   }
 
   return (
@@ -120,8 +167,13 @@ export function OnboardingFlow({ account, onComplete }: Props) {
             ← Back
           </button>
         ) : null}
-        {step.id === "welcome" ? (
-          <WelcomeStep name={firstName} onContinue={goNext} />
+        {step.id === "sign-in" ? (
+          <SignInStep
+            account={account}
+            name={firstName}
+            onAccountChanged={onAccountChanged}
+            onContinue={goNext}
+          />
         ) : step.id === "privacy" ? (
           <PrivacyStep onContinue={goNext} />
         ) : step.id === "data-practices" ? (
@@ -134,6 +186,12 @@ export function OnboardingFlow({ account, onComplete }: Props) {
             onShortcutLabelChange={setShortcutLabel}
             language={language}
             onLanguageChange={setLanguage}
+            onContinue={goNext}
+          />
+        ) : step.id === "trial" ? (
+          <TrialStep
+            account={account}
+            onRefresh={onRefreshAccount}
             onContinue={goNext}
           />
         ) : step.id === "dictation-practice" ? (

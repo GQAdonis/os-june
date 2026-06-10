@@ -165,3 +165,67 @@ The structural insight this screen encodes: **inference privacy is a property of
 3. **Screen 21 first-agent-task** — in onboarding (recommended, optional) or fully deferred to the post-onboarding modal?
 4. **Time-saved projection numbers** — need real WPM/typing-time model before shipping the reward screen claims.
 5. **Team detection** — does the same-domain lookup conflict with the privacy positioning? (Recommend: only surface counts, never names, until invited.)
+
+---
+
+## 7. Membership funnel integration (2026-06-10)
+
+The original wizard treated sign-up and the free trial as someone else's
+problem — sign-in lived on a separate gate before the wizard, and the trial
+was a second gate that bounced users through the accounts portal:
+
+> open app → sign up in browser → return → **click "Start free trial"** →
+> land on the portal home → **find and click "Start free trial" again** →
+> Stripe Checkout → pay → **manually find your way back to the app**.
+
+Three clicks and a navigation dead-end between a signed-up user and a paying
+one. The redesign folds both into the wizard and removes every step that
+doesn't earn its keep:
+
+### The new funnel
+
+Progress bar: **Welcome → Privacy → Permissions → Set up → Free trial → Learn → Finish**
+
+1. **Welcome doubles as sign-up (step 1).** The old standalone AccountGate
+   became the wizard's first step, so the progress bar frames the very first
+   screen — users see the whole map before committing. The browser handoff
+   returns via the `osscribe://` deep link; the step flips to a
+   "Welcome, {name}!" greeting on its own.
+2. **The trial ask moved to *after* permissions and setup, right before the
+   hands-on practice.** Two reasons:
+   - *Investment*: by the trial screen the user has granted two permissions
+     and configured their hotkey — maximum sunk cost before the card ask.
+   - *Necessity + payoff*: the dictation practice runs the real, metered
+     pipeline, so it needs the trial's credits — and it means the magic
+     moment lands seconds after payment, not before it.
+3. **One click to Stripe, no portal page.** The app mints the subscription
+   Checkout session itself (`POST /billing/subscription` with the user's own
+   token — requires the `billing:write` scope) and opens the Stripe URL
+   directly. The portal's "Start free trial" page is gone from the path. If
+   the direct mint fails (older token without the scope, subscriptions
+   disabled), the app falls back to opening the portal — nobody is stranded.
+4. **The return trip is automatic.** While checkout is open the app polls the
+   subscription status every 2.5s; the instant it flips to `trialing` the app
+   pulls itself back to the foreground (`focus_main_window`) and shows
+   "You're in" — the user never hunts for the window or clicks
+   "check again" (both still exist as quiet escape hatches).
+5. **Resume on relaunch.** The wizard persists the current step
+   (`june.onboarding.resumeStep`), so quitting mid-checkout doesn't replay
+   the whole flow. Steps re-verify their own state: the sign-in step skips
+   itself when signed in, the trial step skips itself when a subscription is
+   already live (which also makes wizard re-runs after a version bump cheap
+   for existing members).
+
+### Post-onboarding gates
+
+AccountGate (signed out) and TrialGate (lapsed/canceled/past-due) remain for
+users who finished onboarding. TrialGate now uses the same one-click
+checkout + auto-detect machinery (`src/lib/trial-checkout.ts`); past-due
+still routes to the portal's billing management.
+
+### Server dependency
+
+The June OAuth client's `allowed_scopes` in the OS Accounts admin console
+must include `billing:write`, or every direct checkout falls back to the
+portal flow. Tokens issued before this change lack the scope until the next
+sign-in; the fallback covers them.

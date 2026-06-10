@@ -6,8 +6,9 @@
  * everyone after a flow redesign.
  */
 
-const ONBOARDING_VERSION = 3;
+const ONBOARDING_VERSION = 4;
 const COMPLETED_KEY = "june.onboarding.completedVersion";
+const RESUME_KEY = "june.onboarding.resumeStep";
 const AGENT_ACK_KEY = "june.agent.riskAcknowledged";
 
 export function isOnboardingComplete(): boolean {
@@ -23,8 +24,31 @@ export function isOnboardingComplete(): boolean {
 export function markOnboardingComplete() {
   try {
     window.localStorage.setItem(COMPLETED_KEY, String(ONBOARDING_VERSION));
+    window.localStorage.removeItem(RESUME_KEY);
   } catch {
     // Ignore; worst case the wizard shows again next launch.
+  }
+}
+
+/**
+ * Resume point for a wizard quit partway through (e.g. mid free-trial
+ * checkout). A relaunch picks up at the saved step instead of replaying the
+ * whole flow — steps re-verify their own state, so resuming "too far" is
+ * harmless. Returns the saved step id, or null for a fresh run.
+ */
+export function onboardingResumeStep(): string | null {
+  try {
+    return window.localStorage.getItem(RESUME_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setOnboardingResumeStep(stepId: string) {
+  try {
+    window.localStorage.setItem(RESUME_KEY, stepId);
+  } catch {
+    // Ignore; worst case the wizard restarts from the top.
   }
 }
 
