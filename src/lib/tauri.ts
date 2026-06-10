@@ -367,6 +367,10 @@ export type HermesBridgeConnection = {
    * on non-macOS, when sandbox-exec is missing, or when disabled via the
    * escape-hatch env var). Mirrors the Rust connection field. */
   sandboxed: boolean;
+  /** True when the user opted this runtime into Full mode (sandbox
+   * deliberately off). Distinct from `sandboxed`, which can also be false for
+   * environmental reasons. Mirrors the Rust connection field. */
+  fullMode: boolean;
 };
 
 export type HermesBridgeStatus = {
@@ -896,9 +900,12 @@ export async function updateHermesBridgeMessagingPlatform(input: {
   );
 }
 
-export async function startHermesBridge(cwd?: string) {
+/** `fullMode` is an explicit mode choice: passing it restarts a running
+ * runtime whose mode differs (the sandbox is applied at spawn). Omit it to
+ * reuse whatever is running — fresh starts are always sandboxed. */
+export async function startHermesBridge(cwd?: string, fullMode?: boolean) {
   return invoke<HermesBridgeStatus>("start_hermes_bridge", {
-    request: { cwd },
+    request: { cwd, fullMode },
   });
 }
 
