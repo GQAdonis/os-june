@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { listen } from "@tauri-apps/api/event";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { IconAnonymous } from "central-icons/IconAnonymous";
 import { IconArrowUp } from "central-icons/IconArrowUp";
 import { IconCameraSparkle } from "central-icons/IconCameraSparkle";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
@@ -69,8 +70,10 @@ import {
   hermesBridgeToolsets,
   importHermesBridgeFile,
   importHermesBridgeFileBytes,
+  listVeniceModels,
   listAgentTasks,
   downloadHermesBridgeFile,
+  providerModelSettings,
   retryAgentTask,
   sendAgentMessage,
   startHermesBridge,
@@ -117,6 +120,12 @@ import {
   HermesGatewayClient,
   type HermesGatewayEvent,
 } from "../../lib/hermes-gateway";
+import {
+  PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+  modelPrivacyBadge,
+  type ModelPrivacyBadge,
+  type ProviderModelSettingsChangedDetail,
+} from "../../lib/model-privacy";
 import { messageFromError } from "../../lib/errors";
 import {
   buildAgentChatTurns,
@@ -442,6 +451,8 @@ export function AgentWorkspace({
   const [messagingPlatforms, setMessagingPlatforms] = useState<
     HermesMessagingPlatformInfo[] | null
   >(null);
+  const [generationPrivacyBadge, setGenerationPrivacyBadge] =
+    useState<ModelPrivacyBadge>();
   const [capabilityQuery, setCapabilityQuery] = useState("");
   const [capabilityLoading, setCapabilityLoading] = useState(false);
   const [capabilitySaving, setCapabilitySaving] = useState<string | null>(null);
@@ -701,6 +712,56 @@ export function AgentWorkspace({
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let requestSequence = 0;
+    async function loadGenerationPrivacyBadge() {
+      const requestId = ++requestSequence;
+      try {
+        const [settingsResponse, modelsResponse] = await Promise.all([
+          providerModelSettings(),
+          listVeniceModels("generation"),
+        ]);
+        const selectedModelId =
+          settingsResponse.settings.generationModel ||
+          modelsResponse.selectedModel;
+        const selectedModel = modelsResponse.models.find(
+          (model) => model.id === selectedModelId,
+        );
+        if (!cancelled && requestId === requestSequence) {
+          setGenerationPrivacyBadge(
+            selectedModel ? modelPrivacyBadge(selectedModel) : undefined,
+          );
+        }
+      } catch {
+        if (!cancelled && requestId === requestSequence) {
+          setGenerationPrivacyBadge(undefined);
+        }
+      }
+    }
+    function handleProviderModelSettingsChanged(event: Event) {
+      const { mode } = (
+        event as CustomEvent<ProviderModelSettingsChangedDetail>
+      ).detail;
+      if (mode === "generation") {
+        void loadGenerationPrivacyBadge();
+      }
+    }
+
+    void loadGenerationPrivacyBadge();
+    window.addEventListener(
+      PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+      handleProviderModelSettingsChanged,
+    );
+    return () => {
+      cancelled = true;
+      window.removeEventListener(
+        PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
+        handleProviderModelSettingsChanged,
+      );
+    };
+  }, []);
 
   useEffect(() => {
     if (!bridge.running) return;
@@ -2442,7 +2503,7 @@ export function AgentWorkspace({
           />
           <div className="agent-detail-heading">
             <h2>{selectedTask.title}</h2>
-            <SafetyBadge />
+            <SafetyBadge privacyBadge={generationPrivacyBadge} />
           </div>
         </div>
         <div className="agent-actions">
@@ -2511,6 +2572,7 @@ export function AgentWorkspace({
       {!newSessionMode && !selectedHermesSessionId && selectedTask ? null : (
         <AgentSessionBar
           origin={origin}
+          privacyBadge={generationPrivacyBadge}
           title={
             !newSessionMode && selectedHermesSessionId
               ? (selectedHermesSession?.title ?? "")
@@ -2836,15 +2898,21 @@ function completedHermesMessageText(events: LiveHermesEvent[]) {
   return message.item.text.trim();
 }
 
-function SafetyBadge() {
+function SafetyBadge({ privacyBadge }: { privacyBadge?: ModelPrivacyBadge }) {
+  if (!privacyBadge) return null;
   return (
     <span
       className="agent-safety-badge"
-      title="Sensitive desktop, credential, payment, and destructive actions are blocked or escalated."
-      aria-label="Private mode — sensitive desktop, credential, payment, and destructive actions are blocked or escalated."
+      data-mode={privacyBadge.mode}
+      title={privacyBadge.description}
+      aria-label={`${privacyBadge.label} - ${privacyBadge.description}`}
     >
-      <IconShieldAi size={13} aria-hidden />
-      Private mode
+      {privacyBadge.mode === "private" ? (
+        <IconShieldAi size={13} aria-hidden />
+      ) : (
+        <IconAnonymous size={13} aria-hidden />
+      )}
+      {privacyBadge.label}
     </span>
   );
 }
@@ -2856,11 +2924,13 @@ function SafetyBadge() {
 // conversation keeps the focus (no separate title heading).
 function AgentSessionBar({
   origin,
+  privacyBadge,
   title,
   onRename,
   onDelete,
 }: {
   origin?: AgentWorkspaceOrigin;
+  privacyBadge?: ModelPrivacyBadge;
   title?: string;
   onRename?: (title: string) => void;
   onDelete?: () => void;
@@ -2966,7 +3036,7 @@ function AgentSessionBar({
         </ol>
       </nav>
       <div className="detail-bar-actions">
-        <SafetyBadge />
+        <SafetyBadge privacyBadge={privacyBadge} />
         {hasMenu ? (
           <div className="agent-session-menu-wrap" ref={menuWrapRef}>
             <button
