@@ -563,8 +563,8 @@ fn clean_agent_session_title(value: &str) -> Option<String> {
         "Can you ",
         "Could you ",
         "Would you ",
-        "Help me ",
         "Help me to ",
+        "Help me ",
         "I want you to ",
         "I want to ",
         "I need you to ",
@@ -758,6 +758,10 @@ mod tests {
         assert_eq!(
             clean_agent_session_title("I want you to Keep this CLI run organized.").as_deref(),
             Some("Keep this CLI run organized")
+        );
+        assert_eq!(
+            clean_agent_session_title("Help me to organize files").as_deref(),
+            Some("organize files")
         );
         assert_eq!(
             clean_agent_session_title(

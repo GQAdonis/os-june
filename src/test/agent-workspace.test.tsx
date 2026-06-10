@@ -321,6 +321,36 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText("CLI Run Tracking")).toBeInTheDocument();
   });
 
+  it("keeps generated titles that begin with past-tense request words", async () => {
+    const generatedTitle = "I Wanted Outcomes";
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-generated",
+        title: generatedTitle,
+        preview: "Finished planning outcomes",
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-1",
+        role: "user",
+        content: "plan outcomes",
+        timestamp: "2026-06-04T12:00:00Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText(generatedTitle)).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith(
+        "session-generated",
+      ),
+    );
+    expect(mocks.suggestAgentSessionTitle).not.toHaveBeenCalled();
+  });
+
   it("forgets the persisted session when it is deleted", async () => {
     render(<AgentWorkspace />);
 

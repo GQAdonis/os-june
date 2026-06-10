@@ -93,6 +93,7 @@ describe("Hermes adapter", () => {
     expect(titleFromPrompt("I want you to keep this running in my CLI")).toBe(
       "Keep This Running in My CLI",
     );
+    expect(titleFromPrompt("Help me to organize files")).toBe("Organize Files");
     expect(
       titleFromPrompt(
         "please summarize the key points from today's standup\n\n--- Attached Context ---\n{}",

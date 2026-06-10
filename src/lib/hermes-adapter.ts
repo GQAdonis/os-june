@@ -86,7 +86,6 @@ function promptTitleSource(prompt: string) {
     .replace(/\n+Attached files copied into[\s\S]*$/i, "")
     .replace(/\s+/g, " ")
     .trim()
-    .trim()
     .replace(/^["'`]+|["'`]+$/g, "");
 }
 
@@ -95,7 +94,7 @@ function stripRequestPrefix(value: string) {
   const prefixes = [
     /^(?:hey\s+)?june,?\s+/i,
     /^(?:please\s+)?(?:can|could|would)\s+you\s+/i,
-    /^(?:please\s+)?(?:help\s+me(?:\s+to)?|help\s+me)\s+/i,
+    /^(?:please\s+)?help\s+me(?:\s+to)?\s+/i,
     /^(?:i\s+want\s+you\s+to|i\s+want\s+to|i\s+need\s+you\s+to|i\s+need\s+to|i'd\s+like\s+you\s+to|i'd\s+like\s+to)\s+/i,
     /^(?:have|ask)\s+june\s+to\s+/i,
     /^please\s+/i,
