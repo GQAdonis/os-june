@@ -75,6 +75,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 const baseSettings: DictationSettingsDto = {
   pushToTalkShortcut: {
+    keyCode: 0x02,
     code: "KeyD",
     label: "Ctrl+Opt+D",
     pressCount: 1,
@@ -87,6 +88,7 @@ const baseSettings: DictationSettingsDto = {
     },
   },
   toggleShortcut: {
+    keyCode: 0x11,
     code: "KeyT",
     label: "Ctrl+Opt+T",
     pressCount: 1,
@@ -853,6 +855,86 @@ describe("AppSettings", () => {
         },
         pressCount: 1,
       }),
+    );
+  });
+
+  it("resets customized dictation shortcuts and hides reset for defaults", async () => {
+    const user = userEvent.setup();
+    mocks.dictationSettings.mockResolvedValue({
+      settings: {
+        ...baseSettings,
+        pushToTalkShortcut: {
+          code: "KeyP",
+          label: "Ctrl+P",
+          pressCount: 1,
+          modifiers: {
+            command: false,
+            control: true,
+            option: false,
+            shift: false,
+            function: false,
+          },
+        },
+      },
+    });
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
+
+    expect(
+      await screen.findByRole("button", {
+        name: "Reset Push to talk shortcut to default",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: "Reset Toggle dictation shortcut to default",
+      }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Reset Push to talk shortcut to default",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith(
+        "push_to_talk",
+        {
+          keyCode: 0x02,
+          code: "KeyD",
+          label: "Ctrl+Opt+D",
+          pressCount: 1,
+          modifiers: {
+            command: false,
+            control: true,
+            option: true,
+            shift: false,
+            function: false,
+          },
+        },
+      ),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: "Reset Push to talk shortcut to default",
+        }),
+      ).not.toBeInTheDocument(),
     );
   });
 
