@@ -131,6 +131,34 @@ describe("RoutinesView", () => {
     );
   });
 
+  it("surfaces a failed reload after a successful pause", async () => {
+    mocks.listRoutines.mockResolvedValue([job()]);
+    render(<RoutinesView onCreateRoutine={vi.fn()} />);
+    await screen.findByText("Morning summary");
+
+    mocks.listRoutines.mockRejectedValue(new Error("reload failed"));
+    await userEvent.click(screen.getByRole("button", { name: "Pause" }));
+
+    expect(await screen.findByText("reload failed")).toBeInTheDocument();
+  });
+
+  it("surfaces a failed delete in the error banner", async () => {
+    mocks.listRoutines.mockResolvedValue([job()]);
+    mocks.removeRoutine.mockRejectedValue(new Error("remove failed"));
+    render(<RoutinesView onCreateRoutine={vi.fn()} />);
+    await screen.findByText("Morning summary");
+
+    await userEvent.click(screen.getByRole("button", { name: "Delete" }));
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete" }),
+    );
+
+    expect(await screen.findByText("remove failed")).toBeInTheDocument();
+    // The routine stays listed — only a successful delete removes the row.
+    expect(screen.getByText("Morning summary")).toBeInTheDocument();
+  });
+
   it("surfaces a load error", async () => {
     mocks.listRoutines.mockRejectedValue(new Error("gateway down"));
     render(<RoutinesView onCreateRoutine={vi.fn()} />);

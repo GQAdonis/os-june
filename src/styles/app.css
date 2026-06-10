@@ -5924,6 +5924,16 @@ input:focus-visible,
   color: var(--foreground);
 }
 
+.routines-refresh[data-busy] svg {
+  animation: spinner-spin 0.8s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .routines-refresh[data-busy] svg {
+    animation: none;
+  }
+}
+
 .routines-list {
   display: flex;
   flex-direction: column;

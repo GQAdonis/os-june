@@ -1,6 +1,5 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconArrowsRepeat } from "central-icons/IconArrowsRepeat";
-import { IconArrowsRepeat as IconArrowsRepeatFilled } from "central-icons-filled/IconArrowsRepeat";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconPause } from "central-icons/IconPause";
 import { IconPlay } from "central-icons/IconPlay";
@@ -28,6 +27,7 @@ type RoutinesViewProps = {
 export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
   const [routines, setRoutines] = useState<RoutineJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(new Set());
@@ -35,7 +35,11 @@ export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [draft, setDraft] = useState("");
 
+  // `loading` gates the whole list and only covers the first fetch;
+  // `refreshing` covers every fetch so reloads keep the list visible while
+  // still signalling progress on the refresh control.
   const loadRoutines = useCallback(async () => {
+    setRefreshing(true);
     try {
       const jobs = await listRoutines();
       setRoutines(sortRoutines(jobs));
@@ -44,6 +48,7 @@ export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
       setError(messageFromError(err));
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   }, []);
 
@@ -75,8 +80,9 @@ export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
     try {
       if (routine.state === "paused") await resumeRoutine(routine.job_id);
       else await pauseRoutine(routine.job_id);
+      // loadRoutines manages the error banner itself (clears on success,
+      // sets on failure) — clearing here would mask a failed reload.
       await loadRoutines();
-      setError(null);
     } catch (err) {
       setError(messageFromError(err));
     } finally {
@@ -87,11 +93,17 @@ export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
   async function confirmDelete() {
     const routine = pendingDelete;
     if (!routine) return;
-    // Let errors propagate so ConfirmDialog keeps itself open on failure.
-    await removeRoutine(routine.job_id);
-    setRoutines((prev) =>
-      prev.filter((entry) => entry.job_id !== routine.job_id),
-    );
+    // ConfirmDialog swallows a thrown error (it only keeps itself open), so
+    // route failures to the banner like togglePaused does instead.
+    try {
+      await removeRoutine(routine.job_id);
+      setRoutines((prev) =>
+        prev.filter((entry) => entry.job_id !== routine.job_id),
+      );
+      setError(null);
+    } catch (err) {
+      setError(messageFromError(err));
+    }
   }
 
   function openCreate() {
@@ -145,6 +157,9 @@ export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
             type="button"
             className="routines-refresh"
             aria-label="Refresh"
+            aria-busy={refreshing}
+            data-busy={refreshing || undefined}
+            disabled={refreshing}
             onClick={() => void loadRoutines()}
           >
             <IconArrowRotateClockwise size={14} />
@@ -161,7 +176,7 @@ export function RoutinesView({ onCreateRoutine }: RoutinesViewProps) {
       ) : routines.length === 0 ? (
         <EmptyState
           label="Create your first routine"
-          icon={<IconArrowsRepeatFilled size={28} />}
+          icon={<IconArrowsRepeat size={28} />}
           title="Put June on a schedule"
           description="Describe something June should do every morning, every hour, or at a specific time — a routine runs it for you automatically."
           footer={
