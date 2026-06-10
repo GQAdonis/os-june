@@ -2898,7 +2898,8 @@ input:focus-visible,
   transform: translateY(-10px);
 }
 
-.agent-main[data-hero-leaving="true"] .agent-hero-suggestions {
+.agent-main[data-hero-leaving="true"] .agent-hero-suggestions,
+.agent-main[data-hero-leaving="true"] .agent-fullmode-row {
   opacity: 0;
   transform: translateY(10px);
   pointer-events: none;
@@ -3016,6 +3017,65 @@ input:focus-visible,
   margin: 0;
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
+}
+
+/* Full mode opt-in under the hero composer: a quiet switch-styled pill that
+ * turns destructive-tinted once armed, with the consequence spelled out
+ * beside it rather than only in the tooltip. */
+.agent-fullmode-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  transition:
+    opacity 280ms var(--ease-out),
+    transform 280ms var(--ease-out);
+}
+
+.agent-fullmode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: var(--fs-xs);
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.agent-fullmode-toggle:hover {
+  border-color: var(--border);
+  color: var(--foreground);
+}
+
+.agent-fullmode-toggle[aria-checked="true"] {
+  border-color: color-mix(in oklch, var(--destructive) 40%, transparent);
+  background: var(--destructive-soft);
+  color: var(--destructive);
+}
+
+.agent-fullmode-hint {
+  margin: 0;
+  color: var(--destructive);
+  font-size: var(--fs-xs);
+}
+
+/* Session-bar twin of .agent-safety-badge, tinted destructive: the runtime is
+ * live without the write-jail. */
+.agent-fullmode-badge {
+  background: var(--destructive-soft);
+  color: var(--destructive);
+}
+
+.agent-fullmode-badge svg {
+  color: var(--destructive);
 }
 
 /* Hero teardown: while a shortcut/submit is creating the session, the

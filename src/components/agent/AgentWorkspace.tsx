@@ -40,6 +40,7 @@ import { IconPencilLine } from "central-icons/IconPencilLine";
 import { IconPieChart1 } from "central-icons/IconPieChart1";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconShieldAi } from "central-icons/IconShieldAi";
+import { IconShieldCrossed } from "central-icons/IconShieldCrossed";
 import { IconStop } from "central-icons/IconStop";
 import { IconTrashCan } from "central-icons/IconTrashCan";
 import { IconPangolin } from "../icons/IconPangolin";
@@ -563,6 +564,10 @@ export function AgentWorkspace({
     running: false,
   });
   const [bridgeStarting, setBridgeStarting] = useState(false);
+  // Opt-in for the session being composed in the hero: start the runtime
+  // without the OS sandbox. Read through a ref inside the async submit path.
+  const [fullModeDraft, setFullModeDraft] = useState(false);
+  const fullModeDraftRef = useRef(false);
   const [hermesSessionItems, setHermesSessionItems] = useState<
     HermesSessionInfo[]
   >(() => (initialSession ? [initialSession] : []));
@@ -844,6 +849,14 @@ export function AgentWorkspace({
   const heroMode =
     !gallerySections &&
     (newSessionMode || (!selectedHermesSessionId && !selectedTask));
+
+  // Full mode is an opt-in made per new session, so the toggle re-arms to off
+  // every time the hero is entered — it never carries over from the last one.
+  useEffect(() => {
+    if (!heroMode) return;
+    fullModeDraftRef.current = false;
+    setFullModeDraft(false);
+  }, [heroMode]);
 
   // The conversation scroller's thumb fades in with scroll activity and back
   // out when idle (native-overlay feel; see scroll-thumb-fade.ts). The hero
@@ -1577,7 +1590,11 @@ export function AgentWorkspace({
     const titlePromise = targetSessionId
       ? undefined
       : agentSessionTitleForPrompt(content);
-    const gateway = await ensureHermesGateway();
+    // Only a session being created applies the Full mode opt-in; follow-ups
+    // on existing sessions never change the runtime's mode under them.
+    const gateway = await ensureHermesGateway(
+      targetSessionId ? undefined : fullModeDraftRef.current,
+    );
     const sessionTitle = titlePromise ? await titlePromise : undefined;
     const created = targetSessionId
       ? undefined
@@ -1762,8 +1779,22 @@ export function AgentWorkspace({
     }
   }
 
-  async function ensureHermesGateway() {
-    const current = bridge.running ? bridge : await startBridge();
+  // `fullMode` is an explicit per-new-session choice: when the running
+  // runtime's mode differs, the backend restarts it (the sandbox is applied at
+  // spawn and can't change on a live process). Callers acting on an existing
+  // session pass undefined and reuse whatever runtime is up.
+  async function ensureHermesGateway(fullMode?: boolean) {
+    let current = bridge.running ? bridge : await startBridge(fullMode);
+    if (
+      fullMode !== undefined &&
+      current.connection &&
+      Boolean(current.connection.fullMode) !== fullMode
+    ) {
+      // Close the gateway socket before the restart kills the old process, so
+      // the drop reads as intentional and doesn't trigger close-recovery.
+      gatewayRef.current?.close();
+      current = await startBridge(fullMode);
+    }
     const wsUrl = current.connection?.wsUrl;
     if (!wsUrl) throw new Error("Hermes bridge did not return a gateway URL.");
     let gateway = gatewayRef.current;
@@ -1835,11 +1866,11 @@ export function AgentWorkspace({
     }
   }
 
-  async function startBridge() {
+  async function startBridge(fullMode?: boolean) {
     setBridgeStarting(true);
     setError(null);
     try {
-      const status = await startHermesBridge();
+      const status = await startHermesBridge(undefined, fullMode);
       setBridge(status);
       return status;
     } catch (err) {
@@ -2923,6 +2954,7 @@ export function AgentWorkspace({
             setArtifactPanel((open) => (open ? null : { view: "list" }))
           }
           privacyBadge={generationPrivacyBadge}
+          fullMode={Boolean(bridge.running && bridge.connection?.fullMode)}
           title={
             !newSessionMode && selectedHermesSessionId
               ? (selectedHermesSession?.title ?? "")
@@ -2962,6 +2994,31 @@ export function AgentWorkspace({
             <h2 className="agent-hero-title">What can June do for you?</h2>
           </div>
           {composer}
+          {activePanel === "chat" ? (
+            <div className="agent-fullmode-row">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={fullModeDraft}
+                className="agent-fullmode-toggle"
+                title="Start this session without the file sandbox. June can then change any file your account can. Switching modes restarts June's runtime and stops sessions that are still working."
+                onClick={() => {
+                  const next = !fullModeDraft;
+                  fullModeDraftRef.current = next;
+                  setFullModeDraft(next);
+                }}
+              >
+                <IconShieldCrossed size={14} aria-hidden />
+                Full mode
+              </button>
+              {fullModeDraft ? (
+                <p className="agent-fullmode-hint" role="alert">
+                  June won't be sandboxed and can change any file your account
+                  can.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {activePanel === "chat" ? (
             <div className="agent-hero-suggestions">
               <div
@@ -3059,6 +3116,24 @@ function SafetyBadge({ privacyBadge }: { privacyBadge?: ModelPrivacyBadge }) {
   );
 }
 
+// Honest indicator of the live runtime, not of any one session: the jail is
+// per-process, so while the user has it in Full mode every session it serves
+// runs unsandboxed.
+function FullModeBadge() {
+  const description =
+    "June is running without the file sandbox and can change any file your account can. Start a session with Full mode off to restore the sandbox.";
+  return (
+    <span
+      className="agent-safety-badge agent-fullmode-badge"
+      title={description}
+      aria-label={`Full mode - ${description}`}
+    >
+      <IconShieldCrossed size={13} aria-hidden />
+      Full mode
+    </span>
+  );
+}
+
 // Persistent, full-width session bar — same chrome as the Notes/Folders
 // breadcrumb. Stays pinned while the conversation scrolls beneath it, carries
 // the back arrow + origin crumbs (Projects / {project} or Agents), the
@@ -3067,6 +3142,7 @@ function SafetyBadge({ privacyBadge }: { privacyBadge?: ModelPrivacyBadge }) {
 function AgentSessionBar({
   origin,
   privacyBadge,
+  fullMode,
   title,
   artifactCount = 0,
   artifactsOpen = false,
@@ -3076,6 +3152,7 @@ function AgentSessionBar({
 }: {
   origin?: AgentWorkspaceOrigin;
   privacyBadge?: ModelPrivacyBadge;
+  fullMode?: boolean;
   title?: string;
   artifactCount?: number;
   artifactsOpen?: boolean;
@@ -3184,6 +3261,7 @@ function AgentSessionBar({
         </ol>
       </nav>
       <div className="detail-bar-actions">
+        {fullMode ? <FullModeBadge /> : null}
         {onToggleArtifacts && artifactCount > 0 ? (
           <button
             type="button"
