@@ -11,6 +11,7 @@ import {
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import { AccountGate } from "../components/account/AccountGate";
+import { TrialGate } from "../components/account/TrialGate";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
@@ -101,7 +102,7 @@ import type {
   RecordingSourceReadinessDto,
 } from "../lib/tauri";
 import { useAccountStatus } from "../lib/account-status";
-import { shouldBlockOnSignIn } from "../lib/account-gate";
+import { shouldBlockOnSignIn, shouldBlockOnTrial } from "../lib/account-gate";
 import {
   checkScribeUpdate,
   relaunchScribe,
@@ -238,7 +239,8 @@ export function App() {
   // Sessions with a finishRecording call in flight; guards stop double-clicks.
   const finishingSessionsRef = useRef<Set<string>>(new Set());
   const signInRequired = shouldBlockOnSignIn(account);
-  const appBlocked = accountLoading || signInRequired;
+  const trialRequired = !signInRequired && shouldBlockOnTrial(account);
+  const appBlocked = accountLoading || signInRequired || trialRequired;
   const publishAgentMenuBarState = useCallback(() => {
     void emitAgentMenuBarState(
       buildAgentMenuBarState({
@@ -1445,6 +1447,24 @@ export function App() {
           account={account}
           loading={accountLoading}
           onAccountChanged={handleAccountChanged}
+        />
+      </main>
+    );
+  }
+
+  if (trialRequired) {
+    return (
+      <main className="account-gate-shell">
+        <div
+          className="titlebar-drag"
+          aria-hidden
+          data-tauri-drag-region
+          onPointerDown={handleTitlebarPointerDown}
+        />
+        <TrialGate
+          account={account}
+          onRefresh={refreshAccount}
+          onSignOut={() => void handleSignOut()}
         />
       </main>
     );

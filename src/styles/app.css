@@ -9171,3 +9171,28 @@ input:focus-visible,
   text-decoration: underline;
   text-underline-offset: 2px;
 }
+
+/* Trial gate — same card chrome as the sign-in gate; the primary action is
+ * an anchor (opens the portal in the browser), so it inherits .primary-action
+ * with the link reset below. */
+.welcome-providers a.primary-action {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.trial-gate-refresh {
+  margin-top: var(--sp-2);
+}
+
+.trial-gate-signout {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--foreground);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
