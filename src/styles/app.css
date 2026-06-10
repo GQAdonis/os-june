@@ -8178,35 +8178,6 @@ input:focus-visible,
   color: var(--foreground);
 }
 
-.onboarding-chip-grid {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: var(--sp-3);
-}
-
-.onboarding-chip {
-  padding: var(--sp-3) var(--sp-5);
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  background: var(--card);
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  transition:
-    border-color var(--t-fast) var(--ease-out),
-    background-color var(--t-fast) var(--ease-out);
-}
-
-.onboarding-chip:hover {
-  border-color: var(--ring);
-}
-
-.onboarding-chip[aria-pressed="true"] {
-  background: var(--primary);
-  border-color: var(--primary);
-  color: var(--primary-foreground);
-}
-
 .onboarding-feature-list {
   margin: 0;
   padding: 0;

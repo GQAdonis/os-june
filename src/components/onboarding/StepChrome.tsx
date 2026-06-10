@@ -52,25 +52,3 @@ export function StepActions({
     </div>
   );
 }
-
-/** Selectable survey chip (single- or multi-select decided by the parent). */
-export function Chip({
-  label,
-  selected,
-  onToggle,
-}: {
-  label: string;
-  selected: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="onboarding-chip"
-      aria-pressed={selected}
-      onClick={onToggle}
-    >
-      {label}
-    </button>
-  );
-}

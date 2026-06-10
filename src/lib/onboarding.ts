@@ -8,13 +8,7 @@
 
 const ONBOARDING_VERSION = 2;
 const COMPLETED_KEY = "june.onboarding.completedVersion";
-const PROFILE_KEY = "june.onboarding.profile";
-const DATA_SHARING_KEY = "june.privacy.shareUsageData";
 const AGENT_ACK_KEY = "june.agent.riskAcknowledged";
-
-export type OnboardingProfile = {
-  focus: string[];
-};
 
 export function isOnboardingComplete(): boolean {
   try {
@@ -31,48 +25,6 @@ export function markOnboardingComplete() {
     window.localStorage.setItem(COMPLETED_KEY, String(ONBOARDING_VERSION));
   } catch {
     // Ignore; worst case the wizard shows again next launch.
-  }
-}
-
-export function loadOnboardingProfile(): OnboardingProfile {
-  try {
-    const raw = window.localStorage.getItem(PROFILE_KEY);
-    if (!raw) return { focus: [] };
-    const parsed = JSON.parse(raw) as Partial<OnboardingProfile>;
-    return {
-      focus: Array.isArray(parsed.focus)
-        ? parsed.focus.filter(
-            (item): item is string => typeof item === "string",
-          )
-        : [],
-    };
-  } catch {
-    return { focus: [] };
-  }
-}
-
-export function saveOnboardingProfile(profile: OnboardingProfile) {
-  try {
-    window.localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
-  } catch {
-    // Ignore; the profile only personalizes copy.
-  }
-}
-
-/** Usage-analytics opt-in. Private by default: absent means false. */
-export function isDataSharingEnabled(): boolean {
-  try {
-    return window.localStorage.getItem(DATA_SHARING_KEY) === "true";
-  } catch {
-    return false;
-  }
-}
-
-export function setDataSharingEnabled(enabled: boolean) {
-  try {
-    window.localStorage.setItem(DATA_SHARING_KEY, String(enabled));
-  } catch {
-    // Ignore.
   }
 }
 

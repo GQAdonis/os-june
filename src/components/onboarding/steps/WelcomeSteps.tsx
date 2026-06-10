@@ -1,13 +1,4 @@
-import type { OnboardingProfile } from "../../../lib/onboarding";
-import { Chip, StepActions, StepHeading } from "../StepChrome";
-
-export const FOCUS_OPTIONS = [
-  "Writing by voice",
-  "Meeting notes",
-  "Research and drafts",
-  "Digging through files",
-  "Recurring busywork",
-];
+import { StepActions, StepHeading } from "../StepChrome";
 
 export function WelcomeStep({
   name,
@@ -39,50 +30,6 @@ export function WelcomeStep({
       <StepActions
         continueLabel="Let's get you set up"
         onContinue={onContinue}
-      />
-    </section>
-  );
-}
-
-export function FocusStep({
-  profile,
-  onProfileChange,
-  onContinue,
-}: {
-  profile: OnboardingProfile;
-  onProfileChange: (next: OnboardingProfile) => void;
-  onContinue: () => void;
-}) {
-  function toggle(option: string) {
-    const focus = profile.focus.includes(option)
-      ? profile.focus.filter((item) => item !== option)
-      : [...profile.focus, option];
-    onProfileChange({ ...profile, focus });
-  }
-  return (
-    <section className="onboarding-step">
-      <StepHeading
-        title="What should June take off your plate?"
-        subtitle="Select all that apply."
-      />
-      <div
-        className="onboarding-chip-grid"
-        role="group"
-        aria-label="What June should help with"
-      >
-        {FOCUS_OPTIONS.map((option) => (
-          <Chip
-            key={option}
-            label={option}
-            selected={profile.focus.includes(option)}
-            onToggle={() => toggle(option)}
-          />
-        ))}
-      </div>
-      <StepActions
-        onContinue={onContinue}
-        continueDisabled={profile.focus.length === 0}
-        onSkip={onContinue}
       />
     </section>
   );

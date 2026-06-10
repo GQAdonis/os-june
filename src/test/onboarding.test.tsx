@@ -4,9 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import {
   isAgentRiskAcknowledged,
-  isDataSharingEnabled,
   isOnboardingComplete,
-  loadOnboardingProfile,
 } from "../lib/onboarding";
 import type { AccountStatus } from "../lib/tauri";
 
@@ -15,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   dictationHelperCommand: vi.fn(),
   openPrivacySettings: vi.fn(),
   setDictationLanguage: vi.fn(),
+  setDictationShortcut: vi.fn(),
   listen: vi.fn(),
 }));
 
@@ -23,6 +22,7 @@ vi.mock("../lib/tauri", () => ({
   dictationHelperCommand: mocks.dictationHelperCommand,
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationLanguage: mocks.setDictationLanguage,
+  setDictationShortcut: mocks.setDictationShortcut,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -68,6 +68,7 @@ describe("OnboardingFlow", () => {
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.openPrivacySettings.mockResolvedValue(undefined);
     mocks.setDictationLanguage.mockResolvedValue(undefined);
+    mocks.setDictationShortcut.mockResolvedValue(undefined);
     mocks.dictationSettings.mockResolvedValue({
       settings: {
         pushToTalkShortcut: shortcut("fn"),
@@ -98,18 +99,18 @@ describe("OnboardingFlow", () => {
     await user.click(
       screen.getByRole("button", { name: "Let's get you set up" }),
     );
-    await user.click(screen.getByRole("button", { name: "Meeting notes" }));
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    // Privacy education + data sharing.
+    // Privacy education + data practices.
     await screen.findByRole("heading", {
       name: "Private by architecture, not by promise",
     });
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "false");
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    // Permissions: continue stays locked until the helper reports granted.
     await screen.findByRole("heading", {
-      name: "Allow June to use your microphone",
+      name: "June doesn't collect your data",
+    });
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    // Permissions: continue stays locked until the helper reports both granted.
+    await screen.findByRole("heading", {
+      name: "Give June permissions on your Mac",
     });
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
     grantPermissions();
@@ -117,15 +118,17 @@ describe("OnboardingFlow", () => {
       expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled(),
     );
     await user.click(screen.getByRole("button", { name: "Continue" }));
-    await user.click(await screen.findByRole("button", { name: "Continue" }));
-    await screen.findByRole("heading", {
-      name: "Thanks for trusting us — here's the full picture",
-    });
-    await user.click(screen.getByRole("button", { name: "Continue" }));
-    // Set up.
+    // Set up: onboarding applies the fn dictation key.
+    await screen.findByRole("heading", { name: "Set up dictation" });
+    await waitFor(() =>
+      expect(mocks.setDictationShortcut).toHaveBeenCalledWith(
+        "push_to_talk",
+        expect.objectContaining({ code: "Fn" }),
+      ),
+    );
     await user.click(screen.getByRole("button", { name: "Continue" }));
     // Dictation practice: typing into the field stands in for dictation.
-    const input = await screen.findByPlaceholderText(/Hold fn/);
+    const input = await screen.findByPlaceholderText(/Hold Fn/i);
     await user.type(input, "hello there");
     await screen.findByText(/Good work!/);
     await user.click(screen.getByRole("button", { name: "Continue" }));
@@ -156,10 +159,6 @@ describe("OnboardingFlow", () => {
 
     expect(onComplete).toHaveBeenCalledOnce();
     expect(isAgentRiskAcknowledged()).toBe(true);
-    expect(isDataSharingEnabled()).toBe(false);
-    expect(loadOnboardingProfile()).toEqual({
-      focus: ["Meeting notes"],
-    });
     // Completion is the caller's job (App marks it), not the flow's.
     expect(isOnboardingComplete()).toBe(false);
   });
@@ -170,11 +169,10 @@ describe("OnboardingFlow", () => {
     await user.click(
       screen.getByRole("button", { name: "Let's get you set up" }),
     );
-    await user.click(screen.getByRole("button", { name: "Skip for now" }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await screen.findByRole("heading", {
-      name: "Allow June to use your microphone",
+      name: "Give June permissions on your Mac",
     });
     await waitFor(() =>
       expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({

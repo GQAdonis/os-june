@@ -49,15 +49,16 @@ function PermissionCard({
   );
 }
 
-export function MicrophoneStep({
+export function PermissionsStep({
   statuses,
   onContinue,
 }: {
   statuses: PermissionStatuses;
   onContinue: () => void;
 }) {
-  const granted = isMicrophoneGranted(statuses);
-  const denied = isMicrophoneDenied(statuses);
+  const micGranted = isMicrophoneGranted(statuses);
+  const micDenied = isMicrophoneDenied(statuses);
+  const accessibilityGranted = isAccessibilityGranted(statuses);
 
   // Fire the native TCC prompt as soon as the screen shows — the user just
   // read why we're asking, so the dialog lands in context. No-op when
@@ -68,55 +69,6 @@ export function MicrophoneStep({
       type: "request_microphone_permission",
     }).catch(() => undefined);
   }, []);
-
-  return (
-    <section className="onboarding-step">
-      <StepHeading
-        title="Allow June to use your microphone"
-        subtitle="June only listens while you hold the dictation key or while a meeting note is recording."
-      />
-      <PermissionCard
-        granted={granted}
-        title={granted ? "June can use your microphone" : "Microphone access"}
-        body={
-          granted
-            ? "You're set — dictation and meeting notes can hear you."
-            : denied
-              ? "Microphone access is turned off for June. Flip the toggle in System Settings, then come back — we'll notice."
-              : "macOS will show a one-time prompt. Choose Allow."
-        }
-        action={
-          denied
-            ? {
-                label: "Open System Settings",
-                onClick: () => void openPrivacySettings("microphone"),
-              }
-            : {
-                label: "Allow microphone",
-                onClick: () =>
-                  void dictationHelperCommand({
-                    type: "request_microphone_permission",
-                  }).catch(() => undefined),
-              }
-        }
-      />
-      <StepActions
-        onContinue={onContinue}
-        continueDisabled={!granted}
-        onSkip={onContinue}
-      />
-    </section>
-  );
-}
-
-export function AccessibilityStep({
-  statuses,
-  onContinue,
-}: {
-  statuses: PermissionStatuses;
-  onContinue: () => void;
-}) {
-  const granted = isAccessibilityGranted(statuses);
 
   function openAccessibilitySettings() {
     // Fire the helper's prompting check first: it registers the dictation
@@ -135,72 +87,60 @@ export function AccessibilityStep({
   return (
     <section className="onboarding-step">
       <StepHeading
-        title="Allow June to type for you"
-        subtitle="This lets June put your spoken words into whatever app you're using — your editor, your email, your terminal."
-      />
-      <PermissionCard
-        granted={granted}
-        title={granted ? "June can type anywhere" : "Accessibility access"}
-        body={
-          granted
-            ? "You're set — dictation will land at your cursor in any app."
-            : "Turn on June in System Settings → Privacy & Security → Accessibility, then come back — we'll notice."
-        }
-        action={{
-          label: "Open System Settings",
-          onClick: openAccessibilitySettings,
-        }}
-      />
-      <StepActions
-        onContinue={onContinue}
-        continueDisabled={!granted}
-        onSkip={onContinue}
-      />
-    </section>
-  );
-}
-
-export function PermissionsRecapStep({
-  statuses,
-  onContinue,
-}: {
-  statuses: PermissionStatuses;
-  onContinue: () => void;
-}) {
-  return (
-    <section className="onboarding-step">
-      <StepHeading
-        title="Thanks for trusting us — here's the full picture"
-        subtitle="What June can do now, and the two asks that come later, when they make sense."
+        title="Give June permissions on your Mac"
+        subtitle="Two permissions power dictation: the microphone to hear you, and accessibility to type your words into whatever app you're using."
       />
       <div className="onboarding-permission-stack">
         <PermissionCard
-          granted={isMicrophoneGranted(statuses)}
-          title="June can use your microphone"
-          body="Only while you hold the dictation key or a meeting note is recording."
+          granted={micGranted}
+          title={
+            micGranted ? "June can use your microphone" : "Microphone access"
+          }
+          body={
+            micGranted
+              ? "Only while you hold the dictation key or a meeting note is recording."
+              : micDenied
+                ? "Microphone access is turned off for June. Flip the toggle in System Settings, then come back — we'll notice."
+                : "June only listens while you hold the dictation key or while a meeting note is recording."
+          }
+          action={
+            micDenied
+              ? {
+                  label: "Open System Settings",
+                  onClick: () => void openPrivacySettings("microphone"),
+                }
+              : {
+                  label: "Allow microphone",
+                  onClick: () =>
+                    void dictationHelperCommand({
+                      type: "request_microphone_permission",
+                    }).catch(() => undefined),
+                }
+          }
         />
         <PermissionCard
-          granted={isAccessibilityGranted(statuses)}
-          title="June can type anywhere"
-          body="Your spoken words land at your cursor, in any app."
+          granted={accessibilityGranted}
+          title={
+            accessibilityGranted
+              ? "June can type anywhere"
+              : "Accessibility access"
+          }
+          body={
+            accessibilityGranted
+              ? "Your spoken words land at your cursor, in any app."
+              : "Turn on June in System Settings → Privacy & Security → Accessibility, then come back — we'll notice."
+          }
+          action={{
+            label: "Open System Settings",
+            onClick: openAccessibilitySettings,
+          }}
         />
-        <div className="onboarding-permission-card" data-deferred="true">
-          <div className="onboarding-permission-copy">
-            <h2>System audio — later</h2>
-            <p>
-              macOS will ask the first time you record a meeting, so the request
-              makes sense when you see it.
-            </p>
-          </div>
-        </div>
-        <div className="onboarding-permission-card" data-deferred="true">
-          <div className="onboarding-permission-copy">
-            <h2>Your files — later</h2>
-            <p>The agent asks before it touches anything. Always.</p>
-          </div>
-        </div>
       </div>
-      <StepActions onContinue={onContinue} />
+      <StepActions
+        onContinue={onContinue}
+        continueDisabled={!micGranted || !accessibilityGranted}
+        onSkip={onContinue}
+      />
     </section>
   );
 }

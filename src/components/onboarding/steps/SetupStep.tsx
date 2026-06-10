@@ -1,18 +1,46 @@
+import { useEffect } from "react";
 import { LANGUAGE_OPTIONS } from "../../../lib/dictation-languages";
-import { setDictationLanguage } from "../../../lib/tauri";
+import { setDictationLanguage, setDictationShortcut } from "../../../lib/tauri";
 import { StepActions, StepHeading } from "../StepChrome";
+
+// The product default: bare fn, mirroring DictationShortcutSetting::bare_fn()
+// on the Rust side.
+const FN_SHORTCUT = {
+  code: "Fn",
+  modifiers: {
+    command: false,
+    control: false,
+    option: false,
+    shift: false,
+    function: true,
+  },
+  label: "Fn",
+  pressCount: 1 as const,
+};
 
 export function SetupStep({
   shortcutLabel,
+  onShortcutLabelChange,
   language,
   onLanguageChange,
   onContinue,
 }: {
   shortcutLabel: string;
+  onShortcutLabelChange: (label: string) => void;
   language: string;
   onLanguageChange: (language: string) => void;
   onContinue: () => void;
 }) {
+  // June's dictation key is fn. Apply it when the screen shows so the rest
+  // of onboarding (and the app) teaches the real binding; idempotent when
+  // fn is already set. Power users can rebind later in Settings.
+  useEffect(() => {
+    setDictationShortcut("push_to_talk", FN_SHORTCUT)
+      .then(() => onShortcutLabelChange(FN_SHORTCUT.label))
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <section className="onboarding-step">
       <StepHeading

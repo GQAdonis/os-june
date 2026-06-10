@@ -1,4 +1,3 @@
-import { Switch } from "../../ui/Switch";
 import { StepActions, StepHeading } from "../StepChrome";
 
 const PRIVACY_CARDS = [
@@ -46,15 +45,7 @@ export function PrivacyStep({ onContinue }: { onContinue: () => void }) {
   );
 }
 
-export function DataSharingStep({
-  enabled,
-  onEnabledChange,
-  onContinue,
-}: {
-  enabled: boolean;
-  onEnabledChange: (enabled: boolean) => void;
-  onContinue: () => void;
-}) {
+export function DataPracticesStep({ onContinue }: { onContinue: () => void }) {
   return (
     <section className="onboarding-step">
       <StepHeading
@@ -69,29 +60,11 @@ export function DataSharingStep({
         <article className="onboarding-info-card">
           <h2>What we never store</h2>
           <p>
-            Your prompts, transcripts, files, and memory. They stay on your
-            Mac, and inference runs through zero-retention models.
+            Your prompts, transcripts, files, and memory. They stay on your Mac,
+            and inference runs through zero-retention models.
           </p>
         </article>
       </div>
-      <div className="onboarding-setting-card">
-        <div className="onboarding-setting-copy">
-          <h2 id="onboarding-data-sharing-label">Usage analytics — optional</h2>
-          <p>
-            The one exception, and it's your call: share anonymized usage data
-            to help improve June. Off by default.
-          </p>
-        </div>
-        <Switch
-          checked={enabled}
-          onCheckedChange={onEnabledChange}
-          aria-labelledby="onboarding-data-sharing-label"
-        />
-      </div>
-      <p className="onboarding-footnote">
-        June works exactly the same either way. Change this anytime in
-        Settings.
-      </p>
       <StepActions onContinue={onContinue} />
     </section>
   );
