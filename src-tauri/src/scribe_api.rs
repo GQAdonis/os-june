@@ -643,7 +643,7 @@ pub async fn explain_agent_approval(
         "messages": [
             {
                 "role": "system",
-                "content": "An AI agent paused mid-task to ask its user for permission. Explain what this specific request would actually do, in plain language the user can act on: name the files, hosts, or data involved, decode any flags or shell syntax, and call out anything risky or hard to undo (deleting or overwriting files, sending data off the machine, spending money). Use 2 to 4 short sentences. Never be generic, never use markdown or headings, and never tell the user which button to press."
+                "content": "An AI agent paused mid-task to ask its user for permission. Explain what this specific request would actually do, in plain language the user can act on: name the files, hosts, or data involved, decode any flags or shell syntax, and call out anything risky or hard to undo (deleting or overwriting files, sending data off the machine, spending money). Keep it as short as the request allows: a few sentences for a simple command, short paragraphs (separated by blank lines) only when the request genuinely needs them. Never be generic, never use markdown or headings, and never tell the user which button to press."
             },
             {
                 "role": "user",
@@ -651,10 +651,12 @@ pub async fn explain_agent_approval(
             }
         ],
         "temperature": 0.2,
-        // Sized for reasoning models: with the previous 220-token cap, the
-        // default model's hidden thinking consumed nearly all of it and the
-        // visible explanation arrived cut off mid-word.
-        "max_tokens": 2000
+        // Generous on purpose: reasoning models spend hidden thinking from
+        // this same budget (a 220-token cap once cut the visible answer off
+        // mid-word), and a complex script can legitimately need several
+        // paragraphs to explain. A one-shot side call is cheap; a truncated
+        // safety explanation is not.
+        "max_tokens": 8000
     }))
     .await?;
     if !(200..300).contains(&response.status) {
