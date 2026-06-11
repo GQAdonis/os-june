@@ -1498,6 +1498,26 @@ button.agent-safety-badge:hover {
   line-height: 1.55;
 }
 
+/* A scheduled routine run opens with the cron prompt; stack a quiet eyebrow
+ * above the right-aligned bubble so it reads as a routine, not a user message. */
+.agent-user-turn[data-scheduled-run="true"] {
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-1);
+}
+
+.agent-user-turn-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.agent-user-turn-eyebrow svg {
+  color: var(--muted-foreground);
+}
+
 .agent-assistant-empty {
   margin: 0;
   color: var(--muted-foreground);
