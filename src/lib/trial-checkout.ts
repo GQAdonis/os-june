@@ -27,9 +27,11 @@ function errorCode(error: unknown): string | undefined {
  * "success" or "cancel". */
 const BILLING_CALLBACK_EVENT = "os-accounts-billing-callback";
 
-/** Phases of the one-click trial flow. `waiting` = Stripe Checkout is open in
- * the browser and we're polling for the subscription to appear. */
-export type TrialCheckoutPhase = "idle" | "opening" | "waiting";
+/** Phases of the one-click trial flow. `reauth` = the stored grant lacked a
+ * scope and a browser sign-in bounce is in flight to pick up the current
+ * ones. `waiting` = Stripe Checkout is open in the browser and we're polling
+ * for the subscription to appear. */
+export type TrialCheckoutPhase = "idle" | "opening" | "reauth" | "waiting";
 
 // Stripe's webhook usually settles within a couple of seconds of payment;
 // poll fast enough that the app reacts while the user is still looking at
@@ -173,6 +175,7 @@ export function useTrialCheckout({
       // the current scopes, then retry the direct path — the user still
       // lands on Stripe, not the portal.
       if (errorCode(checkoutError) === NEEDS_REAUTH_CODE) {
+        setPhase("reauth");
         try {
           await osAccountsLogin();
         } catch (loginError) {
@@ -184,6 +187,7 @@ export function useTrialCheckout({
           await openPortalFallback();
           return;
         }
+        setPhase("opening");
         try {
           await openDirectCheckout();
           return;
