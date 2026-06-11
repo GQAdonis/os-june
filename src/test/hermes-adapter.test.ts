@@ -1,12 +1,76 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  isScheduledRunPreamble,
+  isScheduledRunSession,
   listHermesSessions,
   normalizeHermesSessionMessagesResponse,
   normalizeHermesSessionsResponse,
   sessionTimestamp,
+  stripScheduledRunPreamble,
   titleFromPrompt,
 } from "../lib/hermes-adapter";
 import type { HermesSessionInfo } from "../lib/tauri";
+
+const SCHEDULED_PREAMBLE =
+  '[IMPORTANT: You are running as a scheduled cron job. DELIVERY: produce ' +
+  'your report as your final response. SILENT: if there is nothing new, ' +
+  'respond with exactly "[SILENT]" (nothing else). Never combine [SILENT] ' +
+  "with content — either report normally, or say [SILENT] and nothing more.]";
+
+describe("scheduled-run helpers", () => {
+  it("recognizes the cron delivery preamble, not arbitrary bracketed text", () => {
+    expect(isScheduledRunPreamble(SCHEDULED_PREAMBLE)).toBe(true);
+    expect(isScheduledRunPreamble("[IMPORTANT] read this carefully")).toBe(
+      false,
+    );
+    expect(isScheduledRunPreamble("Summarize today's standup")).toBe(false);
+  });
+
+  it("strips the preamble to the routine's own prompt, balancing brackets", () => {
+    const prompt = `${SCHEDULED_PREAMBLE}\n\nYou are a daily standup reporter. Summarize GitHub activity.`;
+    expect(stripScheduledRunPreamble(prompt)).toBe(
+      "You are a daily standup reporter. Summarize GitHub activity.",
+    );
+    // The inner [SILENT] tokens must not end the preamble early.
+    expect(stripScheduledRunPreamble(prompt)).not.toContain("SILENT");
+    // A normal prompt is returned untouched (just trimmed).
+    expect(stripScheduledRunPreamble("  hello there  ")).toBe("hello there");
+  });
+
+  it("gives cron sessions a readable title and clean preview", () => {
+    const sessions = normalizeHermesSessionsResponse({
+      sessions: [
+        {
+          id: "cron-1",
+          source: "cron",
+          title: "",
+          preview: `${SCHEDULED_PREAMBLE}\n\nSummarize GitHub activity for the team.`,
+          last_active: "2026-06-11T12:00:00Z",
+        },
+      ],
+    });
+    const session = sessions[0];
+    expect(isScheduledRunSession(session as HermesSessionInfo)).toBe(true);
+    expect(session?.title).toBe("Summarize Github Activity for the Team");
+    expect(session?.title).not.toContain("IMPORTANT");
+    expect(session?.preview?.startsWith("Summarize GitHub activity")).toBe(true);
+  });
+
+  it("derives the title from a cron title that is itself the raw preamble", () => {
+    const sessions = normalizeHermesSessionsResponse({
+      sessions: [
+        {
+          id: "cron-2",
+          source: "cron",
+          title: SCHEDULED_PREAMBLE.slice(0, 30),
+          preview: `${SCHEDULED_PREAMBLE}\n\nPost the weekly metrics digest.`,
+          last_active: "2026-06-11T12:00:00Z",
+        },
+      ],
+    });
+    expect(sessions[0]?.title).toBe("Post the Weekly Metrics Digest");
+  });
+});
 
 const mocks = vi.hoisted(() => ({
   hermesBridgeSessions: vi.fn(),
