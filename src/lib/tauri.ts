@@ -779,6 +779,26 @@ export async function suggestAgentSessionTitle(prompt: string) {
   );
 }
 
+export type SubmitIssueReportRequest = {
+  /** The user's report as they typed it, before the investigation wrapper. */
+  description: string;
+  /** June's diagnostic assessment from the report session, when available. */
+  agentDiagnosis?: string;
+  attachmentNames: string[];
+  /** Workspace paths of the attached files; their bytes are uploaded with
+   * the report. */
+  attachmentPaths: string[];
+  sessionId?: string;
+};
+
+export type SubmitIssueReportResponse = {
+  received: boolean;
+};
+
+export async function submitIssueReport(request: SubmitIssueReportRequest) {
+  return invoke<SubmitIssueReportResponse>("submit_issue_report", { request });
+}
+
 export type ExplainAgentApprovalResponse = {
   explanation: string;
 };
