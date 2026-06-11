@@ -244,6 +244,7 @@ export function App() {
       : "microphoneOnly";
   const {
     account,
+    error: accountError,
     loading: accountLoading,
     refresh: refreshAccount,
     setAccount,
@@ -255,8 +256,18 @@ export function App() {
   const recordingNoteIdRef = useRef<string | undefined>(undefined);
   // Sessions with a finishRecording call in flight; guards stop double-clicks.
   const finishingSessionsRef = useRef<Set<string>>(new Set());
-  const signInRequired = shouldBlockOnSignIn(account);
-  const trialRequired = !signInRequired && shouldBlockOnTrial(account);
+  // A dev build without the OS Accounts env vars (fresh workspace, no .env)
+  // can never complete sign-in, so the sign-in and trial gates would be dead
+  // ends — skip them and let account-dependent features surface their own
+  // errors. Release builds always gate; so do dev builds once configured.
+  const devAccountsUnconfigured =
+    import.meta.env.DEV &&
+    !account.signedIn &&
+    (accountLoading || !!accountError || !account.configured);
+  const signInRequired =
+    !devAccountsUnconfigured && shouldBlockOnSignIn(account);
+  const trialRequired =
+    !devAccountsUnconfigured && !signInRequired && shouldBlockOnTrial(account);
   const [onboardingDone, setOnboardingDone] = useState(() =>
     isOnboardingComplete(),
   );
