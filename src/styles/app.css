@@ -7623,6 +7623,13 @@ button.agent-safety-badge:hover {
   gap: var(--sp-3);
 }
 
+/* The header's mode disclosure: routine runs execute in the always-on
+ * gateway outside the chat sandbox, so the badge is unconditional and sits
+ * once under the subtitle rather than repeating on every row. */
+.routines-mode-badge {
+  margin-top: var(--sp-3);
+}
+
 .routines-refresh {
   display: inline-grid;
   place-items: center;

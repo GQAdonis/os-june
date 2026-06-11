@@ -5,6 +5,7 @@ import { IconPause } from "central-icons/IconPause";
 import { IconPencil } from "central-icons/IconPencil";
 import { IconPlay } from "central-icons/IconPlay";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
+import { IconShieldCrossed } from "central-icons/IconShieldCrossed";
 import { IconTrashCanSimple } from "central-icons/IconTrashCanSimple";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -20,6 +21,7 @@ import { humanizeSchedule } from "../../lib/routine-schedule";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
 import { EmptyState } from "../ui/EmptyState";
+import { HoverTip } from "../ui/HoverTip";
 
 type RoutinesViewProps = {
   /** Hands off a composed agent prompt; the app opens a new June session with
@@ -156,6 +158,7 @@ export function RoutinesView({
           <p className="folders-subtitle">
             Automations June runs for you on a schedule.
           </p>
+          <UnrestrictedRoutinesBadge />
         </div>
         <button
           type="button"
@@ -239,7 +242,7 @@ export function RoutinesView({
         onClose={() => setCreateOpen(false)}
         leading={<IconArrowsRepeat size={15} />}
         title="New routine"
-        description="Tell June what to do and when. It opens a new session to set the routine up, and you can fine-tune the schedule there."
+        description="Tell June what to do and when. It opens a new session to set the routine up, and you can fine-tune the schedule there. Routines run unrestricted: when one fires, June can change any file your account can."
         footer={
           <>
             <button
@@ -457,6 +460,29 @@ function isSameDate(left: Date, right: Date) {
     left.getFullYear() === right.getFullYear() &&
     left.getMonth() === right.getMonth() &&
     left.getDate() === right.getDate()
+  );
+}
+
+/** Unconditional mode disclosure, same chrome as the session bar's
+ * Unrestricted badge. Scheduled runs execute in June's always-on background
+ * gateway, which the app must start outside the Seatbelt write-jail so
+ * launchd can manage it (see spawn_hermes_gateway_start in hermes_bridge.rs)
+ * — so the Sandboxed/Unrestricted choice made per chat session never applies
+ * to a routine run, and labeling each routine individually would just repeat
+ * the same badge on every row. */
+function UnrestrictedRoutinesBadge() {
+  const description =
+    "Routines run in June's always-on background service, which is not sandboxed. When a routine fires, June can change any file your account can, regardless of the mode of the chat that created it.";
+  return (
+    <HoverTip
+      tip={description}
+      className="agent-safety-badge agent-sandbox-badge routines-mode-badge"
+      tabIndex={0}
+      aria-label={`Unrestricted - ${description}`}
+    >
+      <IconShieldCrossed size={13} aria-hidden />
+      Unrestricted
+    </HoverTip>
   );
 }
 

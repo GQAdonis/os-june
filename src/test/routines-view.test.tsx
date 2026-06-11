@@ -88,6 +88,25 @@ describe("RoutinesView", () => {
     expect(screen.queryByText("Weekly digest")).toBeNull();
   });
 
+  it("discloses that routines run unrestricted", async () => {
+    // Routine runs execute in the always-on background gateway, which lives
+    // outside the chat sandbox, so the disclosure is unconditional: a badge
+    // in the header and a sentence in the creation dialog.
+    mocks.listRoutines.mockResolvedValue([]);
+    render(<RoutinesView onCreateRoutine={vi.fn()} onEditRoutine={vi.fn()} />);
+
+    expect(await screen.findByText("Put June on a schedule")).toBeVisible();
+    expect(screen.getByText("Unrestricted")).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getAllByRole("button", { name: /new routine/i })[0],
+    );
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveTextContent(
+      "Routines run unrestricted: when one fires, June can change any file your account can.",
+    );
+  });
+
   it("shows the empty state and routes creation through the agent prompt", async () => {
     mocks.listRoutines.mockResolvedValue([]);
     const onCreateRoutine = vi.fn();
