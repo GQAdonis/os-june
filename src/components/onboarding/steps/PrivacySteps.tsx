@@ -12,7 +12,7 @@ const PRIVACY_CARDS = [
   },
   {
     title: "Verifiable",
-    body: "June runs on the open-source Hermes agent, and our backend runs in a secure enclave with attestation you can inspect. You don't have to trust us. You can check.",
+    body: "Our code is open source and our backend runs in a secure enclave. You don't have to trust us. You can check.",
   },
 ];
 
