@@ -139,7 +139,8 @@
       "entitlements": "Entitlements.plist",
       "exceptionDomain": "",
       "frameworks": [],
-      "infoPlist": "Info.plist"
+      "infoPlist": "Info.plist",
+      "minimumSystemVersion": "14.2"
     }
   }
 }
