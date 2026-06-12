@@ -2,9 +2,10 @@ use clap::{Parser, Subcommand};
 use scribe_api::{ApiLimits, ApiState, ApiStateParams, AttestationInfo};
 use scribe_config::{AppConfig, ModelPriceConfig, ModelProvider};
 use scribe_providers::{
-    JwksTokenVerifier, LogIssueReportSink, MultiFormatDurationProbe, OsAccountsHttpClient,
-    OsPlatformIssueReportSink, RoutingTranscriber, VeniceAgentChat, VeniceCleaner, VeniceGenerator,
-    VeniceModelCatalog, WebhookIssueReportSink, default_client, jwks_client,
+    JwksTokenVerifier, LogIssueReportSink, LogSurveySink, MultiFormatDurationProbe,
+    OsAccountsHttpClient, OsPlatformIssueReportSink, PostHogSurveySink, RoutingTranscriber,
+    VeniceAgentChat, VeniceCleaner, VeniceGenerator, VeniceModelCatalog, WebhookIssueReportSink,
+    WebhookSurveySink, default_client, jwks_client,
 };
 use scribe_services::{
     AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps,
@@ -102,19 +103,8 @@ fn build_router(
     let token_verifier: Arc<dyn scribe_domain::TokenVerifier> = Arc::new(
         JwksTokenVerifier::from_config(jwks_client(), &config.os_accounts),
     );
-    let issue_reports: Arc<dyn scribe_domain::IssueReportSink> = if let Some(sink) =
-        OsPlatformIssueReportSink::from_config(http.clone(), &config.issue_reports)
-    {
-        tracing::info!("issue reports will be filed as os-platform issues");
-        Arc::new(sink)
-    } else if let Some(sink) =
-        WebhookIssueReportSink::from_config(http.clone(), &config.issue_reports)
-    {
-        Arc::new(sink)
-    } else {
-        tracing::info!("no issue report sink configured; reports will be logged only");
-        Arc::new(LogIssueReportSink)
-    };
+    let issue_reports = build_issue_report_sink(config, http);
+    let surveys = build_survey_sink(config, http);
 
     let flat_estimate_credits = config.os_accounts.flat_estimate_credits;
 
@@ -161,6 +151,7 @@ fn build_router(
         agent_chat,
         dictate,
         issue_reports,
+        surveys,
         limits: ApiLimits {
             max_audio_bytes: config.server.max_audio_bytes,
             max_json_bytes: config.server.max_json_bytes,
@@ -174,6 +165,39 @@ fn build_router(
         },
     });
     scribe_api::router(state)
+}
+
+fn build_issue_report_sink(
+    config: &AppConfig,
+    http: &reqwest::Client,
+) -> Arc<dyn scribe_domain::IssueReportSink> {
+    if let Some(sink) = OsPlatformIssueReportSink::from_config(http.clone(), &config.issue_reports)
+    {
+        tracing::info!("issue reports will be filed as os-platform issues");
+        Arc::new(sink)
+    } else if let Some(sink) =
+        WebhookIssueReportSink::from_config(http.clone(), &config.issue_reports)
+    {
+        Arc::new(sink)
+    } else {
+        tracing::info!("no issue report sink configured; reports will be logged only");
+        Arc::new(LogIssueReportSink)
+    }
+}
+
+fn build_survey_sink(
+    config: &AppConfig,
+    http: &reqwest::Client,
+) -> Arc<dyn scribe_domain::SurveySink> {
+    if let Some(sink) = PostHogSurveySink::from_config(http.clone(), &config.surveys) {
+        tracing::info!("survey answers will be captured in PostHog");
+        Arc::new(sink)
+    } else if let Some(sink) = WebhookSurveySink::from_config(http.clone(), &config.surveys) {
+        Arc::new(sink)
+    } else {
+        tracing::info!("no survey sink configured; survey answers will be logged only");
+        Arc::new(LogSurveySink)
+    }
 }
 
 fn init_tracing() {
