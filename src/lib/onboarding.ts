@@ -107,9 +107,12 @@ export function discoverySource(): string | null {
 
 export function setDiscoverySource(source: string) {
   try {
+    const previousSource = window.localStorage.getItem(DISCOVERY_KEY);
     window.localStorage.setItem(DISCOVERY_KEY, source);
-    window.localStorage.removeItem(DISCOVERY_REPORTED_KEY);
-    window.localStorage.removeItem(DISCOVERY_PENDING_REPORT_KEY);
+    if (previousSource !== source) {
+      window.localStorage.removeItem(DISCOVERY_REPORTED_KEY);
+      window.localStorage.removeItem(DISCOVERY_PENDING_REPORT_KEY);
+    }
   } catch {
     // Ignore; worst case the question is asked again on a replay.
   }

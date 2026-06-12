@@ -685,6 +685,39 @@ describe("OnboardingFlow", () => {
     );
   });
 
+  it("keeps pending discovery retry state when the same source is re-selected during an in-flight report", async () => {
+    let rejectReport!: (error: Error) => void;
+    mocks.submitDiscoverySource.mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectReport = reject;
+      }),
+    );
+
+    setDiscoverySource("search");
+    reportPendingDiscoverySource({ force: true });
+
+    await waitFor(() =>
+      expect(mocks.submitDiscoverySource).toHaveBeenCalledWith({
+        source: "search",
+      }),
+    );
+    expect(localStorage.getItem("june.onboarding.discoveryPendingReport")).toBe(
+      "search",
+    );
+
+    setDiscoverySource("search");
+    rejectReport(new Error("offline"));
+
+    await waitFor(() =>
+      expect(
+        localStorage.getItem("june.onboarding.discoveryPendingReport"),
+      ).toBe("search"),
+    );
+    expect(
+      localStorage.getItem("june.onboarding.discoveryReported"),
+    ).toBeNull();
+  });
+
   it("retries one pending discovery answer on launch and does not duplicate after delivery", async () => {
     localStorage.setItem("june.onboarding.discoverySource", "friend");
     localStorage.setItem("june.onboarding.discoveryPendingReport", "friend");

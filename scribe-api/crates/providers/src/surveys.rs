@@ -3,6 +3,8 @@ use scribe_config::SurveysConfig;
 use scribe_domain::{DomainError, OnboardingSurvey, SurveySink};
 use serde::Serialize;
 
+const POSTHOG_ONBOARDING_DISCOVERY_EVENT: &str = "onboarding_discovery_source_submitted";
+
 /// Forwards onboarding survey answers as a JSON POST to the configured webhook.
 pub struct WebhookSurveySink {
     http: reqwest::Client,
@@ -159,18 +161,28 @@ struct PostHogCaptureProperties<'a> {
     source: &'a str,
     app_version: Option<&'a str>,
     platform: Option<&'a str>,
+    #[serde(rename = "$set")]
+    set: PostHogPersonProperties<'a>,
+}
+
+#[derive(Serialize)]
+struct PostHogPersonProperties<'a> {
+    discovery_source: &'a str,
 }
 
 impl<'a> PostHogCaptureWire<'a> {
     fn from_survey(project_key: &'a str, survey: &'a OnboardingSurvey) -> Self {
         Self {
             api_key: project_key,
-            event: "onboarding discovery source submitted",
+            event: POSTHOG_ONBOARDING_DISCOVERY_EVENT,
             distinct_id: &survey.user_id.0,
             properties: PostHogCaptureProperties {
                 source: survey.source.as_str(),
                 app_version: survey.app_version.as_deref(),
                 platform: survey.platform.as_deref(),
+                set: PostHogPersonProperties {
+                    discovery_source: survey.source.as_str(),
+                },
             },
         }
     }
@@ -235,12 +247,15 @@ mod tests {
             .and(path("/capture"))
             .and(body_json(serde_json::json!({
                 "api_key": "phc_test",
-                "event": "onboarding discovery source submitted",
+                "event": "onboarding_discovery_source_submitted",
                 "distinct_id": "usr_test",
                 "properties": {
                     "source": "ai-chat",
                     "appVersion": "0.0.8",
-                    "platform": "macos"
+                    "platform": "macos",
+                    "$set": {
+                        "discovery_source": "ai-chat"
+                    }
                 }
             })))
             .respond_with(ResponseTemplate::new(200))
