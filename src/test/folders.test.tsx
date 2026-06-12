@@ -211,8 +211,9 @@ describe("folders UI", () => {
       screen.getByRole("region", { name: "Pinned agent sessions" }),
     ).toBeInTheDocument();
     expect(
-      within(screen.getByRole("region", { name: "Pinned agent sessions" }))
-        .getByText("Fetch os platform issues"),
+      within(
+        screen.getByRole("region", { name: "Pinned agent sessions" }),
+      ).getByText("Fetch os platform issues"),
     ).toBeInTheDocument();
     expect(window.localStorage.getItem("scribe:pinned-agent-session-ids")).toBe(
       '["session-1"]',
@@ -638,7 +639,7 @@ describe("folders UI", () => {
       />,
     );
 
-    expect(screen.getByText("No notes yet.")).toBeInTheDocument();
+    expect(screen.getByText("Capture your first meeting")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Create your first note" }),
     ).toBeInTheDocument();
