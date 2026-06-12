@@ -1812,7 +1812,8 @@ fi
 # extraction. Idempotent (an already-quoted $UV_CMD is preceded by a quote,
 # which the pattern excludes) and applied outside the download guard so a
 # previously extracted tree gets patched on retry too.
-sed -e 's/\([^"]\)\$UV_CMD/\1"$UV_CMD"/g' "$install_dir/scripts/install.sh" \
+sed -e 's/^\$UV_CMD/"$UV_CMD"/g' \
+  -e 's/\([^"]\)\$UV_CMD/\1"$UV_CMD"/g' "$install_dir/scripts/install.sh" \
   > "$install_dir/scripts/install.sh.quoted"
 mv "$install_dir/scripts/install.sh.quoted" "$install_dir/scripts/install.sh"
 
