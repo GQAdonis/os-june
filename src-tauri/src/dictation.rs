@@ -16,7 +16,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Mutex, OnceLock},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow, WindowEvent,
@@ -372,10 +372,18 @@ pub struct DictationSettingsResponse {
     pub settings: DictationSettings,
 }
 
+/// A push released faster than this is a graze or an aborted press, not a
+/// dictation: recording starts on the down edge now (the helper no longer
+/// holds unambiguous presses back), so quick releases must discard instead of
+/// transcribing a fraction of a second of noise. Mirrors the helper's old
+/// holdThreshold, which used to absorb these by delaying the start.
+const PUSH_TO_TALK_MIN_HOLD: Duration = Duration::from_millis(160);
+
 #[derive(Debug, Default)]
 struct ShortcutActivationController {
     active_mode: Option<DictationShortcutKind>,
     push_to_talk_is_down: bool,
+    push_started_at: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -388,6 +396,7 @@ enum ShortcutKeyEdge {
 enum DictationCommand {
     StartListening,
     StopAndPaste,
+    DiscardListening,
     ToggleListening,
 }
 
@@ -396,6 +405,7 @@ impl ShortcutActivationController {
         &mut self,
         edge: ShortcutKeyEdge,
         kind: DictationShortcutKind,
+        now: Instant,
     ) -> Option<DictationCommand> {
         match (kind, edge) {
             (DictationShortcutKind::PushToTalk, ShortcutKeyEdge::Down) => {
@@ -404,15 +414,23 @@ impl ShortcutActivationController {
                 }
                 self.active_mode = Some(DictationShortcutKind::PushToTalk);
                 self.push_to_talk_is_down = true;
+                self.push_started_at = Some(now);
                 Some(DictationCommand::StartListening)
             }
             (DictationShortcutKind::PushToTalk, ShortcutKeyEdge::Up) => {
+                let started_at = self.push_started_at.take();
                 if self.active_mode == Some(DictationShortcutKind::PushToTalk)
                     && self.push_to_talk_is_down
                 {
                     self.active_mode = None;
                     self.push_to_talk_is_down = false;
-                    Some(DictationCommand::StopAndPaste)
+                    let grazed =
+                        started_at.is_some_and(|at| now.duration_since(at) < PUSH_TO_TALK_MIN_HOLD);
+                    Some(if grazed {
+                        DictationCommand::DiscardListening
+                    } else {
+                        DictationCommand::StopAndPaste
+                    })
                 } else {
                     self.push_to_talk_is_down = false;
                     None
@@ -436,6 +454,7 @@ impl ShortcutActivationController {
     fn reset(&mut self) {
         self.active_mode = None;
         self.push_to_talk_is_down = false;
+        self.push_started_at = None;
     }
 }
 
@@ -444,6 +463,7 @@ impl DictationCommand {
         match self {
             Self::StartListening => serde_json::json!({ "type": "start_listening" }),
             Self::StopAndPaste => serde_json::json!({ "type": "stop_and_paste" }),
+            Self::DiscardListening => serde_json::json!({ "type": "discard_recording" }),
             Self::ToggleListening => serde_json::json!({
                 "type": "toggle_listening",
                 "shortcut": shortcut_label,
@@ -1400,7 +1420,7 @@ fn handle_shortcut_key_event(
                 .controller
                 .lock()
                 .ok()
-                .and_then(|mut state| state.handle_edge(edge, kind))
+                .and_then(|mut state| state.handle_edge(edge, kind, Instant::now()))
         });
 
     let shortcut = match kind {
@@ -1439,24 +1459,30 @@ fn reset_shortcut_activation(app: &AppHandle) {
 }
 
 fn send_dictation_command(app: &AppHandle, command: DictationCommand, shortcut_label: &str) {
-    // Gate the start path on a signed-in OS Accounts session. ToggleListening
-    // can also start, but we can't tell start-from-stop without extra state;
-    // transcribe_recording_ready acts as the backstop there.
+    // The start path needs a signed-in OS Accounts session for the
+    // transcription that follows, but the token check must not sit between
+    // the key press and the microphone: capture is local and the token is
+    // only consumed once the recording ends. Awaiting it here delayed every
+    // start by an executor hop, blocked on a network refresh whenever the
+    // cached token was stale, and could reorder a fast press-release so
+    // stop_and_paste reached the helper before start_listening. Start
+    // immediately and check in parallel; a signed-out session discards the
+    // moments-old local recording and lands on the same sign-in surface as
+    // before. ToggleListening can also start, but we can't tell
+    // start-from-stop without extra state; transcribe_recording_ready acts
+    // as the backstop there.
+    forward_dictation_command(app, command, shortcut_label);
     if matches!(command, DictationCommand::StartListening) {
         let app = app.clone();
         let label = shortcut_label.to_string();
         tauri::async_runtime::spawn(async move {
             if crate::os_accounts::access_token().await.is_err() {
-                emit_dictation_not_signed_in(&app);
-                focus_main_window(&app);
+                forward_dictation_command(&app, DictationCommand::DiscardListening, &label);
+                notify_dictation_not_signed_in(&app);
                 reset_shortcut_activation(&app);
-                return;
             }
-            forward_dictation_command(&app, command, &label);
         });
-        return;
     }
-    forward_dictation_command(app, command, shortcut_label);
 }
 
 fn forward_dictation_command(app: &AppHandle, command: DictationCommand, shortcut_label: &str) {
@@ -1476,8 +1502,39 @@ fn forward_dictation_command(app: &AppHandle, command: DictationCommand, shortcu
     }
 }
 
-fn emit_dictation_not_signed_in(app: &AppHandle) {
+/// Instant (millis since the Unix epoch) of the last signed-out prompt.
+/// One press-release can hit two signed-out checks — the parallel
+/// fast-discard task on the down edge and the transcribe_recording_ready
+/// backstop on the up edge — and which of them fires (or both) depends on
+/// how far the recording got before the discard landed. Deduping here, at
+/// the notifier, collapses every ordering to a single prompt + focus pull
+/// without losing the prompt in the paths where only one check runs.
+static LAST_NOT_SIGNED_IN_AT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+const NOT_SIGNED_IN_DEDUPE_MS: u64 = 2_000;
+
+/// Emits the signed-out prompt and pulls the app forward, unless the same
+/// prompt fired within the dedupe window. Owns the focus pull too, so
+/// callers can't split the prompt from it.
+fn notify_dictation_not_signed_in(app: &AppHandle) {
+    use std::sync::atomic::Ordering;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0);
+    let last = LAST_NOT_SIGNED_IN_AT_MS.load(Ordering::Relaxed);
+    if now_ms.saturating_sub(last) < NOT_SIGNED_IN_DEDUPE_MS {
+        return;
+    }
+    if LAST_NOT_SIGNED_IN_AT_MS
+        .compare_exchange(last, now_ms, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        // Another path won the race within the same window.
+        return;
+    }
     emit_dictation_event_value(app, dictation_not_signed_in_event());
+    focus_main_window(app);
 }
 
 fn dictation_not_signed_in_event() -> serde_json::Value {
@@ -1734,8 +1791,7 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
     if crate::os_accounts::access_token().await.is_err() {
         let state = app.state::<HelperState>();
         let _ = send_helper_command(&state, serde_json::json!({ "type": "discard_recording" }));
-        emit_dictation_not_signed_in(&app);
-        focus_main_window(&app);
+        notify_dictation_not_signed_in(&app);
         return;
     }
     let provider = match dictation_transcription_provider(configured_transcription_provider()) {
@@ -3093,31 +3149,72 @@ mod tests {
     #[test]
     fn push_to_talk_starts_on_down_and_stops_on_up() {
         let mut controller = ShortcutActivationController::default();
+        let down = Instant::now();
+        let up = down + PUSH_TO_TALK_MIN_HOLD;
 
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::PushToTalk),
+            controller.handle_edge(
+                ShortcutKeyEdge::Down,
+                DictationShortcutKind::PushToTalk,
+                down
+            ),
             Some(DictationCommand::StartListening)
         );
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::PushToTalk),
+            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::PushToTalk, up),
             Some(DictationCommand::StopAndPaste)
+        );
+    }
+
+    #[test]
+    fn push_to_talk_graze_discards_instead_of_transcribing() {
+        // Recording starts on the down edge now, so an accidental brush of
+        // the key produces a real (tiny) recording. Releasing inside the
+        // minimum hold must discard it rather than paste transcribed noise.
+        let mut controller = ShortcutActivationController::default();
+        let down = Instant::now();
+        let up = down + PUSH_TO_TALK_MIN_HOLD - Duration::from_millis(1);
+
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Down,
+                DictationShortcutKind::PushToTalk,
+                down
+            ),
+            Some(DictationCommand::StartListening)
+        );
+        assert_eq!(
+            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::PushToTalk, up),
+            Some(DictationCommand::DiscardListening)
+        );
+
+        // The graze fully releases the press: the next hold is a fresh start.
+        let next_down = up + Duration::from_millis(5);
+        assert_eq!(
+            controller.handle_edge(
+                ShortcutKeyEdge::Down,
+                DictationShortcutKind::PushToTalk,
+                next_down
+            ),
+            Some(DictationCommand::StartListening)
         );
     }
 
     #[test]
     fn toggle_mode_toggles_on_down_and_ignores_up() {
         let mut controller = ShortcutActivationController::default();
+        let now = Instant::now();
 
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::Toggle),
+            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::Toggle, now),
             Some(DictationCommand::ToggleListening)
         );
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::Toggle),
+            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::Toggle, now),
             None
         );
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::Toggle),
+            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::Toggle, now),
             Some(DictationCommand::ToggleListening)
         );
     }
@@ -3125,17 +3222,22 @@ mod tests {
     #[test]
     fn shortcut_activation_ignores_push_while_toggle_active() {
         let mut controller = ShortcutActivationController::default();
+        let now = Instant::now();
 
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::Toggle),
+            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::Toggle, now),
             Some(DictationCommand::ToggleListening)
         );
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Down, DictationShortcutKind::PushToTalk),
+            controller.handle_edge(
+                ShortcutKeyEdge::Down,
+                DictationShortcutKind::PushToTalk,
+                now
+            ),
             None
         );
         assert_eq!(
-            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::PushToTalk),
+            controller.handle_edge(ShortcutKeyEdge::Up, DictationShortcutKind::PushToTalk, now),
             None
         );
     }
