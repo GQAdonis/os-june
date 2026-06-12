@@ -1404,7 +1404,7 @@ describe("AppSettings", () => {
 
     await user.click(hudSwitch);
     expect(localStorage.getItem(AGENT_HUD_ENABLED_KEY)).toBe("true");
-    expect(mocks.agentHudShow).not.toHaveBeenCalled();
+    expect(mocks.agentHudShow).toHaveBeenCalledTimes(1);
   });
 
   it("opts into agent CLI access from Agent settings", async () => {
