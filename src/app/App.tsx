@@ -876,9 +876,12 @@ export function App() {
       .catch((err: unknown) => setError(messageFromError(err)));
   }, [appBlocked]);
 
-  // Probe with "microphonePlusSystem" on mount so sourceReadiness always
-  // has the system source. The helper's preflight surfaces the native
-  // TCC prompt on first install as a side-effect of this call.
+  // Passive check with "microphonePlusSystem" on mount so sourceReadiness
+  // always has the system source. Deliberately not a permission probe: the
+  // probe launches the helper, which fires the native "record system audio"
+  // TCC prompt out of the blue on first launch after onboarding. The prompt
+  // belongs to the moment the user starts a recording (handleStartRecording
+  // probes for real).
   useEffect(() => {
     if (appBlocked) return;
     let cancelled = false;
@@ -917,6 +920,16 @@ export function App() {
   // common case where the user flipped a toggle in System Settings and
   // returns to June. The helper poll is what surfaces fresh mic /
   // accessibility state via the dictation-event listener above.
+  // System audio only probes (helper launch) after an observed denial:
+  // that's the one state a passive check can't move past, and a denied TCC
+  // entry never re-prompts, so the probe stays invisible. Everywhere else
+  // the check is passive, so app focus never pops the permission dialog.
+  const systemPermissionBlocked = sourceReadiness?.sources.some(
+    (source) =>
+      source.source === "system" &&
+      (source.permissionState === "denied" ||
+        source.permissionState === "restricted"),
+  );
   useEffect(() => {
     if (appBlocked) return;
     const recordingState = state.recordingStatus?.state;
@@ -930,13 +943,15 @@ export function App() {
         () => undefined,
       );
       if (captureActive) return;
-      void checkRecordingSourceReadiness("microphonePlusSystem")
+      void checkRecordingSourceReadiness("microphonePlusSystem", {
+        probeSystemPermission: systemPermissionBlocked,
+      })
         .then(setSourceReadiness)
         .catch(() => undefined);
     }
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
-  }, [appBlocked, state.recordingStatus?.state]);
+  }, [appBlocked, state.recordingStatus?.state, systemPermissionBlocked]);
 
   function handleSourceModeChange(next: RecordingSourceMode) {
     setUserWantsSystemAudio(next === "microphonePlusSystem");
@@ -1423,7 +1438,12 @@ export function App() {
     });
     try {
       setCheckingSourceReadiness(true);
-      const readiness = await checkRecordingSourceReadiness(sourceMode);
+      // The probe is what surfaces the system-audio TCC prompt on first
+      // use — it lives here, on the user's explicit record action, rather
+      // than at app launch.
+      const readiness = await checkRecordingSourceReadiness(sourceMode, {
+        probeSystemPermission: true,
+      });
       setSourceReadiness(readiness);
 
       const micSource = readiness.sources.find(

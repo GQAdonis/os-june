@@ -47,20 +47,39 @@ describe("Tauri command contracts", () => {
 
   it("sends recording lifecycle commands with stable request shapes", async () => {
     await checkRecordingSourceReadiness("microphonePlusSystem");
+    await checkRecordingSourceReadiness("microphonePlusSystem", {
+      probeSystemPermission: true,
+    });
     await startRecording("note-1", "microphonePlusSystem");
     await finishRecording("session-1");
 
+    // The readiness check defaults to passive — probing launches the
+    // system-audio helper and fires the native TCC prompt, so it has to be
+    // opted into per call.
     expect(mocks.invoke).toHaveBeenNthCalledWith(
       1,
       "check_recording_source_readiness",
       {
-        request: { sourceMode: "microphonePlusSystem" },
+        request: {
+          sourceMode: "microphonePlusSystem",
+          probeSystemPermission: false,
+        },
       },
     );
-    expect(mocks.invoke).toHaveBeenNthCalledWith(2, "start_recording", {
+    expect(mocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      "check_recording_source_readiness",
+      {
+        request: {
+          sourceMode: "microphonePlusSystem",
+          probeSystemPermission: true,
+        },
+      },
+    );
+    expect(mocks.invoke).toHaveBeenNthCalledWith(3, "start_recording", {
       request: { noteId: "note-1", sourceMode: "microphonePlusSystem" },
     });
-    expect(mocks.invoke).toHaveBeenNthCalledWith(3, "finish_recording", {
+    expect(mocks.invoke).toHaveBeenNthCalledWith(4, "finish_recording", {
       request: { sessionId: "session-1" },
     });
   });

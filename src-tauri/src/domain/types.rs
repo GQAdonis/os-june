@@ -294,6 +294,13 @@ pub struct MicrophonePermissionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CheckRecordingSourceReadinessRequest {
     pub source_mode: RecordingSourceMode,
+    /// When true, launch the system-audio helper to verify the TCC grant —
+    /// this surfaces the native permission prompt on first run, so callers
+    /// must only set it on an explicit user action (starting a recording,
+    /// retrying after a denial). Passive callers get device/version
+    /// readiness with permission_state "unknown".
+    #[serde(default)]
+    pub probe_system_permission: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

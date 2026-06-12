@@ -1013,11 +1013,23 @@ export async function updateNote(input: {
 
 export async function checkRecordingSourceReadiness(
   sourceMode: RecordingSourceMode,
+  options?: {
+    /**
+     * Launches the system-audio helper to verify the TCC grant, which
+     * surfaces the native permission prompt on first run. Only set this on
+     * an explicit user action (starting a recording, retrying after a
+     * denial) — passive readiness reads must leave it off.
+     */
+    probeSystemPermission?: boolean;
+  },
 ) {
   return invoke<RecordingSourceReadinessDto>(
     "check_recording_source_readiness",
     {
-      request: { sourceMode },
+      request: {
+        sourceMode,
+        probeSystemPermission: options?.probeSystemPermission ?? false,
+      },
     },
   );
 }
