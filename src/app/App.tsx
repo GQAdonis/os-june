@@ -78,6 +78,7 @@ import {
   playRecordingSound,
   preloadRecordingSounds,
 } from "../lib/recording-sounds";
+import { isMacLikePlatform, isPrimaryShortcut } from "../lib/platform";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import {
   AGENT_GALLERY_EVENT,
@@ -182,11 +183,11 @@ export function App() {
     "none",
   );
   const [bootstrapped, setBootstrapped] = useState(false);
-  // The app launches on a fresh agent session. The handshake is armed during
-  // state init — before AgentWorkspace's first mount consumes it — so the
-  // workspace opens on the hero instead of restoring the last open
-  // conversation.
+  // macOS launches on a fresh agent session. The Windows installer does not
+  // bundle Hermes yet, so Windows starts on meeting notes instead of promising
+  // a turnkey agent runtime.
   const [activeView, setActiveView] = useState<SidebarView>(() => {
+    if (!isMacLikePlatform()) return "notes";
     markAgentNewSessionPending();
     return "agent";
   });
@@ -2560,13 +2561,7 @@ export function isAccessibilityBlocked(state?: string) {
 }
 
 function isCreateNoteShortcut(event: KeyboardEvent) {
-  return (
-    event.key.toLowerCase() === "n" &&
-    event.metaKey &&
-    !event.ctrlKey &&
-    !event.altKey &&
-    !event.shiftKey
-  );
+  return event.key.toLowerCase() === "n" && isPrimaryShortcut(event);
 }
 
 function stringPayloadValue(value: unknown) {
