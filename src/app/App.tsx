@@ -2371,7 +2371,7 @@ function UpdateRelaunchCard({
   relaunching: boolean;
   onRelaunch: () => void;
 }) {
-  const meta = status ?? updateVersionLabel(payload.version);
+  const meta = status ?? updateReadyLabel(payload.version);
   const failed = status?.toLowerCase().includes("failed") ?? false;
 
   return (
@@ -2384,7 +2384,7 @@ function UpdateRelaunchCard({
         type="button"
         className="update-relaunch-card"
         disabled={relaunching}
-        aria-label={`Relaunch to update to June ${payload.version}`}
+        aria-label={`Relaunch June to finish updating to ${payload.version}`}
         onClick={onRelaunch}
       >
         <span className="update-relaunch-mark" aria-hidden>
@@ -2392,7 +2392,7 @@ function UpdateRelaunchCard({
         </span>
         <span className="update-relaunch-copy">
           <span className="update-relaunch-title">
-            {relaunching ? "Relaunching..." : "Relaunch to update"}
+            {relaunching ? "Relaunching..." : "Relaunch to finish update"}
           </span>
           <span className={status ? "update-relaunch-status" : undefined}>
             {meta}
@@ -2477,6 +2477,10 @@ function updateProgressPercent(progress: UpdateInstallProgress | null) {
 
 function updateVersionLabel(version: string) {
   return version.startsWith("v") ? version : `v${version}`;
+}
+
+function updateReadyLabel(version: string) {
+  return `Update ${updateVersionLabel(version)} is ready. June will reopen after relaunch.`;
 }
 
 // Sidebar toggle icon. One static panel with a single divider that animates:

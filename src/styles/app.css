@@ -11049,12 +11049,10 @@ input:focus-visible,
 }
 
 .update-relaunch-copy > span:last-child {
-  overflow: hidden;
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .update-relaunch-copy > .update-relaunch-status {
