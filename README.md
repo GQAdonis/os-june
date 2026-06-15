@@ -59,7 +59,7 @@ Optional initial model defaults:
 
 ```sh
 export VENICE_TRANSCRIPTION_MODEL=nvidia/parakeet-tdt-0.6b-v3
-export VENICE_GENERATION_MODEL=zai-org-glm-5
+export VENICE_GENERATION_MODEL=deepseek-v4-flash
 export VENICE_TITLE_SUGGESTION_MODEL=nvidia-nemotron-3-nano-30b-a3b
 ```
 

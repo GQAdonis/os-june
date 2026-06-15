@@ -147,7 +147,7 @@ describe("AppSettings", () => {
       settings: {
         transcriptionProvider: "venice",
         transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
-        generationModel: "zai-org-glm-5-1",
+        generationModel: "deepseek-v4-flash",
       },
     });
     mocks.listVeniceModels.mockImplementation(async (mode) => ({
@@ -156,7 +156,7 @@ describe("AppSettings", () => {
       selectedModel:
         mode === "transcription"
           ? "nvidia/parakeet-tdt-0.6b-v3"
-          : "zai-org-glm-5-1",
+          : "deepseek-v4-flash",
       models:
         mode === "transcription"
           ? [
@@ -199,6 +199,21 @@ describe("AppSettings", () => {
               },
             ]
           : [
+              {
+                provider: "venice",
+                id: "deepseek-v4-flash",
+                name: "DeepSeek V4 Flash",
+                modelType: "text",
+                description:
+                  "Efficiency-optimized 284B MoE model with 1M context.",
+                privacy: "anonymized",
+                priceUnit: "tokens",
+                inputCreditsPerMillionTokens: 170,
+                outputCreditsPerMillionTokens: 350,
+                contextTokens: 1000000,
+                traits: [],
+                capabilities: ["supportsFunctionCalling"],
+              },
               {
                 provider: "venice",
                 id: "zai-org-glm-5-1",
@@ -258,7 +273,7 @@ describe("AppSettings", () => {
           : "venice",
       transcriptionModel:
         mode === "transcription" ? modelId : "nvidia/parakeet-tdt-0.6b-v3",
-      generationModel: mode === "generation" ? modelId : "zai-org-glm-5-1",
+      generationModel: mode === "generation" ? modelId : "deepseek-v4-flash",
     }));
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.openPrivacySettings.mockResolvedValue(undefined);
@@ -1145,7 +1160,7 @@ describe("AppSettings", () => {
         screen.getAllByText("$1.00 input / $3.20 output per 1M tokens").length,
       ).toBeGreaterThan(0);
       expect(screen.getAllByText("Private mode").length).toBeGreaterThan(0);
-      expect(screen.getByText("Anonymous mode")).toBeInTheDocument();
+      expect(screen.getAllByText("Anonymous mode").length).toBeGreaterThan(0);
       expect(screen.queryByText("Anon")).not.toBeInTheDocument();
       await user.click(
         await screen.findByRole("option", { name: /Venice Uncensored/ }),
@@ -1193,19 +1208,19 @@ describe("AppSettings", () => {
     // Suggested is the default view: only the curated picks present in the
     // catalog show, each with its recommendation reason.
     expect(
-      await screen.findByRole("option", { name: /GLM 5\.1/ }),
+      await screen.findByRole("option", { name: /DeepSeek V4 Flash/ }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("option", { name: /Venice Uncensored/ }),
     ).not.toBeInTheDocument();
-    expect(screen.getByText(/Best overall/)).toBeInTheDocument();
+    expect(screen.getByText(/Best value/)).toBeInTheDocument();
 
     // All shows the full catalog, without recommendation copy.
     await user.click(screen.getByRole("tab", { name: "All" }));
     expect(
       screen.getByRole("option", { name: /Venice Uncensored/ }),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/Best overall/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Best value/)).not.toBeInTheDocument();
 
     // Searching looks across the whole catalog even from Suggested, and a
     // suggested pick stays selectable.
@@ -1215,10 +1230,10 @@ describe("AppSettings", () => {
       screen.getByRole("option", { name: /Venice Uncensored/ }),
     ).toBeInTheDocument();
     await user.clear(screen.getByLabelText("Search models"));
-    await user.click(screen.getByRole("option", { name: /GLM 5\.1/ }));
+    await user.click(screen.getByRole("option", { name: /DeepSeek V4 Flash/ }));
     expect(mocks.setVeniceModel).toHaveBeenCalledWith(
       "generation",
-      "zai-org-glm-5-1",
+      "deepseek-v4-flash",
     );
   });
 
