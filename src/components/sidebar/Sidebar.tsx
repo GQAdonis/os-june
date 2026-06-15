@@ -51,6 +51,7 @@ import {
 import { messageFromError } from "../../lib/errors";
 import { NOTE_DND_MIME } from "../../lib/dnd";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
+import { isPrimaryShortcut, primaryShortcutLabel } from "../../lib/platform";
 import type {
   AccountStatus,
   HermesSessionInfo,
@@ -239,6 +240,7 @@ export function Sidebar({
   const [commandActiveIndex, setCommandActiveIndex] = useState(0);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [identityMenuOpen, setIdentityMenuOpen] = useState(false);
+  const searchShortcut = primaryShortcutLabel("K");
   const inSettings = activeView === "settings";
   const [allAgentSessions, setAgentSessions] = useState<HermesSessionInfo[]>(
     [],
@@ -859,7 +861,7 @@ export function Sidebar({
               readOnly
             />
             <span className="sidebar-search-kbd" aria-hidden="true">
-              ⌘ K
+              {searchShortcut}
             </span>
           </label>
 
@@ -1486,13 +1488,7 @@ function normalizeCommandQuery(value: string) {
 }
 
 function isSearchShortcut(event: KeyboardEvent) {
-  return (
-    event.key.toLowerCase() === "k" &&
-    event.metaKey &&
-    !event.ctrlKey &&
-    !event.altKey &&
-    !event.shiftKey
-  );
+  return event.key.toLowerCase() === "k" && isPrimaryShortcut(event);
 }
 
 // The user's name is the settings entry point: clicking it opens a small

@@ -8,6 +8,7 @@ import {
   dictationHelperCommand,
   openPrivacySettings,
 } from "../../../lib/tauri";
+import { isMacLikePlatform } from "../../../lib/platform";
 import { StepActions, StepCard } from "../StepChrome";
 import {
   isAccessibilityGranted,
@@ -211,15 +212,4 @@ export function PermissionsStep({
       />
     </StepCard>
   );
-}
-
-function isMacLikePlatform() {
-  const platform =
-    typeof navigator === "undefined"
-      ? ""
-      : `${navigator.platform} ${navigator.userAgent}`;
-  if (/Windows|Win32|Win64|Linux|Android/i.test(platform)) {
-    return false;
-  }
-  return true;
 }

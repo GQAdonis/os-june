@@ -419,6 +419,34 @@ describe("OnboardingFlow", () => {
     await waitFor(() => expect(onAccountChanged).toHaveBeenCalledWith(account));
   });
 
+  it("shows Windows-accurate welcome copy", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    try {
+      render(<OnboardingFlow {...flowProps({ account: signedOutAccount })} />);
+
+      await screen.findByRole("heading", { name: "Welcome to June" });
+      expect(
+        screen.getByText("Meeting notes from your mic"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(
+          "Record meetings from your microphone and turn them into notes.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("Talk instead of type"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/Dictate into any app/),
+      ).not.toBeInTheDocument();
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("starts the trial checkout in one click and advances when the subscription lands", async () => {
     const user = userEvent.setup();
     mocks.osAccountsStartTrialCheckout.mockResolvedValue({
@@ -748,7 +776,7 @@ describe("OnboardingFlow", () => {
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     );
     try {
-      await renderFlow();
+      const onComplete = await renderFlow();
 
       expect(
         screen.getByText("Dictation and meeting notes need microphone access."),
@@ -767,6 +795,12 @@ describe("OnboardingFlow", () => {
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled(),
       );
+      await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+      await waitFor(() => expect(onComplete).toHaveBeenCalledOnce());
+      expect(
+        screen.queryByRole("heading", { name: "Talk to June" }),
+      ).not.toBeInTheDocument();
     } finally {
       restoreNavigator();
     }

@@ -78,6 +78,7 @@ import {
   playRecordingSound,
   preloadRecordingSounds,
 } from "../lib/recording-sounds";
+import { isPrimaryShortcut } from "../lib/platform";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import {
   AGENT_GALLERY_EVENT,
@@ -2560,13 +2561,7 @@ export function isAccessibilityBlocked(state?: string) {
 }
 
 function isCreateNoteShortcut(event: KeyboardEvent) {
-  return (
-    event.key.toLowerCase() === "n" &&
-    event.metaKey &&
-    !event.ctrlKey &&
-    !event.altKey &&
-    !event.shiftKey
-  );
+  return event.key.toLowerCase() === "n" && isPrimaryShortcut(event);
 }
 
 function stringPayloadValue(value: unknown) {

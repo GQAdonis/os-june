@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { IconLock } from "central-icons/IconLock";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconSparkle } from "central-icons/IconSparkle";
+import { isMacLikePlatform } from "../../../lib/platform";
 import { osAccountsCancelLogin, osAccountsLogin } from "../../../lib/tauri";
 import type { AccountStatus } from "../../../lib/tauri";
 import { OsMark } from "../../account/AccountGate";
@@ -29,6 +30,16 @@ const JUNE_POINTS = [
   },
 ];
 
+const WINDOWS_JUNE_POINTS = [
+  JUNE_POINTS[0],
+  {
+    icon: IconMicrophone,
+    title: "Meeting notes from your mic",
+    detail: "Record meetings from your microphone and turn them into notes.",
+  },
+  JUNE_POINTS[2],
+];
+
 /**
  * Step 1: welcome + sign-in, fused into one screen so the wizard frames the
  * very first thing a new user sees. The browser handoff resolves through the
@@ -46,6 +57,7 @@ export function SignInStep({
 }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>();
+  const points = isMacLikePlatform() ? JUNE_POINTS : WINDOWS_JUNE_POINTS;
 
   const cancelInFlight = useCallback(async () => {
     try {
@@ -88,7 +100,7 @@ export function SignInStep({
       wide
     >
       <ul className="onboarding-points">
-        {JUNE_POINTS.map(({ icon: Icon, title, detail }) => (
+        {points.map(({ icon: Icon, title, detail }) => (
           <li key={title}>
             <span className="onboarding-point-icon" aria-hidden>
               <Icon size={15} />
