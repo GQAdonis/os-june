@@ -307,7 +307,7 @@ export function NoteEditor({
                   text={
                     visibleTurns.length
                       ? turnsToText(visibleTurns)
-                      : transcriptToText(note)
+                      : transcriptText
                   }
                 />
               </div>
