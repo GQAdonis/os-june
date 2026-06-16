@@ -3,6 +3,7 @@ import { IconArrowRight } from "central-icons/IconArrowRight";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { AnimatePresence, motion } from "framer-motion";
 import {
   useCallback,
   useEffect,
@@ -37,6 +38,8 @@ import { RoutinesView } from "../components/routines/RoutinesView";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
+import { GlobalRecorderPill } from "../components/recorder/GlobalRecorderPill";
+import type { GlobalRecorderDemoApi } from "../lib/global-recorder-demo";
 import {
   NotesList,
   type NotesListHandle,
@@ -400,6 +403,42 @@ export function App() {
   // currently selected note — wrong whenever the user browsed away while
   // recording.
   const recordingNoteIdRef = useRef<string | undefined>(undefined);
+  // Reactive mirror of recordingNoteIdRef. The ref serves the async finish/HUD
+  // paths that need the latest value synchronously; this state drives render
+  // decisions — which note shows the in-note RecorderBar, and whether the
+  // floating global recorder pill is up (it shows whenever a recording is live
+  // but you're not viewing its note). Always update them together via
+  // setRecordingNote so they can't drift.
+  const [recordingNoteId, setRecordingNoteIdState] = useState<
+    string | undefined
+  >(undefined);
+  const setRecordingNote = useCallback((noteId: string | undefined) => {
+    recordingNoteIdRef.current = noteId;
+    setRecordingNoteIdState(noteId);
+  }, []);
+  // Dev-only synthetic status driving the global recorder pill, set by the
+  // window.__globalRecorderPill console hook. When non-null it force-shows the
+  // pill (any view, no real recording) so its styling can be inspected.
+  const [demoRecorderStatus, setDemoRecorderStatus] =
+    useState<RecordingStatusDto | null>(null);
+  const demoRecorderRef = useRef<GlobalRecorderDemoApi | null>(null);
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    void import("../lib/global-recorder-demo").then(
+      ({ registerGlobalRecorderDemo }) => {
+        if (cancelled) return;
+        demoRecorderRef.current = registerGlobalRecorderDemo({
+          setStatus: setDemoRecorderStatus,
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+      demoRecorderRef.current?.dispose();
+      demoRecorderRef.current = null;
+    };
+  }, []);
   // Sessions with a finishRecording call in flight; guards stop double-clicks.
   const finishingSessionsRef = useRef<Set<string>>(new Set());
   // A dev build without the OS Accounts env vars (fresh workspace, no .env)
@@ -1377,25 +1416,28 @@ export function App() {
     };
   }, []);
 
-  // The detached meeting HUD (shown when the main window is closed/minimized
-  // mid-recording) is a presence indicator, not a control surface: clicking it
-  // emits "reopen", and we bring the window forward and land back on the meeting
-  // being recorded. All recording controls stay in-app.
+  // The detached meeting HUD (shown when June is backgrounded, minimized, or
+  // hidden mid-recording) is a presence indicator, not a control surface:
+  // clicking it emits "reopen", and we bring the window forward and land back
+  // on the meeting being recorded. All recording controls stay in-app.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let aborted = false;
-    void listen<{ action: "reopen" }>("meeting-hud-action", (event) => {
-      if (event.payload?.action !== "reopen") return;
-      const main = getCurrentWindow();
-      void main.show();
-      void main.unminimize();
-      void main.setFocus();
-      const noteId = recordingNoteIdRef.current;
-      if (noteId) {
-        setActiveView("meetings");
-        void handleSelectNote(noteId);
-      }
-    }).then((cleanup) => {
+    void listen<{ action: "reopen"; noteId?: string }>(
+      "meeting-hud-action",
+      (event) => {
+        if (event.payload?.action !== "reopen") return;
+        const main = getCurrentWindow();
+        void main.show();
+        void main.unminimize();
+        void main.setFocus();
+        const noteId = event.payload.noteId ?? recordingNoteIdRef.current;
+        if (noteId) {
+          setActiveView("meetings");
+          void handleSelectNote(noteId);
+        }
+      },
+    ).then((cleanup) => {
       // If the listener resolves after unmount, tear it down immediately.
       if (aborted) cleanup();
       else unlisten = cleanup;
@@ -1995,65 +2037,102 @@ export function App() {
     }
   }
 
-  const handleStartRecording = useCallback(async () => {
-    if (!selectedNoteId) return;
-    recordingNoteIdRef.current = selectedNoteId;
-    dispatch({
-      type: "recordingStatusChanged",
-      status: startingRecordingStatus(sourceMode),
-    });
-    try {
-      setCheckingSourceReadiness(true);
-      const readiness = await checkRecordingSourceReadiness(sourceMode);
-      setSourceReadiness(readiness);
-
-      const micSource = readiness.sources.find(
-        (source) => source.source === "microphone",
-      );
-      if (!micSource?.ready) {
-        recordingNoteIdRef.current = undefined;
-        dispatch({ type: "recordingStatusCleared" });
-        setError(micSource?.message ?? "Microphone is not ready.");
-        return;
-      }
-
-      // System audio is optional. If the fresh probe shows it isn't
-      // available, fall back to mic-only for this take — the derived
-      // sourceMode will follow automatically next render via
-      // setSourceReadiness above.
-      const systemSource = readiness.sources.find(
-        (source) => source.source === "system",
-      );
-      const effectiveMode: RecordingSourceMode =
-        sourceMode === "microphonePlusSystem" && !systemSource?.ready
-          ? "microphoneOnly"
-          : sourceMode;
-
-      const recording = await startRecording(selectedNoteId, effectiveMode);
-      recordingNoteIdRef.current = selectedNoteId;
+  const handleStartRecordingForNote = useCallback(
+    async (noteId: string) => {
+      setRecordingNote(noteId);
       dispatch({
         type: "recordingStatusChanged",
-        status: recordingToStatus(recording),
+        status: startingRecordingStatus(noteId, sourceMode),
       });
-      playRecordingSound("start");
+      try {
+        setCheckingSourceReadiness(true);
+        const readiness = await checkRecordingSourceReadiness(sourceMode);
+        setSourceReadiness(readiness);
+
+        const micSource = readiness.sources.find(
+          (source) => source.source === "microphone",
+        );
+        if (!micSource?.ready) {
+          setRecordingNote(undefined);
+          dispatch({ type: "recordingStatusCleared" });
+          setError(micSource?.message ?? "Microphone is not ready.");
+          return;
+        }
+
+        // System audio is optional. If the fresh probe shows it isn't
+        // available, fall back to mic-only for this take — the derived
+        // sourceMode will follow automatically next render via
+        // setSourceReadiness above.
+        const systemSource = readiness.sources.find(
+          (source) => source.source === "system",
+        );
+        const effectiveMode: RecordingSourceMode =
+          sourceMode === "microphonePlusSystem" && !systemSource?.ready
+            ? "microphoneOnly"
+            : sourceMode;
+
+        const recording = await startRecording(noteId, effectiveMode);
+        setRecordingNote(noteId);
+        dispatch({
+          type: "recordingStatusChanged",
+          status: recordingToStatus(recording),
+        });
+        playRecordingSound("start");
+      } catch (err) {
+        // The ref was set optimistically above; a failed start must not leave
+        // the meeting HUD's reopen path pointing at a note with no recording.
+        setRecordingNote(undefined);
+        dispatch({ type: "recordingStatusCleared" });
+        setError(messageFromError(err));
+      } finally {
+        setCheckingSourceReadiness(false);
+      }
+    },
+    [setRecordingNote, sourceMode],
+  );
+
+  const handleStartRecording = useCallback(async () => {
+    if (!selectedNoteId) return;
+    await handleStartRecordingForNote(selectedNoteId);
+  }, [handleStartRecordingForNote, selectedNoteId]);
+
+  const handleStartMeetingDetectedRecording = useCallback(async () => {
+    try {
+      const note = await createNote(undefined);
+      dispatch({ type: "noteLoaded", note });
+      setOriginFolderId(undefined);
+      setOriginAllNotes(false);
+      setActiveView("meetings");
+      await handleStartRecordingForNote(note.id);
     } catch (err) {
-      // The ref was set optimistically above; a failed start must not leave
-      // the meeting HUD's reopen path pointing at a note with no recording.
-      recordingNoteIdRef.current = undefined;
-      dispatch({ type: "recordingStatusCleared" });
       setError(messageFromError(err));
-    } finally {
-      setCheckingSourceReadiness(false);
     }
-  }, [selectedNoteId, sourceMode]);
+  }, [handleStartRecordingForNote]);
+
+  // Click the floating global recorder pill to jump back to the note the
+  // recording belongs to (it lives wherever you started it, which may not be
+  // the note you're currently looking at).
+  const handleOpenRecordingNote = useCallback(async () => {
+    const noteId = recordingNoteIdRef.current;
+    if (!noteId) return;
+    try {
+      const note = await getNote(noteId);
+      dispatch({ type: "noteLoaded", note });
+      setOriginFolderId(undefined);
+      setOriginAllNotes(false);
+      setFolderReturnTarget(undefined);
+      setActiveView("meetings");
+    } catch (err) {
+      setError(messageFromError(err));
+    }
+  }, []);
 
   useEffect(() => {
     let aborted = false;
     let unlisten: (() => void) | undefined;
     void listen(MEETING_START_TRANSCRIPTION_EVENT, () => {
       if (appBlocked || !bootstrapped) return;
-      setActiveView("meetings");
-      void handleStartRecording();
+      void handleStartMeetingDetectedRecording();
     }).then((cleanup) => {
       if (aborted) cleanup();
       else unlisten = cleanup;
@@ -2062,7 +2141,7 @@ export function App() {
       aborted = true;
       unlisten?.();
     };
-  }, [appBlocked, bootstrapped, handleStartRecording]);
+  }, [appBlocked, bootstrapped, handleStartMeetingDetectedRecording]);
 
   async function handleFinishRecording(sessionId: string) {
     // The recorder bar stays mounted (and clickable) for the duration of its
@@ -2077,14 +2156,15 @@ export function App() {
     // button stays available — you can stack another take while this one
     // finishes — and the body shimmer ("Transcribing audio…" → "Generating
     // notes…") plus a queued count tell the user work is still in flight.
+    const owningNoteId = recordingNoteIdRef.current;
     dispatch({ type: "recordingStatusCleared" });
-    recordingNoteIdRef.current = undefined;
+    setRecordingNote(undefined);
     playRecordingSound("stop");
     // Optimistically flip the note that owns this recording to transcribing.
     // The selected note isn't necessarily that note — the user may have
     // browsed elsewhere while recording — and stamping the wrong note as
     // transcribing would lock its record button and shimmer forever.
-    if (selectedNote && selectedNote.id === recordingNoteIdRef.current) {
+    if (selectedNote && selectedNote.id === owningNoteId) {
       dispatch({
         type: "noteProcessingUpdated",
         note: { ...selectedNote, processingStatus: "transcribing" },
@@ -2195,6 +2275,35 @@ export function App() {
     );
   }
 
+  // The in-note RecorderBar covers the recording while you're looking at its
+  // note. Elsewhere, the sidebar header carries a tiny recording presence; the
+  // floating pill is only the collapsed-sidebar fallback.
+  const viewingRecordingNote =
+    activeView === "meetings" &&
+    selectedNoteId !== undefined &&
+    selectedNoteId === recordingNoteId;
+  const recorderPresenceVisible =
+    Boolean(state.recordingStatus) && !viewingRecordingNote;
+  const recordingNoteTitle =
+    (selectedNote?.id === recordingNoteId
+      ? selectedNote?.title
+      : state.notes.find((note) => note.id === recordingNoteId)?.title
+    )?.trim() || "New note";
+  // The dev console demo (window.__globalRecorderPill) force-shows the recorder
+  // presence with synthetic status; otherwise it tracks the real recording.
+  const recorderPresenceStatus =
+    demoRecorderStatus ??
+    (recorderPresenceVisible ? state.recordingStatus : null);
+  const sidebarRecorderStatus =
+    recorderPresenceStatus && !sidebarCollapsed && activeView !== "settings"
+      ? recorderPresenceStatus
+      : null;
+  const pillStatus =
+    recorderPresenceStatus && !sidebarRecorderStatus
+      ? recorderPresenceStatus
+      : null;
+  const pillIsDemo = demoRecorderStatus !== null;
+
   return (
     <main
       className="app-shell"
@@ -2289,6 +2398,11 @@ export function App() {
           setActiveView("agent");
         }}
         recoverableNoteIds={recoverableNoteIds}
+        recordingStatus={sidebarRecorderStatus}
+        recordingTitle={recordingNoteTitle}
+        onOpenRecording={() =>
+          pillIsDemo ? undefined : void handleOpenRecordingNote()
+        }
         collapsed={sidebarCollapsed}
       />
       <div
@@ -2492,6 +2606,7 @@ export function App() {
                 <NotesList
                   ref={notesListRef}
                   notes={state.notes}
+                  activeRecordingNoteId={recordingNoteId}
                   onSelectNote={(noteId) => {
                     if (takeNewTabIntent()) {
                       openTab({
@@ -2655,7 +2770,11 @@ export function App() {
                     <NoteEditor
                       note={selectedNote}
                       folders={state.folders}
-                      recordingStatus={state.recordingStatus}
+                      recordingStatus={
+                        selectedNoteId === recordingNoteId
+                          ? state.recordingStatus
+                          : undefined
+                      }
                       sourceMode={sourceMode}
                       sourceReadiness={sourceReadiness}
                       recovery={selectedRecovery}
@@ -2751,6 +2870,33 @@ export function App() {
               )}
             </div>
           </div>
+          <AnimatePresence>
+            {pillStatus ? (
+              <motion.div
+                key="global-recorder"
+                className="global-recorder-dock"
+                initial={{ opacity: 0, y: -8 }}
+                animate={{
+                  opacity: 1,
+                  y: 0,
+                  transition: { duration: 0.22, ease: [0.22, 1, 0.36, 1] },
+                }}
+                exit={{
+                  opacity: 0,
+                  y: -8,
+                  transition: { duration: 0.14, ease: [0.22, 1, 0.36, 1] },
+                }}
+              >
+                <GlobalRecorderPill
+                  status={pillStatus}
+                  title={recordingNoteTitle}
+                  onOpen={() =>
+                    pillIsDemo ? undefined : void handleOpenRecordingNote()
+                  }
+                />
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
         </section>
       </div>
       <MoveNoteToFolderDialog
@@ -3069,6 +3215,7 @@ function stringPayloadValue(value: unknown) {
 
 function recordingToStatus(recording: {
   id: string;
+  noteId?: string;
   sourceMode?: RecordingStatusDto["sourceMode"];
   state: RecordingStatusDto["state"];
   elapsedMs: number;
@@ -3078,6 +3225,7 @@ function recordingToStatus(recording: {
 }): RecordingStatusDto {
   return {
     sessionId: recording.id,
+    noteId: recording.noteId,
     sourceMode: recording.sourceMode,
     state: recording.state,
     elapsedMs: recording.elapsedMs,
@@ -3090,6 +3238,7 @@ function recordingToStatus(recording: {
 }
 
 function startingRecordingStatus(
+  noteId: string,
   sourceMode: RecordingSourceMode,
 ): RecordingStatusDto {
   const sources: RecordingStatusDto["sources"] = [
@@ -3117,6 +3266,7 @@ function startingRecordingStatus(
 
   return {
     sessionId: "",
+    noteId,
     sourceMode,
     state: "starting",
     elapsedMs: 0,

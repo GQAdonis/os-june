@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => ({
   pauseRecording: vi.fn(),
   resumeRecording: vi.fn(),
   getRecordingStatus: vi.fn(),
+  setRecordingPresenceBounds: vi.fn(),
   finishRecording: vi.fn(),
   retryProcessing: vi.fn(),
   recoverRecording: vi.fn(),
@@ -86,6 +87,7 @@ vi.mock("../lib/tauri", () => ({
   pauseRecording: mocks.pauseRecording,
   resumeRecording: mocks.resumeRecording,
   getRecordingStatus: mocks.getRecordingStatus,
+  setRecordingPresenceBounds: mocks.setRecordingPresenceBounds,
   finishRecording: mocks.finishRecording,
   retryProcessing: mocks.retryProcessing,
   recoverRecording: mocks.recoverRecording,
@@ -181,6 +183,9 @@ describe("notes recording reliability", () => {
       startDragging: vi.fn().mockResolvedValue(undefined),
     });
     mocks.bootstrapApp.mockResolvedValue(payload);
+    // The meeting-detected start path creates a fresh note to record into; this
+    // suite asserts recording lands on note-1, so the fresh note IS note-1.
+    mocks.createNote.mockResolvedValue(first);
     mocks.getNote.mockImplementation(async (noteId: string) =>
       noteId === "note-2" ? second : first,
     );
@@ -263,16 +268,58 @@ describe("notes recording reliability", () => {
     );
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-2"));
 
-    // The recorder bar is global, so Done is still reachable from note-2.
-    // findByRole: the bar re-renders while getNote("note-2") settles, so a
-    // sync query can race the view switch on slow runs.
+    // Off the recording's note, the sidebar indicator stands in for the
+    // in-note bar. Click it back to note-1, where Done lives.
+    const indicator = await screen.findByRole("button", {
+      name: "Open recording: First note",
+    });
+    await userEvent.click(indicator);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
     await waitFor(() =>
       expect(mocks.finishRecording).toHaveBeenCalledWith("rec-1"),
     );
 
     // note-2 must not pick up note-1's optimistic "transcribing" lock.
+    mocks.getNote.mockClear();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Meeting notes", current: "page" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Second note Preview/ }),
+    );
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-2"));
     expect(screen.queryByText(/Transcribing audio/)).not.toBeInTheDocument();
+  });
+
+  it("shows a sidebar recorder indicator off the recording's note and reopens it on click", async () => {
+    await startRecordingOnFirstNote();
+
+    // Browse away from the recording note while the take keeps running.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Meeting notes", current: "page" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Second note Preview/ }),
+    );
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-2"));
+
+    // The sidebar indicator stands in for the in-note bar, titled after note-1.
+    const indicator = await screen.findByRole("button", {
+      name: "Open recording: First note",
+    });
+
+    mocks.getNote.mockClear();
+    await userEvent.click(indicator);
+
+    // Clicking it jumps back to the recording's note, where it yields to the
+    // in-note recorder bar.
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Open recording: First note" }),
+      ).not.toBeInTheDocument(),
+    );
   });
 
   it("applies the finish result even when the note already sat in a terminal status", async () => {

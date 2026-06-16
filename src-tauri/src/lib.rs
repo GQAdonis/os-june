@@ -14,12 +14,47 @@ pub mod os_accounts;
 pub mod providers;
 pub mod scribe_api;
 
+use serde::Deserialize;
+use std::sync::Mutex;
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use tauri::{Emitter, Manager};
 
 const CHECK_FOR_UPDATES_MENU_ID: &str = "check_for_updates";
 const CHECK_FOR_UPDATES_EVENT: &str = "scribe://check-for-updates";
 const OPEN_SETTINGS_MENU_ID: &str = "open_settings";
 const OPEN_SETTINGS_EVENT: &str = "scribe://open-settings";
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordingPresenceBounds {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl RecordingPresenceBounds {
+    fn contains(self, x: f64, y: f64) -> bool {
+        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
+    }
+
+    fn is_valid(self) -> bool {
+        self.width > 0.0 && self.height > 0.0
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetRecordingPresenceBoundsRequest {
+    bounds: Option<RecordingPresenceBounds>,
+}
+
+#[derive(Default)]
+struct RecordingPresenceBoundsState(Mutex<Option<RecordingPresenceBounds>>);
+
+#[cfg(target_os = "macos")]
+static MAIN_WINDOW_APP: OnceLock<tauri::AppHandle> = OnceLock::new();
 
 pub fn run() {
     providers::load_local_env();
@@ -132,6 +167,7 @@ pub fn run() {
             commands::pause_recording,
             commands::resume_recording,
             commands::get_recording_status,
+            set_recording_presence_bounds,
             commands::finish_recording,
             commands::retry_processing,
             commands::recover_recording,
@@ -175,6 +211,7 @@ pub fn run() {
             os_accounts::os_accounts_start_trial_checkout,
             focus_main_window
         ])
+        .manage(RecordingPresenceBoundsState::default())
         .manage(hermes_bridge::HermesBridge::default())
         .manage(os_accounts::LoginFlow::default())
         .setup(|app| {
@@ -346,15 +383,26 @@ fn focus_main_window(app: tauri::AppHandle) {
     }
 }
 
-#[cfg(target_os = "macos")]
-fn setup_main_window_lifecycle(app: &mut tauri::App) {
-    if let Some(main_window) = app.get_webview_window("main") {
-        register_main_window_lifecycle(&main_window);
+#[tauri::command]
+fn set_recording_presence_bounds(
+    state: tauri::State<'_, RecordingPresenceBoundsState>,
+    request: SetRecordingPresenceBoundsRequest,
+) {
+    if let Ok(mut bounds) = state.0.lock() {
+        *bounds = request.bounds.filter(|bounds| bounds.is_valid());
     }
 }
 
 #[cfg(target_os = "macos")]
-fn register_main_window_lifecycle(window: &tauri::WebviewWindow) {
+fn setup_main_window_lifecycle(app: &mut tauri::App) {
+    if let Some(main_window) = app.get_webview_window("main") {
+        register_main_window_lifecycle(app.handle(), &main_window);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn register_main_window_lifecycle(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    install_main_window_first_mouse_bridge(app, window);
     let close_window = window.clone();
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -362,6 +410,131 @@ fn register_main_window_lifecycle(window: &tauri::WebviewWindow) {
             let _ = close_window.hide();
         }
     });
+}
+
+#[cfg(target_os = "macos")]
+fn install_main_window_first_mouse_bridge(app: &tauri::AppHandle, window: &tauri::WebviewWindow) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let _ = MAIN_WINDOW_APP.get_or_init(|| app.clone());
+    let Ok(handle) = window.ns_window() else {
+        return;
+    };
+    if handle.is_null() {
+        return;
+    }
+    let Some(class) = main_window_first_mouse_class() else {
+        return;
+    };
+
+    unsafe {
+        let window = handle as *mut AnyObject;
+        objc2::ffi::object_setClass(window, class as *const _ as *const _);
+        let _: () = msg_send![window, setAcceptsMouseMovedEvents: true];
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn main_window_first_mouse_class() -> Option<&'static objc2::runtime::AnyClass> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
+    use objc2::sel;
+
+    const NS_EVENT_TYPE_LEFT_MOUSE_DOWN: i64 = 1;
+
+    extern "C-unwind" fn send_event(this: &AnyObject, _sel: Sel, event: *mut AnyObject) {
+        static SUPERCLASS: OnceLock<&'static AnyClass> = OnceLock::new();
+
+        unsafe {
+            if !event.is_null() {
+                let event_type: i64 = msg_send![event, type];
+                if event_type == NS_EVENT_TYPE_LEFT_MOUSE_DOWN
+                    && main_app_inactive()
+                    && main_first_mouse_hits_recording_presence(this, event)
+                {
+                    emit_recording_presence_reopen();
+                }
+            }
+
+            let superclass = *SUPERCLASS
+                .get_or_init(|| AnyClass::get(c"NSWindow").expect("NSWindow class missing"));
+            let _: () = msg_send![super(this, superclass), sendEvent: event];
+        }
+    }
+
+    if let Some(class) = AnyClass::get(c"JuneMainWindow") {
+        return Some(class);
+    }
+    let superclass = AnyClass::get(c"NSWindow")?;
+    let mut builder = objc2::runtime::ClassBuilder::new(c"JuneMainWindow", superclass)?;
+    unsafe {
+        builder.add_method(
+            sel!(sendEvent:),
+            send_event as extern "C-unwind" fn(_, _, _),
+        );
+    }
+    Some(builder.register())
+}
+
+#[cfg(target_os = "macos")]
+fn main_app_inactive() -> bool {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let Some(app_class) = AnyClass::get(c"NSApplication") else {
+        return false;
+    };
+    unsafe {
+        let app: *mut AnyObject = msg_send![app_class, sharedApplication];
+        if app.is_null() {
+            return false;
+        }
+        let active: bool = msg_send![app, isActive];
+        !active
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn main_first_mouse_hits_recording_presence(
+    window: &objc2::runtime::AnyObject,
+    event: *mut objc2::runtime::AnyObject,
+) -> bool {
+    use objc2::msg_send;
+    use objc2_foundation::{NSPoint, NSRect};
+
+    let Some(app) = MAIN_WINDOW_APP.get() else {
+        return false;
+    };
+    let Some(bounds) = app
+        .try_state::<RecordingPresenceBoundsState>()
+        .and_then(|state| state.0.lock().ok().and_then(|bounds| *bounds))
+    else {
+        return false;
+    };
+
+    let content: *mut objc2::runtime::AnyObject = msg_send![window, contentView];
+    if content.is_null() {
+        return false;
+    }
+    let frame: NSRect = msg_send![content, frame];
+    let point: NSPoint = msg_send![event, locationInWindow];
+    let x = point.x;
+    let y = frame.size.height - point.y;
+    bounds.contains(x, y)
+}
+
+#[cfg(target_os = "macos")]
+fn emit_recording_presence_reopen() {
+    let Some(app) = MAIN_WINDOW_APP.get() else {
+        return;
+    };
+    let note_id = audio::capture::current_status().and_then(|status| status.note_id);
+    let _ = app.emit_to(
+        "main",
+        "meeting-hud-action",
+        serde_json::json!({ "action": "reopen", "noteId": note_id }),
+    );
 }
 
 #[cfg(target_os = "macos")]
@@ -386,7 +559,7 @@ fn show_main_window(app: &tauri::AppHandle) {
     if let Ok(window) =
         tauri::WebviewWindowBuilder::from_config(app, config).and_then(|builder| builder.build())
     {
-        register_main_window_lifecycle(&window);
+        register_main_window_lifecycle(app, &window);
         let _ = window.show();
         let _ = window.set_focus();
     }
