@@ -823,6 +823,11 @@ export function App() {
   function handleRecovery(sessionId: string, action: "validate" | "discard") {
     void recoverRecording(sessionId, action)
       .then((note) => {
+        if (recordingStatusRef.current?.sessionId === sessionId) {
+          recordingStatusRef.current = undefined;
+          setRecordingNote(undefined);
+          dispatch({ type: "recordingStatusCleared" });
+        }
         dispatch({ type: "noteProcessingUpdated", note });
         dispatch({ type: "recoveryRemoved", sessionId });
       })

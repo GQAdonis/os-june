@@ -7,6 +7,7 @@ import type {
   AccountStatus,
   BootstrapResponse,
   NoteDto,
+  RecoverableRecordingDto,
   RecordingSessionDto,
 } from "../lib/tauri";
 
@@ -151,6 +152,21 @@ function recording(overrides: Partial<RecordingSessionDto> = {}) {
     level: { peak: 0, rms: 0, recentPeaks: [] },
     sources: [],
     warnings: [],
+    ...overrides,
+  };
+}
+
+function recovery(
+  overrides: Partial<RecoverableRecordingDto> = {},
+): RecoverableRecordingDto {
+  return {
+    sessionId: "rec-1",
+    noteId: "note-1",
+    sourceMode: "microphonePlusSystem",
+    startedAt: now,
+    partialPathPresent: true,
+    finalPathPresent: true,
+    bytesFound: 2048,
     ...overrides,
   };
 }
@@ -480,6 +496,54 @@ describe("notes recording reliability", () => {
     });
     expect(mocks.listNotes).toHaveBeenCalled();
     expect(mocks.startRecording).not.toHaveBeenCalled();
+  });
+
+  it("clears the recorder presence and disables retry when a recovery is discarded", async () => {
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [first, second],
+      activeRecoveries: [recovery()],
+      providerConfigured: true,
+    });
+    mocks.recoverRecording.mockResolvedValue({
+      ...first,
+      processingStatus: "failed",
+      lastError: "Recording discarded",
+      audio: undefined,
+      audioSources: [],
+    });
+
+    await startRecordingOnFirstNote();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Meeting notes", current: "page" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Second note Preview/ }),
+    );
+    const indicator = await screen.findByRole("button", {
+      name: "Open recording: First note",
+    });
+    await userEvent.click(indicator);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+    await userEvent.click(screen.getByRole("button", { name: "Discard" }));
+
+    await waitFor(() =>
+      expect(mocks.recoverRecording).toHaveBeenCalledWith("rec-1", "discard"),
+    );
+    expect(screen.getByText("Recording discarded")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Retry/ })).toBeDisabled();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Meeting notes", current: "page" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /Second note Preview/ }),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Open recording: First note" }),
+    ).not.toBeInTheDocument();
   });
 
   it("applies the finish result even when the note already sat in a terminal status", async () => {
