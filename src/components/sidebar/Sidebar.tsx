@@ -56,11 +56,13 @@ import {
 import { messageFromError } from "../../lib/errors";
 import { NOTE_DND_MIME } from "../../lib/dnd";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
+import { useRecordingPresenceBounds } from "../../lib/recording-presence-bounds";
 import { isPrimaryShortcut, primaryShortcutLabel } from "../../lib/platform";
 import type {
   AccountStatus,
   HermesSessionInfo,
   NoteListItemDto,
+  RecordingStatusDto,
   ReferralSummary,
 } from "../../lib/tauri";
 import { osAccountsReferralSummary } from "../../lib/tauri";
@@ -68,6 +70,7 @@ import { type SettingsTab } from "../settings/AppSettings";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
 import { DotSpinner } from "../DotSpinner";
+import { combineSourceAudioLevels, Waveform } from "../recorder/Waveform";
 
 const NO_AGENT_SESSIONS: HermesSessionInfo[] = [];
 
@@ -103,6 +106,9 @@ type SidebarProps = {
   onNewAgentSession: () => void;
   onSelectAgentSession: (session: HermesSessionInfo) => void;
   recoverableNoteIds?: ReadonlySet<string>;
+  recordingStatus?: RecordingStatusDto | null;
+  recordingTitle?: string;
+  onOpenRecording?: () => void;
   collapsed?: boolean;
   footerAccessory?: ReactNode;
 };
@@ -240,6 +246,9 @@ export function Sidebar({
   onNewAgentSession,
   onSelectAgentSession,
   recoverableNoteIds,
+  recordingStatus,
+  recordingTitle = "New note",
+  onOpenRecording,
   collapsed = false,
   footerAccessory,
 }: SidebarProps) {
@@ -887,6 +896,13 @@ export function Sidebar({
             />
             <span style={{ position: "absolute", left: -9999 }}>June</span>
           </a>
+          {recordingStatus ? (
+            <SidebarRecordingIndicator
+              status={recordingStatus}
+              title={recordingTitle}
+              onOpen={onOpenRecording}
+            />
+          ) : null}
         </header>
       )}
 
@@ -1214,6 +1230,39 @@ export function Sidebar({
         destructive
       />
     </aside>
+  );
+}
+
+function SidebarRecordingIndicator({
+  status,
+  title,
+  onOpen,
+}: {
+  status: RecordingStatusDto;
+  title: string;
+  onOpen?: () => void;
+}) {
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const recording = status.state === "recording";
+  useRecordingPresenceBounds(buttonRef);
+  const meterLevel =
+    status.sources && status.sources.length > 0
+      ? combineSourceAudioLevels(status.sources)
+      : status.level;
+
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      className="sidebar-recording-indicator"
+      data-state={status.state}
+      onClick={onOpen}
+      aria-label={`Open recording: ${title}`}
+      title="Open recording"
+    >
+      <span className="sidebar-recording-dot" aria-hidden />
+      <Waveform level={meterLevel} active={recording} />
+    </button>
   );
 }
 
