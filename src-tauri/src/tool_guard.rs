@@ -362,3 +362,170 @@ fn byte_index_for_codepoint(text: &str, index: usize) -> Option<usize> {
 fn redaction_error(message: &'static str) -> AppError {
     AppError::new("tool_guard_redaction_failed", message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn value_locator(path: Vec<ToolGuardPathSegment>) -> ToolGuardLocator {
+        ToolGuardLocator {
+            target: ToolGuardLocatorTarget::Value,
+            path,
+        }
+    }
+
+    fn key_locator(path: Vec<ToolGuardPathSegment>) -> ToolGuardLocator {
+        ToolGuardLocator {
+            target: ToolGuardLocatorTarget::Key,
+            path,
+        }
+    }
+
+    fn key_segment(key: &str) -> ToolGuardPathSegment {
+        ToolGuardPathSegment::ObjectKeySha256 {
+            sha256: object_key_sha256(key),
+        }
+    }
+
+    fn range(start: usize, end: usize) -> ToolGuardTextRange {
+        ToolGuardTextRange {
+            start,
+            end,
+            unit: ToolGuardTextRangeUnit::UnicodeCodepoint,
+        }
+    }
+
+    fn operation(
+        finding_id: &str,
+        locator: ToolGuardLocator,
+        start: usize,
+        end: usize,
+        replacement: &str,
+    ) -> ToolGuardRedactionOperation {
+        ToolGuardRedactionOperation {
+            finding_id: finding_id.to_string(),
+            locator,
+            range: range(start, end),
+            replacement: replacement.to_string(),
+        }
+    }
+
+    fn plan(operations: Vec<ToolGuardRedactionOperation>) -> ToolGuardRedactionPlan {
+        ToolGuardRedactionPlan { operations }
+    }
+
+    #[test]
+    fn redacts_value_and_records_mapping() {
+        let value = json!({ "query": "Email alice@example.com now" });
+        let locator = value_locator(vec![key_segment("query")]);
+        let plan = plan(vec![operation(
+            "finding-1",
+            locator.clone(),
+            6,
+            23,
+            "[[OSG.EMAIL.1]]",
+        )]);
+
+        let result = apply_redaction_plan(&value, &plan, None).expect("redaction succeeds");
+
+        assert_eq!(result.value["query"], "Email [[OSG.EMAIL.1]] now");
+        assert_eq!(
+            result.mappings,
+            vec![ToolGuardReplacementMapping {
+                replacement: "[[OSG.EMAIL.1]]".to_string(),
+                original: "alice@example.com".to_string(),
+            }]
+        );
+        assert_eq!(
+            text_for_locator(&value, &locator).as_deref(),
+            Some("Email alice@example.com now")
+        );
+    }
+
+    #[test]
+    fn applies_multiple_ranges_from_the_end_of_the_value() {
+        let value = json!({
+            "items": [
+                { "summary": "Alice 555-0100" }
+            ]
+        });
+        let locator = value_locator(vec![
+            key_segment("items"),
+            ToolGuardPathSegment::ArrayIndex { index: 0 },
+            key_segment("summary"),
+        ]);
+        let plan = plan(vec![
+            operation("finding-1", locator.clone(), 0, 5, "[[OSG.NAME.1]]"),
+            operation("finding-2", locator, 6, 14, "[[OSG.PHONE.1]]"),
+        ]);
+
+        let result = apply_redaction_plan(&value, &plan, None).expect("redaction succeeds");
+
+        assert_eq!(
+            result.value["items"][0]["summary"],
+            "[[OSG.NAME.1]] [[OSG.PHONE.1]]"
+        );
+        assert_eq!(result.mappings.len(), 2);
+    }
+
+    #[test]
+    fn selected_findings_leave_unselected_text_raw() {
+        let value = json!({ "query": "Email alice@example.com or bob@example.com" });
+        let locator = value_locator(vec![key_segment("query")]);
+        let plan = plan(vec![
+            operation("finding-1", locator.clone(), 6, 23, "[[OSG.EMAIL.1]]"),
+            operation("finding-2", locator, 27, 42, "[[OSG.EMAIL.2]]"),
+        ]);
+        let selected = HashSet::from(["finding-2".to_string()]);
+
+        let result =
+            apply_redaction_plan(&value, &plan, Some(&selected)).expect("redaction succeeds");
+
+        assert_eq!(
+            result.value["query"],
+            "Email alice@example.com or [[OSG.EMAIL.2]]"
+        );
+        assert_eq!(result.mappings[0].original, "bob@example.com");
+    }
+
+    #[test]
+    fn redacts_object_keys_by_hashed_path() {
+        let value = json!({ "alice@example.com": "secret", "other": true });
+        let locator = key_locator(vec![key_segment("alice@example.com")]);
+        let plan = plan(vec![operation(
+            "finding-1",
+            locator.clone(),
+            0,
+            17,
+            "[[OSG.EMAIL.1]]",
+        )]);
+
+        let result = apply_redaction_plan(&value, &plan, None).expect("redaction succeeds");
+
+        assert!(result.value.get("alice@example.com").is_none());
+        assert_eq!(result.value["[[OSG.EMAIL.1]]"], "secret");
+        assert_eq!(
+            text_for_locator(&value, &locator).as_deref(),
+            Some("alice@example.com")
+        );
+    }
+
+    #[test]
+    fn rehydrates_final_text_from_local_mappings() {
+        let mappings = vec![
+            ToolGuardReplacementMapping {
+                replacement: "[[OSG.EMAIL.1]]".to_string(),
+                original: "alice@example.com".to_string(),
+            },
+            ToolGuardReplacementMapping {
+                replacement: "[[OSG.PHONE.1]]".to_string(),
+                original: "555-0100".to_string(),
+            },
+        ];
+
+        let text = rehydrate_text("I found [[OSG.EMAIL.1]] and [[OSG.PHONE.1]].", &mappings);
+
+        assert_eq!(text, "I found alice@example.com and 555-0100.");
+    }
+}
