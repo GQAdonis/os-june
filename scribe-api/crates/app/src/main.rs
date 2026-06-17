@@ -6,9 +6,9 @@ use scribe_config::{
 };
 use scribe_providers::{
     JwksTokenVerifier, LocalDevOsAccountsClient, LocalDevTokenVerifier, LogIssueReportSink,
-    MultiFormatDurationProbe, OsAccountsHttpClient, OsPlatformIssueReportSink, RoutingTranscriber,
-    VeniceAgentChat, VeniceCleaner, VeniceGenerator, VeniceModelCatalog, WebhookIssueReportSink,
-    default_client, jwks_client,
+    MultiFormatDurationProbe, OsAccountsHttpClient, OsGuardToolGuard, OsPlatformIssueReportSink,
+    RoutingTranscriber, VeniceAgentChat, VeniceCleaner, VeniceGenerator, VeniceModelCatalog,
+    WebhookIssueReportSink, default_client, jwks_client,
 };
 use scribe_services::{
     AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps,
@@ -111,6 +111,7 @@ fn build_router(
         Arc::new(MultiFormatDurationProbe);
     let token_verifier = build_token_verifier(config);
     let issue_reports = build_issue_report_sink(config, http);
+    let tool_guard = build_tool_guard(config, http);
 
     let flat_estimate_credits = config.os_accounts.flat_estimate_credits;
 
@@ -158,6 +159,7 @@ fn build_router(
         agent_chat,
         dictate,
         issue_reports,
+        tool_guard,
         limits: ApiLimits {
             max_audio_bytes: config.server.max_audio_bytes,
             max_json_bytes: config.server.max_json_bytes,
@@ -186,6 +188,25 @@ fn build_os_accounts_client(
             &config.os_accounts,
         ))
     }
+}
+
+/// Builds the Tool Guard analyzer, but only when OS-Guard is configured. Tool
+/// Guard has no Venice equivalent, so an unset `osguard.base_url` leaves the
+/// feature off and its endpoints return a clean "unavailable" error rather than
+/// falling back to a provider that cannot perform detection.
+fn build_tool_guard(
+    config: &AppConfig,
+    http: &reqwest::Client,
+) -> Option<Arc<dyn scribe_domain::ToolGuardAnalyzer>> {
+    if config.upstreams.osguard.base_url.trim().is_empty() {
+        tracing::info!("OS-Guard is not configured; Tool Guard endpoints are disabled");
+        return None;
+    }
+    tracing::info!("OS-Guard Tool Guard enabled");
+    Some(Arc::new(OsGuardToolGuard::from_config(
+        http.clone(),
+        &config.upstreams.osguard,
+    )))
 }
 
 fn build_token_verifier(config: &AppConfig) -> Arc<dyn scribe_domain::TokenVerifier> {
