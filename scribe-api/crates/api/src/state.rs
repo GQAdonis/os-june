@@ -40,6 +40,9 @@ pub struct AttestationInfo {
     pub source_repo_url: String,
     pub image_repo: String,
     pub trust_center_url: String,
+    /// Whether chat prompts/context are redacted by the OS-Guard privacy
+    /// gateway before reaching Venice. Drives the `/verify` privacy copy.
+    pub chat_via_osguard: bool,
 }
 
 pub struct ApiStateParams {

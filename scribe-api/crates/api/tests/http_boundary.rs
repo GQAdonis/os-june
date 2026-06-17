@@ -454,6 +454,7 @@ fn test_attestation() -> AttestationInfo {
         source_repo_url: "https://github.com/open-software-network/os-scribe".to_string(),
         image_repo: "ghcr.io/open-software-network/scribe-api".to_string(),
         trust_center_url: "https://trust.phala.com/app/test-app-id".to_string(),
+        chat_via_osguard: false,
     }
 }
 

@@ -56,6 +56,19 @@ fn render_page(info: &AttestationInfo) -> String {
         ),
     };
 
+    // Privacy copy depends on whether chat routes through OS-Guard: audio always
+    // goes to Venice directly, but with OS-Guard configured the chat prompts and
+    // context are redacted by the gateway before reaching Venice.
+    let inference_routing = if info.chat_via_osguard {
+        "Audio for transcription leaves the TEE for Venice directly. Prompts and \
+         context for note generation and the agent go through the OS-Guard \
+         privacy gateway, which redacts detected PII before forwarding to Venice."
+    } else {
+        "Everything leaving the TEE for model inference (audio for transcription, \
+         prompts and context for note generation and the agent) goes through \
+         Venice."
+    };
+
     PAGE_TEMPLATE
         .replace("@SERVICE@", env!("CARGO_PKG_NAME"))
         .replace("@VERSION@", env!("CARGO_PKG_VERSION"))
@@ -64,6 +77,7 @@ fn render_page(info: &AttestationInfo) -> String {
         .replace("@REPO_URL@", &repo_url)
         .replace("@IMAGE_REPO@", &image_repo)
         .replace("@TRUST_CENTER_URL@", &trust_center_url)
+        .replace("@INFERENCE_ROUTING@", inference_routing)
 }
 
 const PAGE_TEMPLATE: &str = r#"<!doctype html>
@@ -225,12 +239,10 @@ the digest yourself instead of trusting our CI) are in progress; see
 
 <h2>What this does not cover</h2>
 <p>The chain verifies the <strong>code</strong> running in the confidential VM,
-not what upstream providers do. Everything leaving the TEE for model inference
-(audio for transcription, prompts and context for note generation and the
-agent) goes through Venice. By default it runs on Venice private models: zero
-data retention, no training. If you select an anonymized model not run by
-Venice, the request is still routed and anonymized by Venice, but the
-underlying model provider may retain data under its own privacy policy.
+not what upstream providers do. @INFERENCE_ROUTING@ By default it runs on Venice
+private models: zero data retention, no training. If you select an anonymized
+model not run by Venice, the request is still routed and anonymized by Venice,
+but the underlying model provider may retain data under its own privacy policy.
 End-to-end private inference is a separate workstream.</p>
 
 <footer>
@@ -251,6 +263,7 @@ mod tests {
             source_repo_url: "https://github.com/open-software-network/os-scribe".to_string(),
             image_repo: "ghcr.io/open-software-network/scribe-api".to_string(),
             trust_center_url: "https://trust.phala.com/app/15f8d2fd".to_string(),
+            chat_via_osguard: false,
         }
     }
 
