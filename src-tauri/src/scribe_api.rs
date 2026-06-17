@@ -107,10 +107,10 @@ pub struct DictateCleanupRequestParams {
     pub utterance_id: String,
 }
 
-/// Response from the agent chat-completions proxy. Holds the upstream
-/// reqwest response so callers can forward body bytes as they arrive
-/// (Hermes requests `stream: true`) instead of buffering the whole
-/// generation before the first token is visible.
+/// Response from the agent chat-completions proxy. Holds the upstream reqwest
+/// response so callers can decide whether to buffer or stream the body. June's
+/// provider proxy buffers successful agent responses before forwarding them so
+/// Tool Guard can inspect proposed tool calls.
 pub struct AgentChatCompletionsResponse {
     pub status: u16,
     pub content_type: String,

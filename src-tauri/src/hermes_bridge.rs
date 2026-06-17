@@ -3190,6 +3190,8 @@ async fn handle_scribe_provider_connection(
         ("POST", "/v1/chat/completions") => {
             let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            let requested_stream = chat_completion_requested_stream(&body);
+            force_non_streaming_chat_completion(&mut body);
             if let Err(error) = guard_outbound_tool_results(&state, &mut body).await {
                 write_json_response(
                     &mut stream,
@@ -3205,24 +3207,32 @@ async fn handle_scribe_provider_connection(
                 return Ok(());
             }
             match crate::scribe_api::proxy_agent_chat_completions(body).await {
-                Ok(response) if response.status >= 400 => {
+                Ok(response) => {
                     // Error bodies are small enough to buffer whole, and
                     // buffering is what makes the overflow translation
-                    // below possible. Success responses keep streaming.
+                    // below possible. Success bodies are buffered too so Tool
+                    // Guard can inspect proposed tool calls before Hermes
+                    // receives them.
                     let status = response.status;
                     let content_type = response.content_type.clone();
                     let body = response.collect_body().await.unwrap_or_default();
-                    match translate_context_overflow_error(&body) {
-                        Some(rewritten) => {
-                            write_json_response(&mut stream, status, rewritten).await?;
+                    if status >= 400 {
+                        match translate_context_overflow_error(&body) {
+                            Some(rewritten) => {
+                                write_json_response(&mut stream, status, rewritten).await?;
+                            }
+                            None => {
+                                write_raw_response(&mut stream, status, &content_type, &body)
+                                    .await?;
+                            }
                         }
-                        None => {
-                            write_raw_response(&mut stream, status, &content_type, &body).await?;
-                        }
+                    } else if requested_stream {
+                        let value = serde_json::from_slice::<serde_json::Value>(&body)
+                            .unwrap_or_else(|_| serde_json::json!({}));
+                        write_synthetic_sse_response(&mut stream, status, value).await?;
+                    } else {
+                        write_raw_response(&mut stream, status, &content_type, &body).await?;
                     }
-                }
-                Ok(response) => {
-                    write_streaming_response(&mut stream, response).await?;
                 }
                 Err(error) => {
                     write_json_response(
@@ -3249,6 +3259,18 @@ async fn handle_scribe_provider_connection(
         }
     }
     Ok(())
+}
+
+fn chat_completion_requested_stream(body: &serde_json::Value) -> bool {
+    body.get("stream")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn force_non_streaming_chat_completion(body: &mut serde_json::Value) {
+    if let Some(object) = body.as_object_mut() {
+        object.insert("stream".to_string(), serde_json::Value::Bool(false));
+    }
 }
 
 async fn guard_outbound_tool_results(
@@ -3534,39 +3556,50 @@ async fn write_raw_response(
     stream.shutdown().await
 }
 
-/// Forwards an upstream chat-completions response to the socket chunk by
-/// chunk, so Hermes sees streamed tokens (`stream: true`) as they are
-/// generated instead of one buffered body after generation completes. The
-/// proxy already speaks `Connection: close`, so the body is delimited by
-/// closing the connection and no Content-Length is sent.
-async fn write_streaming_response(
+async fn write_synthetic_sse_response(
     stream: &mut tokio::net::TcpStream,
-    mut response: crate::scribe_api::AgentChatCompletionsResponse,
+    status: u16,
+    body: serde_json::Value,
 ) -> io::Result<()> {
-    let headers = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n",
-        status = response.status,
-        reason = http_status_reason(response.status),
-        content_type = response.content_type,
+    let chunk = chat_completion_sse_chunk(body);
+    let chunk = serde_json::to_string(&chunk).unwrap_or_else(|_| "{}".to_string());
+    let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
+    write_raw_response(stream, status, "text/event-stream", body.as_bytes()).await
+}
+
+fn chat_completion_sse_chunk(mut body: serde_json::Value) -> serde_json::Value {
+    body["object"] = serde_json::Value::String("chat.completion.chunk".to_string());
+    let Some(choices) = body
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+    else {
+        return body;
+    };
+    body["choices"] = serde_json::Value::Array(
+        choices
+            .into_iter()
+            .map(|choice| {
+                let message = choice.get("message").cloned().unwrap_or_default();
+                let mut delta = serde_json::Map::new();
+                if let Some(role) = message.get("role").cloned() {
+                    delta.insert("role".to_string(), role);
+                }
+                if let Some(content) = message.get("content").cloned() {
+                    delta.insert("content".to_string(), content);
+                }
+                if let Some(tool_calls) = message.get("tool_calls").cloned() {
+                    delta.insert("tool_calls".to_string(), tool_calls);
+                }
+                serde_json::json!({
+                    "index": choice.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                    "delta": delta,
+                    "finish_reason": choice.get("finish_reason").cloned().unwrap_or(serde_json::Value::Null)
+                })
+            })
+            .collect(),
     );
-    stream.write_all(headers.as_bytes()).await?;
-    loop {
-        match response.chunk().await {
-            Ok(Some(chunk)) => stream.write_all(&chunk).await?,
-            Ok(None) => break,
-            Err(error) => {
-                // Headers are already on the wire, so an error response is
-                // no longer possible. Close the connection to end the body;
-                // the client sees a truncated stream and surfaces the abort.
-                eprintln!(
-                    "Scribe provider proxy upstream stream failed: {}",
-                    error.message
-                );
-                break;
-            }
-        }
-    }
-    stream.shutdown().await
+    body
 }
 
 fn http_status_reason(status: u16) -> &'static str {
