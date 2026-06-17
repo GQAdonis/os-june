@@ -838,30 +838,38 @@ fn resolve_hermes_skill_file_in_root(skills_root: &Path, name: &str) -> Result<P
     let mut matches = Vec::new();
     collect_skill_file_matches(&root, name, 0, &mut matches)
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
+    let mut matches = canonical_skill_matches(&root, matches)?;
 
     match matches.len() {
         0 => Err(AppError::new(
             "hermes_skill_not_found",
             format!("Could not find skill \"{name}\"."),
         )),
-        1 => {
-            let path = matches
-                .remove(0)
-                .canonicalize()
-                .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
-            if !path.starts_with(&root) {
-                return Err(AppError::new(
-                    "hermes_skill_path_invalid",
-                    "Skill file is outside the managed skills directory.",
-                ));
-            }
-            Ok(path)
-        }
+        1 => Ok(matches.remove(0)),
         _ => Err(AppError::new(
             "hermes_skill_ambiguous",
             format!("More than one skill named \"{name}\" exists."),
         )),
     }
+}
+
+fn canonical_skill_matches(root: &Path, matches: Vec<PathBuf>) -> Result<Vec<PathBuf>, AppError> {
+    let mut canonical_matches = Vec::new();
+    for path in matches {
+        let path = path
+            .canonicalize()
+            .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
+        if !path.starts_with(root) {
+            return Err(AppError::new(
+                "hermes_skill_path_invalid",
+                "Skill file is outside the managed skills directory.",
+            ));
+        }
+        if !canonical_matches.iter().any(|existing| existing == &path) {
+            canonical_matches.push(path);
+        }
+    }
+    Ok(canonical_matches)
 }
 
 fn collect_skill_file_matches(
@@ -3784,6 +3792,21 @@ mod tests {
             resolve_hermes_skill_file_in_root(home.path(), "same-name").expect_err("ambiguous");
 
         assert_eq!(err.code, "hermes_skill_ambiguous");
+    }
+
+    #[test]
+    fn skill_resolver_deduplicates_canonical_matches() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let dir = home.path().join("same-name");
+        std::fs::create_dir_all(&dir).expect("skill dir");
+        let skill_file = dir.join("SKILL.md");
+        std::fs::write(&skill_file, "# Same\n").expect("skill");
+        let root = home.path().canonicalize().expect("canonical root");
+
+        let matches = canonical_skill_matches(&root, vec![skill_file.clone(), skill_file])
+            .expect("canonical matches");
+
+        assert_eq!(matches.len(), 1);
     }
 
     #[test]

@@ -62,6 +62,7 @@ import {
   useState,
 } from "react";
 import { BackButton } from "../ui/BackButton";
+import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
 import { EmptyState } from "../ui/EmptyState";
 import { HoverTip } from "../ui/HoverTip";
@@ -5032,6 +5033,7 @@ export function SkillsToolsPanel({
   const [skillLoading, setSkillLoading] = useState(false);
   const [skillSaving, setSkillSaving] = useState(false);
   const [skillError, setSkillError] = useState<string | null>(null);
+  const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const q = query.trim().toLowerCase();
   const visibleSkills = (skills ?? [])
     .filter((skill) => capabilityMatches(skill, q))
@@ -5079,26 +5081,48 @@ export function SkillsToolsPanel({
     }
   }
 
+  function closeSkillEditor() {
+    setSelectedSkillName(null);
+    setSkillDocument(null);
+    setSkillDraft("");
+    setSkillError(null);
+    setDiscardConfirmOpen(false);
+  }
+
+  function requestCloseSkillEditor() {
+    if (skillDirty) {
+      setDiscardConfirmOpen(true);
+      return;
+    }
+    closeSkillEditor();
+  }
+
   if (selectedSkillName) {
     return (
-      <SkillEditorPanel
-        document={skillDocument}
-        dirty={skillDirty}
-        error={skillError}
-        loading={skillLoading}
-        saving={skillSaving}
-        skill={selectedSkill}
-        value={skillDraft}
-        onBack={() => {
-          setSelectedSkillName(null);
-          setSkillDocument(null);
-          setSkillDraft("");
-          setSkillError(null);
-        }}
-        onCancel={() => setSkillDraft(skillDocument?.content ?? "")}
-        onChange={setSkillDraft}
-        onSave={() => void saveSkill()}
-      />
+      <>
+        <SkillEditorPanel
+          document={skillDocument}
+          dirty={skillDirty}
+          error={skillError}
+          loading={skillLoading}
+          saving={skillSaving}
+          skill={selectedSkill}
+          value={skillDraft}
+          onBack={requestCloseSkillEditor}
+          onCancel={() => setSkillDraft(skillDocument?.content ?? "")}
+          onChange={setSkillDraft}
+          onSave={() => void saveSkill()}
+        />
+        <ConfirmDialog
+          open={discardConfirmOpen}
+          title="Discard skill edits?"
+          description="Your unsaved changes will be lost."
+          confirmLabel="Discard"
+          destructive
+          onClose={() => setDiscardConfirmOpen(false)}
+          onConfirm={closeSkillEditor}
+        />
+      </>
     );
   }
 
