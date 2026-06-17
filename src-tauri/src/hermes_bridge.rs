@@ -3193,17 +3193,7 @@ async fn handle_scribe_provider_connection(
             let requested_stream = chat_completion_requested_stream(&body);
             force_non_streaming_chat_completion(&mut body);
             if let Err(error) = guard_outbound_tool_results(&state, &mut body).await {
-                write_json_response(
-                    &mut stream,
-                    502,
-                    serde_json::json!({
-                        "error": {
-                            "message": format!("Tool Guard blocked the provider request: {}", error.message),
-                            "type": error.code
-                        }
-                    }),
-                )
-                .await?;
+                write_tool_guard_blocked_response(&mut stream, &error).await?;
                 return Ok(());
             }
             match crate::scribe_api::proxy_agent_chat_completions(body).await {
@@ -3230,31 +3220,11 @@ async fn handle_scribe_provider_connection(
                         let mut value = serde_json::from_slice::<serde_json::Value>(&body)
                             .unwrap_or_else(|_| serde_json::json!({}));
                         if let Err(error) = guard_inbound_tool_calls(&state, &mut value).await {
-                            write_json_response(
-                                &mut stream,
-                                502,
-                                serde_json::json!({
-                                    "error": {
-                                        "message": format!("Tool Guard blocked the provider response: {}", error.message),
-                                        "type": error.code
-                                    }
-                                }),
-                            )
-                            .await?;
+                            write_tool_guard_blocked_response(&mut stream, &error).await?;
                             return Ok(());
                         }
                         if let Err(error) = rehydrate_assistant_text(&state, &mut value) {
-                            write_json_response(
-                                &mut stream,
-                                502,
-                                serde_json::json!({
-                                    "error": {
-                                        "message": format!("Tool Guard could not rehydrate the provider response: {}", error.message),
-                                        "type": error.code
-                                    }
-                                }),
-                            )
-                            .await?;
+                            write_tool_guard_blocked_response(&mut stream, &error).await?;
                             return Ok(());
                         }
                         write_synthetic_sse_response(&mut stream, status, value).await?;
@@ -3264,31 +3234,11 @@ async fn handle_scribe_provider_connection(
                                 if let Err(error) =
                                     guard_inbound_tool_calls(&state, &mut value).await
                                 {
-                                    write_json_response(
-                                        &mut stream,
-                                        502,
-                                        serde_json::json!({
-                                            "error": {
-                                                "message": format!("Tool Guard blocked the provider response: {}", error.message),
-                                                "type": error.code
-                                            }
-                                        }),
-                                    )
-                                    .await?;
+                                    write_tool_guard_blocked_response(&mut stream, &error).await?;
                                     return Ok(());
                                 }
                                 if let Err(error) = rehydrate_assistant_text(&state, &mut value) {
-                                    write_json_response(
-                                        &mut stream,
-                                        502,
-                                        serde_json::json!({
-                                            "error": {
-                                                "message": format!("Tool Guard could not rehydrate the provider response: {}", error.message),
-                                                "type": error.code
-                                            }
-                                        }),
-                                    )
-                                    .await?;
+                                    write_tool_guard_blocked_response(&mut stream, &error).await?;
                                     return Ok(());
                                 }
                                 write_json_response(&mut stream, status, value).await?;
@@ -3803,6 +3753,29 @@ async fn write_json_response(
     write_raw_response(stream, status, "application/json", &body).await
 }
 
+async fn write_tool_guard_blocked_response(
+    stream: &mut tokio::net::TcpStream,
+    error: &AppError,
+) -> io::Result<()> {
+    let reason = if error.code.is_empty() {
+        "tool_guard_blocked"
+    } else {
+        error.code.as_str()
+    };
+    write_json_response(
+        stream,
+        403,
+        serde_json::json!({
+            "error": {
+                "message": "tool_guard_blocked",
+                "type": "tool_guard_blocked",
+                "reason": reason
+            }
+        }),
+    )
+    .await
+}
+
 async fn write_raw_response(
     stream: &mut tokio::net::TcpStream,
     status: u16,
@@ -3871,6 +3844,7 @@ fn http_status_reason(status: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         402 => "Payment Required",
+        403 => "Forbidden",
         404 => "Not Found",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
