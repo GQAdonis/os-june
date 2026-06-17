@@ -1306,9 +1306,9 @@ mod tests {
 
     #[tokio::test]
     async fn generator_maps_venice_direct_403_to_upstream_not_policy_block() {
-        // When OS-Guard is not configured, chat goes to Venice directly, where a
-        // 403 is an authorization/account failure (content-policy is 422). It
-        // must NOT be reported as a policy block — only a gateway 403 is.
+        // For direct Venice callers, a 403 is an authorization/account failure
+        // (content-policy is 422). It must NOT be reported as a policy block:
+        // only a gateway 403 is.
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/chat/completions"))

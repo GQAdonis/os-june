@@ -17,8 +17,8 @@ struct ApiStateInner {
     agent_chat: Arc<AgentChatService>,
     dictate: Arc<DictateService>,
     issue_reports: Arc<dyn IssueReportSink>,
-    /// None when OS-Guard is not configured. Tool Guard has no Venice
-    /// equivalent, so its endpoints fail cleanly instead of falling back.
+    /// None only for manually constructed states. The app builder requires
+    /// OS-Guard and wires this analyzer in normal deployments.
     tool_guard: Option<Arc<dyn ToolGuardAnalyzer>>,
     limits: ApiLimits,
     attestation: AttestationInfo,
@@ -42,6 +42,7 @@ pub struct AttestationInfo {
     pub trust_center_url: String,
     /// Whether chat prompts/context are redacted by the OS-Guard privacy
     /// gateway before reaching Venice. Drives the `/verify` privacy copy.
+    /// Normal app configuration sets this to true.
     pub chat_via_osguard: bool,
 }
 

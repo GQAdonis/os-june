@@ -56,9 +56,9 @@ fn render_page(info: &AttestationInfo) -> String {
         ),
     };
 
-    // Privacy copy depends on whether chat routes through OS-Guard: audio always
-    // goes to Venice directly, but with OS-Guard configured chat prompts and
-    // context are redacted by the gateway before reaching Venice.
+    // Privacy copy depends on whether chat routes through OS-Guard. The app
+    // requires that route, but the flag keeps the page accurate for tests or
+    // manually constructed API states.
     let inference_routing = if info.chat_via_osguard {
         "Audio for transcription leaves the TEE for Venice directly. Prompts and \
          context for note generation, dictation cleanup, and the agent go through \

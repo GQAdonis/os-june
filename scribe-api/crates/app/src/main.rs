@@ -97,12 +97,10 @@ fn build_router(
         RoutingTranscriber::from_config(http.clone(), &config.upstreams, openai_model_ids),
     );
     // Chat completions (note generation, dictation cleanup, agent chat) go
-    // through OS-Guard when it is configured, falling back to Venice otherwise.
-    // The providers are OpenAI-compatible, so only the upstream they point at
+    // through OS-Guard. The gateway is OpenAI-compatible, so only the upstream
     // changes. Audio transcription above stays on Venice unconditionally.
     let chat_upstream = config.upstreams.chat_upstream();
-    // A 403 means a policy block only when chat routes through OS-Guard; for a
-    // Venice-direct upstream a 403 is an authorization/account failure.
+    // A 403 from OS-Guard means a deterministic policy block.
     let chat_via_osguard = config.upstreams.chat_routes_through_osguard();
     let generator: Arc<dyn scribe_domain::Generator> = Arc::new(VeniceGenerator::from_config(
         http.clone(),
@@ -121,7 +119,7 @@ fn build_router(
         Arc::new(MultiFormatDurationProbe);
     let token_verifier = build_token_verifier(config);
     let issue_reports = build_issue_report_sink(config, http);
-    let tool_guard = build_tool_guard(config, http);
+    let tool_guard = Some(build_tool_guard(config, http));
 
     let flat_estimate_credits = config.os_accounts.flat_estimate_credits;
 
@@ -201,23 +199,19 @@ fn build_os_accounts_client(
     }
 }
 
-/// Builds the Tool Guard analyzer, but only when OS-Guard is configured. Tool
-/// Guard has no Venice equivalent, so an unset `osguard.base_url` leaves the
-/// feature off and its endpoints return a clean "unavailable" error rather than
-/// falling back to a provider that cannot perform detection.
+/// Builds the Tool Guard analyzer from the required OS-Guard upstream. Tool
+/// Guard has no Venice equivalent, so the app requires the gateway URL at
+/// configuration time rather than falling back to a provider that cannot
+/// perform detection.
 fn build_tool_guard(
     config: &AppConfig,
     http: &reqwest::Client,
-) -> Option<Arc<dyn scribe_domain::ToolGuardAnalyzer>> {
-    if config.upstreams.osguard.base_url.trim().is_empty() {
-        tracing::info!("OS-Guard is not configured; Tool Guard endpoints are disabled");
-        return None;
-    }
+) -> Arc<dyn scribe_domain::ToolGuardAnalyzer> {
     tracing::info!("OS-Guard Tool Guard enabled");
-    Some(Arc::new(OsGuardToolGuard::from_config(
+    Arc::new(OsGuardToolGuard::from_config(
         http.clone(),
         &config.upstreams.osguard,
-    )))
+    ))
 }
 
 fn build_token_verifier(config: &AppConfig) -> Arc<dyn scribe_domain::TokenVerifier> {

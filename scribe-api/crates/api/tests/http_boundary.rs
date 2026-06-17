@@ -307,10 +307,10 @@ async fn integration_tool_guard_call_requires_auth() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
-async fn integration_tool_guard_call_unconfigured_returns_unavailable() -> Result<(), Box<dyn Error>>
-{
-    // With no analyzer wired (OS-Guard unconfigured), the endpoint must fail
-    // cleanly as unavailable rather than falling back to anything.
+async fn integration_tool_guard_call_without_analyzer_returns_unavailable()
+-> Result<(), Box<dyn Error>> {
+    // With no analyzer wired, the endpoint must fail cleanly as unavailable
+    // rather than falling back to anything.
     let response = send(json_request(
         "/v1/tool-guard/calls",
         &tool_guard_call_body(),

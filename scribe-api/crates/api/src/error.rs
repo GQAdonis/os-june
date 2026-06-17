@@ -96,10 +96,9 @@ impl IntoResponse for ApiError {
             Self::PolicyBlocked => {
                 error_response(StatusCode::FORBIDDEN, ERR_POLICY_BLOCKED, "policy_blocked")
             }
-            // Tool Guard requires OS-Guard to be configured; there is no Venice
-            // fallback. When it is not configured, the feature is unavailable on
-            // this deployment rather than a per-request failure — 503 so the
-            // client can disable the capability instead of retrying.
+            // Tool Guard requires an analyzer. Normal deployments wire one from
+            // the required OS-Guard upstream; manually constructed states can
+            // still omit it, so report the feature as unavailable.
             Self::ToolGuardUnavailable => error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 ERR_TOOL_GUARD_UNAVAILABLE,
