@@ -5251,6 +5251,7 @@ function SkillEditorPanel({
             className="agent-skill-editor-textarea"
             value={value}
             aria-label={`${title} skill Markdown`}
+            disabled={saving}
             spellCheck={false}
             onChange={(event) => onChange(event.currentTarget.value)}
           />
