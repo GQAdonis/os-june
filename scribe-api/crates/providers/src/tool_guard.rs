@@ -95,13 +95,10 @@ impl OsGuardToolGuard {
             tracing::error!(%status, %url, retryable, "tool-guard: non-success response");
             return Err(UpstreamAttemptError { error, retryable });
         }
-        response
-            .json::<ToolGuardAnalysis>()
-            .await
-            .map_err(|error| {
-                tracing::error!(%error, %url, "tool-guard: response JSON parse failed");
-                UpstreamAttemptError::fatal(DomainError::UpstreamProvider)
-            })
+        response.json::<ToolGuardAnalysis>().await.map_err(|error| {
+            tracing::error!(%error, %url, "tool-guard: response JSON parse failed");
+            UpstreamAttemptError::fatal(DomainError::UpstreamProvider)
+        })
     }
 }
 
