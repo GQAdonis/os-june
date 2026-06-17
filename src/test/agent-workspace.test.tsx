@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => ({
   hermesBridgeFilePreview: vi.fn(),
   hermesBridgeFileText: vi.fn(),
   hermesBridgeMessagingPlatforms: vi.fn(),
+  hermesBridgeToolGuardDecision: vi.fn(),
   hermesBridgeSkills: vi.fn(),
   hermesBridgeStatus: vi.fn(),
   hermesBridgeToolsets: vi.fn(),
@@ -74,12 +75,12 @@ const mocks = vi.hoisted(() => ({
   }>,
   eventHandlers: new Map<
     string,
-    (event: { payload?: { paths?: string[] } }) => void
+    (event: { payload?: Record<string, unknown> }) => void
   >(),
   listen: vi.fn(
     async (
       eventName: string,
-      handler: (event: { payload?: { paths?: string[] } }) => void,
+      handler: (event: { payload?: Record<string, unknown> }) => void,
     ) => {
       mocks.eventHandlers.set(eventName, handler);
       return () => mocks.eventHandlers.delete(eventName);
@@ -96,6 +97,8 @@ vi.mock("../lib/tauri", () => ({
   hermesBridgeFilePreview: mocks.hermesBridgeFilePreview,
   hermesBridgeFileText: mocks.hermesBridgeFileText,
   hermesBridgeMessagingPlatforms: mocks.hermesBridgeMessagingPlatforms,
+  hermesBridgeToolGuardDecision: mocks.hermesBridgeToolGuardDecision,
+  TOOL_GUARD_DECISION_EVENT: "tool-guard-decision-request",
   hermesAgentCliAccess: mocks.hermesAgentCliAccess,
   hermesBridgeSkills: mocks.hermesBridgeSkills,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
@@ -228,6 +231,7 @@ describe("AgentWorkspace", () => {
       running: true,
       connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
     });
+    mocks.hermesBridgeToolGuardDecision.mockResolvedValue(undefined);
     // Mirrors the backend: starting a mode yields a status that contains
     // that mode's connection (alongside any other live mode).
     mocks.startHermesBridge.mockImplementation(
@@ -305,6 +309,54 @@ describe("AgentWorkspace", () => {
     expect(
       window.sessionStorage.getItem(AGENT_NEW_SESSION_PENDING_KEY),
     ).toBeNull();
+  });
+
+  it("renders Tool Guard review requests and sends selected redactions", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    await waitFor(() =>
+      expect(
+        mocks.eventHandlers.has("tool-guard-decision-request"),
+      ).toBeTruthy(),
+    );
+
+    act(() => {
+      mocks.eventHandlers.get("tool-guard-decision-request")?.({
+        payload: {
+          decisionId: "decision-1",
+          kind: "toolCall",
+          toolCallId: "call-1",
+          toolName: "web_lookup",
+          destinationId: "web",
+          analysisRequestId: "req-1",
+          findings: [
+            {
+              findingId: "finding-1",
+              piiType: "email",
+              confidenceBucket: "high",
+              replacement: "[[OSG.EMAIL.1]]",
+              originalText: "alice@example.com",
+            },
+          ],
+          advisories: [],
+        },
+      });
+    });
+
+    expect(
+      await screen.findByRole("dialog", { name: "Review tool data" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("alice@example.com")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Redact selected" }));
+
+    await waitFor(() =>
+      expect(mocks.hermesBridgeToolGuardDecision).toHaveBeenCalledWith({
+        decisionId: "decision-1",
+        action: "redactSelected",
+        selectedFindingIds: ["finding-1"],
+      }),
+    );
   });
 
   it("keeps retrying startup session loads until the API is ready", async () => {

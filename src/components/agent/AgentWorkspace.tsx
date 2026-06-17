@@ -151,6 +151,7 @@ import {
   type ProviderModelSettingsChangedDetail,
 } from "../../lib/model-privacy";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
+import { ToolGuardReviewDialog } from "./ToolGuardReviewDialog";
 import {
   contextLabel,
   modelOptions,
@@ -4092,6 +4093,7 @@ export function AgentWorkspace({
             : null}
         </>
       )}
+      <ToolGuardReviewDialog />
     </section>
   );
 }

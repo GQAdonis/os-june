@@ -407,6 +407,50 @@ export type HermesBridgeStatus = {
   message?: string;
 };
 
+export const TOOL_GUARD_DECISION_EVENT = "tool-guard-decision-request";
+
+export type ToolGuardDecisionKind = "toolCall" | "toolResult";
+
+export type ToolGuardDecisionFinding = {
+  findingId: string;
+  piiType: string;
+  confidenceBucket: string;
+  replacement: string;
+  originalText?: string | null;
+};
+
+export type ToolGuardAdvisory = {
+  advisoryId: string;
+  advisoryType: string;
+  confidenceBucket: string;
+  score?: number | null;
+  sourceRoles?: string[];
+  categories?: string[];
+};
+
+export type ToolGuardDecisionRequest = {
+  decisionId: string;
+  kind: ToolGuardDecisionKind;
+  toolCallId: string;
+  toolName?: string | null;
+  destinationId: string;
+  analysisRequestId: string;
+  findings: ToolGuardDecisionFinding[];
+  advisories: ToolGuardAdvisory[];
+};
+
+export type ToolGuardDecisionAction =
+  | "redactSelected"
+  | "redactAll"
+  | "allowRaw"
+  | "cancel";
+
+export type ToolGuardDecisionResponse = {
+  decisionId: string;
+  action: ToolGuardDecisionAction;
+  selectedFindingIds?: string[];
+};
+
 export type HermesFilesystemEntry = {
   name: string;
   path: string;
@@ -865,6 +909,12 @@ export async function listAgentToolEvents(taskId: string) {
 
 export async function hermesBridgeStatus() {
   return invoke<HermesBridgeStatus>("hermes_bridge_status");
+}
+
+export async function hermesBridgeToolGuardDecision(
+  response: ToolGuardDecisionResponse,
+) {
+  return invoke<void>("hermes_bridge_tool_guard_decision", { response });
 }
 
 export async function hermesBridgeSkills() {
