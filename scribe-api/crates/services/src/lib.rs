@@ -412,7 +412,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_transcribe_preview_authorizes_dispatches_asr_and_settles_zero_credits() {
+    async fn note_transcribe_preview_authorizes_dispatches_asr_and_charges_actual_credits() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let transcriber = Arc::new(RecordingTranscriber::default());
         let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
@@ -444,7 +444,7 @@ mod tests {
             .await
             .expect("preview transcription succeeds");
 
-        assert_eq!(output.receipt.credits_charged.0, 0);
+        assert_eq!(output.receipt.credits_charged.0, 4);
         assert_eq!(
             os_accounts.events(),
             vec![
@@ -456,7 +456,7 @@ mod tests {
                 },
                 RecordedCall::Charge {
                     action_token: "agt_test".to_string(),
-                    credits: 0,
+                    credits: 4,
                     idempotency_key: "note_transcribe_preview:usr_123:live-preview-session-1"
                         .to_string(),
                 },
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_transcribe_preview_settles_zero_credits_when_asr_fails() {
+    async fn note_transcribe_preview_failure_still_settles_hold() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
             pricing: Arc::new(PricingTable::new(models([(
@@ -513,7 +513,7 @@ mod tests {
                 },
                 RecordedCall::Charge {
                     action_token: "agt_test".to_string(),
-                    credits: 0,
+                    credits: 4,
                     idempotency_key: "note_transcribe_preview:usr_123:live-preview-session-1"
                         .to_string(),
                 },
@@ -731,6 +731,7 @@ mod tests {
         allow: bool,
         cap: Option<u64>,
         deny_reason: Option<String>,
+        fail_charge: bool,
         events: Mutex<Vec<RecordedCall>>,
     }
 
@@ -740,6 +741,7 @@ mod tests {
                 allow: true,
                 cap: None,
                 deny_reason: None,
+                fail_charge: false,
                 events: Mutex::new(Vec::new()),
             }
         }
@@ -751,6 +753,7 @@ mod tests {
                 allow: true,
                 cap,
                 deny_reason: None,
+                fail_charge: false,
                 events: Mutex::new(Vec::new()),
             }
         }
@@ -789,6 +792,9 @@ mod tests {
                     credits: request.credits.0,
                     idempotency_key: request.idempotency_key,
                 });
+            }
+            if self.fail_charge {
+                return Err(DomainError::UpstreamProvider);
             }
             Ok(Receipt {
                 credits_charged: request.credits,
