@@ -205,7 +205,7 @@ pub struct HermesBridge {
     /// Pending Tool Guard review prompts emitted by the provider proxy and
     /// resolved by the desktop UI. Missing, timed-out, or cancelled decisions
     /// fail closed so raw tool data is not forwarded accidentally.
-    tool_guard_decisions: crate::tool_guard::ToolGuardDecisionHub,
+    tool_guard_decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
 }
 
 struct HermesProcess {
@@ -575,7 +575,7 @@ async fn start_hermes_bridge_inner(
         .map(std::path::PathBuf::from)
         .unwrap_or(default_cwd);
     let cwd_display = Some(cwd.to_string_lossy().into_owned());
-    let provider_proxy = ensure_provider_proxy(bridge).await?;
+    let provider_proxy = ensure_provider_proxy(app, bridge).await?;
     sync_hermes_config(&hermes_home, provider_proxy.port, &provider_proxy.token)?;
 
     // Wrap the spawn in a macOS Seatbelt write-jail when possible. The model,
@@ -709,7 +709,10 @@ async fn start_hermes_bridge_inner(
 
 /// The shared provider proxy's coordinates, starting it on first use. Both
 /// runtime processes point at it through the one shared config.yaml.
-async fn ensure_provider_proxy(bridge: &HermesBridge) -> Result<SharedProviderProxyInfo, AppError> {
+async fn ensure_provider_proxy(
+    app: &AppHandle,
+    bridge: &HermesBridge,
+) -> Result<SharedProviderProxyInfo, AppError> {
     {
         let guard = bridge.provider_proxy.lock().map_err(|_| {
             AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed.")
@@ -722,7 +725,12 @@ async fn ensure_provider_proxy(bridge: &HermesBridge) -> Result<SharedProviderPr
         }
     }
     let token = random_token();
-    let started = start_scribe_provider_proxy(token.clone()).await?;
+    let started = start_scribe_provider_proxy(
+        app.clone(),
+        token.clone(),
+        bridge.tool_guard_decisions.clone(),
+    )
+    .await?;
     let mut guard = bridge
         .provider_proxy
         .lock()
@@ -3078,7 +3086,9 @@ fn yaml_string(value: &str) -> String {
 }
 
 async fn start_scribe_provider_proxy(
+    app: AppHandle,
     token: String,
+    decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
 ) -> Result<RunningScribeProviderProxy, AppError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("scribe_provider_proxy_failed", error.to_string()))?;
@@ -3092,12 +3102,21 @@ async fn start_scribe_provider_proxy(
     let listener = tokio::net::TcpListener::from_std(listener)
         .map_err(|error| AppError::new("scribe_provider_proxy_failed", error.to_string()))?;
     let (shutdown, shutdown_rx) = oneshot::channel();
-    tauri::async_runtime::spawn(run_scribe_provider_proxy(
-        listener,
-        Arc::new(token),
-        shutdown_rx,
-    ));
+    let state = Arc::new(ScribeProviderProxyState {
+        app,
+        token: Arc::new(token),
+        decisions,
+        mappings: Arc::new(Mutex::new(Vec::new())),
+    });
+    tauri::async_runtime::spawn(run_scribe_provider_proxy(listener, state, shutdown_rx));
     Ok(RunningScribeProviderProxy { port, shutdown })
+}
+
+struct ScribeProviderProxyState {
+    app: AppHandle,
+    token: Arc<String>,
+    decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
+    mappings: Arc<Mutex<Vec<crate::tool_guard::ToolGuardReplacementMapping>>>,
 }
 
 struct RunningScribeProviderProxy {
@@ -3107,7 +3126,7 @@ struct RunningScribeProviderProxy {
 
 async fn run_scribe_provider_proxy(
     listener: tokio::net::TcpListener,
-    token: Arc<String>,
+    state: Arc<ScribeProviderProxyState>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
@@ -3116,9 +3135,9 @@ async fn run_scribe_provider_proxy(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
-                        let token = token.clone();
+                        let state = state.clone();
                         tauri::async_runtime::spawn(async move {
-                            let _ = handle_scribe_provider_connection(stream, token).await;
+                            let _ = handle_scribe_provider_connection(stream, state).await;
                         });
                     }
                     Err(error) => {
@@ -3137,7 +3156,7 @@ async fn run_scribe_provider_proxy(
 
 async fn handle_scribe_provider_connection(
     mut stream: tokio::net::TcpStream,
-    token: Arc<String>,
+    state: Arc<ScribeProviderProxyState>,
 ) -> io::Result<()> {
     let request = match read_http_request(&mut stream).await {
         Ok(request) => request,
@@ -3151,7 +3170,7 @@ async fn handle_scribe_provider_connection(
             return Ok(());
         }
     };
-    if !provider_proxy_authorized(&request, &token) {
+    if !provider_proxy_authorized(&request, &state.token) {
         write_json_response(
             &mut stream,
             401,
@@ -3169,8 +3188,22 @@ async fn handle_scribe_provider_connection(
             write_json_response(&mut stream, 200, body).await?;
         }
         ("POST", "/v1/chat/completions") => {
-            let body = serde_json::from_slice::<serde_json::Value>(&request.body)
+            let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            if let Err(error) = guard_outbound_tool_results(&state, &mut body).await {
+                write_json_response(
+                    &mut stream,
+                    502,
+                    serde_json::json!({
+                        "error": {
+                            "message": format!("Tool Guard blocked the provider request: {}", error.message),
+                            "type": error.code
+                        }
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
             match crate::scribe_api::proxy_agent_chat_completions(body).await {
                 Ok(response) if response.status >= 400 => {
                     // Error bodies are small enough to buffer whole, and
@@ -3216,6 +3249,105 @@ async fn handle_scribe_provider_connection(
         }
     }
     Ok(())
+}
+
+async fn guard_outbound_tool_results(
+    state: &ScribeProviderProxyState,
+    body: &mut serde_json::Value,
+) -> Result<(), AppError> {
+    let agent_turn_id = uuid::Uuid::new_v4().to_string();
+    let Some(messages) = body
+        .as_object_mut()
+        .and_then(|object| object.get_mut("messages"))
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(());
+    };
+
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(result) = message.get("content").cloned() else {
+            continue;
+        };
+        let tool_call_id = message
+            .get("tool_call_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("tool-result-{}", uuid::Uuid::new_v4()));
+        let destination_id = tool_call_id.clone();
+        let analysis = crate::scribe_api::analyze_tool_guard_result(
+            crate::scribe_api::ToolGuardResultAnalysisBody {
+                agent_turn_id: agent_turn_id.clone(),
+                tool_call_id: tool_call_id.clone(),
+                destination_id: destination_id.clone(),
+                destination_class: crate::tool_guard::ToolDestinationClass::ExternalUntrusted,
+                result: result.clone(),
+                deadline_ms: tool_guard_deadline_ms(),
+                policy_context: None,
+            },
+        )
+        .await?;
+        if analysis.findings.is_empty() && analysis.advisories.is_empty() {
+            continue;
+        }
+        let decision_id = uuid::Uuid::new_v4().to_string();
+        let decision_request = crate::tool_guard::build_decision_request(
+            decision_id,
+            crate::tool_guard::ToolGuardDecisionKind::ToolResult,
+            tool_call_id,
+            None,
+            destination_id,
+            &result,
+            &analysis,
+        );
+        let decision = state
+            .decisions
+            .request_decision(&state.app, decision_request)
+            .await?;
+        let redaction = match decision {
+            crate::tool_guard::ToolGuardDecision::AllowRaw => continue,
+            crate::tool_guard::ToolGuardDecision::RedactAll => {
+                crate::tool_guard::apply_redaction_plan(&result, &analysis.redaction_plan, None)?
+            }
+            crate::tool_guard::ToolGuardDecision::RedactSelected(selected) => {
+                crate::tool_guard::apply_redaction_plan(
+                    &result,
+                    &analysis.redaction_plan,
+                    Some(&selected),
+                )?
+            }
+        };
+        message["content"] = redaction.value;
+        remember_tool_guard_mappings(state, redaction.mappings)?;
+    }
+    Ok(())
+}
+
+fn remember_tool_guard_mappings(
+    state: &ScribeProviderProxyState,
+    mappings: Vec<crate::tool_guard::ToolGuardReplacementMapping>,
+) -> Result<(), AppError> {
+    if mappings.is_empty() {
+        return Ok(());
+    }
+    state
+        .mappings
+        .lock()
+        .map_err(|_| {
+            AppError::new(
+                "tool_guard_mapping_failed",
+                "Tool Guard mapping lock failed.",
+            )
+        })?
+        .extend(mappings);
+    Ok(())
+}
+
+fn tool_guard_deadline_ms() -> u64 {
+    let deadline = chrono::Utc::now().timestamp_millis().saturating_add(30_000);
+    u64::try_from(deadline).unwrap_or(30_000)
 }
 
 struct HttpRequest {
