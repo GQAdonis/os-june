@@ -4,7 +4,8 @@ use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    io::{self, Write},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -806,8 +807,7 @@ pub fn update_hermes_bridge_skill(
     }
     let skills_root = resolve_scribe_hermes_home(&app)?.join("skills");
     let path = resolve_hermes_skill_file_in_root(&skills_root, &request.name)?;
-    fs::write(&path, request.content)
-        .map_err(|error| AppError::new("hermes_skill_write_failed", error.to_string()))?;
+    write_managed_skill_file(&skills_root, &path, &request.content)?;
     let content = fs::read_to_string(&path)
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
     Ok(HermesSkillDocument {
@@ -851,6 +851,100 @@ fn resolve_hermes_skill_file_in_root(skills_root: &Path, name: &str) -> Result<P
             format!("More than one skill named \"{name}\" exists."),
         )),
     }
+}
+
+fn write_managed_skill_file(
+    skills_root: &Path,
+    path: &Path,
+    content: &str,
+) -> Result<(), AppError> {
+    let root = skills_root
+        .canonicalize()
+        .map_err(|error| AppError::new("hermes_skill_write_failed", error.to_string()))?;
+    if !path.starts_with(&root) {
+        return Err(AppError::new(
+            "hermes_skill_path_invalid",
+            "Skill file is outside the managed skills directory.",
+        ));
+    }
+
+    let parent = path.parent().ok_or_else(|| {
+        AppError::new(
+            "hermes_skill_path_invalid",
+            "Skill file is outside the managed skills directory.",
+        )
+    })?;
+    let parent = parent
+        .canonicalize()
+        .map_err(|error| AppError::new("hermes_skill_write_failed", error.to_string()))?;
+    if !parent.starts_with(&root) {
+        return Err(AppError::new(
+            "hermes_skill_path_invalid",
+            "Skill file is outside the managed skills directory.",
+        ));
+    }
+
+    let file_name = path.file_name().ok_or_else(|| {
+        AppError::new(
+            "hermes_skill_path_invalid",
+            "Skill file is outside the managed skills directory.",
+        )
+    })?;
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        file_name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
+
+    let write_result = (|| -> io::Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)?;
+        let temp_canonical = temp_path.canonicalize()?;
+        if !temp_canonical.starts_with(&root) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "temporary skill file escaped managed skills directory",
+            ));
+        }
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&temp_path, path)
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(AppError::new(
+            "hermes_skill_write_failed",
+            error.to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    match fs::rename(temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            fs::remove_file(path)?;
+            fs::rename(temp_path, path)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file(temp_path: &Path, path: &Path) -> io::Result<()> {
+    fs::rename(temp_path, path)
 }
 
 fn canonical_skill_matches(root: &Path, matches: Vec<PathBuf>) -> Result<Vec<PathBuf>, AppError> {
@@ -3807,6 +3901,38 @@ mod tests {
             .expect("canonical matches");
 
         assert_eq!(matches.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skill_writer_replaces_swapped_symlink_without_following_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let skills_root = home.path().join("skills");
+        let skill_dir = skills_root.join("same-name");
+        std::fs::create_dir_all(&skill_dir).expect("skill dir");
+        let skill_file = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_file, "# Original\n").expect("skill");
+        let resolved_skill_file = skill_file.canonicalize().expect("canonical skill");
+        let outside_file = home.path().join("outside.md");
+        std::fs::write(&outside_file, "# Outside\n").expect("outside");
+        std::fs::remove_file(&skill_file).expect("remove skill");
+        std::os::unix::fs::symlink(&outside_file, &skill_file).expect("symlink");
+
+        write_managed_skill_file(&skills_root, &resolved_skill_file, "# Updated\n")
+            .expect("write skill");
+
+        assert_eq!(
+            std::fs::read_to_string(&outside_file).expect("read outside"),
+            "# Outside\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&skill_file).expect("read skill"),
+            "# Updated\n"
+        );
+        assert!(!std::fs::symlink_metadata(&skill_file)
+            .expect("skill metadata")
+            .file_type()
+            .is_symlink());
     }
 
     #[test]
