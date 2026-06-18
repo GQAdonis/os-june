@@ -951,8 +951,7 @@ fn is_retryable_transcription_error(error: &AppError) -> bool {
         || code == "empty_response"
         || (code == "scribe_request_failed"
             && (message == "authorization_denied"
-                || message.contains("timed out")
-                || message.contains("timeout")
+                || message == "timeout"
                 || message.contains("connection")
                 || message.contains("error sending request")))
 }
@@ -1973,6 +1972,18 @@ mod tests {
             transient_retry_delay(&operation_id, 0, &error),
             Duration::from_millis(2_000 + retry_jitter_ms(&operation_id, 0))
         );
+    }
+
+    #[test]
+    fn server_timeout_envelope_is_retryable_but_client_timeout_is_not() {
+        assert!(is_retryable_transcription_error(&AppError::new(
+            "scribe_request_failed",
+            "timeout"
+        )));
+        assert!(!is_retryable_transcription_error(&AppError::new(
+            "scribe_request_failed",
+            "operation timed out"
+        )));
     }
 
     #[test]
