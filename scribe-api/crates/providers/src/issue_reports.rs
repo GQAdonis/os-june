@@ -9,8 +9,9 @@ use serde::Deserialize;
 /// blocks the report; the names are listed in the body either way), the
 /// Issue is created with `type: bug`, and the label is attached afterwards
 /// via the labels PUT — creating the label in the Project the first time.
-/// Every step after the create is best-effort: an Issue without its tag
-/// beats a lost report.
+/// Delivery to os-platform is best-effort: the sink retries without a Project
+/// destination and finally logs the report rather than surfacing delivery
+/// failures to the user.
 pub struct OsPlatformIssueReportSink {
     http: reqwest::Client,
     api_url: String,
@@ -39,6 +40,21 @@ struct FellowIssue {
     external_id: String,
     /// The labels PUT addresses the Issue by its per-Org number.
     number_in_org: i64,
+}
+
+#[derive(Clone, Copy)]
+enum IssueCreateDestination {
+    Project,
+    OrgFallback,
+}
+
+impl IssueCreateDestination {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::OrgFallback => "org_fallback",
+        }
+    }
 }
 
 impl OsPlatformIssueReportSink {
@@ -111,11 +127,7 @@ impl OsPlatformIssueReportSink {
         file_ids
     }
 
-    async fn create_issue(
-        &self,
-        report: &IssueReport,
-        file_ids: &[String],
-    ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
+    fn issue_create_body(&self, report: &IssueReport, file_ids: &[String]) -> serde_json::Value {
         let mut body = serde_json::json!({
             "title": issue_title(&report.description),
             "body_markdown": issue_body(report),
@@ -127,13 +139,19 @@ impl OsPlatformIssueReportSink {
         if !self.reward_asset.is_empty() {
             body["asset_symbol"] = serde_json::Value::String(self.reward_asset.clone());
         }
+        body
+    }
+
+    async fn create_issue_at(
+        &self,
+        url: String,
+        report: &IssueReport,
+        file_ids: &[String],
+    ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
         self.http
-            .post(format!(
-                "{}/v1/orgs/{}/projects/{}/bounties",
-                self.api_url, self.org, self.project
-            ))
+            .post(url)
             .bearer_auth(&self.api_key)
-            .json(&body)
+            .json(&self.issue_create_body(report, file_ids))
             .send()
             .await
             .map_err(|error| {
@@ -146,6 +164,63 @@ impl OsPlatformIssueReportSink {
                 tracing::error!(%error, "issue_reports: os-platform returned a malformed envelope");
                 DomainError::UpstreamProvider
             })
+    }
+
+    async fn create_project_issue(
+        &self,
+        report: &IssueReport,
+        file_ids: &[String],
+    ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
+        self.create_issue_at(
+            format!(
+                "{}/v1/orgs/{}/projects/{}/bounties",
+                self.api_url, self.org, self.project
+            ),
+            report,
+            file_ids,
+        )
+        .await
+    }
+
+    async fn create_org_issue(
+        &self,
+        report: &IssueReport,
+        file_ids: &[String],
+    ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
+        self.create_issue_at(
+            format!("{}/v1/orgs/{}/bounties", self.api_url, self.org),
+            report,
+            file_ids,
+        )
+        .await
+    }
+
+    async fn create_org_issue_or_log(
+        &self,
+        report: &IssueReport,
+        file_ids: &[String],
+        project_message: &str,
+    ) -> Option<FellowEnvelope<FellowIssue>> {
+        match self.create_org_issue(report, file_ids).await {
+            Ok(envelope) if envelope.success => Some(envelope),
+            Ok(envelope) => {
+                tracing::error!(
+                    project_message,
+                    org_message = envelope.message.as_deref().unwrap_or(""),
+                    "issue_reports: os-platform rejected both project and org issue creates"
+                );
+                self.fallback_to_log(report, "project_and_org_create_rejected");
+                None
+            }
+            Err(_) => {
+                self.fallback_to_log(report, "org_create_transport_or_envelope_error");
+                None
+            }
+        }
+    }
+
+    fn fallback_to_log(&self, report: &IssueReport, reason: &str) {
+        log_issue_report_delivery_failed(report, reason, &self.org, &self.project);
     }
 
     /// Attaches the configured label via the labels PUT (set-replace; a
@@ -204,18 +279,33 @@ impl OsPlatformIssueReportSink {
     /// Project: the label won't exist yet, so the missing-label rejection
     /// creates it and retries once. Failure here never fails the delivery —
     /// the Issue is already filed (and carries `type: bug` regardless).
-    async fn tag_issue(&self, number_in_org: i64) {
+    async fn tag_issue(&self, number_in_org: i64, destination: IssueCreateDestination) {
         if self.label.is_empty() {
             return;
         }
         let attached = match self.put_label(number_in_org).await {
             Some(envelope) if envelope.success => true,
             Some(envelope) if envelope.message.as_deref().is_some_and(is_missing_label) => {
-                self.ensure_label().await
-                    && self
-                        .put_label(number_in_org)
-                        .await
-                        .is_some_and(|retry| retry.success)
+                match destination {
+                    IssueCreateDestination::Project => {
+                        self.ensure_label().await
+                            && self
+                                .put_label(number_in_org)
+                                .await
+                                .is_some_and(|retry| retry.success)
+                    }
+                    IssueCreateDestination::OrgFallback => {
+                        tracing::warn!(
+                            number_in_org,
+                            label = %self.label,
+                            target_org = %self.org,
+                            target_project = %self.project,
+                            destination = destination.as_str(),
+                            "issue_reports: org-fallback issue filed without label because the configured project label is unavailable"
+                        );
+                        return;
+                    }
+                }
             }
             _ => false,
         };
@@ -223,6 +313,7 @@ impl OsPlatformIssueReportSink {
             tracing::warn!(
                 number_in_org,
                 label = %self.label,
+                destination = destination.as_str(),
                 "issue_reports: issue filed but the label could not be attached"
             );
         }
@@ -242,6 +333,17 @@ fn normalize_destination(org: &str, project: &str) -> Option<(String, String)> {
             "issue_reports: ignoring malformed project destination"
         );
         return None;
+    }
+
+    if (org == "open-software" && project == "june") || project == "open-software/june" {
+        tracing::warn!(
+            configured_org = %org,
+            configured_project = %project,
+            normalized_org = "june",
+            normalized_project = "bug-reports",
+            "issue_reports: remapped legacy June issue report destination"
+        );
+        return Some(("june".to_string(), "bug-reports".to_string()));
     }
 
     let normalized_project = match project_parts.as_slice() {
@@ -275,22 +377,52 @@ impl IssueReportSink for OsPlatformIssueReportSink {
     async fn deliver(&self, report: IssueReport) -> Result<(), DomainError> {
         let file_ids = self.upload_attachments(&report).await;
 
-        let envelope = self.create_issue(&report, &file_ids).await?;
-        if !envelope.success {
-            tracing::error!(
-                message = envelope.message.as_deref().unwrap_or(""),
-                "issue_reports: os-platform rejected the issue"
-            );
-            return Err(DomainError::UpstreamProvider);
-        }
+        let (envelope, destination) = match self.create_project_issue(&report, &file_ids).await {
+            Ok(project_envelope) if project_envelope.success => {
+                (project_envelope, IssueCreateDestination::Project)
+            }
+            Ok(project_envelope) => {
+                let project_message = project_envelope.message.as_deref().unwrap_or("");
+                tracing::warn!(
+                    message = project_message,
+                    target_org = %self.org,
+                    target_project = %self.project,
+                    "issue_reports: os-platform rejected the project-scoped issue; retrying at org scope"
+                );
+                let Some(envelope) = self
+                    .create_org_issue_or_log(&report, &file_ids, project_message)
+                    .await
+                else {
+                    return Ok(());
+                };
+                (envelope, IssueCreateDestination::OrgFallback)
+            }
+            Err(_) => {
+                let project_message = "project_create_transport_or_envelope_error";
+                tracing::warn!(
+                    message = project_message,
+                    target_org = %self.org,
+                    target_project = %self.project,
+                    "issue_reports: project-scoped issue create failed before envelope; retrying at org scope"
+                );
+                let Some(envelope) = self
+                    .create_org_issue_or_log(&report, &file_ids, project_message)
+                    .await
+                else {
+                    return Ok(());
+                };
+                (envelope, IssueCreateDestination::OrgFallback)
+            }
+        };
         let issue = envelope.data.as_ref();
         if let Some(issue) = issue {
-            self.tag_issue(issue.number_in_org).await;
+            self.tag_issue(issue.number_in_org, destination).await;
         }
         tracing::info!(
             issue = issue.map_or("", |issue| issue.external_id.as_str()),
             user_id = %report.user_id.0,
             attachments = file_ids.len(),
+            destination = destination.as_str(),
             "issue_reports: report filed as an os-platform issue"
         );
         Ok(())
@@ -383,22 +515,43 @@ fn issue_body(report: &IssueReport) -> String {
 /// structured log line, so it still reaches whoever reads the service logs.
 pub struct LogIssueReportSink;
 
+fn log_issue_report_delivery_failed(report: &IssueReport, reason: &str, org: &str, project: &str) {
+    tracing::warn!(
+        reason,
+        target_org = %org,
+        target_project = %project,
+        user_id = %report.user_id.0,
+        description = %report.description,
+        agent_diagnosis = report.agent_diagnosis.as_deref().unwrap_or(""),
+        attachment_names = ?report.attachment_names,
+        attachments = ?report.attachments,
+        session_id = report.session_id.as_deref().unwrap_or(""),
+        app_version = report.app_version.as_deref().unwrap_or(""),
+        platform = report.platform.as_deref().unwrap_or(""),
+        "issue_reports: delivery failed; report logged only"
+    );
+}
+
+fn log_issue_report_without_sink(report: &IssueReport) {
+    tracing::warn!(
+        user_id = %report.user_id.0,
+        description = %report.description,
+        agent_diagnosis = report.agent_diagnosis.as_deref().unwrap_or(""),
+        attachment_names = ?report.attachment_names,
+        // The Debug impl reports name/type/length only — uploaded bytes
+        // never reach the logs.
+        attachments = ?report.attachments,
+        session_id = report.session_id.as_deref().unwrap_or(""),
+        app_version = report.app_version.as_deref().unwrap_or(""),
+        platform = report.platform.as_deref().unwrap_or(""),
+        "issue_reports: no delivery sink configured; report logged only"
+    );
+}
+
 #[async_trait]
 impl IssueReportSink for LogIssueReportSink {
     async fn deliver(&self, report: IssueReport) -> Result<(), DomainError> {
-        tracing::warn!(
-            user_id = %report.user_id.0,
-            description = %report.description,
-            agent_diagnosis = report.agent_diagnosis.as_deref().unwrap_or(""),
-            attachment_names = ?report.attachment_names,
-            // The Debug impl reports name/type/length only — uploaded bytes
-            // never reach the logs.
-            attachments = ?report.attachments,
-            session_id = report.session_id.as_deref().unwrap_or(""),
-            app_version = report.app_version.as_deref().unwrap_or(""),
-            platform = report.platform.as_deref().unwrap_or(""),
-            "issue_reports: no delivery sink configured; report logged only"
-        );
+        log_issue_report_without_sink(&report);
         Ok(())
     }
 }
@@ -463,16 +616,31 @@ mod os_platform_tests {
         IssueReportsConfig {
             os_platform_api_url: api_url.to_string(),
             os_platform_api_key: "osk_test".to_string(),
-            os_platform_org: "open-software".to_string(),
-            os_platform_project: "june".to_string(),
+            os_platform_org: "june".to_string(),
+            os_platform_project: "bug-reports".to_string(),
             os_platform_reward_asset: "POINTS".to_string(),
             ..Default::default()
         }
     }
 
-    fn sink(server: &MockServer) -> OsPlatformIssueReportSink {
-        OsPlatformIssueReportSink::from_config(reqwest::Client::new(), &config(&server.uri()))
+    fn missing_project_config(api_url: &str) -> IssueReportsConfig {
+        IssueReportsConfig {
+            os_platform_project: "missing-project".to_string(),
+            ..config(api_url)
+        }
+    }
+
+    fn sink_with_config(config: &IssueReportsConfig) -> OsPlatformIssueReportSink {
+        OsPlatformIssueReportSink::from_config(reqwest::Client::new(), config)
             .expect("configured sink")
+    }
+
+    fn sink(server: &MockServer) -> OsPlatformIssueReportSink {
+        sink_with_config(&config(&server.uri()))
+    }
+
+    fn missing_project_sink(server: &MockServer) -> OsPlatformIssueReportSink {
+        sink_with_config(&missing_project_config(&server.uri()))
     }
 
     fn issue_created() -> ResponseTemplate {
@@ -498,6 +666,15 @@ mod os_platform_tests {
         }))
     }
 
+    fn issue_rejected(message: &str) -> ResponseTemplate {
+        ResponseTemplate::new(404).set_body_json(serde_json::json!({
+            "data": null,
+            "success": false,
+            "error_code": 3004,
+            "message": message,
+        }))
+    }
+
     #[test]
     fn os_platform_sink_requires_full_config() {
         let mut incomplete = config("https://fellow.test");
@@ -515,7 +692,7 @@ mod os_platform_tests {
     }
 
     #[test]
-    fn os_platform_sink_uses_default_june_destination_with_api_key() {
+    fn os_platform_sink_uses_default_june_bug_reports_destination_with_api_key() {
         let config = IssueReportsConfig {
             os_platform_api_key: "osk_test".to_string(),
             ..Default::default()
@@ -524,24 +701,31 @@ mod os_platform_tests {
             .expect("default June issue report destination plus API key is configured");
 
         assert_eq!(sink.api_url, "https://app.opensoftware.co/api");
-        assert_eq!(sink.org, "open-software");
-        assert_eq!(sink.project, "june");
+        assert_eq!(sink.org, "june");
+        assert_eq!(sink.project, "bug-reports");
         assert_eq!(sink.label, "bug");
         assert_eq!(sink.reward_asset, "POINTS");
     }
 
     #[test]
-    fn os_platform_sink_accepts_legacy_org_project_destination() {
-        let config = IssueReportsConfig {
-            os_platform_api_key: "osk_test".to_string(),
-            os_platform_project: "open-software/june".to_string(),
-            ..Default::default()
-        };
-        let sink = OsPlatformIssueReportSink::from_config(reqwest::Client::new(), &config)
-            .expect("legacy org/project destination should normalize");
+    fn os_platform_sink_remaps_legacy_open_software_june_destination() {
+        for (org, project) in [
+            ("open-software", "june"),
+            ("open-software", "open-software/june"),
+            ("june", "open-software/june"),
+        ] {
+            let config = IssueReportsConfig {
+                os_platform_api_key: "osk_test".to_string(),
+                os_platform_org: org.to_string(),
+                os_platform_project: project.to_string(),
+                ..Default::default()
+            };
+            let sink = OsPlatformIssueReportSink::from_config(reqwest::Client::new(), &config)
+                .expect("legacy June issue report destination should remap");
 
-        assert_eq!(sink.org, "open-software");
-        assert_eq!(sink.project, "june");
+            assert_eq!(sink.org, "june");
+            assert_eq!(sink.project, "bug-reports");
+        }
     }
 
     #[test]
@@ -563,7 +747,7 @@ mod os_platform_tests {
     fn os_platform_sink_rejects_malformed_project_destination() {
         let config = IssueReportsConfig {
             os_platform_api_key: "osk_test".to_string(),
-            os_platform_project: "open-software/june/issues".to_string(),
+            os_platform_project: "june/bug-reports/issues".to_string(),
             ..Default::default()
         };
 
@@ -574,7 +758,7 @@ mod os_platform_tests {
     fn os_platform_sink_rejects_incomplete_legacy_project_destination() {
         let config = IssueReportsConfig {
             os_platform_api_key: "osk_test".to_string(),
-            os_platform_project: "open-software/".to_string(),
+            os_platform_project: "june/".to_string(),
             ..Default::default()
         };
 
@@ -585,7 +769,7 @@ mod os_platform_tests {
     fn os_platform_sink_rejects_other_org_project_destination() {
         let config = IssueReportsConfig {
             os_platform_api_key: "osk_test".to_string(),
-            os_platform_project: "other-org/june".to_string(),
+            os_platform_project: "other-org/bug-reports".to_string(),
             ..Default::default()
         };
 
@@ -605,7 +789,7 @@ mod os_platform_tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/orgs/open-software/projects/june/bounties"))
+            .and(path("/v1/orgs/june/projects/bug-reports/bounties"))
             .and(body_partial_json(serde_json::json!({
                 "title": "June report: The recorder freezes",
                 "reward_amount_units": "0",
@@ -619,7 +803,7 @@ mod os_platform_tests {
             .mount(&server)
             .await;
         Mock::given(method("PUT"))
-            .and(path("/v1/orgs/open-software/bounties/7/labels"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
             .and(body_partial_json(serde_json::json!({
                 "label_slugs": ["bug"],
             })))
@@ -642,7 +826,7 @@ mod os_platform_tests {
         // The attachment-upload failure above never blocks the report —
         // file_ids just ends up empty.
         Mock::given(method("POST"))
-            .and(path("/v1/orgs/open-software/projects/june/bounties"))
+            .and(path("/v1/orgs/june/projects/bug-reports/bounties"))
             .and(body_partial_json(serde_json::json!({ "file_ids": [] })))
             .respond_with(issue_created())
             .expect(1)
@@ -651,13 +835,13 @@ mod os_platform_tests {
         // First labels PUT: the label doesn't exist in the Project yet.
         // After the label create, the retried PUT lands.
         Mock::given(method("PUT"))
-            .and(path("/v1/orgs/open-software/bounties/7/labels"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
             .respond_with(label_missing())
             .up_to_n_times(1)
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/orgs/open-software/projects/june/labels"))
+            .and(path("/v1/orgs/june/projects/bug-reports/labels"))
             .and(body_partial_json(serde_json::json!({
                 "name": "Bug",
                 "slug": "bug",
@@ -670,7 +854,7 @@ mod os_platform_tests {
             .mount(&server)
             .await;
         Mock::given(method("PUT"))
-            .and(path("/v1/orgs/open-software/bounties/7/labels"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
             .respond_with(labels_set())
             .expect(1)
             .mount(&server)
@@ -688,18 +872,18 @@ mod os_platform_tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/orgs/open-software/projects/june/bounties"))
+            .and(path("/v1/orgs/june/projects/bug-reports/bounties"))
             .respond_with(issue_created())
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("PUT"))
-            .and(path("/v1/orgs/open-software/bounties/7/labels"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
             .respond_with(label_missing())
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/orgs/open-software/projects/june/labels"))
+            .and(path("/v1/orgs/june/projects/bug-reports/labels"))
             .respond_with(ResponseTemplate::new(403))
             .mount(&server)
             .await;
@@ -710,7 +894,7 @@ mod os_platform_tests {
     }
 
     #[tokio::test]
-    async fn os_platform_sink_surfaces_rejections_as_upstream_errors() {
+    async fn os_platform_sink_retries_at_org_scope_when_project_create_is_rejected() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/files"))
@@ -718,17 +902,143 @@ mod os_platform_tests {
             .mount(&server)
             .await;
         Mock::given(method("POST"))
-            .and(path("/v1/orgs/open-software/projects/june/bounties"))
+            .and(path("/v1/orgs/june/projects/missing-project/bounties"))
+            .respond_with(issue_rejected("project 'june/missing-project' not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/bounties"))
+            .and(body_partial_json(serde_json::json!({
+                "title": "June report: The recorder freezes",
+                "reward_amount_units": "0",
+                "asset_symbol": "POINTS",
+                "type": "bug",
+                "status": "todo",
+                "file_ids": [],
+            })))
+            .respond_with(issue_created())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
+            .respond_with(labels_set())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(
+            missing_project_sink(&server)
+                .deliver(report())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn os_platform_sink_retries_at_org_scope_when_project_create_has_bad_envelope() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/files"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/projects/missing-project/bounties"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("bad gateway"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/bounties"))
+            .respond_with(issue_created())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
+            .respond_with(labels_set())
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        assert!(
+            missing_project_sink(&server)
+                .deliver(report())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn os_platform_sink_does_not_create_project_label_after_org_fallback() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/files"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/projects/missing-project/bounties"))
+            .respond_with(issue_rejected("project 'june/missing-project' not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/bounties"))
+            .respond_with(issue_created())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
+            .respond_with(label_missing())
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/projects/missing-project/labels"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        assert!(
+            missing_project_sink(&server)
+                .deliver(report())
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn os_platform_sink_accepts_and_logs_when_platform_rejects_all_creates() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/files"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/projects/missing-project/bounties"))
+            .respond_with(issue_rejected("project 'june/missing-project' not found"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/bounties"))
             .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
                 "data": null,
                 "success": false,
                 "error_code": 3001,
                 "message": "caller is not an org member",
             })))
+            .expect(1)
             .mount(&server)
             .await;
 
-        let result = sink(&server).deliver(report()).await;
-        assert!(matches!(result, Err(DomainError::UpstreamProvider)));
+        let result = missing_project_sink(&server).deliver(report()).await;
+        assert!(result.is_ok());
     }
 }
