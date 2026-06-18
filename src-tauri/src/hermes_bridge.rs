@@ -2,6 +2,7 @@ use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     fs,
@@ -15,7 +16,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::oneshot,
@@ -206,12 +207,140 @@ pub struct HermesBridge {
     /// resolved by the desktop UI. Missing, timed-out, or cancelled decisions
     /// fail closed so raw tool data is not forwarded accidentally.
     tool_guard_decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
+    /// Pending OS Guard policy-block prompts emitted by the provider proxy.
+    /// The UI must explicitly choose whether a blocked session continues
+    /// directly through Venice or stops.
+    policy_block_decisions: Arc<PolicyBlockDecisionHub>,
 }
 
 struct HermesProcess {
     generation: u64,
     child: Child,
     connection: HermesBridgeConnection,
+}
+
+const AGENT_POLICY_BLOCK_DECISION_EVENT: &str = "agent-policy-block-decision-request";
+const POLICY_BLOCK_DECISION_TIMEOUT: Duration = Duration::from_secs(300);
+const POLICY_BLOCKED_ERROR_CODE: i64 = 4031;
+
+#[derive(Default)]
+pub struct PolicyBlockDecisionHub {
+    pending: Mutex<HashMap<String, oneshot::Sender<PolicyBlockDecisionResponse>>>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyBlockDecisionRequest {
+    pub decision_id: String,
+    pub conversation_fingerprint: String,
+    pub model: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyBlockDecisionResponse {
+    pub decision_id: String,
+    pub action: PolicyBlockDecisionAction,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum PolicyBlockDecisionAction {
+    Continue,
+    Reject,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum PolicyBlockDecision {
+    Continue,
+    Reject,
+}
+
+impl PolicyBlockDecisionHub {
+    async fn request_decision(
+        &self,
+        app: &AppHandle,
+        request: PolicyBlockDecisionRequest,
+    ) -> Result<PolicyBlockDecision, AppError> {
+        let decision_id = request.decision_id.clone();
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut pending = self.pending.lock().map_err(|_| {
+                AppError::new(
+                    "policy_block_decision_failed",
+                    "Policy block decision lock failed.",
+                )
+            })?;
+            pending.insert(decision_id.clone(), sender);
+        }
+
+        if app
+            .emit(AGENT_POLICY_BLOCK_DECISION_EVENT, request)
+            .is_err()
+        {
+            let _ = self.remove_pending(&decision_id);
+            return Err(AppError::new(
+                "policy_block_decision_unavailable",
+                "Policy block decision UI is unavailable.",
+            ));
+        }
+
+        let response = match tokio::time::timeout(POLICY_BLOCK_DECISION_TIMEOUT, receiver).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(_)) => {
+                return Err(AppError::new(
+                    "policy_block_decision_dropped",
+                    "Policy block decision was dropped.",
+                ));
+            }
+            Err(_) => {
+                let _ = self.remove_pending(&decision_id);
+                return Err(AppError::new(
+                    "policy_block_decision_timeout",
+                    "Policy block decision timed out.",
+                ));
+            }
+        };
+        if response.decision_id != decision_id {
+            return Err(AppError::new(
+                "policy_block_decision_mismatch",
+                "Policy block decision mismatch.",
+            ));
+        }
+        Ok(match response.action {
+            PolicyBlockDecisionAction::Continue => PolicyBlockDecision::Continue,
+            PolicyBlockDecisionAction::Reject => PolicyBlockDecision::Reject,
+        })
+    }
+
+    pub fn respond(&self, response: PolicyBlockDecisionResponse) -> Result<(), AppError> {
+        let sender = self.remove_pending(&response.decision_id)?;
+        sender
+            .send(response)
+            .map_err(|_| AppError::new("policy_block_decision_dropped", "Decision was dropped."))
+    }
+
+    fn remove_pending(
+        &self,
+        decision_id: &str,
+    ) -> Result<oneshot::Sender<PolicyBlockDecisionResponse>, AppError> {
+        self.pending
+            .lock()
+            .map_err(|_| {
+                AppError::new(
+                    "policy_block_decision_failed",
+                    "Policy block decision lock failed.",
+                )
+            })?
+            .remove(decision_id)
+            .ok_or_else(|| {
+                AppError::new(
+                    "policy_block_decision_missing",
+                    "Policy block decision missing.",
+                )
+            })
+    }
 }
 
 struct SharedProviderProxy {
@@ -424,6 +553,14 @@ pub async fn hermes_bridge_tool_guard_decision(
     response: crate::tool_guard::ToolGuardDecisionResponse,
 ) -> Result<(), AppError> {
     bridge.tool_guard_decisions.respond(response)
+}
+
+#[tauri::command]
+pub async fn hermes_bridge_policy_block_decision(
+    bridge: State<'_, HermesBridge>,
+    response: PolicyBlockDecisionResponse,
+) -> Result<(), AppError> {
+    bridge.policy_block_decisions.respond(response)
 }
 
 /// Reap-and-collect: drops map entries whose process has exited and returns
@@ -729,6 +866,7 @@ async fn ensure_provider_proxy(
         app.clone(),
         token.clone(),
         bridge.tool_guard_decisions.clone(),
+        bridge.policy_block_decisions.clone(),
     )
     .await?;
     let mut guard = bridge
@@ -3089,6 +3227,7 @@ async fn start_scribe_provider_proxy(
     app: AppHandle,
     token: String,
     decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
+    policy_block_decisions: Arc<PolicyBlockDecisionHub>,
 ) -> Result<RunningScribeProviderProxy, AppError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("scribe_provider_proxy_failed", error.to_string()))?;
@@ -3106,7 +3245,9 @@ async fn start_scribe_provider_proxy(
         app,
         token: Arc::new(token),
         decisions,
+        policy_block_decisions,
         mappings: Arc::new(Mutex::new(Vec::new())),
+        direct_policy_fingerprints: Arc::new(Mutex::new(Vec::new())),
     });
     tauri::async_runtime::spawn(run_scribe_provider_proxy(listener, state, shutdown_rx));
     Ok(RunningScribeProviderProxy { port, shutdown })
@@ -3116,7 +3257,9 @@ struct ScribeProviderProxyState {
     app: AppHandle,
     token: Arc<String>,
     decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
+    policy_block_decisions: Arc<PolicyBlockDecisionHub>,
     mappings: Arc<Mutex<Vec<crate::tool_guard::ToolGuardReplacementMapping>>>,
+    direct_policy_fingerprints: Arc<Mutex<Vec<String>>>,
 }
 
 struct RunningScribeProviderProxy {
@@ -3196,72 +3339,67 @@ async fn handle_scribe_provider_connection(
                 write_tool_guard_blocked_response(&mut stream, &error).await?;
                 return Ok(());
             }
-            match crate::scribe_api::proxy_agent_chat_completions(body).await {
+            let direct_policy_route = body_matches_direct_policy_fingerprint(&state, &body);
+            let proxy_result = if direct_policy_route {
+                crate::scribe_api::proxy_agent_chat_completions_direct(body.clone()).await
+            } else {
+                crate::scribe_api::proxy_agent_chat_completions(body.clone()).await
+            };
+            match proxy_result {
                 Ok(response) => {
                     // Error bodies are small enough to buffer whole, and
                     // buffering is what makes the overflow translation
                     // below possible. Success bodies are buffered too so Tool
                     // Guard can inspect proposed tool calls before Hermes
                     // receives them.
-                    let status = response.status;
-                    let content_type = response.content_type.clone();
-                    let body = response.collect_body().await.unwrap_or_default();
-                    if status >= 400 {
-                        match translate_context_overflow_error(&body) {
-                            Some(rewritten) => {
-                                write_json_response(&mut stream, status, rewritten).await?;
-                            }
-                            None => {
-                                write_raw_response(&mut stream, status, &content_type, &body)
-                                    .await?;
-                            }
-                        }
-                    } else if requested_stream {
-                        let mut value = serde_json::from_slice::<serde_json::Value>(&body)
-                            .unwrap_or_else(|_| serde_json::json!({}));
-                        if let Err(error) = guard_inbound_tool_calls(&state, &mut value).await {
-                            write_tool_guard_blocked_response(&mut stream, &error).await?;
-                            return Ok(());
-                        }
-                        if let Err(error) = rehydrate_assistant_text(&state, &mut value) {
-                            write_tool_guard_blocked_response(&mut stream, &error).await?;
-                            return Ok(());
-                        }
-                        write_synthetic_sse_response(&mut stream, status, value).await?;
-                    } else {
-                        match serde_json::from_slice::<serde_json::Value>(&body) {
-                            Ok(mut value) => {
-                                if let Err(error) =
-                                    guard_inbound_tool_calls(&state, &mut value).await
+                    let collected = collect_agent_proxy_response(response).await;
+                    if !direct_policy_route
+                        && is_policy_blocked_response(collected.status, &collected.body)
+                    {
+                        match request_policy_block_decision(&state, &body, &collected.body).await {
+                            Ok(PolicyBlockDecision::Continue) => {
+                                if let Some(fingerprint) =
+                                    policy_block_conversation_fingerprint(&body)
                                 {
-                                    write_tool_guard_blocked_response(&mut stream, &error).await?;
-                                    return Ok(());
+                                    remember_direct_policy_fingerprint(&state, fingerprint);
                                 }
-                                if let Err(error) = rehydrate_assistant_text(&state, &mut value) {
-                                    write_tool_guard_blocked_response(&mut stream, &error).await?;
-                                    return Ok(());
+                                match crate::scribe_api::proxy_agent_chat_completions_direct(
+                                    body.clone(),
+                                )
+                                .await
+                                {
+                                    Ok(response) => {
+                                        let direct = collect_agent_proxy_response(response).await;
+                                        write_collected_agent_response(
+                                            &mut stream,
+                                            &state,
+                                            requested_stream,
+                                            direct,
+                                        )
+                                        .await?;
+                                    }
+                                    Err(error) => {
+                                        write_agent_proxy_error(&mut stream, error).await?;
+                                    }
                                 }
-                                write_json_response(&mut stream, status, value).await?;
                             }
-                            Err(_) => {
-                                write_raw_response(&mut stream, status, &content_type, &body)
+                            Ok(PolicyBlockDecision::Reject) | Err(_) => {
+                                write_policy_block_rejected_response(&mut stream, requested_stream)
                                     .await?;
                             }
                         }
+                    } else {
+                        write_collected_agent_response(
+                            &mut stream,
+                            &state,
+                            requested_stream,
+                            collected,
+                        )
+                        .await?;
                     }
                 }
                 Err(error) => {
-                    write_json_response(
-                        &mut stream,
-                        502,
-                        serde_json::json!({
-                            "error": {
-                                "message": format!("Scribe agent provider failed: {}", error.message),
-                                "type": error.code
-                            }
-                        }),
-                    )
-                    .await?;
+                    write_agent_proxy_error(&mut stream, error).await?;
                 }
             }
         }
@@ -3275,6 +3413,279 @@ async fn handle_scribe_provider_connection(
         }
     }
     Ok(())
+}
+
+struct CollectedAgentProxyResponse {
+    status: u16,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+async fn collect_agent_proxy_response(
+    response: crate::scribe_api::AgentChatCompletionsResponse,
+) -> CollectedAgentProxyResponse {
+    let status = response.status;
+    let content_type = response.content_type.clone();
+    let body = response.collect_body().await.unwrap_or_default();
+    CollectedAgentProxyResponse {
+        status,
+        content_type,
+        body,
+    }
+}
+
+async fn write_collected_agent_response(
+    stream: &mut tokio::net::TcpStream,
+    state: &Arc<ScribeProviderProxyState>,
+    requested_stream: bool,
+    response: CollectedAgentProxyResponse,
+) -> io::Result<()> {
+    if response.status >= 400 {
+        match translate_context_overflow_error(&response.body) {
+            Some(rewritten) => {
+                write_json_response(stream, response.status, rewritten).await?;
+            }
+            None => {
+                write_raw_response(
+                    stream,
+                    response.status,
+                    &response.content_type,
+                    &response.body,
+                )
+                .await?;
+            }
+        }
+    } else if requested_stream {
+        let mut value = serde_json::from_slice::<serde_json::Value>(&response.body)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        if let Err(error) = guard_inbound_tool_calls(state, &mut value).await {
+            write_tool_guard_blocked_response(stream, &error).await?;
+            return Ok(());
+        }
+        if let Err(error) = rehydrate_assistant_text(state, &mut value) {
+            write_tool_guard_blocked_response(stream, &error).await?;
+            return Ok(());
+        }
+        write_synthetic_sse_response(stream, response.status, value).await?;
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(&response.body) {
+            Ok(mut value) => {
+                if let Err(error) = guard_inbound_tool_calls(state, &mut value).await {
+                    write_tool_guard_blocked_response(stream, &error).await?;
+                    return Ok(());
+                }
+                if let Err(error) = rehydrate_assistant_text(state, &mut value) {
+                    write_tool_guard_blocked_response(stream, &error).await?;
+                    return Ok(());
+                }
+                write_json_response(stream, response.status, value).await?;
+            }
+            Err(_) => {
+                write_raw_response(
+                    stream,
+                    response.status,
+                    &response.content_type,
+                    &response.body,
+                )
+                .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn write_agent_proxy_error(
+    stream: &mut tokio::net::TcpStream,
+    error: AppError,
+) -> io::Result<()> {
+    write_json_response(
+        stream,
+        502,
+        serde_json::json!({
+            "error": {
+                "message": format!("Scribe agent provider failed: {}", error.message),
+                "type": error.code
+            }
+        }),
+    )
+    .await
+}
+
+async fn request_policy_block_decision(
+    state: &Arc<ScribeProviderProxyState>,
+    body: &serde_json::Value,
+    response_body: &[u8],
+) -> Result<PolicyBlockDecision, AppError> {
+    let decision_id = uuid::Uuid::new_v4().to_string();
+    let conversation_fingerprint = policy_block_conversation_fingerprint(body)
+        .unwrap_or_else(|| policy_block_body_fingerprint(body));
+    let request = PolicyBlockDecisionRequest {
+        decision_id,
+        conversation_fingerprint,
+        model: body
+            .get("model")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        message: policy_block_response_message(response_body)
+            .unwrap_or_else(|| "policy_blocked".to_string()),
+    };
+    state
+        .policy_block_decisions
+        .request_decision(&state.app, request)
+        .await
+}
+
+fn is_policy_blocked_response(status: u16, body: &[u8]) -> bool {
+    if status != 403 {
+        return false;
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    json_contains_policy_block(&value)
+}
+
+fn json_contains_policy_block(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.iter().any(|(key, value)| {
+            (key == "error_code"
+                && (value.as_i64() == Some(POLICY_BLOCKED_ERROR_CODE)
+                    || value.as_str() == Some("4031")))
+                || (key == "message" && value.as_str() == Some("policy_blocked"))
+                || json_contains_policy_block(value)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(json_contains_policy_block),
+        _ => false,
+    }
+}
+
+fn policy_block_response_message(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    find_json_string_field(&value, "message")
+}
+
+fn find_json_string_field(value: &serde_json::Value, field: &str) -> Option<String> {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(value) = object.get(field).and_then(serde_json::Value::as_str) {
+                return Some(value.to_string());
+            }
+            object
+                .values()
+                .find_map(|value| find_json_string_field(value, field))
+        }
+        serde_json::Value::Array(items) => items
+            .iter()
+            .find_map(|value| find_json_string_field(value, field)),
+        _ => None,
+    }
+}
+
+fn body_matches_direct_policy_fingerprint(
+    state: &Arc<ScribeProviderProxyState>,
+    body: &serde_json::Value,
+) -> bool {
+    let candidates = policy_block_conversation_fingerprints(body);
+    if candidates.is_empty() {
+        return false;
+    }
+    let Ok(fingerprints) = state.direct_policy_fingerprints.lock() else {
+        return false;
+    };
+    candidates
+        .iter()
+        .any(|candidate| fingerprints.iter().any(|stored| stored == candidate))
+}
+
+fn remember_direct_policy_fingerprint(state: &Arc<ScribeProviderProxyState>, fingerprint: String) {
+    if let Ok(mut fingerprints) = state.direct_policy_fingerprints.lock() {
+        if !fingerprints.iter().any(|stored| stored == &fingerprint) {
+            fingerprints.push(fingerprint);
+        }
+        const MAX_DIRECT_POLICY_FINGERPRINTS: usize = 128;
+        if fingerprints.len() > MAX_DIRECT_POLICY_FINGERPRINTS {
+            let excess = fingerprints.len() - MAX_DIRECT_POLICY_FINGERPRINTS;
+            fingerprints.drain(0..excess);
+        }
+    }
+}
+
+fn policy_block_conversation_fingerprint(body: &serde_json::Value) -> Option<String> {
+    policy_block_conversation_fingerprints(body).pop()
+}
+
+fn policy_block_conversation_fingerprints(body: &serde_json::Value) -> Vec<String> {
+    let system_prefix = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map(|messages| {
+            messages
+                .iter()
+                .take_while(|message| {
+                    message.get("role").and_then(serde_json::Value::as_str) == Some("system")
+                })
+                .filter_map(|message| chat_message_content_text(message.get("content")?))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let Some(messages) = body.get("messages").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    messages
+        .iter()
+        .filter(|message| message.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .filter_map(|message| chat_message_content_text(message.get("content")?))
+        .map(|user_text| policy_block_text_fingerprint(&system_prefix, &user_text))
+        .collect()
+}
+
+fn chat_message_content_text(content: &serde_json::Value) -> Option<String> {
+    match content {
+        serde_json::Value::String(value) => Some(value.trim().to_string()),
+        serde_json::Value::Array(parts) => {
+            let text = parts
+                .iter()
+                .filter_map(|part| {
+                    let object = part.as_object()?;
+                    if object.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+                        return None;
+                    }
+                    object
+                        .get("text")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::trim)
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.is_empty()).then_some(text)
+        }
+        _ => None,
+    }
+}
+
+fn policy_block_text_fingerprint(system_prefix: &str, user_text: &str) -> String {
+    let value = serde_json::json!({
+        "system": system_prefix.trim(),
+        "user": user_text.trim(),
+    });
+    policy_block_body_fingerprint(&value)
+}
+
+fn policy_block_body_fingerprint(value: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.to_string().as_bytes());
+    hex_lower(&hasher.finalize())
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn chat_completion_requested_stream(body: &serde_json::Value) -> bool {
@@ -3767,6 +4178,36 @@ async fn write_tool_guard_blocked_response(
     write_json_response(stream, 403, tool_guard_blocked_response_body(error)).await
 }
 
+async fn write_policy_block_rejected_response(
+    stream: &mut tokio::net::TcpStream,
+    requested_stream: bool,
+) -> io::Result<()> {
+    let body = serde_json::json!({
+        "id": format!("chatcmpl-policy-block-rejected-{}", uuid::Uuid::new_v4()),
+        "object": "chat.completion",
+        "created": chrono::Utc::now().timestamp(),
+        "model": crate::providers::generation_model(),
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": ""
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+    });
+    if requested_stream {
+        write_synthetic_sse_response(stream, 200, body).await
+    } else {
+        write_json_response(stream, 200, body).await
+    }
+}
+
 fn tool_guard_blocked_response_body(error: &AppError) -> serde_json::Value {
     let reason = if error.code.is_empty() {
         "tool_guard_blocked"
@@ -4108,6 +4549,38 @@ mod tests {
         assert_eq!(body["error"]["message"], "tool_guard_blocked");
         assert_eq!(body["error"]["type"], "tool_guard_blocked");
         assert_eq!(body["error"]["reason"], "scribe_request_failed");
+    }
+
+    #[test]
+    fn provider_proxy_detects_scribe_policy_block_envelope() {
+        let body = br#"{"data":null,"success":false,"error_code":4031,"message":"policy_blocked"}"#;
+
+        assert!(is_policy_blocked_response(403, body));
+        assert!(!is_policy_blocked_response(502, body));
+    }
+
+    #[test]
+    fn policy_block_fingerprint_matches_follow_up_context() {
+        let blocked = serde_json::json!({
+            "messages": [
+                { "role": "system", "content": "You are June." },
+                { "role": "user", "content": "Describe an apple" }
+            ]
+        });
+        let follow_up = serde_json::json!({
+            "messages": [
+                { "role": "system", "content": "You are June." },
+                { "role": "user", "content": "Describe an apple" },
+                { "role": "assistant", "content": "" },
+                { "role": "user", "content": "Try again" }
+            ]
+        });
+
+        let fingerprint =
+            policy_block_conversation_fingerprint(&blocked).expect("blocked fingerprint");
+        assert!(policy_block_conversation_fingerprints(&follow_up)
+            .iter()
+            .any(|candidate| candidate == &fingerprint));
     }
 
     #[test]

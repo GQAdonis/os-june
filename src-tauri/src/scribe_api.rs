@@ -379,6 +379,19 @@ pub async fn list_models(model_type: &str) -> Result<Vec<ModelDto>, AppError> {
 }
 
 pub async fn proxy_agent_chat_completions(
+    body: serde_json::Value,
+) -> Result<AgentChatCompletionsResponse, AppError> {
+    proxy_agent_chat_completions_to_path("/v1/chat/completions", body).await
+}
+
+pub async fn proxy_agent_chat_completions_direct(
+    body: serde_json::Value,
+) -> Result<AgentChatCompletionsResponse, AppError> {
+    proxy_agent_chat_completions_to_path("/v1/chat/completions/direct", body).await
+}
+
+async fn proxy_agent_chat_completions_to_path(
+    path: &str,
     mut body: serde_json::Value,
 ) -> Result<AgentChatCompletionsResponse, AppError> {
     limit_agent_chat_messages_for_proxy(&mut body);
@@ -388,7 +401,7 @@ pub async fn proxy_agent_chat_completions(
             serde_json::Value::String(crate::providers::generation_model()),
         );
     }
-    let url = format!("{}/v1/chat/completions", scribe_api_url());
+    let url = format!("{}{}", scribe_api_url(), path);
     let mut token = crate::os_accounts::access_token().await?;
     for attempt in 0..2 {
         let response = agent_http_client()
