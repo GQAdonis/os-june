@@ -9,6 +9,7 @@ import type {
   NoteDto,
   RecoverableRecordingDto,
   RecordingSessionDto,
+  RecordingStatusDto,
 } from "../lib/tauri";
 
 type TauriListener = (event: { payload: unknown }) => unknown;
@@ -385,6 +386,47 @@ describe("notes recording reliability", () => {
         screen.queryByRole("button", { name: "Open recording: First note" }),
       ).not.toBeInTheDocument(),
     );
+  });
+
+  it("does not overlap active recording status polls", async () => {
+    const pendingStatus = deferred<RecordingStatusDto>();
+    const resumedStatus = deferred<RecordingStatusDto>();
+    mocks.getRecordingStatus
+      .mockReturnValueOnce(pendingStatus.promise)
+      .mockReturnValue(resumedStatus.promise);
+
+    await startRecordingOnFirstNote();
+    await screen.findByRole("button", { name: "Done" });
+    await waitFor(() =>
+      expect(mocks.getRecordingStatus).toHaveBeenCalledTimes(1),
+    );
+
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+
+    expect(mocks.getRecordingStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingStatus.resolve({
+        sessionId: "rec-1",
+        state: "recording",
+        elapsedMs: 500,
+        level: { peak: 0.2, rms: 0.1, recentPeaks: [0.2] },
+        silenceWarning: false,
+        bytesWritten: 2048,
+      });
+      await pendingStatus.promise;
+    });
+    await waitFor(() =>
+      expect(mocks.getRecordingStatus).toHaveBeenCalledTimes(2),
+    );
+    resumedStatus.resolve({
+      sessionId: "rec-1",
+      state: "recording",
+      elapsedMs: 550,
+      level: { peak: 0.2, rms: 0.1, recentPeaks: [0.2] },
+      silenceWarning: false,
+      bytesWritten: 2048,
+    });
   });
 
   it("ignores meeting-start signals while a recording is already live", async () => {
