@@ -1669,7 +1669,10 @@ export function App() {
     // each poll coalesces the peaks since the last one (see Waveform.tsx). Audio
     // is sampled every ~5–10ms in Rust, so there's always a fresh peak waiting;
     // 100ms left the bars a beat behind the voice.
+    let inFlight = false;
     const interval = window.setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
       getRecordingStatus(sessionId)
         .then((status) => {
           if (!cancelled) dispatch({ type: "recordingStatusChanged", status });
@@ -1684,6 +1687,9 @@ export function App() {
             return;
           }
           setError(messageFromError(err));
+        })
+        .finally(() => {
+          inFlight = false;
         });
     }, 50);
     return () => {
