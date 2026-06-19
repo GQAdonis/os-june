@@ -318,6 +318,15 @@ impl AgentChatCompleter for VeniceAgentChat {
     ) -> Result<AgentChatCompletion, DomainError> {
         self.chat.complete_raw(request.body, request.model).await
     }
+
+    async fn complete_streaming(
+        &self,
+        request: AgentChatRequest,
+    ) -> Result<scribe_domain::AgentChatStream, DomainError> {
+        self.chat
+            .complete_raw_streaming(request.body, request.model)
+            .await
+    }
 }
 
 impl VeniceCleaner {
@@ -471,30 +480,7 @@ impl VeniceChat {
         mut body: serde_json::Value,
         model: scribe_domain::ModelId,
     ) -> Result<AgentChatCompletion, DomainError> {
-        let Some(object) = body.as_object_mut() else {
-            return Err(DomainError::InvalidInput {
-                reason: "invalid_chat_completion_body".to_string(),
-            });
-        };
-        object.insert(
-            "model".to_string(),
-            serde_json::Value::String(model.0.clone()),
-        );
-        inject_safety_context(object);
-        if object.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
-            let stream_options = object
-                .entry("stream_options")
-                .or_insert_with(|| serde_json::json!({}));
-            // Replace a non-object `stream_options` instead of leaving it:
-            // without `include_usage` the stream carries no usage frame, so
-            // metering fails after the upstream call has already been made.
-            if !stream_options.is_object() {
-                *stream_options = serde_json::json!({});
-            }
-            if let Some(options) = stream_options.as_object_mut() {
-                options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
-            }
-        }
+        prepare_agent_chat_body(&mut body, &model)?;
         let url = format!("{}/chat/completions", self.base_url);
         let response = self
             .http
@@ -536,6 +522,127 @@ impl VeniceChat {
             usage,
         })
     }
+
+    /// Streaming counterpart of `complete_raw`: forwards the upstream response
+    /// body to the caller as it arrives instead of buffering it. The status is
+    /// validated before any byte is streamed (so a policy block / error still
+    /// surfaces as an error response). The terminal usage frame is parsed at end
+    /// of stream into the returned `usage` handle so the caller can settle
+    /// billing once forwarding completes.
+    async fn complete_raw_streaming(
+        &self,
+        mut body: serde_json::Value,
+        model: scribe_domain::ModelId,
+    ) -> Result<scribe_domain::AgentChatStream, DomainError> {
+        prepare_agent_chat_body(&mut body, &model)?;
+        let url = format!("{}/chat/completions", self.base_url);
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, %url, model = %model.0, "chat: agent transport error");
+                DomainError::UpstreamProvider
+            })?;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("application/json")
+            .to_string();
+        if !status.is_success() {
+            let body = response.bytes().await.unwrap_or_default();
+            tracing::error!(
+                %status,
+                %url,
+                model = %model.0,
+                body_bytes = body.len(),
+                "chat: agent non-success response"
+            );
+            return Err(self.status_error(status));
+        }
+
+        let usage = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let usage_for_stream = usage.clone();
+        let content_type_for_usage = content_type.clone();
+        let model_id = model.0.clone();
+        let upstream = response.bytes_stream();
+        let stream = async_stream::stream! {
+            use futures_util::StreamExt;
+            let mut accumulated: Vec<u8> = Vec::new();
+            futures_util::pin_mut!(upstream);
+            while let Some(item) = upstream.next().await {
+                match item {
+                    Ok(chunk) => {
+                        accumulated.extend_from_slice(&chunk);
+                        yield Ok(chunk);
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, model = %model_id, "chat: agent stream read failed");
+                        yield Err(DomainError::UpstreamProvider);
+                        return;
+                    }
+                }
+            }
+            // Stream complete: extract the usage frame so the caller can settle.
+            if let Ok(parsed) = usage_from_chat_body(&accumulated, &content_type_for_usage) {
+                if let Ok(mut guard) = usage_for_stream.lock() {
+                    *guard = Some(parsed);
+                }
+            } else {
+                tracing::warn!(
+                    model = %model_id,
+                    "chat: no usage frame in streamed agent response; billing skipped"
+                );
+            }
+        };
+
+        Ok(scribe_domain::AgentChatStream {
+            content_type,
+            provider: PROVIDER_NAME.to_string(),
+            usage,
+            body: Box::pin(stream),
+        })
+    }
+}
+
+/// Apply the gateway-bound mutations every agent chat body needs: pin the model,
+/// prepend the standing safety policy, and (when streaming) force
+/// `stream_options.include_usage` so the response carries a usage frame for
+/// metering. Shared by the buffered and streaming provider paths.
+fn prepare_agent_chat_body(
+    body: &mut serde_json::Value,
+    model: &scribe_domain::ModelId,
+) -> Result<(), DomainError> {
+    let Some(object) = body.as_object_mut() else {
+        return Err(DomainError::InvalidInput {
+            reason: "invalid_chat_completion_body".to_string(),
+        });
+    };
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(model.0.clone()),
+    );
+    inject_safety_context(object);
+    if object.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
+        let stream_options = object
+            .entry("stream_options")
+            .or_insert_with(|| serde_json::json!({}));
+        // Replace a non-object `stream_options` instead of leaving it: without
+        // `include_usage` the stream carries no usage frame, so metering fails
+        // after the upstream call has already been made.
+        if !stream_options.is_object() {
+            *stream_options = serde_json::json!({});
+        }
+        if let Some(options) = stream_options.as_object_mut() {
+            options.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
