@@ -7,6 +7,7 @@ use crate::{domain::types::AppError, providers::PROVIDER_OPENAI};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::OnceLock,
     time::Duration,
@@ -26,6 +27,7 @@ const ERR_INSUFFICIENT_CREDITS: i64 = 4301;
 const ERR_TOKEN_EXPIRED: i64 = 3001;
 const INVALID_SCRIBE_RESPONSE_MESSAGE: &str =
     "The processing service returned an invalid response.";
+const DEBUG_CAPTURE_AGENT_CHAT_PAYLOADS_ENV: &str = "OS_SCRIBE_DEBUG_CAPTURE_AGENT_CHAT_PAYLOADS";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static AGENT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
@@ -401,6 +403,7 @@ async fn proxy_agent_chat_completions_to_path(
             serde_json::Value::String(crate::providers::generation_model()),
         );
     }
+    capture_agent_chat_payload(path, &body);
     let url = format!("{}{}", scribe_api_url(), path);
     let mut token = crate::os_accounts::access_token().await?;
     for attempt in 0..2 {
@@ -429,6 +432,38 @@ async fn proxy_agent_chat_completions_to_path(
         });
     }
     Err(AppError::new("unauthorized", "Not signed in."))
+}
+
+fn capture_agent_chat_payload(path: &str, body: &serde_json::Value) {
+    if !debug_capture_agent_chat_payloads_enabled() {
+        return;
+    }
+    let route = if path.ends_with("/direct") {
+        "direct"
+    } else {
+        "guarded"
+    };
+    let file_path = format!("/tmp/scribe-agent-chat-payload.{route}.json");
+    match serde_json::to_vec_pretty(body) {
+        Ok(bytes) => {
+            if let Err(error) = fs::write(&file_path, bytes) {
+                eprintln!("failed to capture Scribe agent chat payload to {file_path}: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("failed to serialize Scribe agent chat payload: {error}");
+        }
+    }
+}
+
+fn debug_capture_agent_chat_payloads_enabled() -> bool {
+    match std::env::var(DEBUG_CAPTURE_AGENT_CHAT_PAYLOADS_ENV) {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
+    }
 }
 
 fn limit_agent_chat_messages_for_proxy(body: &mut serde_json::Value) {

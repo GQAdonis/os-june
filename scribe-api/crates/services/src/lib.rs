@@ -39,9 +39,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use scribe_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
     use scribe_domain::{
-        AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AudioDurationProbe,
-        Authorization, AuthorizeRequest, ChargeRequest, CleanedText, Cleaner, CleanupRequest,
-        Credits, DomainError, GeneratedNote, GenerationRequest, Generator, ModelId,
+        AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream,
+        AudioDurationProbe, Authorization, AuthorizeRequest, ChargeRequest, CleanedText, Cleaner,
+        CleanupRequest, Credits, DomainError, GeneratedNote, GenerationRequest, Generator, ModelId,
         OsAccountsClient, Receipt, TokenUsage, Transcriber, Transcript, TranscriptionRequest,
         UserId,
     };
@@ -206,6 +206,54 @@ mod tests {
         assert!(matches!(
             os_accounts.events().first(),
             Some(RecordedCall::Authorize { action, .. }) if action == "agent_chat"
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_chat_streaming_charges_when_client_drops_body_before_eof() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = AgentChatService::new(AgentChatServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "text-model",
+                PriceUnit::Tokens,
+                2,
+                ModelType::Text,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            guarded_chat_completer: Arc::new(StreamingAgentChatCompleter),
+            direct_chat_completer: Arc::new(FixedAgentChatCompleter { provider: "direct" }),
+            hold_ttl_seconds: 300,
+            flat_estimate_credits: 8200,
+        });
+
+        let output = service
+            .complete_streaming(AgentChatParams {
+                user_id: UserId("usr_123".to_string()),
+                model_id: ModelId("text-model".to_string()),
+                body: serde_json::json!({
+                    "model": "text-model",
+                    "messages": [{ "role": "user", "content": "hello" }],
+                    "stream": true,
+                }),
+                route: AgentChatRoute::Guarded,
+            })
+            .await
+            .expect("streaming agent chat starts");
+
+        drop(output.body);
+
+        assert!(
+            wait_for_charge_idempotency_key(&os_accounts)
+                .await
+                .is_some_and(|key| key.starts_with("agent_chat:usr_123:text-model:"))
+        );
+        assert!(matches!(
+            os_accounts.events().get(1),
+            Some(RecordedCall::Charge {
+                action_token,
+                credits,
+                ..
+            }) if action_token == "agt_test" && *credits == 60
         ));
     }
 
@@ -926,6 +974,43 @@ mod tests {
             _request: AgentChatRequest,
         ) -> Result<AgentChatCompletion, DomainError> {
             Err(DomainError::UpstreamProvider)
+        }
+    }
+
+    struct StreamingAgentChatCompleter;
+
+    #[async_trait]
+    impl AgentChatCompleter for StreamingAgentChatCompleter {
+        async fn complete(
+            &self,
+            _request: AgentChatRequest,
+        ) -> Result<AgentChatCompletion, DomainError> {
+            Err(DomainError::UpstreamProvider)
+        }
+
+        async fn complete_streaming(
+            &self,
+            _request: AgentChatRequest,
+        ) -> Result<AgentChatStream, DomainError> {
+            let usage = Arc::new(Mutex::new(None));
+            let usage_for_stream = usage.clone();
+            let body = async_stream::stream! {
+                yield Ok(bytes::Bytes::from_static(b"data: first\n\n"));
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                if let Ok(mut guard) = usage_for_stream.lock() {
+                    *guard = Some(TokenUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 20,
+                    });
+                }
+                yield Ok(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+            };
+            Ok(AgentChatStream {
+                content_type: "text/event-stream".to_string(),
+                provider: "streaming".to_string(),
+                usage,
+                body: Box::pin(body),
+            })
         }
     }
 

@@ -88,11 +88,10 @@ impl AgentChatService {
         })
     }
 
-    /// Streaming counterpart of `complete`: holds credits up front, forwards the
-    /// provider response body to the caller as it arrives, and settles billing
-    /// once the stream completes (from the usage frame captured at end of
-    /// stream). A post-stream charge failure is logged and the hold expires by
-    /// TTL — it can never double-charge because the idempotency key is stable.
+    /// Streaming counterpart of `complete`: holds credits up front, drains the
+    /// provider response on a background task, mirrors chunks to the caller,
+    /// and settles billing once the provider stream completes. Billing depends
+    /// on the upstream EOF, not on whether the client keeps reading.
     pub async fn complete_streaming(
         &self,
         params: AgentChatParams,
@@ -117,7 +116,6 @@ impl AgentChatService {
             })
             .await?;
 
-        // Billing context moved into the forwarding stream; settled at its end.
         let os_accounts = self.os_accounts.clone();
         let pricing = self.pricing.clone();
         let user_id = params.user_id.clone();
@@ -127,14 +125,31 @@ impl AgentChatService {
         let usage_handle = stream.usage.clone();
         let content_type = stream.content_type.clone();
         let upstream = stream.body;
+        let (downstream_tx, mut downstream_rx) = tokio::sync::mpsc::unbounded_channel::<
+            Result<bytes::Bytes, scribe_domain::DomainError>,
+        >();
 
-        let billed = async_stream::stream! {
+        tokio::spawn(async move {
             use futures_util::StreamExt;
             futures_util::pin_mut!(upstream);
+            let mut downstream_open = true;
             while let Some(item) = upstream.next().await {
-                yield item;
+                match item {
+                    Ok(chunk) => {
+                        if downstream_open && downstream_tx.send(Ok(chunk)).is_err() {
+                            downstream_open = false;
+                        }
+                    }
+                    Err(error) => {
+                        if downstream_open {
+                            let _ = downstream_tx.send(Err(error));
+                        }
+                        return;
+                    }
+                }
             }
-            // Stream fully forwarded: settle from the captured usage frame.
+            // Provider stream fully drained: settle from the captured usage frame
+            // even if the downstream client disconnected before reading EOF.
             let usage = usage_handle.lock().ok().and_then(|mut guard| guard.take());
             let Some(usage) = usage else {
                 tracing::warn!(
@@ -169,11 +184,17 @@ impl AgentChatService {
                     "agent chat: post-stream charge failed; hold will expire"
                 ),
             }
+        });
+
+        let body = async_stream::stream! {
+            while let Some(item) = downstream_rx.recv().await {
+                yield item;
+            }
         };
 
         Ok(AgentChatStreamOutput {
             content_type,
-            body: Box::pin(billed),
+            body: Box::pin(body),
         })
     }
 
@@ -185,8 +206,8 @@ impl AgentChatService {
     }
 }
 
-/// A streamed agent-chat response: the content type plus the body stream that
-/// forwards the provider response and settles billing when it ends.
+/// A streamed agent-chat response: the content type plus the body stream
+/// mirrored from a provider-draining background task.
 pub struct AgentChatStreamOutput {
     pub content_type: String,
     pub body: std::pin::Pin<

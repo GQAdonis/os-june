@@ -29,6 +29,7 @@ const SCRIBE_HERMES_COMMAND_ENV: &str = "SCRIBE_HERMES_COMMAND";
 // hatch for debugging a runtime that won't boot under the profile — leaving the
 // agent able to write anywhere the user can, so only flip it knowingly.
 const SCRIBE_HERMES_DISABLE_SANDBOX_ENV: &str = "SCRIBE_HERMES_DISABLE_SANDBOX";
+const DEBUG_CAPTURE_AGENT_CHAT_PAYLOADS_ENV: &str = "OS_SCRIBE_DEBUG_CAPTURE_AGENT_CHAT_PAYLOADS";
 // Referenced by the spawn match arm on every target; only ever reached when
 // `prepare_sandbox` returns a profile, which it only does on macOS.
 const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
@@ -3247,7 +3248,7 @@ async fn start_scribe_provider_proxy(
         decisions,
         policy_block_decisions,
         mappings: Arc::new(Mutex::new(Vec::new())),
-        direct_policy_fingerprints: Arc::new(Mutex::new(Vec::new())),
+        direct_policy_session_keys: Arc::new(Mutex::new(Vec::new())),
     });
     tauri::async_runtime::spawn(run_scribe_provider_proxy(listener, state, shutdown_rx));
     Ok(RunningScribeProviderProxy { port, shutdown })
@@ -3259,7 +3260,7 @@ struct ScribeProviderProxyState {
     decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
     policy_block_decisions: Arc<PolicyBlockDecisionHub>,
     mappings: Arc<Mutex<Vec<crate::tool_guard::ToolGuardReplacementMapping>>>,
-    direct_policy_fingerprints: Arc<Mutex<Vec<String>>>,
+    direct_policy_session_keys: Arc<Mutex<Vec<String>>>,
 }
 
 struct RunningScribeProviderProxy {
@@ -3333,13 +3334,15 @@ async fn handle_scribe_provider_connection(
         ("POST", "/v1/chat/completions") => {
             let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            capture_hermes_chat_payload("raw", &body);
             let requested_stream = chat_completion_requested_stream(&body);
             force_non_streaming_chat_completion(&mut body);
             if let Err(error) = guard_outbound_tool_results(&state, &mut body).await {
                 write_tool_guard_blocked_response(&mut stream, &error).await?;
                 return Ok(());
             }
-            let direct_policy_route = body_matches_direct_policy_fingerprint(&state, &body);
+            capture_hermes_chat_payload("forwarded", &body);
+            let direct_policy_route = body_matches_direct_policy_session_key(&state, &body);
             let proxy_result = if direct_policy_route {
                 crate::scribe_api::proxy_agent_chat_completions_direct(body.clone()).await
             } else {
@@ -3358,11 +3361,6 @@ async fn handle_scribe_provider_connection(
                     {
                         match request_policy_block_decision(&state, &body, &collected.body).await {
                             Ok(PolicyBlockDecision::Continue) => {
-                                if let Some(fingerprint) =
-                                    policy_block_conversation_fingerprint(&body)
-                                {
-                                    remember_direct_policy_fingerprint(&state, fingerprint);
-                                }
                                 match crate::scribe_api::proxy_agent_chat_completions_direct(
                                     body.clone(),
                                 )
@@ -3370,6 +3368,13 @@ async fn handle_scribe_provider_connection(
                                 {
                                     Ok(response) => {
                                         let direct = collect_agent_proxy_response(response).await;
+                                        if direct.status < 400 {
+                                            if let Some(key) =
+                                                policy_block_direct_session_key(&body, &direct.body)
+                                            {
+                                                remember_direct_policy_session_key(&state, key);
+                                            }
+                                        }
                                         write_collected_agent_response(
                                             &mut stream,
                                             &state,
@@ -3413,6 +3418,33 @@ async fn handle_scribe_provider_connection(
         }
     }
     Ok(())
+}
+
+fn capture_hermes_chat_payload(label: &str, body: &serde_json::Value) {
+    if !debug_capture_agent_chat_payloads_enabled() {
+        return;
+    }
+    let path = format!("/tmp/hermes-chat-payload.{label}.json");
+    match serde_json::to_vec_pretty(body) {
+        Ok(bytes) => {
+            if let Err(error) = fs::write(&path, bytes) {
+                eprintln!("failed to capture Hermes chat payload to {path}: {error}");
+            }
+        }
+        Err(error) => {
+            eprintln!("failed to serialize Hermes chat payload: {error}");
+        }
+    }
+}
+
+fn debug_capture_agent_chat_payloads_enabled() -> bool {
+    match std::env::var(DEBUG_CAPTURE_AGENT_CHAT_PAYLOADS_ENV) {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => false,
+    }
 }
 
 struct CollectedAgentProxyResponse {
@@ -3581,31 +3613,31 @@ fn find_json_string_field(value: &serde_json::Value, field: &str) -> Option<Stri
     }
 }
 
-fn body_matches_direct_policy_fingerprint(
+fn body_matches_direct_policy_session_key(
     state: &Arc<ScribeProviderProxyState>,
     body: &serde_json::Value,
 ) -> bool {
-    let candidates = policy_block_conversation_fingerprints(body);
+    let candidates = policy_block_direct_session_keys(body);
     if candidates.is_empty() {
         return false;
     }
-    let Ok(fingerprints) = state.direct_policy_fingerprints.lock() else {
+    let Ok(keys) = state.direct_policy_session_keys.lock() else {
         return false;
     };
     candidates
         .iter()
-        .any(|candidate| fingerprints.iter().any(|stored| stored == candidate))
+        .any(|candidate| keys.iter().any(|stored| stored == candidate))
 }
 
-fn remember_direct_policy_fingerprint(state: &Arc<ScribeProviderProxyState>, fingerprint: String) {
-    if let Ok(mut fingerprints) = state.direct_policy_fingerprints.lock() {
-        if !fingerprints.iter().any(|stored| stored == &fingerprint) {
-            fingerprints.push(fingerprint);
+fn remember_direct_policy_session_key(state: &Arc<ScribeProviderProxyState>, key: String) {
+    if let Ok(mut keys) = state.direct_policy_session_keys.lock() {
+        if !keys.iter().any(|stored| stored == &key) {
+            keys.push(key);
         }
-        const MAX_DIRECT_POLICY_FINGERPRINTS: usize = 128;
-        if fingerprints.len() > MAX_DIRECT_POLICY_FINGERPRINTS {
-            let excess = fingerprints.len() - MAX_DIRECT_POLICY_FINGERPRINTS;
-            fingerprints.drain(0..excess);
+        const MAX_DIRECT_POLICY_SESSION_KEYS: usize = 128;
+        if keys.len() > MAX_DIRECT_POLICY_SESSION_KEYS {
+            let excess = keys.len() - MAX_DIRECT_POLICY_SESSION_KEYS;
+            keys.drain(0..excess);
         }
     }
 }
@@ -3638,6 +3670,101 @@ fn policy_block_conversation_fingerprints(body: &serde_json::Value) -> Vec<Strin
         .filter_map(|message| chat_message_content_text(message.get("content")?))
         .map(|user_text| policy_block_text_fingerprint(&system_prefix, &user_text))
         .collect()
+}
+
+fn policy_block_direct_session_key(
+    blocked_body: &serde_json::Value,
+    direct_response_body: &[u8],
+) -> Option<String> {
+    let conversation = policy_block_conversation_fingerprint(blocked_body)?;
+    let assistant = assistant_message_fingerprint_from_chat_response_body(direct_response_body)?;
+    Some(policy_block_session_key(&conversation, &assistant))
+}
+
+fn policy_block_direct_session_keys(body: &serde_json::Value) -> Vec<String> {
+    let system_prefix = body
+        .get("messages")
+        .and_then(serde_json::Value::as_array)
+        .map(|messages| system_message_prefix(messages))
+        .unwrap_or_default();
+    let Some(messages) = body.get("messages").and_then(serde_json::Value::as_array) else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        if message.get("role").and_then(serde_json::Value::as_str) != Some("user") {
+            continue;
+        }
+        let Some(user_text) = message.get("content").and_then(chat_message_content_text) else {
+            continue;
+        };
+        let conversation = policy_block_text_fingerprint(&system_prefix, &user_text);
+        let Some(assistant) = next_assistant_message_fingerprint(&messages[index + 1..]) else {
+            continue;
+        };
+        keys.push(policy_block_session_key(&conversation, &assistant));
+    }
+    keys
+}
+
+fn system_message_prefix(messages: &[serde_json::Value]) -> String {
+    messages
+        .iter()
+        .take_while(|message| {
+            message.get("role").and_then(serde_json::Value::as_str) == Some("system")
+        })
+        .filter_map(|message| chat_message_content_text(message.get("content")?))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn next_assistant_message_fingerprint(messages: &[serde_json::Value]) -> Option<String> {
+    for message in messages {
+        match message.get("role").and_then(serde_json::Value::as_str) {
+            Some("assistant") => return assistant_message_fingerprint(message),
+            Some("user") => return None,
+            _ => continue,
+        }
+    }
+    None
+}
+
+fn assistant_message_fingerprint_from_chat_response_body(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body).ok()?;
+    let message = value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)?
+        .first()?
+        .get("message")?;
+    assistant_message_fingerprint(message)
+}
+
+fn assistant_message_fingerprint(message: &serde_json::Value) -> Option<String> {
+    let content = message
+        .get("content")
+        .and_then(chat_message_content_text)
+        .unwrap_or_default();
+    let tool_calls = message
+        .get("tool_calls")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let has_tool_calls = tool_calls.as_array().is_some_and(|items| !items.is_empty())
+        || (!tool_calls.is_null() && !tool_calls.is_array());
+    if content.is_empty() && !has_tool_calls {
+        return None;
+    }
+    let value = serde_json::json!({
+        "assistant": content,
+        "tool_calls": tool_calls,
+    });
+    Some(policy_block_body_fingerprint(&value))
+}
+
+fn policy_block_session_key(conversation: &str, assistant: &str) -> String {
+    policy_block_body_fingerprint(&serde_json::json!({
+        "conversation": conversation,
+        "assistant": assistant,
+    }))
 }
 
 fn chat_message_content_text(content: &serde_json::Value) -> Option<String> {
@@ -4560,27 +4687,69 @@ mod tests {
     }
 
     #[test]
-    fn policy_block_fingerprint_matches_follow_up_context() {
+    fn policy_block_session_key_matches_follow_up_after_direct_response() {
         let blocked = serde_json::json!({
             "messages": [
                 { "role": "system", "content": "You are June." },
                 { "role": "user", "content": "Describe an apple" }
             ]
         });
+        let direct_response = br#"{
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "An apple is a crisp fruit."
+                    }
+                }
+            ]
+        }"#;
         let follow_up = serde_json::json!({
             "messages": [
                 { "role": "system", "content": "You are June." },
                 { "role": "user", "content": "Describe an apple" },
-                { "role": "assistant", "content": "" },
+                { "role": "assistant", "content": "An apple is a crisp fruit." },
                 { "role": "user", "content": "Try again" }
             ]
         });
 
-        let fingerprint =
-            policy_block_conversation_fingerprint(&blocked).expect("blocked fingerprint");
-        assert!(policy_block_conversation_fingerprints(&follow_up)
+        let key =
+            policy_block_direct_session_key(&blocked, direct_response).expect("direct route key");
+        assert!(policy_block_direct_session_keys(&follow_up)
             .iter()
-            .any(|candidate| candidate == &fingerprint));
+            .any(|candidate| candidate == &key));
+    }
+
+    #[test]
+    fn policy_block_session_key_does_not_match_same_prompt_without_direct_response() {
+        let blocked = serde_json::json!({
+            "messages": [
+                { "role": "system", "content": "You are June." },
+                { "role": "user", "content": "Describe an apple" }
+            ]
+        });
+        let direct_response = br#"{
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "An apple is a crisp fruit."
+                    }
+                }
+            ]
+        }"#;
+        let repeated_prompt = serde_json::json!({
+            "messages": [
+                { "role": "system", "content": "You are June." },
+                { "role": "user", "content": "Describe an apple" }
+            ]
+        });
+
+        let key =
+            policy_block_direct_session_key(&blocked, direct_response).expect("direct route key");
+        assert!(!policy_block_direct_session_keys(&repeated_prompt)
+            .iter()
+            .any(|candidate| candidate == &key));
     }
 
     #[test]
