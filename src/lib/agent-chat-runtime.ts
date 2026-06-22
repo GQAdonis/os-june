@@ -665,6 +665,16 @@ export type PolicyBlockDecision = {
   status: "pending" | "continued" | "rejected";
 };
 
+/** A re-enable marker closing the span where OS Guard was off. `afterTurnId` is
+ * the id of the last turn present when the user re-enabled, so the divider is
+ * anchored by position — not by a wall-clock timestamp, which drifts against the
+ * server-stamped message times and used to misplace the divider (and shove the
+ * next prompt's card out of order) on any clock skew. */
+export type OsGuardReenable = {
+  id: string;
+  afterTurnId: string | null;
+};
+
 function userTurnText(turn: AgentChatTurn): string {
   return turn.parts
     .filter((part): part is AgentChatTextPart => part.type === "text")
@@ -683,13 +693,14 @@ function userTurnText(turn: AgentChatTurn): string {
  * inserted immediately after the earliest user turn whose text matches the
  * decision's prompt and that no earlier decision already claimed — so an
  * identical prompt re-sent later gets its own card. With no match the card is
- * appended at the end. Each re-enable timestamp becomes a `divider` turn placed
- * after the last turn created at or before it.
+ * appended at the end. Each re-enable marker becomes a `divider` turn placed
+ * immediately after its anchor turn (`afterTurnId`), or at the end if the
+ * anchor is missing.
  */
 export function applyPolicyBlockCards(
   turns: AgentChatTurn[],
   decisions: PolicyBlockDecision[],
-  reenabledAt: string[],
+  reenables: OsGuardReenable[],
 ): AgentChatTurn[] {
   const out = [...turns];
   const claimed = new Set<AgentChatTurn>();
@@ -722,21 +733,21 @@ export function applyPolicyBlockCards(
     }
   }
 
-  for (const ts of reenabledAt) {
+  for (const reenable of reenables) {
     let index = out.length;
-    for (let i = 0; i < out.length; i += 1) {
-      const turn = out[i];
-      if (turn && turn.createdAt && turn.createdAt <= ts) index = i + 1;
+    if (reenable.afterTurnId) {
+      const anchor = out.findIndex((turn) => turn?.id === reenable.afterTurnId);
+      if (anchor >= 0) index = anchor + 1;
     }
     out.splice(index, 0, {
-      id: `os-guard-reenabled:${ts}`,
+      id: `os-guard-reenabled:${reenable.id}`,
       role: "system",
-      createdAt: ts,
+      createdAt: index > 0 ? (out[index - 1]?.createdAt ?? "") : "",
       status: "complete",
       parts: [
         {
           type: "divider",
-          id: `os-guard-reenabled:${ts}`,
+          id: `os-guard-reenabled:${reenable.id}`,
           label: "OS Guard re-enabled",
         },
       ],

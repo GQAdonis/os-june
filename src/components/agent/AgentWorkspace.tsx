@@ -203,6 +203,7 @@ import {
   type AgentChatTurn,
   type LiveHermesEvent,
   type PolicyBlockDecision,
+  type OsGuardReenable,
 } from "../../lib/agent-chat-runtime";
 import {
   buildAgentChatGallery,
@@ -725,7 +726,7 @@ type AgentSessionContinuity = {
   directPolicySessionIds: string[];
   rejectedPolicySessionIds: string[];
   policyBlockDecisions: Record<string, PolicyBlockDecision[]>;
-  osGuardReenabledAt: Record<string, string[]>;
+  osGuardReenabledAt: Record<string, OsGuardReenable[]>;
 };
 
 let sessionContinuity: AgentSessionContinuity | null = null;
@@ -741,7 +742,7 @@ function captureSessionContinuity(state: {
   directPolicySessionIds: Set<string>;
   rejectedPolicySessionIds: Set<string>;
   policyBlockDecisions: Record<string, PolicyBlockDecision[]>;
-  osGuardReenabledAt: Record<string, string[]>;
+  osGuardReenabledAt: Record<string, OsGuardReenable[]>;
 }): AgentSessionContinuity | null {
   const activeIds = new Set([
     ...state.workingSessionIds,
@@ -840,7 +841,7 @@ export function AgentWorkspace({
   // Per-session ISO timestamps of OS Guard re-enable clicks; each renders a
   // divider in the timeline at its point in time.
   const [osGuardReenabledAt, setOsGuardReenabledAt] = useState<
-    Record<string, string[]>
+    Record<string, OsGuardReenable[]>
   >(() => continuity?.osGuardReenabledAt ?? {});
   const osGuardReenabledAtRef = useRef(osGuardReenabledAt);
   const [bridge, setBridge] = useState<HermesBridgeStatus>({
@@ -1283,13 +1284,23 @@ export function AgentWorkspace({
       return next;
     });
     // Keep the block/approval card and record a re-enable marker closing the
-    // span where OS Guard was off, instead of deleting that history.
+    // span where OS Guard was off, instead of deleting that history. The marker
+    // is anchored to the id of the last message present right now (the answer
+    // the continued turn produced) so the divider sits there by position — not
+    // by a wall-clock timestamp, which drifts against server message times and
+    // misplaced the divider, disordering the next prompt's card.
+    const sessionMessages = [
+      ...(hermesSessionMessages[sessionId] ?? []),
+      ...(pendingHermesMessagesRef.current[sessionId] ?? []),
+    ];
+    const afterTurnId = sessionMessages.at(-1)?.id ?? null;
     setOsGuardReenabledAt((current) => {
+      const existing = current[sessionId] ?? [];
       const next = {
         ...current,
         [sessionId]: [
-          ...(current[sessionId] ?? []),
-          new Date().toISOString(),
+          ...existing,
+          { id: `${existing.length}:${afterTurnId ?? "end"}`, afterTurnId },
         ],
       };
       osGuardReenabledAtRef.current = next;

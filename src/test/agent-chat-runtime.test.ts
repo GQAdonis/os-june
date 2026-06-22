@@ -140,7 +140,7 @@ describe("applyPolicyBlockCards", () => {
     ];
 
     const result = applyPolicyBlockCards(turns, decisions, [
-      "2026-06-22T10:01:00.000Z",
+      { id: "r1", afterTurnId: "a1" },
     ]);
 
     expect(result.map(kindOf)).toEqual([
@@ -166,7 +166,7 @@ describe("applyPolicyBlockCards", () => {
     expect(result.map(kindOf)).toEqual(["user", "block:pending"]);
   });
 
-  it("places the re-enable divider by timestamp among existing turns", () => {
+  it("places the re-enable divider right after its anchor turn", () => {
     const turns = [
       userTurn("u1", "first", "2026-06-22T10:00:00.000Z"),
       assistantTurn("a1", "answer", "2026-06-22T10:00:05.000Z"),
@@ -174,7 +174,7 @@ describe("applyPolicyBlockCards", () => {
     ];
 
     const result = applyPolicyBlockCards(turns, [], [
-      "2026-06-22T10:01:00.000Z",
+      { id: "r1", afterTurnId: "a1" },
     ]);
 
     expect(result.map(kindOf)).toEqual([
