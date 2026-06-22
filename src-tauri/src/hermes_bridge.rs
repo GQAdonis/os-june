@@ -4304,7 +4304,12 @@ async fn write_policy_block_rejected_response(
             "index": 0,
             "message": {
                 "role": "assistant",
-                "content": ""
+                // Non-empty, and recognizable as a policy block by the
+                // frontend, which renders the "Prompt blocked" card from this
+                // and suppresses the raw text. Empty content would make the
+                // agent runtime treat the turn as an empty completion, retry,
+                // and finally surface a confusing "No reply" error instead.
+                "content": "Error: policy_blocked - the prompt was blocked by OS Guard."
             },
             "finish_reason": "stop"
         }],
