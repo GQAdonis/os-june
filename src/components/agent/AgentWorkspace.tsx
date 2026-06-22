@@ -1248,15 +1248,13 @@ export function AgentWorkspace({
       next.delete(sessionId);
       return next;
     });
-    liveEventsRef.current = {
-      ...liveEventsRef.current,
-      [sessionId]: (liveEventsRef.current[sessionId] ?? []).filter(
-        (event) =>
-          event.type !== "policy_block.request" &&
-          event.type !== "policy_block.decision",
-      ),
-    };
-    setLiveEvents(liveEventsRef.current);
+    // Keep the block/approval card and drop a marker closing the span where
+    // OS Guard was off, instead of deleting that history.
+    appendPolicyBlockLiveEvent(sessionId, {
+      type: "os_guard.reactivated",
+      receivedAt: new Date().toISOString(),
+      payload: {},
+    });
     try {
       await hermesBridgeClearDirectPolicy();
     } catch (err) {
@@ -6074,7 +6072,8 @@ function retainPolicyBlockLiveEvents(
   return (events ?? []).filter(
     (event) =>
       event.type === "policy_block.request" ||
-      event.type === "policy_block.decision",
+      event.type === "policy_block.decision" ||
+      event.type === "os_guard.reactivated",
   );
 }
 
@@ -6301,6 +6300,25 @@ function AgentChatTurnRow({
       part.type === "context",
   );
   const nonTextParts = turn.parts.filter((part) => part.type !== "text");
+
+  const dividerParts = turn.parts.filter(
+    (part): part is Extract<AgentChatPart, { type: "divider" }> =>
+      part.type === "divider",
+  );
+  if (dividerParts.length && turn.parts.every((part) => part.type === "divider")) {
+    return (
+      <>
+        {dividerParts.map((part) => (
+          <div key={`${turn.id}:divider:${part.id}`} className="agent-chat-divider">
+            <span className="agent-chat-divider-label">
+              <IconShieldCheck size={13} aria-hidden />
+              {part.label}
+            </span>
+          </div>
+        ))}
+      </>
+    );
+  }
 
   if (
     contextParts.length &&

@@ -79,6 +79,15 @@ export type AgentChatPolicyBlockPart = {
   status: "pending" | "continued" | "rejected";
 };
 
+/** A full-width marker in the timeline (today: OS Guard was re-enabled).
+ * Renders as a labelled divider so the span where it was off stays visible
+ * between the block/approval card and the turns that follow. */
+export type AgentChatDividerPart = {
+  type: "divider";
+  id: string;
+  label: string;
+};
+
 export type AgentChatPart =
   | AgentChatTextPart
   | AgentChatReasoningPart
@@ -87,7 +96,8 @@ export type AgentChatPart =
   | AgentChatApprovalPart
   | AgentChatClarifyPart
   | AgentChatNoticePart
-  | AgentChatPolicyBlockPart;
+  | AgentChatPolicyBlockPart
+  | AgentChatDividerPart;
 
 export type AgentChatTurn = {
   id: string;
@@ -642,8 +652,31 @@ function appendLiveHermesEvents(
       continue;
     }
 
+    if (event.type === "os_guard.reactivated") {
+      // Standalone marker turn closing the span where OS Guard was off. It
+      // sits at its own timestamp between the block/approval card and the
+      // turns that follow, instead of deleting that history.
+      const turn = createAssistantTurn(turns, event.receivedAt);
+      turn.role = "system";
+      turn.status = "complete";
+      turn.parts.push({
+        type: "divider",
+        id: `os-guard-reactivated:${event.receivedAt}`,
+        label: "OS Guard re-enabled",
+      });
+      currentAssistant = null;
+      continue;
+    }
+
     if (event.type === "policy_block.request") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
+      // Anchor the card just after the prompt it blocks. The block event's
+      // wall-clock time can land before the user message's persisted timestamp
+      // on reconcile, which would sort the card above the prompt; pinning it
+      // after the latest existing turn keeps prompt-then-card order.
+      currentAssistant ??= createAssistantTurn(
+        turns,
+        afterLatestTurn(turns, event.receivedAt),
+      );
       currentAssistant.status = "running";
       const payload = event.payload as Record<string, unknown> | undefined;
       upsertPolicyBlockPart(currentAssistant.parts, {
@@ -723,6 +756,20 @@ function appendLiveHermesEvents(
       currentAssistant = null;
     }
   }
+}
+
+// A timestamp guaranteed to sort at or after every existing turn, so a turn
+// created with it lands at the bottom regardless of clock skew between live
+// events and persisted message timestamps. Returns `receivedAt` when nothing
+// already sorts later, else the latest turn's timestamp plus 1ms.
+function afterLatestTurn(turns: AgentChatTurn[], receivedAt: string): string {
+  let latest = receivedAt;
+  for (const turn of turns) {
+    if (turn.createdAt > latest) latest = turn.createdAt;
+  }
+  if (latest === receivedAt) return receivedAt;
+  const bumped = new Date(new Date(latest).getTime() + 1);
+  return Number.isNaN(bumped.getTime()) ? receivedAt : bumped.toISOString();
 }
 
 function createAssistantTurn(turns: AgentChatTurn[], createdAt: string) {
@@ -1246,6 +1293,7 @@ function partText(part: AgentChatPart) {
     return [part.question, part.answer ?? ""].join(" ");
   if (part.type === "context") return part.preview || part.text;
   if (part.type === "policyBlock") return "OS Guard blocked this prompt.";
+  if (part.type === "divider") return part.label;
   return part.text;
 }
 

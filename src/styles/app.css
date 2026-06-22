@@ -7515,6 +7515,40 @@ input:focus-visible,
   padding-top: 1px;
 }
 
+/* Full-width timeline marker for OS Guard being re-enabled: a centred label
+ * flanked by hairlines, so the span where it was off stays readable between
+ * the block/approval card and the turns that follow. */
+.agent-chat-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0;
+}
+
+.agent-chat-divider::before,
+.agent-chat-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+.agent-chat-divider-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--success);
+  white-space: nowrap;
+}
+
+.agent-chat-divider-label svg {
+  color: var(--success);
+}
+
 /* Inline notice — shared shape used by NoteRecoveryPrompt and the
  * mic-blocked banner. Tone-aware via the [data-tone] attribute so the
  * eyebrow color reflects the severity without changing the surrounding
