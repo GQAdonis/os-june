@@ -1149,6 +1149,17 @@ export function AgentWorkspace({
         const sessionId = selectedHermesSessionIdRef.current;
         if (!request || !sessionId) return;
         policyBlockSessionIdsRef.current[request.decisionId] = sessionId;
+        // Capture the prompt being blocked (the message the user just sent) so
+        // the card can stay anchored to that exact turn later, instead of
+        // drifting onto whatever the newest prompt happens to be.
+        const sessionPending =
+          pendingHermesMessagesRef.current[sessionId] ?? [];
+        const blockedPrompt = [...sessionPending]
+          .reverse()
+          .find(
+            (message) =>
+              message.role === "user" && typeof message.content === "string",
+          )?.content;
         appendPolicyBlockLiveEvent(sessionId, {
           type: "policy_block.request",
           receivedAt: new Date().toISOString(),
@@ -1156,6 +1167,7 @@ export function AgentWorkspace({
             decision_id: request.decisionId,
             model: request.model,
             message: request.message,
+            blocked_prompt: blockedPrompt,
           },
         });
         // Surface the prompt as a "needs you" state: the agent HUD/menu-bar

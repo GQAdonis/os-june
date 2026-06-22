@@ -375,6 +375,9 @@ function appendLiveHermesEvents(
 ) {
   let currentAssistant: AgentChatTurn | null = null;
   const toolCreatedTurns = new Set<AgentChatTurn>();
+  // User turns already claimed by a policy-block card, so repeated identical
+  // prompts each anchor to their own turn instead of all matching the first.
+  const claimedPromptTurns = new Set<string>();
 
   for (const event of events) {
     const text = eventText(event);
@@ -669,16 +672,24 @@ function appendLiveHermesEvents(
     }
 
     if (event.type === "policy_block.request") {
-      // Anchor the card just after the prompt it blocks. The block event's
-      // wall-clock time can land before the user message's persisted timestamp
-      // on reconcile, which would sort the card above the prompt; pinning it
-      // after the latest existing turn keeps prompt-then-card order.
+      // Anchor the card just after the exact prompt it blocked, matched by the
+      // captured prompt text, so it never drifts onto a later prompt or sorts
+      // above its own (the block event's wall-clock time can land before the
+      // user message's persisted timestamp on reconcile). Repeated identical
+      // prompts each claim their own turn; fall back to the latest user turn
+      // when the text is unknown.
+      const payload = event.payload as Record<string, unknown> | undefined;
+      const blockedPrompt = stringValue(payload?.blocked_prompt);
       currentAssistant ??= createAssistantTurn(
         turns,
-        afterLatestUserTurn(turns, event.receivedAt),
+        afterBlockedPromptTurn(
+          turns,
+          blockedPrompt,
+          claimedPromptTurns,
+          event.receivedAt,
+        ),
       );
       currentAssistant.status = "running";
-      const payload = event.payload as Record<string, unknown> | undefined;
       upsertPolicyBlockPart(currentAssistant.parts, {
         id:
           stringValue(payload?.decision_id) ??
@@ -758,6 +769,44 @@ function appendLiveHermesEvents(
   }
 }
 
+function userTurnText(turn: AgentChatTurn): string {
+  return turn.parts
+    .filter((part): part is AgentChatTextPart => part.type === "text")
+    .map((part) => part.text)
+    .join("")
+    .trim();
+}
+
+// 1ms past `createdAt`, so a turn created with it sorts directly after that
+// turn. Falls back to `fallback` if `createdAt` is unparseable.
+function bumpedTimestamp(createdAt: string, fallback: string): string {
+  const bumped = new Date(new Date(createdAt).getTime() + 1);
+  return Number.isNaN(bumped.getTime()) ? fallback : bumped.toISOString();
+}
+
+// Anchors the policy-block card directly after the prompt it blocked, matched
+// by the captured prompt text against the earliest unclaimed user turn (so two
+// identical prompts each keep their own card). Falls back to the latest user
+// turn when the prompt text is unknown.
+function afterBlockedPromptTurn(
+  turns: AgentChatTurn[],
+  blockedPrompt: string | undefined,
+  claimed: Set<string>,
+  receivedAt: string,
+): string {
+  const target = blockedPrompt?.trim();
+  if (target) {
+    for (const turn of turns) {
+      if (turn.role !== "user" || claimed.has(turn.id)) continue;
+      if (userTurnText(turn) === target) {
+        claimed.add(turn.id);
+        return bumpedTimestamp(turn.createdAt, receivedAt);
+      }
+    }
+  }
+  return afterLatestUserTurn(turns, receivedAt);
+}
+
 // A timestamp that sorts the policy-block card right after the prompt it
 // blocks: 1ms past the latest USER turn. Anchoring to the prompt (not to every
 // turn) keeps the card between the prompt and whatever the turn produces next —
@@ -775,8 +824,7 @@ function afterLatestUserTurn(turns: AgentChatTurn[], receivedAt: string): string
     }
   }
   if (latestUser === undefined) return receivedAt;
-  const bumped = new Date(new Date(latestUser).getTime() + 1);
-  return Number.isNaN(bumped.getTime()) ? receivedAt : bumped.toISOString();
+  return bumpedTimestamp(latestUser, receivedAt);
 }
 
 function createAssistantTurn(turns: AgentChatTurn[], createdAt: string) {
@@ -807,30 +855,19 @@ function turnsHavePolicyBlockPart(turns: AgentChatTurn[]): boolean {
   );
 }
 
-// A single prompt block can surface from several sources at once — the live
-// decision flow, the re-streamed block message, and the persisted message —
-// each a separate part. Collapse them to one card so the conversation never
-// shows two, even for a frame. A decided card (continued/rejected) wins over a
-// pending one; the latest such is kept.
+// The same block can surface twice with the same id (e.g. the retained live
+// decision plus a persisted copy). Keep only the first occurrence of each id so
+// a single block never renders twice — while distinct blocks (different ids,
+// e.g. an identical prompt re-sent in its own turn) are all preserved.
 function dedupePolicyBlockParts(turns: AgentChatTurn[]): AgentChatTurn[] {
-  const blocks = turns.flatMap((turn) =>
-    turn.parts.filter((part) => part.type === "policyBlock"),
-  );
-  if (blocks.length <= 1) {
-    return turns;
-  }
-  const decided = blocks.filter((part) => part.status !== "pending");
-  const keep = (decided.length ? decided : blocks).at(-1);
-  let kept = false;
+  const seen = new Set<string>();
   return turns
     .map((turn) => {
       const parts = turn.parts.filter((part) => {
         if (part.type !== "policyBlock") return true;
-        if (part === keep && !kept) {
-          kept = true;
-          return true;
-        }
-        return false;
+        if (seen.has(part.id)) return false;
+        seen.add(part.id);
+        return true;
       });
       return parts.length === turn.parts.length ? turn : { ...turn, parts };
     })

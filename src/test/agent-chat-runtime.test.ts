@@ -50,6 +50,76 @@ describe("repairContractionSpacing", () => {
 });
 
 describe("Agent chat runtime", () => {
+  it("keeps each card on its own prompt when an identical prompt is re-sent", () => {
+    // Approve apple, re-enable OS Guard, send apple again: the old approval
+    // card must stay on the first apple (above its answer), and the re-sent
+    // apple must get its own pending card below the divider — not inherit the
+    // old approval.
+    const turns = buildHermesSessionChatTurns(
+      [
+        {
+          id: "u1",
+          role: "user",
+          content: "describe an apple",
+          timestamp: "2026-06-22T10:00:00.000Z",
+        },
+        {
+          id: "a1",
+          role: "assistant",
+          content: "An apple is a fruit.",
+          timestamp: "2026-06-22T10:00:05.000Z",
+        },
+        {
+          id: "u2",
+          role: "user",
+          content: "describe an apple",
+          timestamp: "2026-06-22T10:02:00.000Z",
+        },
+      ],
+      [
+        {
+          type: "policy_block.request",
+          session_id: "s1",
+          receivedAt: "2026-06-22T10:00:01.000Z",
+          payload: { decision_id: "d1", blocked_prompt: "describe an apple" },
+        },
+        {
+          type: "policy_block.decision",
+          session_id: "s1",
+          receivedAt: "2026-06-22T10:00:02.000Z",
+          payload: { decision_id: "d1", action: "continue" },
+        },
+        {
+          type: "os_guard.reactivated",
+          session_id: "s1",
+          receivedAt: "2026-06-22T10:01:00.000Z",
+          payload: {},
+        },
+        {
+          type: "policy_block.request",
+          session_id: "s1",
+          receivedAt: "2026-06-22T10:02:01.000Z",
+          payload: { decision_id: "d2", blocked_prompt: "describe an apple" },
+        },
+      ],
+    );
+
+    const kinds = turns.map((turn) => {
+      const block = turn.parts.find((part) => part.type === "policyBlock");
+      if (block && block.type === "policyBlock") return `block:${block.status}`;
+      if (turn.parts.some((part) => part.type === "divider")) return "divider";
+      return turn.role;
+    });
+    expect(kinds).toEqual([
+      "user",
+      "block:continued",
+      "assistant",
+      "divider",
+      "user",
+      "block:pending",
+    ]);
+  });
+
   it("places the approval card between the prompt and the answer on continue", () => {
     // Continue keeps the conversation going: the approval card must sit above
     // the reasoning/answer the turn then produces, not sink below them once the
