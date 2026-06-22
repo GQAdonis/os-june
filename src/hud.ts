@@ -199,8 +199,17 @@ const HUD_WHISPER_FLOOR = 0.06;
 // can faithfully track the envelope. Lower decay = livelier/twitchier, higher =
 // steadier but stickier. Slightly long so the tail eases down smoothly instead
 // of dropping out from under the bars.
+//
+// The decay is time-normalized: the helper emits levels at ~50Hz (20ms) on the
+// default-capture/recorder paths but ~25Hz (40ms) on the AVCapture path, so a
+// flat per-event multiply would give a 2× different wall-clock hold depending
+// on which metering source is live. AUDIO_HOLD_DECAY is the decay per
+// HOLD_REF_EVENT_MS; each event scales it by elapsed dt so the hold lasts the
+// same real time regardless of emit rate.
 const AUDIO_HOLD_DECAY = 0.8;
+const HOLD_REF_EVENT_MS = 20; // helper's nominal 50Hz emit cadence
 let audioPeakHold = 0;
+let lastHoldAt = 0; // performance.now() of the previous peak-hold update
 // The idle pulse + speech wave live in the shared meter (IDLE_PULSE_*,
 // SPEECH_WAVE_*, withWaveLayers) so the HUD and recorder move identically.
 
@@ -314,6 +323,7 @@ function startBarLoop() {
 function resetBars() {
   meter.reset();
   audioPeakHold = 0;
+  lastHoldAt = 0;
   for (let i = 0; i < bars.length; i++) {
     bars[i].style.setProperty("--level", IDLE_LEVEL.toFixed(3));
   }
@@ -323,8 +333,15 @@ function resetBars() {
 function renderAudioLevel(rawLevel: number) {
   // Hold the raw envelope before shaping (mirrors the recorder windowing its
   // raw peaks before scaleLiveInputPeak): jump up to a louder sample instantly,
-  // bleed down otherwise so the level rides through inter-syllable dips.
-  audioPeakHold = Math.max(rawLevel, audioPeakHold * AUDIO_HOLD_DECAY);
+  // bleed down otherwise so the level rides through inter-syllable dips. The
+  // decay is scaled by elapsed time so its wall-clock duration doesn't drift
+  // with the helper's emit rate (see HOLD_REF_EVENT_MS). dt is clamped so a
+  // first event or a post-idle gap doesn't collapse the hold in one step.
+  const nowMs = performance.now();
+  const dt = lastHoldAt ? clamp(nowMs - lastHoldAt, 1, 250) : HOLD_REF_EVENT_MS;
+  lastHoldAt = nowMs;
+  const decay = Math.pow(AUDIO_HOLD_DECAY, dt / HOLD_REF_EVENT_MS);
+  audioPeakHold = Math.max(rawLevel, audioPeakHold * decay);
   const held = audioPeakHold;
   let shaped: number;
   if (held <= AUDIO_NOISE_GATE) {
