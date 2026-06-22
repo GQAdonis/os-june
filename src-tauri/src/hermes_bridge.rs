@@ -310,6 +310,10 @@ pub struct HermesSkillDocument {
     pub name: String,
     pub relative_path: String,
     pub content: String,
+    /// True when the skill was loaded from an external dir (e.g.
+    /// `~/.agents/skills`). June can read these but not write them, so the
+    /// editor presents them read-only.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -775,8 +779,8 @@ pub fn get_hermes_bridge_skill(
     app: AppHandle,
     request: HermesSkillRequest,
 ) -> Result<HermesSkillDocument, AppError> {
-    let skills_root = resolve_scribe_hermes_home(&app)?.join("skills");
-    let path = resolve_hermes_skill_file_in_root(&skills_root, &request.name)?;
+    let roots = skill_search_roots(&app)?;
+    let (root, path, read_only) = resolve_skill_in_roots(&roots, &request.name)?;
     let metadata = fs::metadata(&path)
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
     if metadata.len() > HERMES_SKILL_MAX_BYTES as u64 {
@@ -789,8 +793,9 @@ pub fn get_hermes_bridge_skill(
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
     Ok(HermesSkillDocument {
         name: request.name.trim().to_string(),
-        relative_path: skill_relative_path(&skills_root, &path)?,
+        relative_path: skill_relative_path(&root, &path)?,
         content,
+        read_only,
     })
 }
 
@@ -806,7 +811,26 @@ pub fn update_hermes_bridge_skill(
         ));
     }
     let skills_root = resolve_scribe_hermes_home(&app)?.join("skills");
-    let path = resolve_hermes_skill_file_in_root(&skills_root, &request.name)?;
+    let path = match resolve_hermes_skill_file_in_root(&skills_root, &request.name) {
+        Ok(path) => path,
+        Err(error) if error.code == "hermes_skill_not_found" => {
+            // Skills loaded from `~/.agents/skills` live outside the managed
+            // root and are read-only in June: the agent loads them, but the
+            // editor never writes them. Surface that instead of "not found".
+            let externals: Vec<(PathBuf, bool)> = external_skill_dirs()
+                .into_iter()
+                .map(|dir| (dir, true))
+                .collect();
+            if resolve_skill_in_roots(&externals, &request.name).is_ok() {
+                return Err(AppError::new(
+                    "hermes_skill_read_only",
+                    "This skill loads from ~/.agents/skills and is read-only in June. Edit it on disk.",
+                ));
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     write_managed_skill_file(&skills_root, &path, &request.content)?;
     let content = fs::read_to_string(&path)
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
@@ -814,7 +838,50 @@ pub fn update_hermes_bridge_skill(
         name: request.name.trim().to_string(),
         relative_path: skill_relative_path(&skills_root, &path)?,
         content,
+        read_only: false,
     })
+}
+
+/// Ordered skill roots June searches when opening a skill: the managed
+/// `$HERMES_HOME/skills` first (editable), then any `external_skill_dirs()`
+/// (read-only). The bool is the read-only flag for skills found under that
+/// root. Non-existent roots are skipped so a missing managed dir still lets
+/// external skills resolve.
+fn skill_search_roots(app: &AppHandle) -> Result<Vec<(PathBuf, bool)>, AppError> {
+    let mut roots = Vec::new();
+    let managed = resolve_scribe_hermes_home(app)?.join("skills");
+    if managed.is_dir() {
+        roots.push((managed, false));
+    }
+    for dir in external_skill_dirs() {
+        roots.push((dir, true));
+    }
+    Ok(roots)
+}
+
+/// Resolves `name` against an ordered list of `(root, read_only)` pairs,
+/// returning the matched root, the resolved skill file, and whether it is
+/// read-only. Roots are tried in order and the first match wins; a
+/// `hermes_skill_not_found` falls through to the next root, while any other
+/// error (ambiguous name, invalid name) stops the search.
+fn resolve_skill_in_roots(
+    roots: &[(PathBuf, bool)],
+    name: &str,
+) -> Result<(PathBuf, PathBuf, bool), AppError> {
+    let mut not_found: Option<AppError> = None;
+    for (root, read_only) in roots {
+        match resolve_hermes_skill_file_in_root(root, name) {
+            Ok(path) => return Ok((root.clone(), path, *read_only)),
+            Err(error) if error.code == "hermes_skill_not_found" => not_found = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(not_found.unwrap_or_else(|| {
+        AppError::new(
+            "hermes_skill_not_found",
+            format!("Could not find skill \"{}\".", name.trim()),
+        )
+    }))
 }
 
 fn resolve_hermes_skill_file_in_root(skills_root: &Path, name: &str) -> Result<PathBuf, AppError> {
@@ -3985,6 +4052,36 @@ mod tests {
                         .join("SKILL.md")
                 )
         );
+    }
+
+    #[test]
+    fn skill_resolver_searches_external_roots_and_flags_read_only() {
+        let managed = tempfile::tempdir().expect("managed tempdir");
+        let external = tempfile::tempdir().expect("external tempdir");
+        let managed_skill = managed.path().join("dogfood");
+        std::fs::create_dir_all(&managed_skill).expect("managed skill dir");
+        std::fs::write(managed_skill.join("SKILL.md"), "# Dogfood\n").expect("managed skill");
+        let external_skill = external.path().join("caveman");
+        std::fs::create_dir_all(&external_skill).expect("external skill dir");
+        std::fs::write(external_skill.join("SKILL.md"), "# Caveman\n").expect("external skill");
+
+        let roots = vec![
+            (managed.path().to_path_buf(), false),
+            (external.path().to_path_buf(), true),
+        ];
+
+        let (_, _, managed_read_only) =
+            resolve_skill_in_roots(&roots, "dogfood").expect("resolve managed");
+        assert!(!managed_read_only, "managed skills are editable");
+
+        let (root, path, external_read_only) =
+            resolve_skill_in_roots(&roots, "caveman").expect("resolve external");
+        assert!(external_read_only, "external skills are read-only");
+        assert_eq!(root.as_path(), external.path());
+        assert!(path.ends_with(Path::new("caveman").join("SKILL.md")));
+
+        let err = resolve_skill_in_roots(&roots, "missing").expect_err("missing");
+        assert_eq!(err.code, "hermes_skill_not_found");
     }
 
     #[test]
