@@ -397,12 +397,22 @@ fn clamp_agent_chat_output_tokens(
     let Some(value) = object.get_mut(field) else {
         return;
     };
-    let Some(tokens) = value.as_u64() else {
-        return;
-    };
-    if tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS {
+    if output_tokens_exceeds_proxy_cap(value) {
         *value = serde_json::Value::Number(AGENT_PROXY_MAX_OUTPUT_TOKENS.into());
     }
+}
+
+fn output_tokens_exceeds_proxy_cap(value: &serde_json::Value) -> bool {
+    if let Some(tokens) = value.as_u64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS;
+    }
+    if let Some(tokens) = value.as_i64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS as i64;
+    }
+    if let Some(tokens) = value.as_f64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS as f64;
+    }
+    false
 }
 
 fn limit_agent_chat_messages(body: &mut serde_json::Value, max_messages: usize) {
@@ -1182,6 +1192,35 @@ mod tests {
             body["max_completion_tokens"],
             serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
         );
+    }
+
+    #[test]
+    fn agent_proxy_caps_float_output_token_budgets_over_the_limit() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": 8193.0,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_leaves_negative_output_token_budgets_for_backend_validation() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": -1,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(body["max_tokens"], serde_json::json!(-1));
     }
 
     #[test]
