@@ -221,10 +221,14 @@ body:active {
   transform: rotate(-90deg);
 }
 
-/* Upright, the full 7-bar run crowds the 32px cross axis — keep a shorter
- * 4-bar run of the same waveform (the meter still drives all seven; the
- * hidden ones just don't paint). */
-.mhud[data-orient="vertical"] .mhud-bar:nth-child(n + 5) {
+/* Upright, the full 7-bar run crowds the 32px cross axis. Keep the center
+ * three bars (3-4-5 = the symmetric core 0.725 / 0.9 / 0.725) so the peak
+ * sits dead center and the row reads as a balanced little tent — slicing the
+ * first four instead grabs the rising half of the lens, which leans to one
+ * side once rotated. The meter still drives all seven; the hidden ones just
+ * don't paint. */
+.mhud[data-orient="vertical"] .mhud-bar:nth-child(-n + 2),
+.mhud[data-orient="vertical"] .mhud-bar:nth-child(n + 6) {
   display: none;
 }
 
