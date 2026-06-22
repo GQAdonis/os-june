@@ -4362,10 +4362,61 @@ async fn write_synthetic_sse_response(
     status: u16,
     body: serde_json::Value,
 ) -> io::Result<()> {
+    let mut data = String::new();
+    // Reasoning first, then the answer — so the runtime streams them in that
+    // order into a single turn (thought above output). A buffered upstream
+    // response carries both at once; without a separate reasoning chunk the
+    // reasoning was dropped entirely and only resurfaced, out of order, from
+    // the persisted message.
+    if let Some(reasoning_chunk) = chat_completion_sse_reasoning_chunk(&body) {
+        let reasoning_chunk =
+            serde_json::to_string(&reasoning_chunk).unwrap_or_else(|_| "{}".to_string());
+        data.push_str(&format!("data: {reasoning_chunk}\n\n"));
+    }
     let chunk = chat_completion_sse_chunk(body);
     let chunk = serde_json::to_string(&chunk).unwrap_or_else(|_| "{}".to_string());
-    let body = format!("data: {chunk}\n\ndata: [DONE]\n\n");
-    write_raw_response(stream, status, "text/event-stream", body.as_bytes()).await
+    data.push_str(&format!("data: {chunk}\n\ndata: [DONE]\n\n"));
+    write_raw_response(stream, status, "text/event-stream", data.as_bytes()).await
+}
+
+// Builds a streaming chunk carrying only the assistant's reasoning, or None
+// when the buffered response has no reasoning to relay. Mirrors the field names
+// providers use for reasoning so the runtime can pick whichever it understands.
+fn chat_completion_sse_reasoning_chunk(body: &serde_json::Value) -> Option<serde_json::Value> {
+    let choices = body.get("choices").and_then(serde_json::Value::as_array)?;
+    let mut any_reasoning = false;
+    let out_choices: Vec<serde_json::Value> = choices
+        .iter()
+        .map(|choice| {
+            let message = choice.get("message").cloned().unwrap_or_default();
+            let mut delta = serde_json::Map::new();
+            if let Some(role) = message.get("role").cloned() {
+                delta.insert("role".to_string(), role);
+            }
+            let reasoning = message
+                .get("reasoning_content")
+                .cloned()
+                .or_else(|| message.get("reasoning").cloned())
+                .filter(|value| value.as_str().is_some_and(|text| !text.is_empty()));
+            if let Some(reasoning) = reasoning {
+                delta.insert("reasoning_content".to_string(), reasoning.clone());
+                delta.insert("reasoning".to_string(), reasoning);
+                any_reasoning = true;
+            }
+            serde_json::json!({
+                "index": choice.get("index").and_then(serde_json::Value::as_u64).unwrap_or(0),
+                "delta": delta,
+                "finish_reason": serde_json::Value::Null,
+            })
+        })
+        .collect();
+    if !any_reasoning {
+        return None;
+    }
+    let mut chunk = body.clone();
+    chunk["object"] = serde_json::Value::String("chat.completion.chunk".to_string());
+    chunk["choices"] = serde_json::Value::Array(out_choices);
+    Some(chunk)
 }
 
 fn chat_completion_sse_chunk(mut body: serde_json::Value) -> serde_json::Value {
@@ -4699,6 +4750,47 @@ mod tests {
         assert!(policy_block_conversation_fingerprints(&follow_up)
             .iter()
             .any(|candidate| candidate == &fingerprint));
+    }
+
+    #[test]
+    fn synthetic_sse_reasoning_chunk_precedes_content_and_carries_reasoning() {
+        let body = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "Let me think.",
+                    "content": "An apple is a fruit."
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let reasoning = chat_completion_sse_reasoning_chunk(&body)
+            .expect("a response with reasoning yields a reasoning chunk");
+        let reasoning_delta = &reasoning["choices"][0]["delta"];
+        assert_eq!(reasoning_delta["reasoning_content"], "Let me think.");
+        // The reasoning chunk must not also carry the answer, or the runtime
+        // would render the output before the thought streams.
+        assert!(reasoning_delta.get("content").is_none());
+
+        // The content chunk stays reasoning-free so the thought is not repeated.
+        let content = chat_completion_sse_chunk(body);
+        let content_delta = &content["choices"][0]["delta"];
+        assert_eq!(content_delta["content"], "An apple is a fruit.");
+        assert!(content_delta.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn synthetic_sse_reasoning_chunk_absent_without_reasoning() {
+        let body = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "Hi." },
+                "finish_reason": "stop"
+            }]
+        });
+        assert!(chat_completion_sse_reasoning_chunk(&body).is_none());
     }
 
     #[test]
