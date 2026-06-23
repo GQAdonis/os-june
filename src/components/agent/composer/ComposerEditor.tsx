@@ -24,7 +24,7 @@ export type ComposerEditorHandle = {
   setContent: (
     text: string,
     category?: ReportCategory | null,
-    options?: { selectPlaceholder?: boolean },
+    options?: { selectPlaceholder?: boolean; focus?: boolean },
   ) => void;
   /** Inserts or swaps the message's single category tag at the caret. */
   insertCategory: (category: ReportCategory) => void;
@@ -238,10 +238,11 @@ export const ComposerEditor = forwardRef<
           options?.selectPlaceholder && !category
             ? placeholderSelection(text)
             : null;
+        const shouldFocus = options?.focus !== false;
         if (range) {
           editor.commands.setTextSelection(range);
-          editor.view.focus();
-        } else {
+          if (shouldFocus) editor.view.focus();
+        } else if (shouldFocus) {
           focusEnd(editor);
         }
       },
