@@ -165,10 +165,7 @@ import {
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
 } from "../../lib/hermes-messaging";
-import {
-  categoryPrompt,
-  displayedUserMessageText,
-} from "../../lib/issue-report-prompt";
+import { displayedUserMessageText } from "../../lib/issue-report-prompt";
 import {
   ComposerEditor,
   type ComposerEditorHandle,
@@ -639,17 +636,6 @@ export type AgentNewSessionDetail = {
   category?: ReportCategory;
 };
 
-/** Frames the user's bug report for June: investigate and write a diagnosis
- * for the team instead of treating it as a normal request for help. */
-type PendingIssueReport = {
-  category: ReportCategory;
-  description: string;
-  attachmentNames: string[];
-  /** Workspace paths captured at submit, so the files can be uploaded with
-   * the report even after the composer clears its attachment chips. */
-  attachmentPaths: string[];
-};
-
 type AgentWorkspaceError = {
   message: string;
   /** Null means the error belongs to the no-session workspace surface. */
@@ -662,7 +648,7 @@ type AgentWorkspaceErrorOptions = {
 
 type AgentWorkspaceNotice = {
   message: string;
-  sessionId: string;
+  sessionId: string | null;
 };
 
 type AgentDeleteSessionDetail = {
@@ -1068,11 +1054,6 @@ export function AgentWorkspace({
   // the fetch *started*) — the scroll-settling logic needs the landing.
   const taskHistoryLoadedIdsRef = useRef<Set<string>>(new Set());
   const newSessionModeRef = useRef(newSessionMode);
-  // sessionId -> the report captured at submit time, delivered to the June
-  // team once the agent's diagnostic turn reaches a terminal event.
-  const pendingIssueReportsRef = useRef<Map<string, PendingIssueReport>>(
-    new Map(),
-  );
   // True only while a brand-new thread is being started from the hero. The
   // hero→dock composer FLIP keys off this so it glides *only* when the empty
   // chat hands over to a fresh thread — not when the hero is dismissed by
@@ -1271,7 +1252,8 @@ export function AgentWorkspace({
     selectedHermesSessionId,
   );
   const visibleIssueReportNotice =
-    issueReportNotice && issueReportNotice.sessionId === selectedHermesSessionId
+    issueReportNotice &&
+    issueReportNotice.sessionId === (selectedHermesSessionId ?? null)
       ? issueReportNotice.message
       : null;
   // Holds the prior render's heroMode. Read by both the composer auto-grow
@@ -1961,11 +1943,9 @@ export function AgentWorkspace({
     const message = draft.trim();
     if ((!message && !attachments.length) || submitting || importingFiles)
       return;
-    // The composer's category chip makes this a report: wrap the prompt to
-    // frame it for the team and queue the delivery. Captured before the
+    // The composer's category chip makes this a report. Captured before the
     // composer clears so a failed send can restore the chip on retry.
     const reportCategory = category;
-    const content = promptWithAttachments(message, attachments);
     const submittedDraftKey = composerDraftKeyRef.current;
     // A typed hero submit plays the same teardown as a run shortcut: greeting
     // up, suggestions down during the session-create latency. Without it they
@@ -1982,27 +1962,29 @@ export function AgentWorkspace({
     setComposerAttachments([]);
     setIssueReportNotice(null);
     try {
-      await submitHermesSession(
-        reportCategory ? categoryPrompt(reportCategory, content) : content,
-        undefined,
-        reportCategory
-          ? {
-              issueReport: {
-                category: reportCategory,
-                // An attachments-only send has no typed text, but the server
-                // requires a description; the report must not bounce there.
-                description:
-                  message || "No description was typed; see the attachments.",
-                attachmentNames: attachments.map(
-                  (attachment) => attachment.name,
-                ),
-                attachmentPaths: attachments.map(
-                  (attachment) => attachment.path,
-                ),
-              },
-            }
-          : undefined,
-      );
+      if (reportCategory) {
+        const reportSessionId = selectedHermesSessionIdRef.current ?? null;
+        await submitIssueReport({
+          category: reportCategory,
+          // An attachments-only send has no typed text, but the server
+          // requires a description; the report must not bounce there.
+          description:
+            message || "No description was typed; see the attachments.",
+          attachmentNames: attachments.map((attachment) => attachment.name),
+          attachmentPaths: attachments.map((attachment) => attachment.path),
+          sessionId: reportSessionId ?? undefined,
+        });
+        setIssueReportNotice({
+          message:
+            "Your report was sent to the June team. Thank you for helping improve June.",
+          sessionId: reportSessionId,
+        });
+        setError(null);
+        setBusyNotice(null);
+        return;
+      }
+      const content = promptWithAttachments(message, attachments);
+      await submitHermesSession(content, undefined);
       setError(null);
       setBusyNotice(null);
     } catch (err) {
@@ -2026,6 +2008,10 @@ export function AgentWorkspace({
         // connection banner along with showing the notice.
         setError(null);
         setBusyNotice(SESSION_BUSY_NOTICE);
+      } else if (reportCategory) {
+        setError(
+          `The issue report could not be sent. ${messageFromError(err)}`,
+        );
       } else {
         setError(messageFromError(err));
       }
@@ -2154,66 +2140,18 @@ export function AgentWorkspace({
     setIssueReportNotice(null);
   }, [selectedHermesSessionId]);
 
-  /** Sends the captured report plus June's diagnostic reply (the last
-   * assistant message of the turn) to the June team. The diagnosis fetch is
-   * best-effort: a report without June's assessment still beats no report. */
-  async function deliverIssueReport(
-    sessionId: string,
-    report: PendingIssueReport,
-  ) {
-    let agentDiagnosis: string | undefined;
-    try {
-      const messages = await listHermesSessionMessages(sessionId);
-      agentDiagnosis = messages
-        .slice()
-        .reverse()
-        .map((message) =>
-          message.role === "assistant" ? visibleHermesMessageText(message) : "",
-        )
-        .find((text) => text.trim())
-        ?.trim();
-    } catch {
-      // Best-effort; the report ships without the diagnosis.
-    }
-    try {
-      await submitIssueReport({
-        category: report.category,
-        description: report.description,
-        agentDiagnosis,
-        attachmentNames: report.attachmentNames,
-        attachmentPaths: report.attachmentPaths,
-        sessionId,
-      });
-      if (selectedHermesSessionIdRef.current === sessionId) {
-        setIssueReportNotice({
-          message:
-            "Your report was sent to the June team. Thank you for helping improve June.",
-          sessionId,
-        });
-      }
-    } catch (err) {
-      setError(`The issue report could not be sent. ${messageFromError(err)}`, {
-        sessionId,
-      });
-    }
-  }
-
   async function submitHermesSession(
     content: string,
     explicitSession?: HermesSessionInfo,
-    options?: { issueReport?: PendingIssueReport },
   ) {
     const targetSessionId = explicitSession?.id
       ? explicitSession.id
       : newSessionModeRef.current
         ? undefined
         : selectedHermesSessionId;
-    // Issue reports skip title suggestion: the content is the wrapped
-    // investigation prompt, which would title the session after the wrapper.
-    const titlePromise =
-      targetSessionId || options?.issueReport
-        ? undefined
-        : agentSessionTitleForPrompt(content);
+    const titlePromise = targetSessionId
+      ? undefined
+      : agentSessionTitleForPrompt(content);
     // The Unrestricted opt-in is made per session: a new session applies the
     // picker draft, and a follow-up routes to the runtime process matching
     // the mode its session was created with. Without this, one Unrestricted
@@ -2228,26 +2166,20 @@ export function AgentWorkspace({
     const created = targetSessionId
       ? undefined
       : await gateway.request<HermesRuntimeSessionResponse>("session.create", {
-          title: options?.issueReport
-            ? "Issue report"
-            : (sessionTitle ?? titleFromPrompt(content)),
+          title: sessionTitle ?? titleFromPrompt(content),
           cols: 96,
         });
     const storedSessionId =
       targetSessionId ?? created?.stored_session_id ?? created?.session_id;
     if (!storedSessionId) throw new Error("Hermes did not create a session.");
-    if (options?.issueReport && !targetSessionId) {
-      pendingIssueReportsRef.current.set(storedSessionId, options.issueReport);
-    }
     if (!targetSessionId) {
       rememberSessionMode(storedSessionId, fullModeDraftRef.current);
     }
-    const sessionDisplayTitle = options?.issueReport
-      ? "Issue report"
-      : explicitSession?.title?.trim() ||
-        explicitSession?.preview?.trim() ||
-        sessionTitle ||
-        titleFromPrompt(content);
+    const sessionDisplayTitle =
+      explicitSession?.title?.trim() ||
+      explicitSession?.preview?.trim() ||
+      sessionTitle ||
+      titleFromPrompt(content);
     if (sessionTitle) {
       sessionTitleOverridesRef.current = {
         ...sessionTitleOverridesRef.current,
@@ -2375,17 +2307,8 @@ export function AgentWorkspace({
         if (!activityCounts) {
           clearSessionActivity(storedSessionId);
         }
-        // The diagnostic turn is over (even on error): file the report now so
-        // the user's description isn't lost to a failed investigation.
-        const issueReport = pendingIssueReportsRef.current.get(storedSessionId);
-        if (issueReport) {
-          pendingIssueReportsRef.current.delete(storedSessionId);
-        }
         window.setTimeout(() => {
           void refreshHermesSession(storedSessionId);
-          if (issueReport) {
-            void deliverIssueReport(storedSessionId, issueReport);
-          }
         }, 300);
       }
     });
@@ -2405,9 +2328,6 @@ export function AgentWorkspace({
         suppressStartupRequestError: !hermesSessionsHydratedRef.current,
       });
     } catch (err) {
-      // A queued report must not outlive its failed prompt; submit() re-arms
-      // issue-report mode so the retry files it again.
-      pendingIssueReportsRef.current.delete(storedSessionId);
       // The prompt never entered the session, so its optimistic bubble must
       // not linger — a retained pending message renders below every later
       // persisted message and reads as a send the agent ignored.
