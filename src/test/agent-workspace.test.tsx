@@ -1930,6 +1930,118 @@ describe("AgentWorkspace", () => {
     expect(screen.queryByText("---EXPLICIT SKILLS---")).toBeNull();
   });
 
+  it("fetches qualified skill documents by backend skill id", async () => {
+    const user = userEvent.setup();
+    mocks.hermesBridgeSkills.mockResolvedValue([
+      {
+        name: "tools/gh-address-comments",
+        description: "Address GitHub review comments",
+        enabled: true,
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox"),
+      "/tools/gh-address-comments review PR feedback",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.getHermesBridgeSkill).toHaveBeenCalledWith(
+        "gh-address-comments",
+      ),
+    );
+    const submitCall = mocks.gatewayRequest.mock.calls.find(
+      ([method]) => method === "prompt.submit",
+    );
+    const submittedText = submitCall?.[1]?.text as string;
+    expect(submittedText).toContain("Skill: tools/gh-address-comments");
+    expect(submittedText).toContain("review PR feedback");
+  });
+
+  it("sends path-prefixed prompts normally when no skill matches", async () => {
+    const user = userEvent.setup();
+    mocks.hermesBridgeSkills.mockResolvedValue([
+      {
+        name: "repo-build-pr",
+        description: "Build a branch and open a PR",
+        enabled: true,
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await user.type(
+      screen.getByRole("textbox"),
+      "/Users/alex/Desktop/report.pdf summarize this file",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith(
+        "prompt.submit",
+        expect.objectContaining({
+          text: "/Users/alex/Desktop/report.pdf summarize this file",
+        }),
+      ),
+    );
+    expect(mocks.getHermesBridgeSkill).not.toHaveBeenCalled();
+  });
+
+  it("keeps edits made while skill preparation is in flight", async () => {
+    const user = userEvent.setup();
+    let resolveSkillDocument: (document: {
+      name: string;
+      relativePath: string;
+      content: string;
+    }) => void = () => {};
+    mocks.hermesBridgeSkills.mockResolvedValue([
+      {
+        name: "repo-build-pr",
+        description: "Build a branch and open a PR",
+        enabled: true,
+      },
+    ]);
+    mocks.getHermesBridgeSkill.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveSkillDocument = resolve;
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    const textbox = screen.getByRole("textbox");
+    await user.type(textbox, "/repo-build-pr implement issue JUN-46");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.getHermesBridgeSkill).toHaveBeenCalledWith("repo-build-pr"),
+    );
+
+    await user.click(textbox);
+    await user.type(textbox, " and keep this draft edit");
+    resolveSkillDocument({
+      name: "repo-build-pr",
+      relativePath: "repo-build-pr/SKILL.md",
+      content: "# Repo build PR\n\nOpen a draft PR.",
+    });
+
+    await waitFor(() =>
+      expect(
+        mocks.gatewayRequest.mock.calls.some(
+          ([method]) => method === "prompt.submit",
+        ),
+      ).toBe(true),
+    );
+    expect(textbox).toHaveTextContent(
+      "/repo-build-pr implement issue JUN-46 and keep this draft edit",
+    );
+  });
+
   it("keeps the draft and suggests matches for an unknown skill command", async () => {
     const user = userEvent.setup();
     mocks.hermesBridgeSkills.mockResolvedValue([

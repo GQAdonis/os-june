@@ -173,8 +173,11 @@ import {
 import {
   displayedSkillInvocationText,
   explicitSkillInvocationPrompt,
+  isPathLikeSlashToken,
   parseSkillSlashCommands,
+  parseSkillSlashCommandTokens,
   resolveSkillSlashCommands,
+  skillDocumentLookupName,
   type SkillSlashResolution,
   skillSlashResolutionError,
 } from "../../lib/skill-slash-commands";
@@ -807,7 +810,9 @@ export function AgentWorkspace({
   // Live mirror of `draft` for closures (the hero-chip interval) that must read
   // the current value without re-subscribing.
   const draftRef = useRef("");
+  const categoryRef = useRef<ReportCategory | null>(null);
   const [attachments, setAttachments] = useState<AgentAttachment[]>([]);
+  const attachmentsRef = useRef<AgentAttachment[]>([]);
   const [dropActive, setDropActive] = useState(false);
   const [importingFiles, setImportingFiles] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -1865,6 +1870,14 @@ export function AgentWorkspace({
   }, [bridge.running, workingSessionIds]);
 
   useEffect(() => {
+    categoryRef.current = category;
+  }, [category]);
+
+  useEffect(() => {
+    attachmentsRef.current = attachments;
+  }, [attachments]);
+
+  useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     const installListener = async (eventName: string) => {
@@ -1926,6 +1939,10 @@ export function AgentWorkspace({
     messageAttachments: AgentAttachment[],
   ): Promise<PreparedComposerSubmission> {
     const parsed = parseSkillSlashCommands(message);
+    const commandTokens = commandTokensForResolutions(
+      parsed.commandNames,
+      parseSkillSlashCommandTokens(message),
+    );
     if (!parsed.commandNames.length) {
       const content = promptWithAttachments(message, messageAttachments);
       return {
@@ -1941,7 +1958,26 @@ export function AgentWorkspace({
       parsed.commandNames,
       availableSkills,
     );
-    const problem = resolutions.find(
+    const pathLikePromptIndex = resolutions.findIndex(
+      (resolution, index) =>
+        resolution.status !== "resolved" &&
+        isPathLikeSlashToken(commandTokens[index]?.name ?? ""),
+    );
+    if (pathLikePromptIndex === 0) {
+      const content = promptWithAttachments(message, messageAttachments);
+      return {
+        displayContent: content,
+        runtimeContent: content,
+        titleContent: message,
+        typedMessage: message,
+      };
+    }
+
+    const skillResolutions =
+      pathLikePromptIndex === -1
+        ? resolutions
+        : resolutions.slice(0, pathLikePromptIndex);
+    const problem = skillResolutions.find(
       (resolution) => resolution.status !== "resolved",
     );
     if (problem) {
@@ -1950,14 +1986,22 @@ export function AgentWorkspace({
       );
     }
 
-    const typedMessage = parsed.prompt.trim();
+    const typedMessage =
+      pathLikePromptIndex === -1
+        ? parsed.prompt.trim()
+        : message.slice(commandTokens[pathLikePromptIndex].from).trimStart();
     if (!typedMessage && !messageAttachments.length) {
       throw new Error("Add a request after the skill command.");
     }
 
-    const resolved = resolutions.filter(isResolvedSkillSlashResolution);
+    const resolved = skillResolutions.filter(isResolvedSkillSlashResolution);
     const documents = await Promise.all(
-      resolved.map((resolution) => getHermesBridgeSkill(resolution.skill.name)),
+      resolved.map(async (resolution) => ({
+        ...(await getHermesBridgeSkill(
+          skillDocumentLookupName(resolution.skill.name),
+        )),
+        name: resolution.skill.name,
+      })),
     );
     const displayContent = promptWithAttachments(
       typedMessage,
@@ -1986,12 +2030,23 @@ export function AgentWorkspace({
     // conversation takes over.
     if (heroMode) setHeroLeaving(true);
     setSubmitting(true);
+    let clearedDraft = false;
+    let clearedAttachments = false;
     try {
       const prepared = await prepareComposerSubmission(message, attachments);
-      composerEditorRef.current?.clear();
-      setDraft("");
-      setCategory(null);
-      setAttachments([]);
+      if (
+        draftRef.current.trim() === message &&
+        categoryRef.current === reportCategory
+      ) {
+        composerEditorRef.current?.clear();
+        setDraft("");
+        setCategory(null);
+        clearedDraft = true;
+      }
+      if (sameAgentAttachments(attachmentsRef.current, attachments)) {
+        setAttachments([]);
+        clearedAttachments = true;
+      }
       setIssueReportNotice(null);
       await submitHermesSession(
         reportCategory
@@ -2027,10 +2082,12 @@ export function AgentWorkspace({
       // Restore the composer so a failed send doesn't eat the message, its
       // category chip, or its attachments — but only where the user hasn't
       // typed or attached something new during the in-flight send.
-      if (composerEditorRef.current?.isEmpty() ?? true) {
+      if (clearedDraft && (composerEditorRef.current?.isEmpty() ?? true)) {
         composerEditorRef.current?.setContent(message, reportCategory);
       }
-      setAttachments((current) => (current.length ? current : attachments));
+      if (clearedAttachments) {
+        setAttachments((current) => (current.length ? current : attachments));
+      }
       if (isSessionBusyError(err)) {
         // A busy rejection is proof the gateway is healthy — retire any stale
         // connection banner along with showing the notice.
@@ -3658,6 +3715,7 @@ export function AgentWorkspace({
             }
             onChange={(text, nextCategory) => {
               draftRef.current = text;
+              categoryRef.current = nextCategory;
               setDraft(text);
               setCategory(nextCategory);
               if (
@@ -8020,6 +8078,35 @@ function isResolvedSkillSlashResolution(
   resolution: SkillSlashResolution,
 ): resolution is Extract<SkillSlashResolution, { status: "resolved" }> {
   return resolution.status === "resolved";
+}
+
+function sameAgentAttachments(
+  left: AgentAttachment[],
+  right: AgentAttachment[],
+) {
+  return (
+    left.length === right.length &&
+    left.every((attachment, index) => attachment.id === right[index]?.id)
+  );
+}
+
+function commandTokensForResolutions(
+  commandNames: string[],
+  tokens: Array<{ name: string; from: number; to: number }>,
+) {
+  return commandNames
+    .map((name) =>
+      tokens.find(
+        (token) => slashCommandKey(token.name) === slashCommandKey(name),
+      ),
+    )
+    .filter((token): token is { name: string; from: number; to: number } =>
+      Boolean(token),
+    );
+}
+
+function slashCommandKey(name: string) {
+  return name.trim().toLowerCase();
 }
 
 function displayedComposerUserMessageText(content: string): string {

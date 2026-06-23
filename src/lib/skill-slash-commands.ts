@@ -10,6 +10,12 @@ export type ParsedSkillSlashCommands = {
   prompt: string;
 };
 
+export type ParsedSkillSlashCommandToken = {
+  name: string;
+  from: number;
+  to: number;
+};
+
 export type SkillSlashResolution =
   | { status: "resolved"; token: string; skill: HermesSkillInfo }
   | {
@@ -26,14 +32,32 @@ export type SkillSlashResolution =
 export function parseSkillSlashCommands(
   input: string,
 ): ParsedSkillSlashCommands {
-  let index = 0;
+  const commands = parseSkillSlashCommandTokens(input);
   const commandNames: string[] = [];
   const seen = new Set<string>();
+  for (const command of commands) {
+    const key = normalizeSkillName(command.name);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    commandNames.push(command.name);
+  }
+  return {
+    commandNames,
+    prompt: input.slice(commands.at(-1)?.to ?? 0).trimStart(),
+  };
+}
+
+export function parseSkillSlashCommandTokens(
+  input: string,
+): ParsedSkillSlashCommandToken[] {
+  let index = 0;
+  const commands: ParsedSkillSlashCommandToken[] = [];
 
   while (index < input.length) {
     while (index < input.length && /\s/.test(input[index])) index += 1;
     if (input[index] !== "/") break;
 
+    const from = index;
     const commandStart = index + 1;
     index = commandStart;
     while (index < input.length && !/\s/.test(input[index])) index += 1;
@@ -41,17 +65,10 @@ export function parseSkillSlashCommands(
     const command = input.slice(commandStart, index).trim();
     if (!command) break;
 
-    const key = normalizeSkillName(command);
-    if (!seen.has(key)) {
-      seen.add(key);
-      commandNames.push(command);
-    }
+    commands.push({ name: command, from, to: index });
   }
 
-  return {
-    commandNames,
-    prompt: input.slice(index).trimStart(),
-  };
+  return commands;
 }
 
 export function matchSkillSlashSuggestions(
@@ -156,6 +173,15 @@ export function displayedSkillInvocationText(content: string): string {
 
   const request = text.slice(start + USER_REQUEST_START.length, end).trim();
   return request || content;
+}
+
+export function skillDocumentLookupName(name: string) {
+  const parts = name.trim().split(/[/:]/).filter(Boolean);
+  return parts.at(-1) ?? name.trim();
+}
+
+export function isPathLikeSlashToken(token: string) {
+  return token.includes("/") || token.includes("\\");
 }
 
 function matchingSkills(token: string, skills: HermesSkillInfo[]) {

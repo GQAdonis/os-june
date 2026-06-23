@@ -3,9 +3,12 @@ import { describe, expect, it } from "vitest";
 import {
   displayedSkillInvocationText,
   explicitSkillInvocationPrompt,
+  isPathLikeSlashToken,
   matchSkillSlashSuggestions,
   parseSkillSlashCommands,
+  parseSkillSlashCommandTokens,
   resolveSkillSlashCommands,
+  skillDocumentLookupName,
   skillSlashResolutionError,
 } from "../lib/skill-slash-commands";
 import type { HermesSkillDocument, HermesSkillInfo } from "../lib/tauri";
@@ -42,6 +45,22 @@ describe("skill slash commands", () => {
     ).toEqual({
       commandNames: ["repo-build-pr", "os-platform"],
       prompt: "implement issue JUN-46",
+    });
+  });
+
+  it("tracks slash command token positions", () => {
+    expect(parseSkillSlashCommandTokens("  /repo-build-pr /tmp/log")).toEqual([
+      { name: "repo-build-pr", from: 2, to: 16 },
+      { name: "tmp/log", from: 17, to: 25 },
+    ]);
+  });
+
+  it("deduplicates command names without moving the prompt before duplicates", () => {
+    expect(
+      parseSkillSlashCommands("/repo-build-pr /repo-build-pr implement"),
+    ).toEqual({
+      commandNames: ["repo-build-pr"],
+      prompt: "implement",
     });
   });
 
@@ -85,6 +104,22 @@ describe("skill slash commands", () => {
     expect(
       matchSkillSlashSuggestions("review", skills).map((s) => s.name),
     ).toEqual(["github:gh-address-comments", "tools/gh-address-comments"]);
+  });
+
+  it("maps qualified skills to the backend document lookup name", () => {
+    expect(skillDocumentLookupName("tools/gh-address-comments")).toBe(
+      "gh-address-comments",
+    );
+    expect(skillDocumentLookupName("github:gh-address-comments")).toBe(
+      "gh-address-comments",
+    );
+    expect(skillDocumentLookupName("repo-build-pr")).toBe("repo-build-pr");
+  });
+
+  it("detects path-like slash tokens", () => {
+    expect(isPathLikeSlashToken("Users/alex/Desktop/report.pdf")).toBe(true);
+    expect(isPathLikeSlashToken("tmp/log")).toBe(true);
+    expect(isPathLikeSlashToken("repo-build-pr")).toBe(false);
   });
 
   it("wraps skill documents and strips them back to the visible request", () => {
