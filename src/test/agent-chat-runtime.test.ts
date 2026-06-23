@@ -189,7 +189,7 @@ describe("applyPolicyBlockCards", () => {
     ]);
     expect(result[2]?.parts[0]).toMatchObject({
       type: "divider",
-      label: "OS Guard re-enabled",
+      label: "Protection restored",
     });
   });
 

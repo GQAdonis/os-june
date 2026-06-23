@@ -744,7 +744,7 @@ export function applyPolicyBlockCards(
         {
           type: "divider",
           id: `os-guard-reenabled:${reenable.id}`,
-          label: "OS Guard re-enabled",
+          label: "Protection restored",
         },
       ],
     };
@@ -1220,7 +1220,7 @@ function partText(part: AgentChatPart) {
   if (part.type === "clarify")
     return [part.question, part.answer ?? ""].join(" ");
   if (part.type === "context") return part.preview || part.text;
-  if (part.type === "policyBlock") return "OS Guard blocked this prompt.";
+  if (part.type === "policyBlock") return "June blocked this prompt.";
   if (part.type === "divider") return part.label;
   return part.text;
 }

@@ -3085,7 +3085,7 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("Prompt blocked")).toBeInTheDocument();
     expect(
-      screen.getByText(/OS Guard blocked this prompt because malicious content was detected/),
+      screen.getByText(/June blocked this prompt because it detected malicious content/),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -3097,7 +3097,7 @@ describe("AgentWorkspace", () => {
     );
     expect(
       await screen.findAllByText(
-        /This session is running directly on Venice without OS Guard protection/,
+        /Protection is bypassed for this session at your request/,
       ),
     ).not.toHaveLength(0);
   });
@@ -3127,10 +3127,10 @@ describe("AgentWorkspace", () => {
       }),
     );
     expect(
-      screen.getByText("The prompt was blocked. Start a new session to continue."),
+      screen.getByText("June blocked this prompt. Start a new session to continue."),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("This session was blocked. Start a new session to continue."),
+      screen.getByText("June blocked this session. Start a new session to continue."),
     ).toBeInTheDocument();
     expect(screen.getByRole("textbox")).toHaveAttribute(
       "aria-disabled",

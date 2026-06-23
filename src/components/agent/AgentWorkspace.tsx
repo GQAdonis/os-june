@@ -2142,7 +2142,7 @@ export function AgentWorkspace({
       selectedHermesSessionId &&
       rejectedPolicySessionIds.has(selectedHermesSessionId)
     ) {
-      setBusyNotice("This session was blocked. Start a new session to continue.");
+      setBusyNotice("June blocked this session. Start a new session to continue.");
       return;
     }
     const message = draft.trim();
@@ -3776,7 +3776,7 @@ export function AgentWorkspace({
               exit={{ opacity: 0 }}
               transition={{ duration: 0.22, ease: "easeOut" }}
             >
-              <span>This session was blocked. Start a new session to continue.</span>
+              <span>June blocked this session. Start a new session to continue.</span>
               <button
                 type="button"
                 className="btn btn-ghost"
@@ -3796,15 +3796,14 @@ export function AgentWorkspace({
               transition={{ duration: 0.22, ease: "easeOut" }}
             >
               <span>
-                This session is running directly on Venice without OS Guard
-                protection.
+                Protection is bypassed for this session at your request.
               </span>
               <button
                 type="button"
                 className="btn btn-ghost"
                 onClick={() => void reactivateOsGuard(selectedHermesSessionId)}
               >
-                Re-enable OS Guard
+                Restore protection
               </button>
             </motion.div>
           ) : busyNotice || galleryErrors ? (
@@ -6601,17 +6600,17 @@ function PolicyBlockPart({
   const pending = part.status === "pending";
   const continued = part.status === "continued";
   const body = continued
-    ? "You approved this prompt. OS Guard is off for the rest of this session — it runs directly on Venice."
+    ? "Protection is bypassed for the rest of this session at your request — prompts run without June's checks."
     : part.status === "rejected"
-      ? "The prompt was blocked. Start a new session to continue."
-      : "OS Guard blocked this prompt because malicious content was detected. Continuing sends this session directly to Venice without OS Guard protection.";
+      ? "June blocked this prompt. Start a new session to continue."
+      : "June blocked this prompt because it detected malicious content. You can reject it, or bypass protection for the rest of this session to continue.";
   return (
     <InlineNotice
       className="agent-policy-block-notice"
       tone={continued ? "warning" : "destructive"}
       role="alert"
       icon={<IconShieldCrossed size={14} aria-hidden />}
-      eyebrow={continued ? "Prompt approved" : "Prompt blocked"}
+      eyebrow={continued ? "Protection bypassed" : "Prompt blocked"}
       body={body}
       actions={
         pending ? (
@@ -6620,17 +6619,17 @@ function PolicyBlockPart({
               type="button"
               className="btn btn-ghost"
               disabled={Boolean(submitting)}
-              onClick={() => onPolicyBlock(part, "reject")}
+              onClick={() => onPolicyBlock(part, "continue")}
             >
-              {submitting === "reject" ? "Rejecting" : "Reject"}
+              {submitting === "continue" ? "Continuing" : "Continue"}
             </button>
             <button
               type="button"
               className="btn btn-secondary"
               disabled={Boolean(submitting)}
-              onClick={() => onPolicyBlock(part, "continue")}
+              onClick={() => onPolicyBlock(part, "reject")}
             >
-              {submitting === "continue" ? "Continuing" : "Continue"}
+              {submitting === "reject" ? "Rejecting" : "Reject"}
             </button>
           </>
         ) : undefined
