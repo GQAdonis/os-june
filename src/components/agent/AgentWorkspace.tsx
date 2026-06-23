@@ -7664,11 +7664,14 @@ function assignArtifactsToTurns(
     for (const artifact of artifacts) {
       const name = artifact.name.toLowerCase();
       if (!name || claimedPaths.has(artifact.path)) continue;
-      const pathMentioned = text.includes(artifact.path.toLowerCase());
+      const path = artifact.path.toLowerCase();
+      const pathMentioned =
+        text.includes(path) &&
+        (turn.role !== "assistant" || deliverableMentioned(text, path));
       const nameMentioned =
         turn.role === "assistant" &&
         !claimedNames.has(name) &&
-        deliverableNameMentioned(text, name);
+        deliverableMentioned(text, name);
       if (!pathMentioned && !nameMentioned) continue;
       claimedPaths.add(artifact.path);
       claimedNames.add(name);
@@ -7686,11 +7689,11 @@ function artifactMatchText(turn: AgentChatTurn): string {
     .toLowerCase();
 }
 
-function deliverableNameMentioned(text: string, name: string): boolean {
-  let index = text.indexOf(name);
+function deliverableMentioned(text: string, match: string): boolean {
+  let index = text.indexOf(match);
   while (index !== -1) {
-    if (isDeliverableMentionContext(text, index, name.length)) return true;
-    index = text.indexOf(name, index + name.length);
+    if (isDeliverableMentionContext(text, index, match.length)) return true;
+    index = text.indexOf(match, index + match.length);
   }
   return false;
 }
@@ -7703,8 +7706,29 @@ function isDeliverableMentionContext(
   const beforeBoundary = previousSentenceBoundary(text, index);
   const afterBoundary = nextSentenceBoundary(text, index + length);
   const context = text.slice(beforeBoundary + 1, afterBoundary);
+  return (
+    hasDeliveryKeyword(context) || hasDeliveryListHeadingContext(text, index)
+  );
+}
+
+function hasDeliveryListHeadingContext(text: string, index: number): boolean {
+  const lineStart = text.lastIndexOf("\n", index) + 1;
+  const linePrefix = text.slice(lineStart, index).trimStart();
+  if (!/^(?:[-*]|\d+[.)])\s+/.test(linePrefix)) return false;
+
+  let previousLineEnd = lineStart - 1;
+  while (previousLineEnd > 0) {
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousLine = text.slice(previousLineStart, previousLineEnd).trim();
+    if (previousLine) return hasDeliveryKeyword(previousLine);
+    previousLineEnd = previousLineStart - 1;
+  }
+  return false;
+}
+
+function hasDeliveryKeyword(text: string): boolean {
   return /\b(available|created|download|exported|generated|made|produced|rendered|saved|wrote)\b/.test(
-    context,
+    text,
   );
 }
 

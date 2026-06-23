@@ -1918,6 +1918,7 @@ describe("AgentWorkspace", () => {
     const workspaceRoot =
       "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace";
     const pdfPath = `${workspaceRoot}/June Creator Get Started Guide.pdf`;
+    const scriptPath = `${workspaceRoot}/generate_pdf.py`;
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
@@ -1935,7 +1936,7 @@ describe("AgentWorkspace", () => {
             },
             {
               name: "generate_pdf.py",
-              path: `${workspaceRoot}/generate_pdf.py`,
+              path: scriptPath,
               kind: "file",
               size: 4096,
               modifiedAt: "2026-06-23T12:28:00Z",
@@ -1955,10 +1956,9 @@ describe("AgentWorkspace", () => {
       {
         id: "message-1",
         role: "assistant",
-        content:
-          "The workspace contains generate_pdf.py and screenshot.png. The styled PDF is available as `June Creator Get Started Guide.pdf`.",
+        content: `The workspace contains ${scriptPath} and screenshot.png. The styled PDF is available as \`June Creator Get Started Guide.pdf\`.`,
         reasoning:
-          "I inspected generate_pdf.py and screenshot.png before writing the PDF.",
+          "I saved generate_pdf.py while preparing the PDF and generated screenshot.png for reference.",
         timestamp: "2026-06-23T12:30:00Z",
       },
     ]);
@@ -1979,6 +1979,47 @@ describe("AgentWorkspace", () => {
     expect(
       screen.queryByRole("button", { name: "Download screenshot.png" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps generated-file list headings attached to artifact rows", async () => {
+    const reportPath =
+      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/report.pdf";
+    mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
+      roots: [
+        {
+          id: "workspace",
+          label: "Workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          description: "Hermes scratch files and generated outputs.",
+          entries: [
+            {
+              name: "report.pdf",
+              path: reportPath,
+              kind: "file",
+              size: 8192,
+              modifiedAt: "2026-06-23T12:30:00Z",
+            },
+          ],
+        },
+      ],
+    });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-1",
+        role: "assistant",
+        content: "Generated files:\n- report.pdf",
+        timestamp: "2026-06-23T12:30:00Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(
+      await screen.findByRole("button", { name: "Download report.pdf" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "View files (1)" }),
+    ).toBeInTheDocument();
   });
 
   it("renders a workspace file's download card only on the first response that mentions it", async () => {
