@@ -6,6 +6,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 
 import {
   CATEGORY_CHIP_NODE,
+  CATEGORY_SKILLS_CHANGED_EVENT,
   categoryFromDoc,
   createCategoryChip,
   insertReportCategory,
@@ -109,6 +110,14 @@ export const ComposerEditor = forwardRef<
     onReadyRef.current = onReady;
     skillsRef.current = skills;
   }, [onChange, onSubmit, onReady, skills]);
+
+  useEffect(() => {
+    document
+      .querySelectorAll(".agent-category-menu-host")
+      .forEach((host) =>
+        host.dispatchEvent(new CustomEvent(CATEGORY_SKILLS_CHANGED_EVENT)),
+      );
+  }, [skills]);
 
   function updateScrollFades(nextEditor: Editor | null) {
     const frame = frameRef.current;

@@ -3413,6 +3413,28 @@ input:focus-visible,
 .agent-category-menu-host {
   position: fixed;
   z-index: 60;
+  width: var(--agent-category-menu-width, auto);
+}
+
+.agent-category-menu-shell {
+  position: relative;
+  width: 100%;
+}
+
+.agent-category-menu-scroll-wrap,
+.agent-category-menu-empty,
+.agent-attach-menu {
+  border: 1px solid var(--popover-border);
+  border-radius: var(--r-lg);
+  background: var(--popover);
+  box-shadow: var(--shadow-lg);
+}
+
+.agent-category-menu-scroll-wrap {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  contain: paint;
 }
 
 .agent-category-menu,
@@ -3420,20 +3442,49 @@ input:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 1px;
-  min-width: 232px;
-  max-width: min(420px, calc(100vw - 16px));
   padding: var(--sp-1);
-  border-radius: var(--r-lg);
-  background: var(--popover);
-  border: 1px solid var(--popover-border);
-  box-shadow: var(--shadow-lg);
 }
 
 .agent-category-menu {
-  width: min(420px, calc(100vw - 16px));
+  width: 100%;
+  min-width: 0;
+  max-width: calc(100vw - 16px);
   max-height: var(--agent-category-menu-max-height, 280px);
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.agent-category-menu-scroll-wrap::before,
+.agent-category-menu-scroll-wrap::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  left: 0;
+  z-index: 1;
+  height: 16px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.agent-category-menu-scroll-wrap::before {
+  top: 0;
+  background: linear-gradient(to bottom, var(--popover), transparent);
+}
+
+.agent-category-menu-scroll-wrap::after {
+  bottom: 0;
+  background: linear-gradient(to top, var(--popover), transparent);
+}
+
+.agent-category-menu-scroll-wrap[data-fade-top="true"]::before,
+.agent-category-menu-scroll-wrap[data-fade-bottom="true"]::after {
+  opacity: 1;
+}
+
+.agent-attach-menu {
+  min-width: 232px;
+  max-width: min(420px, calc(100vw - 16px));
 }
 
 .agent-category-menu-empty {
@@ -3444,7 +3495,8 @@ input:focus-visible,
 
 .agent-category-menu button,
 .agent-attach-menu button {
-  display: flex;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
   align-items: center;
   gap: var(--sp-2);
   width: 100%;
@@ -3457,8 +3509,15 @@ input:focus-visible,
   cursor: pointer;
 }
 
+.agent-attach-menu button {
+  display: flex;
+}
+
 .agent-category-menu button[data-active],
-.agent-category-menu button:hover,
+.agent-category-menu button:hover {
+  background: color-mix(in oklch, var(--muted) 45%, transparent);
+}
+
 .agent-attach-menu button:hover {
   background: var(--surface-subtle);
 }
@@ -3471,23 +3530,73 @@ input:focus-visible,
 
 .agent-category-menu-label,
 .agent-attach-menu-label {
+  overflow: hidden;
   font-size: var(--fs-md);
   line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-category-menu-copy {
-  display: grid;
+  display: flex;
+  align-items: center;
   min-width: 0;
+}
+
+.agent-category-menu-section {
+  display: grid;
   gap: 1px;
 }
 
-.agent-category-menu-detail {
-  overflow: hidden;
+.agent-category-menu-section-label {
+  padding: var(--sp-2) var(--sp-2) var(--sp-1);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.2;
+}
+
+.agent-category-menu-detail-card {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  width: min(300px, calc(100vw - 24px));
+  padding: var(--sp-3);
+  border: 1px solid var(--popover-border);
+  border-radius: var(--r-md);
+  background: var(--popover);
+  box-shadow: var(--shadow-lg);
+  color: var(--popover-foreground);
+}
+
+.agent-category-menu-detail-card[data-side="right"] {
+  left: calc(100% + 6px);
+}
+
+.agent-category-menu-detail-card[data-side="left"] {
+  right: calc(100% + 6px);
+}
+
+.agent-category-menu-detail-title {
+  margin: 0;
+  font-size: var(--fs-md);
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.agent-category-menu-detail-meta {
+  margin: var(--sp-1) 0 0;
   color: var(--muted-foreground);
   font-size: var(--fs-xs);
   line-height: 1.25;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+}
+
+.agent-category-menu-detail-desc {
+  max-height: 180px;
+  margin: var(--sp-2) 0 0;
+  overflow: auto;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
 }
 
 /* Leading glyph, tinted per category (default muted for "Attach files", which

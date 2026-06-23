@@ -1,7 +1,7 @@
 import Mention from "@tiptap/extension-mention";
 import type { Editor } from "@tiptap/react";
 import { ReactNodeViewRenderer, ReactRenderer } from "@tiptap/react";
-import { TextSelection } from "@tiptap/pm/state";
+import { PluginKey, TextSelection } from "@tiptap/pm/state";
 import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import type { EditorState, Transaction } from "@tiptap/pm/state";
 
@@ -28,7 +28,9 @@ export const CATEGORY_CHIP_NODE = "reportCategory";
 /** The single character that opens the category palette. "/" reads as a
  * command; "#" would read as a tag and is intentionally not used. */
 const TRIGGER_CHAR = "/";
-const SLASH_MENU_ITEM_LIMIT = 5;
+const SLASH_MENU_SKILL_LIMIT = Number.MAX_SAFE_INTEGER;
+const CATEGORY_SUGGESTION_PLUGIN_KEY = new PluginKey("agentCategorySuggestion");
+export const CATEGORY_SKILLS_CHANGED_EVENT = "agent-category-skills-changed";
 
 /** Reads the active category from a doc by scanning for the chip node. The
  * single-chip invariant (enforced on insert) means the first hit is the
@@ -162,6 +164,7 @@ export function createCategoryChip(options: CategoryChipOptions = {}) {
     },
     suggestion: {
       char: TRIGGER_CHAR,
+      pluginKey: CATEGORY_SUGGESTION_PLUGIN_KEY,
       // A leading "/" only — typing a path like "src/foo" mid-word must not pop
       // the palette.
       allowSpaces: false,
@@ -186,6 +189,13 @@ export function createCategoryChip(options: CategoryChipOptions = {}) {
           CategorySuggestionListProps
         > | null = null;
         let host: HTMLDivElement | null = null;
+        let latestProps: {
+          command: CategorySuggestionListProps["command"];
+          editor: Editor;
+          query: string;
+          clientRect?: (() => DOMRect | null) | null;
+        } | null = null;
+        let ownerDocument: Document | null = null;
 
         function position(props: {
           clientRect?: (() => DOMRect | null) | null;
@@ -196,20 +206,25 @@ export function createCategoryChip(options: CategoryChipOptions = {}) {
           if (!rect) return;
           const gap = 6;
           const pad = 8;
-          const hostRect = host.getBoundingClientRect();
-          const maxLeft = window.innerWidth - hostRect.width - pad;
-          const left = Math.min(
-            Math.max(rect.left, pad),
-            Math.max(pad, maxLeft),
-          );
           const composerBox = props.editor.view.dom.closest<HTMLElement>(
             ".agent-composer-box",
           );
-
-          const anchorRect = composerBox?.getBoundingClientRect() ?? rect;
+          const composerRect = composerBox?.getBoundingClientRect();
+          const width = Math.min(
+            composerRect?.width ?? host.getBoundingClientRect().width,
+            window.innerWidth - pad * 2,
+          );
+          host.style.setProperty("--agent-category-menu-width", `${width}px`);
+          const maxLeft = window.innerWidth - width - pad;
+          const left = Math.min(
+            Math.max(composerRect?.left ?? rect.left, pad),
+            Math.max(pad, maxLeft),
+          );
+          const anchorRect = composerRect ?? rect;
           const belowTop = anchorRect.bottom + gap;
           const belowSpace = window.innerHeight - belowTop - pad;
           const aboveSpace = anchorRect.top - gap - pad;
+          const hostRect = host.getBoundingClientRect();
           const fitsBelow = belowSpace >= hostRect.height;
           const placeBelow = fitsBelow || belowSpace >= aboveSpace;
           const maxHeight = Math.max(
@@ -232,19 +247,82 @@ export function createCategoryChip(options: CategoryChipOptions = {}) {
           host.style.left = `${left}px`;
         }
 
+        function updateLatestProps(props: {
+          command: unknown;
+          editor: Editor;
+          query: string;
+          clientRect?: (() => DOMRect | null) | null;
+        }) {
+          latestProps = {
+            ...props,
+            command: props.command as CategorySuggestionListProps["command"],
+          };
+        }
+
+        function refreshItems() {
+          if (!renderer || !latestProps) return;
+          renderer.updateProps({
+            items: composerSlashCommandItems(
+              latestProps.query,
+              options.skills?.(),
+            ),
+            command: latestProps.command,
+          });
+          position(latestProps);
+        }
+
+        function dismissFromPointerDown(event: PointerEvent) {
+          const target = event.target;
+          if (!(target instanceof Node) || host?.contains(target)) return;
+          const view = latestProps?.editor.view;
+          if (!view) return;
+          view.dispatch(
+            view.state.tr.setMeta(CATEGORY_SUGGESTION_PLUGIN_KEY, {
+              exit: true,
+            }),
+          );
+        }
+
+        function cleanupPopover() {
+          renderer?.destroy();
+          host?.removeEventListener(
+            CATEGORY_SKILLS_CHANGED_EVENT,
+            refreshItems,
+          );
+          ownerDocument?.removeEventListener(
+            "pointerdown",
+            dismissFromPointerDown,
+            true,
+          );
+          host?.remove();
+          renderer = null;
+          host = null;
+          latestProps = null;
+          ownerDocument = null;
+        }
+
         return {
           onStart(props) {
+            updateLatestProps(props);
             renderer = new ReactRenderer(CategorySuggestionList, {
               props: { items: props.items, command: props.command },
               editor: props.editor,
             });
             host = document.createElement("div");
             host.className = "agent-category-menu-host";
+            host.addEventListener(CATEGORY_SKILLS_CHANGED_EVENT, refreshItems);
             host.appendChild(renderer.element);
             document.body.appendChild(host);
+            ownerDocument = props.editor.view.dom.ownerDocument;
+            ownerDocument.addEventListener(
+              "pointerdown",
+              dismissFromPointerDown,
+              true,
+            );
             position(props);
           },
           onUpdate(props) {
+            updateLatestProps(props);
             renderer?.updateProps({
               items: props.items,
               command: props.command,
@@ -253,19 +331,13 @@ export function createCategoryChip(options: CategoryChipOptions = {}) {
           },
           onKeyDown(props) {
             if (props.event.key === "Escape") {
-              renderer?.destroy();
-              host?.remove();
-              renderer = null;
-              host = null;
+              cleanupPopover();
               return true;
             }
             return renderer?.ref?.onKeyDown(props.event) ?? false;
           },
           onExit() {
-            renderer?.destroy();
-            host?.remove();
-            renderer = null;
-            host = null;
+            cleanupPopover();
           },
         };
       },
@@ -285,15 +357,13 @@ function composerSlashCommandItems(
   }));
   return [
     ...categories,
-    ...matchSkillSlashSuggestions(
-      query,
-      skills,
-      Math.max(SLASH_MENU_ITEM_LIMIT - categories.length, 0),
-    ).map((skill) => ({
-      kind: "skill" as const,
-      skill,
-    })),
-  ].slice(0, SLASH_MENU_ITEM_LIMIT);
+    ...matchSkillSlashSuggestions(query, skills, SLASH_MENU_SKILL_LIMIT).map(
+      (skill) => ({
+        kind: "skill" as const,
+        skill,
+      }),
+    ),
+  ];
 }
 
 function insertSkillSlashCommand(
