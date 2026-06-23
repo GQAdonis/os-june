@@ -7643,16 +7643,37 @@ function filesystemEntriesToArtifacts(
 }
 
 const ASSISTANT_ARTIFACT_SURFACE_RE =
-  /\b(?:available|attached|created|download|downloadable|exported|saved?|stored|uploaded|written|wrote)\b/;
+  /\b(?:available|attached|created|download|downloadable|exported|generated(?!\s+attachment\s+variants)|saved?|stored|uploaded|written|wrote)\b/;
+
+function assistantArtifactContext(
+  text: string,
+  nameIndex: number,
+  nameLength: number,
+) {
+  const priorSentence = Math.max(
+    text.lastIndexOf(".", nameIndex),
+    text.lastIndexOf("!", nameIndex),
+    text.lastIndexOf("?", nameIndex),
+  );
+  const nextSentenceCandidates = [".", "!", "?"]
+    .map((marker) => text.indexOf(marker, nameIndex + nameLength))
+    .filter((index) => index !== -1);
+  const sentenceStart = Math.max(0, priorSentence + 1, nameIndex - 600);
+  const sentenceEnd = Math.min(
+    text.length,
+    nextSentenceCandidates.length
+      ? Math.min(...nextSentenceCandidates) + 1
+      : nameIndex + nameLength + 120,
+  );
+  return text.slice(sentenceStart, sentenceEnd);
+}
 
 function assistantTextSurfacesArtifactName(text: string, name: string) {
   let searchFrom = 0;
   while (searchFrom < text.length) {
     const index = text.indexOf(name, searchFrom);
     if (index === -1) return false;
-    const contextStart = Math.max(0, index - 80);
-    const contextEnd = Math.min(text.length, index + name.length + 30);
-    const context = text.slice(contextStart, contextEnd);
+    const context = assistantArtifactContext(text, index, name.length);
     if (ASSISTANT_ARTIFACT_SURFACE_RE.test(context)) return true;
     searchFrom = index + name.length;
   }
