@@ -291,6 +291,17 @@ pub fn apply_redaction_plan(
             .push(operation);
     }
 
+    // Value redactions must run before key renames. A key locator resolves by
+    // the hash of the original key; renaming a key first would leave a value
+    // redaction beneath it unable to resolve its path, failing the whole call
+    // closed. Iterating the `HashMap` directly gives an arbitrary order, so sort
+    // Value targets ahead of Key targets first.
+    let mut grouped: Vec<(ToolGuardLocator, Vec<&ToolGuardRedactionOperation>)> =
+        grouped.into_iter().collect();
+    grouped.sort_by_key(|(locator, _)| match locator.target {
+        ToolGuardLocatorTarget::Value => 0,
+        ToolGuardLocatorTarget::Key => 1,
+    });
     for (locator, operations) in grouped {
         match locator.target {
             ToolGuardLocatorTarget::Value => {

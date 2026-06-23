@@ -6599,7 +6599,7 @@ function PolicyBlockPart({
   const pending = part.status === "pending";
   const continued = part.status === "continued";
   const body = continued
-    ? "Protection is bypassed for the rest of this session at your request — prompts run without June's checks."
+    ? "Protection is bypassed for the rest of this session at your request. Prompts run without June's checks."
     : part.status === "rejected"
       ? "June blocked this prompt. Start a new session to continue."
       : "June blocked this prompt because it detected malicious content. You can reject it, or bypass protection for the rest of this session to continue.";
