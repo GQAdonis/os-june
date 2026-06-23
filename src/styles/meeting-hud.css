@@ -36,9 +36,10 @@
    * separate window and locally redefines the tokens it needs. The brand
    * terracotta (--brand in tokens.css), lifted for legibility on dark glass. */
   --attention: oklch(0.74 0.13 42);
-  /* The shimmer highlight. Warmer, brighter, and high-chroma so the tiny
-   * masked glyph has enough contrast to read without washing out to white. */
-  --attention-bright: oklch(0.91 0.2 72);
+  /* The shimmer highlight. A lifted, dull terracotta rather than a bright
+   * yellow, so the sweep stays in the brand family instead of reading as gold,
+   * while staying light enough for the tiny masked glyph to keep contrast. */
+  --attention-bright: oklch(0.82 0.12 48);
 
   color: var(--foreground);
   background: transparent;
@@ -221,10 +222,14 @@ body:active {
   transform: rotate(-90deg);
 }
 
-/* Upright, the full 7-bar run crowds the 32px cross axis — keep a shorter
- * 4-bar run of the same waveform (the meter still drives all seven; the
- * hidden ones just don't paint). */
-.mhud[data-orient="vertical"] .mhud-bar:nth-child(n + 5) {
+/* Upright, the full 7-bar run crowds the 32px cross axis. Keep the center
+ * three bars (3-4-5 = the symmetric core 0.725 / 0.9 / 0.725) so the peak
+ * sits dead center and the row reads as a balanced little tent — slicing the
+ * first four instead grabs the rising half of the lens, which leans to one
+ * side once rotated. The meter still drives all seven; the hidden ones just
+ * don't paint. */
+.mhud[data-orient="vertical"] .mhud-bar:nth-child(-n + 2),
+.mhud[data-orient="vertical"] .mhud-bar:nth-child(n + 6) {
   display: none;
 }
 

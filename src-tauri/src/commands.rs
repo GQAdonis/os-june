@@ -2,8 +2,9 @@ use crate::{
     app_paths::AppPaths,
     audio::{
         capture::{
-            capture_status, finish_active_capture, finish_capture, is_capture_active,
+            capture_status_for_recovery, finish_active_capture, finish_capture, is_capture_active,
             microphone_permission_state, pause_capture, resume_capture, start_capture,
+            CaptureRecoverySnapshot,
         },
         recovery::scan_recoverable_recordings,
         validation::{
@@ -39,8 +40,10 @@ use crate::{
     },
 };
 use chrono::{TimeZone, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx::query::query;
+use sqlx::row::Row;
+use sqlx_sqlite::SqlitePool;
+use sqlx_sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::{Mutex, OnceLock};
@@ -62,6 +65,11 @@ pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError
     let active_recoveries = scan_recoverable_recordings(&repos.pool)
         .await
         .map_err(|error| AppError::new("recovery_scan_failed", error.to_string()))?;
+    for recovery in &active_recoveries {
+        repos
+            .mark_recording_recoverable(&recovery.session_id, &recovery.note_id)
+            .await?;
+    }
     let folders = repos
         .list_folders()
         .await
@@ -679,24 +687,79 @@ pub async fn start_recording(
         elapsed_ms: started.status.elapsed_ms,
         device_label: started.device_label,
         level: started.status.level,
+        live_preview_enabled: started.status.live_preview_enabled,
         sources: started.status.sources,
         warnings: Vec::new(),
     })
 }
 
 #[tauri::command]
-pub async fn pause_recording(request: SessionRequest) -> Result<RecordingStatusDto, AppError> {
-    pause_capture(&request.session_id)
+pub async fn pause_recording(
+    app: AppHandle,
+    request: SessionRequest,
+) -> Result<RecordingStatusDto, AppError> {
+    let snapshot = pause_capture(&request.session_id)?;
+    checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
+    Ok(snapshot.status)
 }
 
 #[tauri::command]
-pub async fn resume_recording(request: SessionRequest) -> Result<RecordingStatusDto, AppError> {
-    resume_capture(&request.session_id)
+pub async fn resume_recording(
+    app: AppHandle,
+    request: SessionRequest,
+) -> Result<RecordingStatusDto, AppError> {
+    let snapshot = resume_capture(&request.session_id)?;
+    checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
+    Ok(snapshot.status)
 }
 
 #[tauri::command]
-pub async fn get_recording_status(request: SessionRequest) -> Result<RecordingStatusDto, AppError> {
-    capture_status(&request.session_id)
+pub async fn get_recording_status(
+    app: AppHandle,
+    request: SessionRequest,
+) -> Result<RecordingStatusDto, AppError> {
+    let snapshot = capture_status_for_recovery(&request.session_id)?;
+    checkpoint_recording_recovery_snapshot(&app, &snapshot).await;
+    Ok(snapshot.status)
+}
+
+async fn checkpoint_recording_recovery_snapshot(
+    app: &AppHandle,
+    snapshot: &CaptureRecoverySnapshot,
+) {
+    if !snapshot.should_persist {
+        return;
+    }
+    let repos = match repositories(app).await {
+        Ok(repos) => repos,
+        Err(error) => {
+            eprintln!(
+                "recording recovery checkpoint unavailable for session {}: {}: {}",
+                snapshot.status.session_id, error.code, error.message
+            );
+            return;
+        }
+    };
+    if let Err(error) = persist_recording_recovery_snapshot(&repos, snapshot).await {
+        eprintln!(
+            "recording recovery checkpoint failed for session {}: {}: {}",
+            snapshot.status.session_id, error.code, error.message
+        );
+    }
+}
+
+async fn persist_recording_recovery_snapshot(
+    repos: &Repositories,
+    snapshot: &CaptureRecoverySnapshot,
+) -> Result<(), AppError> {
+    repos
+        .update_recording_recovery_snapshot(
+            &snapshot.status.session_id,
+            snapshot.status.state,
+            snapshot.status.elapsed_ms,
+        )
+        .await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -774,9 +837,11 @@ async fn finish_recording_session(
             .iter()
             .find(|artifact| artifact.source == source.source.as_db())
         {
+            let final_path = source.final_path.to_string_lossy().into_owned();
             repos
                 .finalize_source_artifact(
                     &artifact.id,
+                    &final_path,
                     if valid { "valid" } else { "invalid" },
                     validation.actual_duration_ms,
                     file_size,
@@ -1183,9 +1248,11 @@ pub async fn recover_recording(
             let Some(path) = recovery_source_path(&paths, &artifact) else {
                 continue;
             };
+            let expected_duration_ms =
+                recovery_validation_expected_duration_ms(&path, artifact.expected_duration_ms);
             let validation = validate_audio_artifact(
                 &path,
-                artifact.expected_duration_ms.max(1),
+                expected_duration_ms,
                 AudioValidationConfig::default(),
             )
             .map_err(|error| AppError::new("audio_validation_failed", error.to_string()))?;
@@ -1193,16 +1260,18 @@ pub async fn recover_recording(
             let file_size = std::fs::metadata(&path)
                 .map(|metadata| metadata.len() as i64)
                 .unwrap_or_default();
+            let recovered_path = path.to_string_lossy().into_owned();
             let source = RecordingSource::from(artifact.source.as_str());
             let valid = source_audio_passes_validation(source, &validation);
             repos
                 .finalize_source_artifact(
                     &artifact.id,
+                    &recovered_path,
                     if valid { "valid" } else { "invalid" },
                     validation.actual_duration_ms,
                     file_size,
                     &checksum,
-                    artifact.expected_duration_ms,
+                    expected_duration_ms,
                     Some(serde_json::to_string(&validation).unwrap_or_default()),
                     if valid {
                         None
@@ -1228,6 +1297,9 @@ pub async fn recover_recording(
         let note = repos.get_note(&info.note_id).await?;
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
+        repos
+            .mark_recording_recovery_valid(&info.session_id)
+            .await?;
         return process_saved_source_audio(
             &repos,
             &info.note_id,
@@ -1246,12 +1318,11 @@ pub async fn recover_recording(
             "No recoverable audio bytes are available.",
         )
     })?;
-    let validation = validate_audio_artifact(
-        &path,
-        info.expected_elapsed_ms.max(1),
-        AudioValidationConfig::default(),
-    )
-    .map_err(|error| AppError::new("audio_validation_failed", error.to_string()))?;
+    let expected_elapsed_ms =
+        recovery_validation_expected_duration_ms(&path, info.expected_elapsed_ms);
+    let validation =
+        validate_audio_artifact(&path, expected_elapsed_ms, AudioValidationConfig::default())
+            .map_err(|error| AppError::new("audio_validation_failed", error.to_string()))?;
     let checksum = checksum_file(&path).unwrap_or_default();
     let file_size = std::fs::metadata(&path)
         .map(|metadata| metadata.len() as i64)
@@ -1264,7 +1335,7 @@ pub async fn recover_recording(
             } else {
                 "invalid"
             },
-            info.expected_elapsed_ms,
+            expected_elapsed_ms,
             Some(file_size),
             Some(validation.actual_duration_ms),
             Some(checksum.clone()),
@@ -1351,6 +1422,20 @@ fn recovery_source_path(
         }
     }
     None
+}
+
+fn recovery_validation_expected_duration_ms(path: &Path, stored_duration_ms: i64) -> i64 {
+    if stored_duration_ms > 1 {
+        return stored_duration_ms;
+    }
+    wav_duration_ms(path).unwrap_or_else(|| stored_duration_ms.max(1))
+}
+
+fn wav_duration_ms(path: &Path) -> Option<i64> {
+    let reader = hound::WavReader::open(path).ok()?;
+    let sample_rate = reader.spec().sample_rate.max(1) as i64;
+    let duration_ms = (reader.duration() as i64 * 1000) / sample_rate;
+    (duration_ms > 0).then_some(duration_ms)
 }
 
 static AGENT_PLACEHOLDER_TASKS_IN_FLIGHT: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -1458,7 +1543,7 @@ async fn hydrate_agent_task_from_hermes(
         return Ok(());
     };
 
-    let rows = sqlx::query(
+    let rows = query(
         "SELECT CAST(id AS TEXT) AS id, content, timestamp
          FROM messages
          WHERE session_id = ?
@@ -1548,7 +1633,7 @@ async fn match_hermes_session_for_task(
     else {
         return Ok(None);
     };
-    let rows = sqlx::query(
+    let rows = query(
         "SELECT id
          FROM sessions
          WHERE title = ?
@@ -1640,9 +1725,7 @@ pub(crate) async fn repositories(app: &AppHandle) -> Result<Repositories, AppErr
 }
 
 fn app_paths(app: &AppHandle) -> Result<AppPaths, AppError> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
+    let data_dir = crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("storage_unavailable", error.to_string()))?;
     AppPaths::from_data_dir(data_dir)
         .map_err(|error| AppError::new("storage_unavailable", error.to_string()))
@@ -1650,7 +1733,7 @@ fn app_paths(app: &AppHandle) -> Result<AppPaths, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::should_probe_system_audio_permission;
+    use super::{recovery_validation_expected_duration_ms, should_probe_system_audio_permission};
 
     #[test]
     fn skips_system_audio_permission_probe_while_capture_is_active() {
@@ -1661,5 +1744,78 @@ mod tests {
     fn probes_system_audio_permission_only_when_available_and_idle() {
         assert!(should_probe_system_audio_permission(true, false));
         assert!(!should_probe_system_audio_permission(false, false));
+    }
+
+    #[test]
+    fn recovered_wav_duration_overrides_stale_stored_duration() {
+        let (_dir, path) = write_one_second_wav();
+
+        assert_eq!(recovery_validation_expected_duration_ms(&path, 0), 1_000);
+        assert_eq!(recovery_validation_expected_duration_ms(&path, 1), 1_000);
+    }
+
+    #[test]
+    fn recovered_wav_duration_reads_flush_only_wav() {
+        let (_dir, path) = write_one_second_flushed_wav();
+
+        assert_eq!(recovery_validation_expected_duration_ms(&path, 0), 1_000);
+    }
+
+    #[test]
+    fn recovered_wav_duration_preserves_persisted_expected_duration() {
+        let (_dir, path) = write_one_second_wav();
+
+        assert_eq!(
+            recovery_validation_expected_duration_ms(&path, 10_000),
+            10_000
+        );
+    }
+
+    #[test]
+    fn recovered_duration_falls_back_to_stored_duration_for_unreadable_audio() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partial.wav");
+        std::fs::write(&path, b"not wav").expect("write");
+
+        assert_eq!(
+            recovery_validation_expected_duration_ms(&path, 2_500),
+            2_500
+        );
+        assert_eq!(recovery_validation_expected_duration_ms(&path, 0), 1);
+    }
+
+    fn write_one_second_wav() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partial.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("writer");
+        for _ in 0..16_000 {
+            writer.write_sample(0_i16).expect("sample");
+        }
+        writer.finalize().expect("finalize");
+        (dir, path)
+    }
+
+    fn write_one_second_flushed_wav() -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("partial.wav");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(&path, spec).expect("writer");
+        for _ in 0..16_000 {
+            writer.write_sample(0_i16).expect("sample");
+        }
+        writer.flush().expect("flush");
+        std::mem::forget(writer);
+        (dir, path)
     }
 }

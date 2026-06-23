@@ -11,17 +11,19 @@ mod validation;
 
 use axum::{
     Router,
+    error_handling::HandleErrorLayer,
     extract::DefaultBodyLimit,
-    http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
 use std::time::Duration;
-use tower_http::{cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer};
+use tower::{BoxError, ServiceBuilder, timeout::TimeoutLayer};
+use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 pub use envelope::{
     ApiResponse, ERR_AUTHORIZATION_DENIED, ERR_BAD_REQUEST, ERR_INSUFFICIENT_CREDITS, ERR_INTERNAL,
-    ERR_PAYLOAD_TOO_LARGE, ERR_POLICY_BLOCKED, ERR_TOOL_GUARD_UNAVAILABLE, ERR_UNAUTHORIZED,
-    ERR_UNPROCESSABLE, ERR_UPSTREAM,
+    ERR_PAYLOAD_TOO_LARGE, ERR_POLICY_BLOCKED, ERR_TIMEOUT, ERR_TOOL_GUARD_UNAVAILABLE,
+    ERR_UNAUTHORIZED, ERR_UNPROCESSABLE, ERR_UPSTREAM,
 };
 pub use error::ApiError;
 pub use handlers::dictate::{
@@ -35,10 +37,11 @@ pub use state::{ApiLimits, ApiState, ApiStateParams, AttestationInfo};
 
 pub fn router(state: ApiState) -> Router {
     let limits = state.limits();
-    let timeout = TimeoutLayer::with_status_code(
-        StatusCode::GATEWAY_TIMEOUT,
-        Duration::from_secs(limits.request_timeout_secs),
-    );
+    let timeout = ServiceBuilder::new()
+        .layer(HandleErrorLayer::new(handle_timeout_error))
+        .layer(TimeoutLayer::new(Duration::from_secs(
+            limits.request_timeout_secs,
+        )));
     Router::new()
         .route("/livez", get(handlers::health::livez))
         .route("/readyz", get(handlers::health::readyz))
@@ -92,4 +95,11 @@ pub fn router(state: ApiState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::new())
         .with_state(state)
+}
+
+async fn handle_timeout_error(error: BoxError) -> axum::response::Response {
+    if error.is::<tower::timeout::error::Elapsed>() {
+        return envelope::timeout_response();
+    }
+    error::ApiError::Internal.into_response()
 }

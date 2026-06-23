@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { IconCalendar1 } from "central-icons/IconCalendar1";
 import { IconLock } from "central-icons/IconLock";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconSparkle } from "central-icons/IconSparkle";
@@ -6,7 +7,6 @@ import { isMacLikePlatform } from "../../../lib/platform";
 import { osAccountsCancelLogin, osAccountsLogin } from "../../../lib/tauri";
 import type { AccountStatus } from "../../../lib/tauri";
 import { OsMark } from "../../account/AccountGate";
-import { Spinner } from "../../ui/Spinner";
 import { OnboardingPrimaryButton, StepCard } from "../StepChrome";
 
 // macOS can introduce the full agent, dictation, and notes surface because the
@@ -15,19 +15,25 @@ import { OnboardingPrimaryButton, StepCard } from "../StepChrome";
 const JUNE_POINTS = [
   {
     icon: IconSparkle,
-    title: "An agent on your computer",
+    title: "Chat and work with June",
     detail: "Hand June real work. It runs the session and comes back done.",
   },
   {
     icon: IconMicrophone,
-    title: "Talk instead of type",
-    detail: "Dictate into any app. June writes your meeting notes too.",
+    title: "Speak instead of type",
+    detail:
+      "June turns your voice into polished writing in any app on your computer.",
+  },
+  {
+    icon: IconCalendar1,
+    title: "Effortlessly capture meetings",
+    detail: "June takes the notes without ever joining the meeting.",
   },
   {
     icon: IconLock,
     title: "Private by default",
     detail:
-      "Prompts leave your device only for inference, on zero-retention models by default.",
+      "Prompts leave your device only for inference, on zero-retention private models.",
   },
 ];
 
@@ -42,7 +48,7 @@ const WINDOWS_JUNE_POINTS = [
     title: "Meeting notes from your mic",
     detail: "Record meetings from your microphone and turn them into notes.",
   },
-  JUNE_POINTS[2],
+  JUNE_POINTS[3],
 ];
 
 /**
@@ -62,7 +68,8 @@ export function SignInStep({
 }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string>();
-  const points = isMacLikePlatform() ? JUNE_POINTS : WINDOWS_JUNE_POINTS;
+  const isMac = isMacLikePlatform();
+  const points = isMac ? JUNE_POINTS : WINDOWS_JUNE_POINTS;
 
   const cancelInFlight = useCallback(async () => {
     try {
@@ -100,9 +107,10 @@ export function SignInStep({
   return (
     <StepCard
       title="Welcome to June"
-      subtitle="Your private AI assistant."
+      subtitle="Private AI for everyday life and work."
       mark
       wide
+      className={isMac ? "welcome-card-intro" : undefined}
     >
       <ul className="onboarding-points">
         {points.map(({ icon: Icon, title, detail }) => (
@@ -126,7 +134,6 @@ export function SignInStep({
               aria-live="polite"
             >
               <span className="welcome-progress-label">
-                <Spinner className="welcome-spinner" aria-hidden />
                 <span>Complete sign-in in browser</span>
               </span>
               <button

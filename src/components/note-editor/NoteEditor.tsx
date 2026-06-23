@@ -29,6 +29,7 @@ import { RecorderBar } from "../recorder/RecorderBar";
 import { NoteRecoveryPrompt } from "../recorder/NoteRecoveryPrompt";
 import { isMacLikePlatform } from "../../lib/platform";
 import {
+  isInvalidScribeResponseMessage,
   NoteFailureBanner,
   userFacingFailureMessage,
 } from "./NoteFailureBanner";
@@ -259,7 +260,8 @@ export function NoteEditor({
   const showTranscriptProcessing =
     processingLock && transcriptText.trim().length > 0;
   const showLivePreviewWaiting =
-    recordingActive && liveTranscriptTurns.length === 0;
+    recordingForNote?.livePreviewEnabled === true &&
+    liveTranscriptTurns.length === 0;
   // Processing runs in the background and is queued per note, so a recording
   // that's still transcribing/generating no longer blocks starting another —
   // you can stack messages and they process in order. The record button only
@@ -835,7 +837,8 @@ function orderedVisibleSourceTranscripts(
   return (note.sourceTranscripts ?? [])
     .filter((turn) => {
       if (turn.text.trim()) return true;
-      return note.processingStatus !== "failed" && !!turn.lastError;
+      if (note.processingStatus === "failed" || !turn.lastError) return false;
+      return true;
     })
     .map((turn, index) => ({ turn, index }))
     .sort(compareSourceTranscriptOrder)
@@ -911,7 +914,7 @@ function TranscriptTurn({
   // its error ("No speech detected…"), which is worth being able to grab.
   // The error is run through userFacingFailureMessage so raw provider codes
   // never reach the clipboard (or the card below).
-  const errorMessage = userFacingFailureMessage(transcript.lastError) ?? "";
+  const errorMessage = sourceTurnFailureMessage(transcript.lastError);
   const copyValue = hasText ? transcript.text : errorMessage;
   const canCopy = copyValue.trim().length > 0;
 
@@ -1004,6 +1007,13 @@ function TranscriptTurn({
       ) : null}
     </article>
   );
+}
+
+function sourceTurnFailureMessage(message?: string) {
+  if (message && isInvalidScribeResponseMessage(message)) {
+    return "Audio for this part could not be transcribed.";
+  }
+  return userFacingFailureMessage(message) ?? "";
 }
 
 function CopyTranscriptButton({ text }: { text: string }) {

@@ -1,7 +1,10 @@
 use crate::{
     app_paths::AppPaths,
     audio::{
-        live_preview::{start_live_transcript_preview, LivePreviewController, LivePreviewSink},
+        live_preview::{
+            start_live_transcript_preview, start_system_live_transcript_preview,
+            LivePreviewController, LivePreviewSink, SystemLivePreviewController,
+        },
         system_macos::SystemAudioCapture,
     },
     domain::types::{
@@ -25,6 +28,7 @@ use std::{
 use uuid::Uuid;
 
 pub const DEFAULT_SILENCE_THRESHOLD: f32 = 0.012;
+const RECOVERY_SNAPSHOT_INTERVAL_MS: i64 = 500;
 
 static ACTIVE_RECORDING: LazyLock<Mutex<Option<ActiveRecording>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -62,6 +66,11 @@ pub struct FinishedSource {
     pub elapsed_ms: i64,
 }
 
+pub struct CaptureRecoverySnapshot {
+    pub status: RecordingStatusDto,
+    pub should_persist: bool,
+}
+
 struct ActiveRecording {
     session_id: String,
     note_id: String,
@@ -77,7 +86,10 @@ struct ActiveRecording {
     paused_flag: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>,
     stats: Arc<Mutex<CaptureStats>>,
+    last_recovery_snapshot_elapsed_ms: i64,
     live_preview: Option<LivePreviewController>,
+    system_live_preview: Option<SystemLivePreviewController>,
+    live_preview_enabled: bool,
     _stream: cpal::Stream,
 }
 
@@ -179,13 +191,15 @@ pub fn start_capture(
     let writer_for_callback = Arc::clone(&writer);
     let stats_for_callback = Arc::clone(&stats);
     let paused_for_callback = Arc::clone(&paused_flag);
-    let live_preview = if crate::scribe_api::configured() && crate::os_accounts::cached_signed_in()
-    {
+    let live_preview_available =
+        crate::scribe_api::configured() && crate::os_accounts::cached_signed_in();
+    let live_preview = if live_preview_available {
         Some(start_live_transcript_preview(
-            app,
+            app.clone(),
             note_id.clone(),
             session_id.clone(),
             source_mode,
+            RecordingSource::Microphone,
             sample_rate,
             channels,
         ))
@@ -247,6 +261,7 @@ pub fn start_capture(
         }
     }
     .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
+    let mut system_live_preview = None;
     let system_capture = if let (Some(system_partial_path), Some(system_final_path)) =
         (system_partial_path.clone(), system_final_path.clone())
     {
@@ -255,7 +270,18 @@ pub fn start_capture(
             system_final_path.clone(),
             Duration::ZERO,
         ) {
-            Ok(capture) => Some(capture),
+            Ok(capture) => {
+                if live_preview_available {
+                    system_live_preview = Some(start_system_live_transcript_preview(
+                        app.clone(),
+                        note_id.clone(),
+                        session_id.clone(),
+                        source_mode,
+                        system_partial_path,
+                    ));
+                }
+                Some(capture)
+            }
             Err(error) => {
                 if let Ok(mut writer_guard) = writer.lock() {
                     let _ = writer_guard.take();
@@ -267,6 +293,7 @@ pub fn start_capture(
     } else {
         None
     };
+    let live_preview_enabled = live_preview.is_some() || system_live_preview.is_some();
     stream
         .play()
         .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
@@ -285,6 +312,7 @@ pub fn start_capture(
         },
         silence_warning: false,
         bytes_written: 0,
+        live_preview_enabled,
         sources: source_statuses(
             source_mode,
             RecordingState::Recording,
@@ -312,7 +340,10 @@ pub fn start_capture(
         paused_flag,
         writer,
         stats,
+        last_recovery_snapshot_elapsed_ms: 0,
         live_preview,
+        system_live_preview,
+        live_preview_enabled,
         _stream: stream,
     });
 
@@ -328,7 +359,7 @@ pub fn start_capture(
     })
 }
 
-pub fn pause_capture(session_id: &str) -> Result<RecordingStatusDto, AppError> {
+pub fn pause_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
     let mut active = lock_active()?;
     let recording = active_for_session(active.as_mut(), session_id)?;
     if !recording.paused {
@@ -341,10 +372,10 @@ pub fn pause_capture(session_id: &str) -> Result<RecordingStatusDto, AppError> {
             system.pause();
         }
     }
-    Ok(recording.status())
+    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
 }
 
-pub fn resume_capture(session_id: &str) -> Result<RecordingStatusDto, AppError> {
+pub fn resume_capture(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
     let mut active = lock_active()?;
     let recording = active_for_session(active.as_mut(), session_id)?;
     if recording.paused {
@@ -355,13 +386,19 @@ pub fn resume_capture(session_id: &str) -> Result<RecordingStatusDto, AppError> 
             system.resume();
         }
     }
-    Ok(recording.status())
+    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Force))
 }
 
 pub fn capture_status(session_id: &str) -> Result<RecordingStatusDto, AppError> {
     let active = lock_active()?;
     let recording = active_for_session(active.as_ref(), session_id)?;
     Ok(recording.status())
+}
+
+pub fn capture_status_for_recovery(session_id: &str) -> Result<CaptureRecoverySnapshot, AppError> {
+    let mut active = lock_active()?;
+    let recording = active_for_session(active.as_mut(), session_id)?;
+    Ok(recording.recovery_snapshot(RecoverySnapshotMode::Throttled))
 }
 
 pub fn is_capture_active() -> bool {
@@ -421,6 +458,7 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         elapsed_ms: status.elapsed_ms,
         device_label: None,
         level: status.level,
+        live_preview_enabled: recording.live_preview_enabled,
         sources: status.sources,
         warnings: status.warnings,
     };
@@ -435,12 +473,16 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         writer,
         paused_flag,
         live_preview,
+        system_live_preview,
         _stream,
         ..
     } = recording;
     paused_flag.store(true, Ordering::Release);
     if let Some(live_preview) = live_preview {
         live_preview.cancel();
+    }
+    if let Some(system_live_preview) = system_live_preview {
+        system_live_preview.cancel();
     }
     drop(_stream);
     let microphone_finalized = (|| -> Result<(), AppError> {
@@ -509,7 +551,9 @@ fn write_input_data<I>(
     let mut preview_samples = preview.map(|_| Vec::new());
     {
         let mut callback_peak = 0.0_f32;
+        let mut saw_sample = false;
         for sample in data {
+            saw_sample = true;
             let clamped = sample.clamp(-1.0, 1.0);
             let pcm_sample = (clamped * i16::MAX as f32) as i16;
             let normalized = clamped.abs();
@@ -523,7 +567,7 @@ fn write_input_data<I>(
                 samples.push(pcm_sample);
             }
         }
-        if callback_peak > 0.0 {
+        if saw_sample {
             if stats.recent_peaks.len() == 24 {
                 stats.recent_peaks.pop_front();
             }
@@ -632,6 +676,7 @@ impl ActiveRecording {
             silence_warning: self.started.elapsed() >= Duration::from_secs(10)
                 && rms < DEFAULT_SILENCE_THRESHOLD,
             bytes_written,
+            live_preview_enabled: self.live_preview_enabled,
             sources: source_statuses(
                 self.source_mode,
                 state,
@@ -644,6 +689,39 @@ impl ActiveRecording {
             ),
             warnings: Vec::new(),
         }
+    }
+
+    fn recovery_snapshot(&mut self, mode: RecoverySnapshotMode) -> CaptureRecoverySnapshot {
+        let status = self.status();
+        let should_persist = match mode {
+            RecoverySnapshotMode::Force => true,
+            RecoverySnapshotMode::Throttled => {
+                status.elapsed_ms - self.last_recovery_snapshot_elapsed_ms
+                    >= RECOVERY_SNAPSHOT_INTERVAL_MS
+            }
+        };
+        if should_persist {
+            self.last_recovery_snapshot_elapsed_ms = status.elapsed_ms;
+            flush_microphone_writer_for_recovery(&self.writer);
+        }
+        CaptureRecoverySnapshot {
+            status,
+            should_persist,
+        }
+    }
+}
+
+enum RecoverySnapshotMode {
+    Throttled,
+    Force,
+}
+
+fn flush_microphone_writer_for_recovery(writer: &Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>) {
+    let Ok(mut writer_guard) = writer.lock() else {
+        return;
+    };
+    if let Some(writer) = writer_guard.as_mut() {
+        let _ = writer.flush();
     }
 }
 

@@ -21,6 +21,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 const AGENT_HTTP_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_PROXY_MAX_MESSAGES: usize = 64;
 const AGENT_PROXY_MAX_INSTRUCTION_MESSAGES: usize = 4;
+// Mirrors the public Scribe API validation cap. Hermes may request a larger
+// per-call output budget than the backend accepts, which otherwise trips a
+// validation error that it misclassifies as prompt context overflow.
+const AGENT_PROXY_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const AGENT_TITLE_MAX_CHARS: usize = 48;
 const ERR_INSUFFICIENT_CREDITS: i64 = 4301;
 const ERR_TOKEN_EXPIRED: i64 = 3001;
@@ -394,13 +398,7 @@ async fn proxy_agent_chat_completions_to_path(
     path: &str,
     mut body: serde_json::Value,
 ) -> Result<AgentChatCompletionsResponse, AppError> {
-    limit_agent_chat_messages_for_proxy(&mut body);
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "model".to_string(),
-            serde_json::Value::String(crate::providers::generation_model()),
-        );
-    }
+    normalize_agent_chat_request_for_proxy(&mut body);
     let url = format!("{}{}", scribe_api_url(), path);
     let mut token = crate::os_accounts::access_token().await?;
     for attempt in 0..2 {
@@ -433,6 +431,44 @@ async fn proxy_agent_chat_completions_to_path(
 
 fn limit_agent_chat_messages_for_proxy(body: &mut serde_json::Value) {
     limit_agent_chat_messages(body, AGENT_PROXY_MAX_MESSAGES);
+}
+
+fn normalize_agent_chat_request_for_proxy(body: &mut serde_json::Value) {
+    limit_agent_chat_messages_for_proxy(body);
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(crate::providers::generation_model()),
+    );
+    clamp_agent_chat_output_tokens(object, "max_tokens");
+    clamp_agent_chat_output_tokens(object, "max_completion_tokens");
+}
+
+fn clamp_agent_chat_output_tokens(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) {
+    let Some(value) = object.get_mut(field) else {
+        return;
+    };
+    if output_tokens_exceeds_proxy_cap(value) {
+        *value = serde_json::Value::Number(AGENT_PROXY_MAX_OUTPUT_TOKENS.into());
+    }
+}
+
+fn output_tokens_exceeds_proxy_cap(value: &serde_json::Value) -> bool {
+    if let Some(tokens) = value.as_u64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS;
+    }
+    if let Some(tokens) = value.as_i64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS as i64;
+    }
+    if let Some(tokens) = value.as_f64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS as f64;
+    }
+    false
 }
 
 fn limit_agent_chat_messages(body: &mut serde_json::Value, max_messages: usize) {
@@ -936,13 +972,15 @@ where
     T: for<'de> Deserialize<'de>,
 {
     let status = response.status();
+    let retry_after_ms = response_retry_after_ms(&response);
     let body = response.text().await.map_err(network_error)?;
-    parse_response_body(path, status, &body)
+    parse_response_body(path, status, retry_after_ms, &body)
 }
 
 fn parse_response_body<T>(
     path: &str,
     status: reqwest::StatusCode,
+    retry_after_ms: Option<u64>,
     body: &str,
 ) -> Result<T, AppError>
 where
@@ -977,12 +1015,25 @@ where
         ));
     }
     let _ = path;
-    Err(AppError::new(
+    let mut error = AppError::new(
         "scribe_request_failed",
         envelope
             .message
             .unwrap_or_else(|| "Couldn't reach Scribe.".to_string()),
-    ))
+    );
+    if let Some(retry_after_ms) = retry_after_ms {
+        error.details = Some(serde_json::json!({ "retryAfterMs": retry_after_ms }));
+    }
+    Err(error)
+}
+
+fn response_retry_after_ms(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds.saturating_mul(1_000))
 }
 
 fn http_client() -> &'static reqwest::Client {
@@ -1127,6 +1178,7 @@ mod tests {
         let result = parse_response_body::<GenerateResponse>(
             "/v1/notes/generate",
             reqwest::StatusCode::BAD_GATEWAY,
+            None,
             "",
         );
 
@@ -1135,6 +1187,96 @@ mod tests {
         assert_eq!(error.code, "scribe_api_response_invalid");
         assert_eq!(error.message, INVALID_SCRIBE_RESPONSE_MESSAGE);
         assert!(!error.message.contains("expected value"));
+    }
+
+    #[test]
+    fn retry_after_header_is_preserved_on_scribe_failures() {
+        let result = parse_response_body::<GenerateResponse>(
+            "/v1/notes/generate",
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            Some(2_000),
+            r#"{"data":null,"success":false,"error_code":4401,"message":"authorization_denied"}"#,
+        );
+
+        assert!(result.is_err());
+        let error = result.err().expect("authorization denial should fail");
+        assert_eq!(error.code, "scribe_request_failed");
+        assert_eq!(error.message, "authorization_denied");
+        assert_eq!(
+            error
+                .details
+                .and_then(|details| details.get("retryAfterMs").cloned())
+                .and_then(|value| value.as_u64()),
+            Some(2_000)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_caps_oversized_output_token_budgets() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": AGENT_PROXY_MAX_OUTPUT_TOKENS + 1,
+            "max_completion_tokens": AGENT_PROXY_MAX_OUTPUT_TOKENS + 10,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            body["max_completion_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_preserves_valid_output_token_budgets() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": 500,
+            "max_completion_tokens": AGENT_PROXY_MAX_OUTPUT_TOKENS,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(body["max_tokens"], serde_json::json!(500));
+        assert_eq!(
+            body["max_completion_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_caps_float_output_token_budgets_over_the_limit() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": 32769.0,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_leaves_negative_output_token_budgets_for_backend_validation() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": -1,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(body["max_tokens"], serde_json::json!(-1));
     }
 
     #[test]

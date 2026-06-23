@@ -130,6 +130,8 @@ Use `scribe-api/.env` for server-side secrets and local auth:
 - `SCRIBE__LOCAL_DEV__BEARER_TOKEN`
 - `SCRIBE__UPSTREAMS__VENICE__API_KEY`
 - `SCRIBE__UPSTREAMS__OPENAI__API_KEY`
+- optional `SCRIBE__ISSUE_REPORTS__OS_PLATFORM_API_KEY` for filing in-app
+  issue reports into the fixed June os-platform project
 - optional provider base URLs such as `SCRIBE__UPSTREAMS__VENICE__BASE_URL`
 
 The local bearer token must match in both env files. It is not an OS Accounts
@@ -189,6 +191,15 @@ Saved audio is the source of truth for retry. If transcription or generation
 fails after capture, June keeps the audio and processing metadata so work can be
 retried without recording again.
 
+## Agent skills
+
+The agent loads skills from its managed `skills` folder and, when the folder
+exists, from `~/.agents/skills` in your home directory (the same location the
+`skills` CLI installs into). Drop a skill folder there and every agent session
+picks it up the next time it starts. Home-folder skills load read-only: the
+macOS write-jail grants writes only under June's own data directory, so the
+agent can use these skills but cannot modify them.
+
 ## Privacy and verification
 
 The production `scribe-api` backend runs in an Intel TDX confidential VM on
@@ -202,7 +213,7 @@ The chain has three public anchors:
    in its OCI `org.opencontainers.image.revision` label.
 2. **Image:** [`build-scribe-api.yml`](.github/workflows/build-scribe-api.yml)
    builds and publishes
-   [`ghcr.io/open-software-network/scribe-api`](https://github.com/open-software-network/os-scribe/pkgs/container/scribe-api).
+   [`ghcr.io/open-software-network/scribe-api`](https://github.com/open-software-network/os-june/pkgs/container/scribe-api).
    Deploys pin immutable per-commit tags, and each deployed digest is recorded
    as a signed `deploy/<env>/<sha>` git tag.
 3. **Attestation:** the

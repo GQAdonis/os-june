@@ -243,6 +243,7 @@ export type RecordingStatusDto = {
   level: AudioLevelDto;
   silenceWarning: boolean;
   bytesWritten: number;
+  livePreviewEnabled?: boolean;
   sources?: SourceStatusDto[];
   warnings?: SourceWarningDto[];
 };
@@ -263,6 +264,7 @@ export type RecordingSessionDto = {
   elapsedMs: number;
   deviceLabel?: string;
   level: AudioLevelDto;
+  livePreviewEnabled?: boolean;
   sources?: SourceStatusDto[];
   warnings?: SourceWarningDto[];
 };
@@ -507,6 +509,9 @@ export type HermesSkillDocument = {
   name: string;
   relativePath: string;
   content: string;
+  /** True for skills loaded from an external dir (e.g. ~/.agents/skills).
+   *  June can read but not write them, so the editor is read-only. */
+  readOnly?: boolean;
 };
 
 export type HermesToolsetInfo = {
@@ -809,14 +814,9 @@ export async function agentHudHide() {
 export async function agentHudSetLayout(input: {
   expanded: boolean;
   cardCount?: number;
-  replying?: boolean;
   contextMenuOpen?: boolean;
 }) {
   return invoke<void>("agent_hud_set_layout", { request: input });
-}
-
-export async function agentHudFocusReply() {
-  return invoke<void>("agent_hud_focus_reply");
 }
 
 export async function agentHudOpenAgent(session?: HermesSessionInfo) {

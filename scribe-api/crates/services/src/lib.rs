@@ -508,7 +508,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_transcribe_preview_authorizes_dispatches_asr_and_settles_zero_credits() {
+    async fn note_transcribe_preview_authorizes_dispatches_asr_and_charges_actual_credits() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let transcriber = Arc::new(RecordingTranscriber::default());
         let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
@@ -540,7 +540,7 @@ mod tests {
             .await
             .expect("preview transcription succeeds");
 
-        assert_eq!(output.receipt.credits_charged.0, 0);
+        assert_eq!(output.receipt.credits_charged.0, 4);
         assert_eq!(
             os_accounts.events(),
             vec![
@@ -552,9 +552,12 @@ mod tests {
                 },
                 RecordedCall::Charge {
                     action_token: "agt_test".to_string(),
-                    credits: 0,
-                    idempotency_key: "note_transcribe_preview:usr_123:live-preview-session-1"
-                        .to_string(),
+                    credits: 4,
+                    idempotency_key: concat!(
+                        "note_transcribe_preview:usr_123:live-preview-session-1:",
+                        "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                    )
+                    .to_string(),
                 },
             ]
         );
@@ -567,7 +570,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn note_transcribe_preview_settles_zero_credits_when_asr_fails() {
+    async fn note_transcribe_preview_failure_still_settles_hold() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
             pricing: Arc::new(PricingTable::new(models([(
@@ -609,10 +612,75 @@ mod tests {
                 },
                 RecordedCall::Charge {
                     action_token: "agt_test".to_string(),
-                    credits: 0,
-                    idempotency_key: "note_transcribe_preview:usr_123:live-preview-session-1"
-                        .to_string(),
+                    credits: 4,
+                    idempotency_key: concat!(
+                        "note_transcribe_preview:usr_123:live-preview-session-1:",
+                        "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                    )
+                    .to_string(),
                 },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn note_transcribe_preview_idempotency_key_distinguishes_audio_chunks() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "audio-model",
+                PriceUnit::Seconds,
+                2,
+                ModelType::Asr,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            transcriber: Arc::new(FixedTranscriber),
+            duration_probe: Arc::new(FixedDurationProbe),
+            hold_ttl_seconds: 60,
+            flat_estimate_credits: 1024,
+            preview_max_audio_seconds: 30,
+        });
+
+        for audio in [vec![1, 2, 3], vec![4, 5, 6]] {
+            service
+                .transcribe(NoteTranscribeParams {
+                    user_id: UserId("usr_123".to_string()),
+                    note_id: "legacy-preview-note-id".to_string(),
+                    audio,
+                    filename: "preview.wav".to_string(),
+                    context: None,
+                    language: None,
+                    model_id: ModelId("audio-model".to_string()),
+                    preview: true,
+                })
+                .await
+                .expect("preview transcription succeeds");
+        }
+
+        let charge_keys = os_accounts
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                RecordedCall::Charge {
+                    idempotency_key, ..
+                } => Some(idempotency_key),
+                RecordedCall::Authorize { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            charge_keys,
+            vec![
+                concat!(
+                    "note_transcribe_preview:usr_123:legacy-preview-note-id:",
+                    "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                )
+                .to_string(),
+                concat!(
+                    "note_transcribe_preview:usr_123:legacy-preview-note-id:",
+                    "787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472",
+                )
+                .to_string(),
             ]
         );
     }
@@ -827,6 +895,7 @@ mod tests {
         allow: bool,
         cap: Option<u64>,
         deny_reason: Option<String>,
+        fail_charge: bool,
         events: Mutex<Vec<RecordedCall>>,
     }
 
@@ -836,6 +905,7 @@ mod tests {
                 allow: true,
                 cap: None,
                 deny_reason: None,
+                fail_charge: false,
                 events: Mutex::new(Vec::new()),
             }
         }
@@ -847,6 +917,7 @@ mod tests {
                 allow: true,
                 cap,
                 deny_reason: None,
+                fail_charge: false,
                 events: Mutex::new(Vec::new()),
             }
         }
@@ -885,6 +956,9 @@ mod tests {
                     credits: request.credits.0,
                     idempotency_key: request.idempotency_key,
                 });
+            }
+            if self.fail_charge {
+                return Err(DomainError::UpstreamProvider);
             }
             Ok(Receipt {
                 credits_charged: request.credits,

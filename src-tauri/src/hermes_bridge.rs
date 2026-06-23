@@ -8,7 +8,7 @@ use std::{
     fs,
     io::{self, Write},
     net::TcpListener,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -32,12 +32,12 @@ const SCRIBE_HERMES_DISABLE_SANDBOX_ENV: &str = "SCRIBE_HERMES_DISABLE_SANDBOX";
 // Referenced by the spawn match arm on every target; only ever reached when
 // `prepare_sandbox` returns a profile, which it only does on macOS.
 const SANDBOX_EXEC_PATH: &str = "/usr/bin/sandbox-exec";
-// v2026.6.5 — see the bump PR for the audited pin→tag compatibility delta.
-const HERMES_AGENT_INSTALL_COMMIT: &str = "3c231eb3979ab9c57d5cd6d02f1d577a3b718b43";
+// v2026.6.19 - see the bump PR for the audited pin-to-tag compatibility delta.
+const HERMES_AGENT_INSTALL_COMMIT: &str = "2bd1977d8fad185c9b4be47884f7e87f1add0ce3";
 const HERMES_SOURCE_TARBALL_URL: &str =
-    "https://github.com/NousResearch/hermes-agent/archive/3c231eb3979ab9c57d5cd6d02f1d577a3b718b43.tar.gz";
+    "https://github.com/NousResearch/hermes-agent/archive/2bd1977d8fad185c9b4be47884f7e87f1add0ce3.tar.gz";
 const HERMES_SOURCE_TARBALL_SHA256: &str =
-    "c36c4b4a205b09673a6bc742c2c4361bac6e92139e795378a4335422458c3a43";
+    "7a9bd367066183898831c2760f269368ab54b458a1d1b51d14ef1f484dd490cc";
 const FILESYSTEM_MAX_DEPTH: usize = 2;
 const FILESYSTEM_MAX_ENTRIES_PER_DIR: usize = 80;
 const HERMES_IMPORT_MAX_BYTES: u64 = 50 * 1024 * 1024;
@@ -498,6 +498,10 @@ pub struct HermesSkillDocument {
     pub name: String,
     pub relative_path: String,
     pub content: String,
+    /// True when the skill was loaded from an external dir (e.g.
+    /// `~/.agents/skills`). June can read these but not write them, so the
+    /// editor presents them read-only.
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -814,9 +818,9 @@ async fn start_hermes_bridge_inner(
         );
     }
     let port_string = port.to_string();
-    // No --tui: upstream removed the flag from the dashboard subcommand in
-    // v2026.6.5 (cae6b5486) — the embedded chat gateway (/api/ws) is always
-    // enabled now, and passing the flag is an argparse error.
+    // No --tui: upstream removed the flag from the dashboard subcommand before
+    // v2026.6.19, and the embedded chat gateway (/api/ws) is always enabled.
+    // Passing the flag is an argparse error.
     let hermes_args: [&str; 6] = [
         "dashboard",
         "--no-open",
@@ -1003,8 +1007,8 @@ pub fn get_hermes_bridge_skill(
     app: AppHandle,
     request: HermesSkillRequest,
 ) -> Result<HermesSkillDocument, AppError> {
-    let skills_root = resolve_scribe_hermes_home(&app)?.join("skills");
-    let path = resolve_hermes_skill_file_in_root(&skills_root, &request.name)?;
+    let roots = skill_search_roots(&app)?;
+    let (root, path, read_only) = resolve_skill_in_roots(&roots, &request.name)?;
     let metadata = fs::metadata(&path)
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
     if metadata.len() > HERMES_SKILL_MAX_BYTES as u64 {
@@ -1017,8 +1021,9 @@ pub fn get_hermes_bridge_skill(
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
     Ok(HermesSkillDocument {
         name: request.name.trim().to_string(),
-        relative_path: skill_relative_path(&skills_root, &path)?,
+        relative_path: skill_relative_path(&root, &path)?,
         content,
+        read_only,
     })
 }
 
@@ -1034,7 +1039,26 @@ pub fn update_hermes_bridge_skill(
         ));
     }
     let skills_root = resolve_scribe_hermes_home(&app)?.join("skills");
-    let path = resolve_hermes_skill_file_in_root(&skills_root, &request.name)?;
+    let path = match resolve_hermes_skill_file_in_root(&skills_root, &request.name) {
+        Ok(path) => path,
+        Err(error) if error.code == "hermes_skill_not_found" => {
+            // Skills loaded from `~/.agents/skills` live outside the managed
+            // root and are read-only in June: the agent loads them, but the
+            // editor never writes them. Surface that instead of "not found".
+            let externals: Vec<(PathBuf, bool)> = external_skill_dirs()
+                .into_iter()
+                .map(|dir| (dir, true))
+                .collect();
+            if resolve_skill_in_roots(&externals, &request.name).is_ok() {
+                return Err(AppError::new(
+                    "hermes_skill_read_only",
+                    "This skill loads from ~/.agents/skills and is read-only in June. Edit it on disk.",
+                ));
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     write_managed_skill_file(&skills_root, &path, &request.content)?;
     let content = fs::read_to_string(&path)
         .map_err(|error| AppError::new("hermes_skill_read_failed", error.to_string()))?;
@@ -1042,7 +1066,50 @@ pub fn update_hermes_bridge_skill(
         name: request.name.trim().to_string(),
         relative_path: skill_relative_path(&skills_root, &path)?,
         content,
+        read_only: false,
     })
+}
+
+/// Ordered skill roots June searches when opening a skill: the managed
+/// `$HERMES_HOME/skills` first (editable), then any `external_skill_dirs()`
+/// (read-only). The bool is the read-only flag for skills found under that
+/// root. Non-existent roots are skipped so a missing managed dir still lets
+/// external skills resolve.
+fn skill_search_roots(app: &AppHandle) -> Result<Vec<(PathBuf, bool)>, AppError> {
+    let mut roots = Vec::new();
+    let managed = resolve_scribe_hermes_home(app)?.join("skills");
+    if managed.is_dir() {
+        roots.push((managed, false));
+    }
+    for dir in external_skill_dirs() {
+        roots.push((dir, true));
+    }
+    Ok(roots)
+}
+
+/// Resolves `name` against an ordered list of `(root, read_only)` pairs,
+/// returning the matched root, the resolved skill file, and whether it is
+/// read-only. Roots are tried in order and the first match wins; a
+/// `hermes_skill_not_found` falls through to the next root, while any other
+/// error (ambiguous name, invalid name) stops the search.
+fn resolve_skill_in_roots(
+    roots: &[(PathBuf, bool)],
+    name: &str,
+) -> Result<(PathBuf, PathBuf, bool), AppError> {
+    let mut not_found: Option<AppError> = None;
+    for (root, read_only) in roots {
+        match resolve_hermes_skill_file_in_root(root, name) {
+            Ok(path) => return Ok((root.clone(), path, *read_only)),
+            Err(error) if error.code == "hermes_skill_not_found" => not_found = Some(error),
+            Err(error) => return Err(error),
+        }
+    }
+    Err(not_found.unwrap_or_else(|| {
+        AppError::new(
+            "hermes_skill_not_found",
+            format!("Could not find skill \"{}\".", name.trim()),
+        )
+    }))
 }
 
 fn resolve_hermes_skill_file_in_root(skills_root: &Path, name: &str) -> Result<PathBuf, AppError> {
@@ -2295,9 +2362,7 @@ fn bundled_hermes_command_candidates(resource_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn managed_hermes_runtime_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
-    Ok(app
-        .path()
-        .app_data_dir()
+    Ok(crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("hermes_runtime_home_failed", error.to_string()))?
         .join("hermes-runtime"))
 }
@@ -2615,7 +2680,7 @@ if [ ! -f "$install_dir/pyproject.toml" ] || [ ! -f "$install_dir/scripts/instal
   mv "$unpacked_dir" "$install_dir"
 fi
 
-# Upstream's install.sh (v2026.6.5) runs $UV_CMD unquoted in the venv-create,
+# Upstream's install.sh (v2026.6.19) runs $UV_CMD unquoted in the venv-create,
 # uv-sync, and pip-install-tier calls. The managed uv it installs lives under
 # the app data dir — "Application Support" on macOS — so the space word-splits
 # the path and every one of those calls fails with "/Users/…/Library/
@@ -2842,7 +2907,7 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     let runtime_dir = managed_hermes_runtime_dir(app).ok()?;
     let write_roots = sandbox_write_roots(hermes_home, &runtime_dir);
     let profile = build_sandbox_profile(&home, &write_roots, agent_cli_access);
-    let app_data_dir = app.path().app_data_dir().ok()?;
+    let app_data_dir = crate::app_paths::app_data_dir(app).ok()?;
     if std::fs::create_dir_all(&app_data_dir).is_err() {
         return None;
     }
@@ -2866,8 +2931,7 @@ fn prepare_sandbox(
 }
 
 fn agent_cli_access_flag_path(app: &AppHandle) -> Option<PathBuf> {
-    app.path()
-        .app_data_dir()
+    crate::app_paths::app_data_dir(app)
         .ok()
         .map(|dir| dir.join(AGENT_CLI_ACCESS_FLAG_FILE))
 }
@@ -3083,9 +3147,7 @@ fn sbpl_regex_escape(value: &str) -> String {
 }
 
 fn resolve_scribe_hermes_home(app: &AppHandle) -> Result<PathBuf, AppError> {
-    let path = app
-        .path()
-        .app_data_dir()
+    let path = crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("hermes_bridge_home_failed", error.to_string()))?
         .join("hermes");
     std::fs::create_dir_all(&path)
@@ -3124,7 +3186,38 @@ fn sync_hermes_config(
 ) -> Result<(), AppError> {
     let model = crate::providers::generation_model();
     let base_url = format!("http://127.0.0.1:{provider_proxy_port}/v1");
-    let config = format!(
+    let config = render_hermes_config(
+        &model,
+        &base_url,
+        provider_proxy_token,
+        &CRON_SANDBOXED_TOOLSETS.join(", "),
+        &external_skill_dirs(),
+    );
+    std::fs::write(hermes_home.join("config.yaml"), config)
+        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))
+}
+
+/// Renders the `config.yaml` June owns for every Hermes spawn. Pure so the
+/// rendered YAML (including the `skills.external_dirs` block) can be asserted in
+/// tests. Hermes deep-merges these keys over its own defaults, so June only
+/// writes the values it controls.
+fn render_hermes_config(
+    model: &str,
+    base_url: &str,
+    provider_proxy_token: &str,
+    cron_toolsets: &str,
+    external_skill_dirs: &[PathBuf],
+) -> String {
+    let skills_block = if external_skill_dirs.is_empty() {
+        "  external_dirs: []\n".to_string()
+    } else {
+        let mut block = String::from("  external_dirs:\n");
+        for dir in external_skill_dirs {
+            block.push_str(&format!("    - {}\n", yaml_string(&dir.to_string_lossy())));
+        }
+        block
+    };
+    format!(
         r#"model:
   default: {model}
   provider: custom
@@ -3137,14 +3230,29 @@ display:
   skin: mono
 platform_toolsets:
   cron: [{cron_toolsets}]
-"#,
-        model = yaml_string(&model),
-        base_url = yaml_string(&base_url),
+skills:
+{skills_block}"#,
+        model = yaml_string(model),
+        base_url = yaml_string(base_url),
         provider_proxy_token = yaml_string(provider_proxy_token),
-        cron_toolsets = CRON_SANDBOXED_TOOLSETS.join(", "),
-    );
-    std::fs::write(hermes_home.join("config.yaml"), config)
-        .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))
+    )
+}
+
+/// User-global skill directories Hermes loads in addition to its built-in
+/// `$HERMES_HOME/skills`. June advertises the conventional `~/.agents/skills`
+/// folder (where the `skills` CLI installs) when it exists, so a user or team
+/// can drop skills there and have every agent session pick them up. The
+/// Seatbelt write-jail only grants writes under the app's own roots, so these
+/// external skills load read-only. A missing folder is a silent no-op.
+fn external_skill_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for home in home_dir_candidates() {
+        let candidate = home.join(".agents").join("skills");
+        if candidate.is_dir() && !dirs.contains(&candidate) {
+            dirs.push(candidate);
+        }
+    }
+    dirs
 }
 
 /// Writes the June persona to `SOUL.md` in the Scribe-managed Hermes home.
@@ -3273,15 +3381,45 @@ fn filesystem_entry(path: PathBuf, depth: usize) -> Result<HermesFilesystemEntry
 }
 
 fn is_hidden_secret_path(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
+    path.components().any(|component| {
+        let Component::Normal(name) = component else {
+            return false;
+        };
+        name.to_str().is_some_and(is_sensitive_path_component)
+    })
+}
+
+fn is_sensitive_path_component(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
     matches!(
-        name,
-        ".env" | "auth.lock" | ".credentials" | "credentials" | "secrets" | "secrets.json"
-    ) || name.ends_with(".lock")
-        || name.ends_with(".key")
-        || name.ends_with(".pem")
+        normalized.as_str(),
+        ".ssh" | ".aws" | ".azure" | ".gnupg" | ".kube" | ".docker"
+    ) || is_sensitive_file_name(&normalized)
+}
+
+fn is_sensitive_file_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized == ".env"
+        || normalized.starts_with(".env.")
+        || matches!(
+            normalized.as_str(),
+            "auth.lock"
+                | ".credentials"
+                | "credentials"
+                | "credentials.json"
+                | "application_default_credentials.json"
+                | "secrets"
+                | "secrets.json"
+                | "id_rsa"
+                | "id_dsa"
+                | "id_ecdsa"
+                | "id_ed25519"
+        )
+        || normalized.ends_with(".lock")
+        || normalized.ends_with(".key")
+        || normalized.ends_with(".pem")
+        || normalized.ends_with(".p12")
+        || normalized.ends_with(".pfx")
 }
 
 fn system_time_to_iso(value: std::time::SystemTime) -> String {
@@ -4671,6 +4809,25 @@ mod tests {
     }
 
     #[test]
+    fn hidden_secret_filter_rejects_common_credential_paths() {
+        for path in [
+            "/workspace/.env.local",
+            "/workspace/.ssh/id_ed25519",
+            "/workspace/.aws/config",
+            "/workspace/project/id_rsa",
+            "/workspace/project/client.p12",
+            "/workspace/project/application_default_credentials.json",
+        ] {
+            assert!(is_hidden_secret_path(Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn hidden_secret_filter_allows_non_sensitive_dotfiles() {
+        assert!(!is_hidden_secret_path(Path::new("/workspace/.gitignore")));
+    }
+
+    #[test]
     fn prompt_too_long_rejection_translates_to_a_recognized_overflow() {
         // The session in this state was wedged: the agent never recognized
         // the backend's bare `prompt_too_long` as a context overflow, so it
@@ -5018,6 +5175,30 @@ mod tests {
     }
 
     #[test]
+    fn render_hermes_config_lists_external_skill_dirs() {
+        let dirs = vec![
+            PathBuf::from("/Users/dev/.agents/skills"),
+            PathBuf::from("/shared/team-skills"),
+        ];
+        let config =
+            render_hermes_config("glm", "http://127.0.0.1:9/v1", "tok", "web, memory", &dirs);
+
+        assert!(config.contains("model:\n  default: \"glm\""));
+        assert!(config.contains("  cron: [web, memory]"));
+        assert!(config.contains(
+            "skills:\n  external_dirs:\n    - \"/Users/dev/.agents/skills\"\n    - \"/shared/team-skills\"\n"
+        ));
+    }
+
+    #[test]
+    fn render_hermes_config_emits_empty_external_dirs_when_none() {
+        let config = render_hermes_config("glm", "http://127.0.0.1:9/v1", "tok", "web", &[]);
+
+        assert!(config.contains("skills:\n  external_dirs: []\n"));
+        assert!(!config.contains("    - "));
+    }
+
+    #[test]
     fn bundled_command_candidates_include_target_specific_launchers() {
         let candidates = bundled_hermes_command_candidates(Path::new("resources"));
 
@@ -5271,6 +5452,36 @@ mod tests {
                         .join("SKILL.md")
                 )
         );
+    }
+
+    #[test]
+    fn skill_resolver_searches_external_roots_and_flags_read_only() {
+        let managed = tempfile::tempdir().expect("managed tempdir");
+        let external = tempfile::tempdir().expect("external tempdir");
+        let managed_skill = managed.path().join("dogfood");
+        std::fs::create_dir_all(&managed_skill).expect("managed skill dir");
+        std::fs::write(managed_skill.join("SKILL.md"), "# Dogfood\n").expect("managed skill");
+        let external_skill = external.path().join("caveman");
+        std::fs::create_dir_all(&external_skill).expect("external skill dir");
+        std::fs::write(external_skill.join("SKILL.md"), "# Caveman\n").expect("external skill");
+
+        let roots = vec![
+            (managed.path().to_path_buf(), false),
+            (external.path().to_path_buf(), true),
+        ];
+
+        let (_, _, managed_read_only) =
+            resolve_skill_in_roots(&roots, "dogfood").expect("resolve managed");
+        assert!(!managed_read_only, "managed skills are editable");
+
+        let (root, path, external_read_only) =
+            resolve_skill_in_roots(&roots, "caveman").expect("resolve external");
+        assert!(external_read_only, "external skills are read-only");
+        assert_eq!(root.as_path(), external.path());
+        assert!(path.ends_with(Path::new("caveman").join("SKILL.md")));
+
+        let err = resolve_skill_in_roots(&roots, "missing").expect_err("missing");
+        assert_eq!(err.code, "hermes_skill_not_found");
     }
 
     #[test]

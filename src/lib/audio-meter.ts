@@ -52,10 +52,12 @@ export type BarMeterOptions = {
   spatial?: number;
 };
 
-// The travelling-wave motion shared by both live surfaces (HUD + recorder): a
-// smearier blend plus a speaking envelope that sweeps left→right across the row,
-// smoothed between neighbours, instead of center bars spiking. Pass to
-// createBarMeter so both surfaces move identically.
+// The travelling-wave motion + envelope ballistics shared by BOTH live surfaces
+// (HUD + recorder): a smearier blend plus a speaking envelope that sweeps
+// left→right across the row, smoothed between neighbours. Both surfaces pass
+// this same object so they move identically — the HUD's pre-meter input
+// treatment (peak-hold, see hud.ts) is what stands in for the recorder's
+// Rust-side max-over-window, leaving the meter itself shared.
 export const LIVE_WAVE_OPTIONS: BarMeterOptions = {
   liveLevelMix: 0.45,
   propDelay: 0.4,

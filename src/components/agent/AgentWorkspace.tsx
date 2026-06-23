@@ -138,7 +138,6 @@ import {
   dispatchAgentSessionsChanged,
   dispatchAgentSessionStatus,
   type AgentGalleryDetail,
-  type AgentReplyDetail,
   type AgentSessionsChangedDetail,
   type AgentSessionStatusKind,
 } from "../../lib/agent-events";
@@ -167,6 +166,11 @@ import {
   isHermesSessionsStartupRequestError,
   messageFromError,
 } from "../../lib/errors";
+import { withTimeout } from "../../lib/async-timeout";
+import {
+  MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
+  MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
+} from "../../lib/hermes-messaging";
 import {
   categoryPrompt,
   displayedUserMessageText,
@@ -655,6 +659,21 @@ type PendingIssueReport = {
   attachmentPaths: string[];
 };
 
+type AgentWorkspaceError = {
+  message: string;
+  /** Null means the error belongs to the no-session workspace surface. */
+  sessionId: string | null;
+};
+
+type AgentWorkspaceErrorOptions = {
+  sessionId?: string | null;
+};
+
+type AgentWorkspaceNotice = {
+  message: string;
+  sessionId: string;
+};
+
 type AgentDeleteSessionDetail = {
   sessionId: string;
 };
@@ -695,14 +714,8 @@ export type AgentWorkspaceOrigin = {
 
 type AgentWorkspaceProps = {
   initialSession?: HermesSessionInfo;
-  pendingReply?: AgentReplyDetail;
   origin?: AgentWorkspaceOrigin;
 };
-
-// Module-scoped so a remount of AgentWorkspace (e.g. navigating away from the
-// agent view and back) does not re-submit an agent HUD reply that App still holds
-// in its pendingReply state.
-const handledHudReplyIds = new Set<string>();
 
 // Mid-run continuity across remounts. While June is working, a session has
 // state that exists nowhere outside this component: the optimistic list entry
@@ -786,7 +799,6 @@ export function resetAgentSessionContinuity() {
 
 export function AgentWorkspace({
   initialSession,
-  pendingReply,
   origin,
 }: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id;
@@ -809,16 +821,17 @@ export function AgentWorkspace({
   const [importingFiles, setImportingFiles] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [errorState, setErrorState] = useState<AgentWorkspaceError | null>(
+    null,
+  );
   // A rejected send into a still-running session, explained by the composer.
-  // Separate from `error` because background session refreshes clear that
+  // Separate from `errorState` because background session refreshes clear that
   // banner on success — this notice must survive until the turn finishes.
   const [busyNotice, setBusyNotice] = useState<string | null>(null);
   // Confirmation that a submitted issue report reached the June team; shown
   // in the composer notice slot until dismissed by the next send.
-  const [issueReportNotice, setIssueReportNotice] = useState<string | null>(
-    null,
-  );
+  const [issueReportNotice, setIssueReportNotice] =
+    useState<AgentWorkspaceNotice | null>(null);
   const [policyBlockSubmitting, setPolicyBlockSubmitting] = useState<
     Record<string, PolicyBlockDecisionAction>
   >({});
@@ -838,8 +851,8 @@ export function AgentWorkspace({
     Record<string, PolicyBlockDecision[]>
   >(() => continuity?.policyBlockDecisions ?? {});
   const policyBlockDecisionsRef = useRef(policyBlockDecisions);
-  // Per-session ISO timestamps of OS Guard re-enable clicks; each renders a
-  // divider in the timeline at its point in time.
+  // Per-session OS Guard re-enable markers; each renders a divider in the
+  // timeline anchored by user-turn ordinal.
   const [osGuardReenabledAt, setOsGuardReenabledAt] = useState<
     Record<string, OsGuardReenable[]>
   >(() => continuity?.osGuardReenabledAt ?? {});
@@ -900,6 +913,22 @@ export function AgentWorkspace({
   const lastAutoSubmittedRef = useRef<{ prompt: string; at: number }>();
   const [newSessionMode, setNewSessionMode] = useState(
     () => !initialSessionId && hasPendingNewSessionRequest(),
+  );
+  const setError = useCallback(
+    (message: string | null, options: AgentWorkspaceErrorOptions = {}) => {
+      if (!message) {
+        setErrorState(null);
+        return;
+      }
+      setErrorState({
+        message,
+        sessionId:
+          options.sessionId === undefined
+            ? (selectedHermesSessionIdRef.current ?? null)
+            : options.sessionId,
+      });
+    },
+    [],
   );
   const [heroGreeting, setHeroGreeting] = useState(advanceHeroGreeting);
   const heroGreetingConsumedRef = useRef(false);
@@ -1450,6 +1479,14 @@ export function AgentWorkspace({
   const heroMode =
     !gallerySections &&
     (newSessionMode || (!selectedHermesSessionId && !selectedTask));
+  const visibleError = visibleAgentWorkspaceError(
+    errorState,
+    selectedHermesSessionId,
+  );
+  const visibleIssueReportNotice =
+    issueReportNotice && issueReportNotice.sessionId === selectedHermesSessionId
+      ? issueReportNotice.message
+      : null;
   // Holds the prior render's heroMode. Read by both the composer auto-grow
   // effect (to skip its glide across a hero transition) and the hero→dock FLIP
   // below (to detect the hero handoff); the FLIP effect, which runs last, is
@@ -1837,13 +1874,6 @@ export function AgentWorkspace({
   }, [selectedHermesSessionId]);
 
   useEffect(() => {
-    if (!pendingReply?.text.trim()) return;
-    if (handledHudReplyIds.has(pendingReply.requestId)) return;
-    handledHudReplyIds.add(pendingReply.requestId);
-    void submitHudReply(pendingReply);
-  }, [pendingReply]);
-
-  useEffect(() => {
     // The sidebar and App replace their session lists wholesale with this
     // payload, so an unhydrated broadcast (mount seed only) would collapse
     // the list they already fetched themselves and flicker it back once the
@@ -1976,7 +2006,11 @@ export function AgentWorkspace({
         }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(messageFromError(err));
+        if (!cancelled) {
+          setError(messageFromError(err), {
+            sessionId: selectedHermesSessionId,
+          });
+        }
       });
     return () => {
       cancelled = true;
@@ -2212,55 +2246,6 @@ export function AgentWorkspace({
     }
   }
 
-  async function submitHudReply(reply: AgentReplyDetail) {
-    const message = reply.text.trim();
-    if (!message) return;
-    if (submitting || importingFiles) {
-      // Another submission is in flight; keep the reply in the composer
-      // instead of dropping it silently.
-      composerEditorRef.current?.setContent(message);
-      return;
-    }
-    const targetSession = reply.session;
-    setActivePanel("chat");
-    setSelectedTaskId(undefined);
-    composerEditorRef.current?.clear();
-    setAttachments([]);
-    if (targetSession?.id) {
-      newSessionModeRef.current = false;
-      setNewSessionMode(false);
-      selectedHermesSessionIdRef.current = targetSession.id;
-      setSelectedHermesSessionId(targetSession.id);
-      setHermesSessionItems((current) =>
-        current.some((session) => session.id === targetSession.id)
-          ? current
-          : [targetSession, ...current],
-      );
-    }
-    setSubmitting(true);
-    try {
-      await submitHermesSession(message, targetSession);
-      setError(null);
-      setBusyNotice(null);
-    } catch (err) {
-      // Same merge-restore as submit(): don't clobber a draft the user
-      // started typing while the reply was in flight.
-      if (composerEditorRef.current?.isEmpty() ?? true) {
-        composerEditorRef.current?.setContent(message);
-      }
-      if (isSessionBusyError(err)) {
-        // Same as submit(): a 4009 proves the gateway is healthy, so a stale
-        // connection banner must not outlive it.
-        setError(null);
-        setBusyNotice(SESSION_BUSY_NOTICE);
-      } else {
-        setError(messageFromError(err));
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   function handleComposerDragOver(event: DragEvent<HTMLFormElement>) {
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
@@ -2406,11 +2391,17 @@ export function AgentWorkspace({
         attachmentPaths: report.attachmentPaths,
         sessionId,
       });
-      setIssueReportNotice(
-        "Your report was sent to the June team. Thank you for helping improve June.",
-      );
+      if (selectedHermesSessionIdRef.current === sessionId) {
+        setIssueReportNotice({
+          message:
+            "Your report was sent to the June team. Thank you for helping improve June.",
+          sessionId,
+        });
+      }
     } catch (err) {
-      setError(`The issue report could not be sent. ${messageFromError(err)}`);
+      setError(`The issue report could not be sent. ${messageFromError(err)}`, {
+        sessionId,
+      });
     }
   }
 
@@ -2916,7 +2907,7 @@ export function AgentWorkspace({
       }
       await loadHermesSessions();
     } catch (err) {
-      setError(messageFromError(err));
+      setError(messageFromError(err), { sessionId });
     }
   }
 
@@ -2966,7 +2957,7 @@ export function AgentWorkspace({
         setLiveEvents(liveEventsRef.current);
         void loadHermesSessions();
       }
-      setError(message);
+      setError(message, { sessionId });
     } finally {
       setApprovalSubmitting((current) => {
         const next = { ...current };
@@ -3269,7 +3260,11 @@ export function AgentWorkspace({
     setCapabilityLoading(true);
     try {
       await ensureHermesGateway();
-      const response = await hermesBridgeMessagingPlatforms();
+      const response = await withTimeout(
+        hermesBridgeMessagingPlatforms(),
+        MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
+        MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
+      );
       setMessagingPlatforms(response.platforms);
       setSelectedMessagingPlatformId((current) => {
         if (current && response.platforms.some((item) => item.id === current)) {
@@ -3279,6 +3274,7 @@ export function AgentWorkspace({
       });
       setError(null);
     } catch (err) {
+      setMessagingPlatforms((current) => current ?? []);
       setError(messageFromError(err));
     } finally {
       setCapabilityLoading(false);
@@ -3286,6 +3282,7 @@ export function AgentWorkspace({
   }
 
   async function loadFilesystemSnapshot() {
+    const sessionId = selectedHermesSessionIdRef.current ?? null;
     setFilesystemLoading(true);
     try {
       await ensureHermesGateway();
@@ -3294,7 +3291,7 @@ export function AgentWorkspace({
       // changes, so a success would wipe an unrelated banner (e.g. a failed
       // send). The banner is dismissable instead.
     } catch (err) {
-      setError(messageFromError(err));
+      setError(messageFromError(err), { sessionId });
     } finally {
       setFilesystemLoading(false);
     }
@@ -3350,7 +3347,7 @@ export function AgentWorkspace({
       // Clearing the selection falls the workspace back to empty.
       removeHermesSessionLocally(sessionId, false);
     } catch (err) {
-      setError(messageFromError(err));
+      setError(messageFromError(err), { sessionId });
     }
   }
 
@@ -3821,7 +3818,7 @@ export function AgentWorkspace({
               <DotSpinner />
               {busyNotice ?? SESSION_BUSY_NOTICE}
             </motion.p>
-          ) : issueReportNotice ? (
+          ) : visibleIssueReportNotice ? (
             <motion.p
               key="issue-report-notice"
               className="agent-composer-notice"
@@ -3831,7 +3828,7 @@ export function AgentWorkspace({
               exit={{ opacity: 0 }}
               transition={{ duration: 0.22, ease: "easeOut" }}
             >
-              {issueReportNotice}
+              {visibleIssueReportNotice}
             </motion.p>
           ) : null}
         </AnimatePresence>
@@ -3874,7 +3871,7 @@ export function AgentWorkspace({
               importingFiles
                 ? "Attaching file…"
                 : heroMode
-                  ? "Describe a task for June…"
+                  ? "Ask June anything, run / commands"
                   : "Send a message"
             }
             onChange={(text, nextCategory) => {
@@ -4330,11 +4327,11 @@ export function AgentWorkspace({
           data-hero="true"
           data-hero-leaving={heroLeaving ? "true" : undefined}
         >
-          {error ? (
+          {visibleError ? (
             <AgentErrorBanner
-              message={error}
+              message={visibleError}
               onRetry={
-                GATEWAY_CONNECTION_ERROR.test(error)
+                GATEWAY_CONNECTION_ERROR.test(visibleError)
                   ? () => void retryGatewayConnection()
                   : undefined
               }
@@ -4395,11 +4392,11 @@ export function AgentWorkspace({
                   onRetry={galleryNoop}
                   onDismiss={galleryNoop}
                 />
-              ) : error ? (
+              ) : visibleError ? (
                 <AgentErrorBanner
-                  message={error}
+                  message={visibleError}
                   onRetry={
-                    GATEWAY_CONNECTION_ERROR.test(error)
+                    GATEWAY_CONNECTION_ERROR.test(visibleError)
                       ? () => void retryGatewayConnection()
                       : undefined
                   }
@@ -5047,7 +5044,7 @@ function PrivacyModeBadge({ badge }: { badge?: ModelPrivacyBadge }) {
 // honest unit to label.
 function UnrestrictedBadge() {
   const description =
-    "This session runs without the file sandbox — June can change any file your account can. Sandboxed sessions keep their jail and run alongside on a separate, jailed runtime.";
+    "This session runs without the file sandbox: June can change any file your account can. Sandboxed sessions keep their jail and run alongside on a separate, jailed runtime.";
   return (
     <HoverTip
       tip={description}
@@ -5267,24 +5264,6 @@ async function agentSessionTitleForPrompt(prompt: string) {
   } catch {
     return titleFromPrompt(prompt);
   }
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number) {
-  return new Promise<T>((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      reject(new Error("Agent title generation timed out."));
-    }, timeoutMs);
-    promise.then(
-      (value) => {
-        window.clearTimeout(timeout);
-        resolve(value);
-      },
-      (error: unknown) => {
-        window.clearTimeout(timeout);
-        reject(error);
-      },
-    );
-  });
 }
 
 function isReplaceableAgentSessionTitle(title: unknown) {
@@ -5551,6 +5530,7 @@ function SkillEditorPanel({
   onSave: () => void;
 }) {
   const title = skill?.name ?? document?.name ?? "Skill";
+  const readOnly = Boolean(document?.readOnly);
   return (
     <section
       className="agent-management-panel agent-skill-editor-panel"
@@ -5576,6 +5556,7 @@ function SkillEditorPanel({
               {document?.relativePath ? (
                 <span>{document.relativePath}</span>
               ) : null}
+              {readOnly ? <span>Read-only</span> : null}
               {skill ? (
                 <span>{skill.enabled ? "Enabled" : "Disabled"}</span>
               ) : null}
@@ -5593,27 +5574,36 @@ function SkillEditorPanel({
             value={value}
             aria-label={`${title} skill Markdown`}
             disabled={saving}
+            readOnly={readOnly}
             spellCheck={false}
             onChange={(event) => onChange(event.currentTarget.value)}
           />
         )}
       </div>
       <footer className="agent-messaging-footer">
-        <button
-          type="button"
-          disabled={!dirty || saving || loading}
-          onClick={onCancel}
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          className="primary-action primary-solid"
-          disabled={!dirty || saving || loading || !document}
-          onClick={onSave}
-        >
-          {saving ? "Saving..." : "Save changes"}
-        </button>
+        {readOnly ? (
+          <p className="agent-skill-editor-readonly-note">
+            Read-only. This skill loads from ~/.agents/skills. Edit it on disk.
+          </p>
+        ) : (
+          <>
+            <button
+              type="button"
+              disabled={!dirty || saving || loading}
+              onClick={onCancel}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-action primary-solid"
+              disabled={!dirty || saving || loading || !document}
+              onClick={onSave}
+            >
+              {saving ? "Saving..." : "Save changes"}
+            </button>
+          </>
+        )}
       </footer>
     </section>
   );
@@ -6560,6 +6550,15 @@ function AgentErrorBanner({
       </div>
     </div>
   );
+}
+
+function visibleAgentWorkspaceError(
+  error: AgentWorkspaceError | null,
+  selectedSessionId: string | undefined,
+) {
+  if (!error) return null;
+  if (!error.sessionId) return selectedSessionId ? null : error.message;
+  return error.sessionId === selectedSessionId ? error.message : null;
 }
 
 // The raw billing failure ("Error: Error code: 402 - …") never reaches the

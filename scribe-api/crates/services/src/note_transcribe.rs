@@ -4,7 +4,7 @@ use crate::{
     },
     error::ServiceError,
     pricing::PricingTable,
-    util::ceil_seconds,
+    util::{ceil_seconds, sha256_hex},
 };
 use scribe_domain::{
     ActionSlug, AudioDurationProbe, AudioFormat, Credits, ModelId, OsAccountsClient, Receipt,
@@ -102,8 +102,8 @@ impl NoteTranscribeService {
             params,
             format,
             seconds,
+            actual,
             estimate,
-            ..
         } = prepared;
         if seconds > self.preview_max_audio_seconds {
             return Err(ServiceError::InvalidInput {
@@ -128,10 +128,7 @@ impl NoteTranscribeService {
             estimate_credits = estimate.0,
             "note_transcribe: preview request authorized"
         );
-        let idempotency_key = format!(
-            "note_transcribe_preview:{}:{}",
-            params.user_id.0, params.note_id
-        );
+        let audio_digest = sha256_hex(&params.audio);
         let transcript_result = self
             .transcriber
             .transcribe(TranscriptionRequest {
@@ -141,20 +138,25 @@ impl NoteTranscribeService {
                 language: params.language,
                 model: params.model_id.clone(),
             })
-            .await
-            .map_err(ServiceError::from);
+            .await;
+        let charge_credits = clamp_to_cap(actual, authorization.cap_credits);
+        let idempotency_key = format!(
+            "note_transcribe_preview:{}:{}:{}",
+            params.user_id.0, params.note_id, audio_digest
+        );
         let receipt = charge(ChargeParams {
             os_accounts: self.os_accounts.as_ref(),
             action_token: authorization.action_token,
-            credits: Credits(0),
+            credits: charge_credits,
             idempotency_key,
         })
         .await?;
-        let transcript = transcript_result?;
         tracing::info!(
             note_id = %params.note_id,
-            "note_transcribe: preview hold settled with zero credits"
+            credits_charged = receipt.credits_charged.0,
+            "note_transcribe: preview hold settled"
         );
+        let transcript = transcript_result?;
         Ok(NoteTranscribeOutput {
             transcript,
             receipt,

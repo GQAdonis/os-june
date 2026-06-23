@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -11,6 +12,7 @@ import { AppSettings } from "../components/settings/AppSettings";
 import type { DictationSettingsDto } from "../lib/tauri";
 import { APP_COMMIT_HASH, APP_VERSION } from "../app/build-info";
 import { AGENT_HUD_ENABLED_KEY } from "../lib/agent-hud-settings";
+import { MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS } from "../lib/hermes-messaging";
 import { PROVIDER_MODEL_SETTINGS_CHANGED_EVENT } from "../lib/model-privacy";
 
 const mocks = vi.hoisted(() => ({
@@ -27,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   osAccountsLogin: vi.fn(),
   osAccountsCancelLogin: vi.fn(),
   osAccountsLogout: vi.fn(),
+  osAccountsOpenPortal: vi.fn(),
   osAccountsTopUp: vi.fn(),
   hermesBridgeSkills: vi.fn(),
   hermesBridgeToolsets: vi.fn(),
@@ -62,6 +65,7 @@ vi.mock("../lib/tauri", () => ({
   osAccountsLogin: mocks.osAccountsLogin,
   osAccountsCancelLogin: mocks.osAccountsCancelLogin,
   osAccountsLogout: mocks.osAccountsLogout,
+  osAccountsOpenPortal: mocks.osAccountsOpenPortal,
   osAccountsTopUp: mocks.osAccountsTopUp,
   hermesBridgeSkills: mocks.hermesBridgeSkills,
   hermesBridgeToolsets: mocks.hermesBridgeToolsets,
@@ -123,9 +127,9 @@ const signedInAccount = {
   configured: true,
   user: {
     id: "usr_123",
-    handle: "junho",
-    email: "junho@example.com",
-    displayName: "Junho",
+    handle: "alex",
+    email: "alex@example.com",
+    displayName: "Alex",
   },
   balance: { usdMillis: 1200 },
 };
@@ -316,6 +320,11 @@ describe("AppSettings", () => {
     }));
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.openPrivacySettings.mockResolvedValue(undefined);
+    mocks.osAccountsLogin.mockResolvedValue(signedInAccount);
+    mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
+    mocks.osAccountsLogout.mockResolvedValue(undefined);
+    mocks.osAccountsOpenPortal.mockResolvedValue(undefined);
+    mocks.osAccountsTopUp.mockResolvedValue(undefined);
     mocks.agentHudShow.mockResolvedValue(undefined);
     mocks.agentHudHide.mockResolvedValue(undefined);
     mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
@@ -340,12 +349,12 @@ describe("AppSettings", () => {
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/junho/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
               name: "sample.pdf",
-              path: "/Users/junho/Library/Application Support/co.opensoftware.scribe/hermes/workspace/sample.pdf",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/sample.pdf",
               kind: "file",
               size: 1700,
               modifiedAt: "2026-06-04T18:39:00Z",
@@ -355,12 +364,12 @@ describe("AppSettings", () => {
         {
           id: "memory",
           label: "Memory",
-          path: "/Users/junho/Library/Application Support/co.opensoftware.scribe/hermes/memory",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/memory",
           description: "Persistent Hermes memory files and stores.",
           entries: [
             {
               name: "USER.md",
-              path: "/Users/junho/Library/Application Support/co.opensoftware.scribe/hermes/memory/USER.md",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/memory/USER.md",
               kind: "file",
               size: 39,
               modifiedAt: "2026-06-04T18:47:00Z",
@@ -400,6 +409,107 @@ describe("AppSettings", () => {
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Add funds" }));
     expect(mocks.osAccountsTopUp).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs sign-in, cancel, and sign-out actions from account settings", async () => {
+    const user = userEvent.setup();
+    const onAccountChanged = vi.fn();
+    render(
+      <AppSettings
+        account={{ signedIn: false, configured: true }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={onAccountChanged}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Sign in with OpenSoftware" }),
+    );
+    await waitFor(() => expect(mocks.osAccountsLogin).toHaveBeenCalledOnce());
+    expect(onAccountChanged).toHaveBeenCalledWith(signedInAccount);
+    expect(await screen.findByText("Signed in as Alex.")).toBeInTheDocument();
+
+    mocks.osAccountsLogin.mockReset();
+    let rejectLogin: (error: Error) => void = () => undefined;
+    mocks.osAccountsLogin.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectLogin = reject;
+        }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Sign in with OpenSoftware" }),
+    );
+    expect(await screen.findByRole("button", { name: "Cancel" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(mocks.osAccountsCancelLogin).toHaveBeenCalledOnce();
+    rejectLogin(new Error("Login canceled"));
+    expect(
+      await screen.findByRole("button", { name: "Sign in with OpenSoftware" }),
+    ).toBeEnabled();
+
+    const signedOut = vi.fn();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={signedOut}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(mocks.osAccountsLogout).toHaveBeenCalledOnce();
+    expect(signedOut).toHaveBeenCalledWith({
+      signedIn: false,
+      configured: signedInAccount.configured,
+    });
+    expect(await screen.findByText("Signed out.")).toBeInTheDocument();
+  });
+
+  it("opens the account portal and refreshes billing from billing settings", async () => {
+    const user = userEvent.setup();
+    const onAccountRefresh = vi.fn().mockResolvedValue(signedInAccount);
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          subscription: {
+            subscribed: true,
+            status: "active",
+            currentPeriodEnd: "2027-02-03T00:00:00Z",
+          },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={onAccountRefresh}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+    await user.click(
+      screen.getByRole("button", { name: "Manage subscription" }),
+    );
+    expect(mocks.osAccountsOpenPortal).toHaveBeenCalledOnce();
+    expect(
+      await screen.findByText("Opened your account portal in the browser."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Refresh balance" }));
+    await waitFor(() => expect(onAccountRefresh).toHaveBeenCalledOnce());
   });
 
   it("hides billing and sign-out controls in local mode", () => {
@@ -1471,6 +1581,32 @@ describe("AppSettings", () => {
     expect(screen.getByText(APP_COMMIT_HASH)).toBeInTheDocument();
   });
 
+  it("checks for updates from About", async () => {
+    const onCheckForUpdates = vi.fn();
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        onCheckForUpdates={onCheckForUpdates}
+      />,
+    );
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("tab", { name: "About" }));
+    expect(await screen.findByText("Updates")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Check for updates" }));
+
+    expect(onCheckForUpdates).toHaveBeenCalledOnce();
+  });
+
   it("opens the server attestation page from About through Rust", async () => {
     // Not an anchor: the webview drops target="_blank" navigations, so the
     // button must invoke the scribe_open_verify_page command instead.
@@ -1560,6 +1696,43 @@ describe("AppSettings", () => {
     expect(screen.getByText("sample.pdf")).toBeInTheDocument();
     expect(screen.getByText("USER.md")).toBeInTheDocument();
     expect(screen.queryByText("Logs")).toBeNull();
+  });
+
+  it("shows a refreshable messaging state when platform loading hangs", async () => {
+    vi.useFakeTimers();
+    try {
+      mocks.hermesBridgeMessagingPlatforms.mockReturnValue(
+        new Promise(() => {}),
+      );
+      render(
+        <AppSettings
+          account={signedInAccount}
+          accountLoading={false}
+          sourceMode="microphoneOnly"
+          checkingSourceReadiness={false}
+          onAccountChanged={vi.fn()}
+          onAccountRefresh={vi.fn()}
+          onSourceModeChange={vi.fn()}
+          onEnableSystemAudio={vi.fn()}
+        />,
+      );
+
+      fireEvent.click(screen.getByRole("tab", { name: "Agent" }));
+      fireEvent.click(screen.getByRole("button", { name: "Messaging" }));
+
+      await act(async () => {
+        vi.advanceTimersByTime(MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS);
+        await Promise.resolve();
+      });
+
+      expect(screen.queryByRole("status", { name: "Loading" })).toBeNull();
+      expect(screen.getByText("No matching platforms")).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Refresh" }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("toggles the agent HUD from Agent settings", async () => {

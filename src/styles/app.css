@@ -113,8 +113,12 @@ input:focus-visible,
   transition: none;
 }
 
+/* The columns track --sidebar-w-current directly (collapsed sets it to 0, so
+ * no hard-coded 0 override is needed). Animating that registered length is what
+ * tweens the grid; everything else that rides the width animates off the same
+ * value, so the snap stays in lockstep. */
 .app-shell[data-sidebar-transition="smooth"] {
-  transition: grid-template-columns var(--t-med) var(--ease-out);
+  transition: --sidebar-w-current var(--t-med) var(--ease-out);
 }
 
 .app-shell[data-sidebar-resizing="true"] {
@@ -124,28 +128,6 @@ input:focus-visible,
 .app-shell[data-sidebar-resizing="true"],
 .app-shell[data-sidebar-resizing="true"] * {
   cursor: col-resize !important;
-}
-
-.app-shell[data-sidebar="collapsed"] {
-  grid-template-columns: 0 minmax(0, 1fr);
-}
-
-.app-shell[data-sidebar-preview="expanded"] {
-  grid-template-columns: var(--sidebar-w-current, var(--sidebar-w)) minmax(
-      0,
-      1fr
-    );
-}
-
-.app-shell[data-sidebar-preview="opening"] {
-  grid-template-columns: var(--sidebar-w-current, var(--sidebar-w)) minmax(
-      0,
-      1fr
-    );
-}
-
-.app-shell[data-sidebar-preview="collapsed"] {
-  grid-template-columns: 0 minmax(0, 1fr);
 }
 
 /* Sidebar ------------------------------------------------------------ */
@@ -187,12 +169,11 @@ input:focus-visible,
   position: fixed;
   top: var(--card-top);
   bottom: 0;
-  /* Track the white card's left edge — sidebar width plus its collapsed gutter
-   * — not the raw sidebar width, so the drag bar rides the card (and stays on
-   * white for contrast) as it collapses instead of sliding onto the gray. */
-  left: calc(
-    var(--sidebar-w-current, var(--sidebar-w)) + var(--main-gutter, 0px) - 5px
-  );
+  /* Track the white card's left edge — sidebar width, floored at the collapsed
+   * gutter — not the raw sidebar width, so the drag bar rides the card (and
+   * stays on white for contrast) as it collapses instead of sliding onto the
+   * gray. max(width, gutter) is exactly the card's left edge. */
+  left: calc(max(var(--sidebar-w-current), var(--sp-3)) - 5px);
   z-index: 70;
   width: 12px;
   cursor: col-resize;
@@ -1314,6 +1295,12 @@ input:focus-visible,
 
 .agent-messaging-enable {
   margin-right: auto;
+}
+
+.agent-skill-editor-readonly-note {
+  margin: 0 auto 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
 }
 
 /* Action cards (approval, clarify) — a clean system card: card surface, subtle
@@ -2766,7 +2753,10 @@ input:focus-visible,
  * Centred to the same reading column as the turns. */
 .agent-composer {
   position: fixed;
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
+  /* Rides the card's left edge (max(width, gutter)) plus the reading inset, off
+   * the same animated --sidebar-w-current as the grid so it never drifts during
+   * the snap. */
+  left: calc(max(var(--sidebar-w-current), var(--sp-3)) + var(--sp-8));
   right: calc(var(--sp-3) + var(--sp-8));
   bottom: calc(var(--sp-3) + var(--sp-5));
   z-index: 5;
@@ -2855,29 +2845,9 @@ input:focus-visible,
   padding: 0 var(--sp-2);
 }
 
-.app-shell[data-sidebar="collapsed"] .agent-composer:not([data-hero="true"]) {
-  left: calc(var(--sp-3) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-preview="expanded"]
-  .agent-composer:not([data-hero="true"]) {
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-preview="collapsed"]
-  .agent-composer:not([data-hero="true"]) {
-  left: calc(var(--sp-3) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-preview="opening"]
-  .agent-composer:not([data-hero="true"]) {
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-transition="smooth"]
-  .agent-composer:not([data-hero="true"]) {
-  transition: left var(--t-med) var(--ease-out);
-}
+/* No per-state / collapsed overrides or left transition needed: the single
+ * max(--sidebar-w-current, --sp-3) rule above already tracks the card edge in
+ * every state, and animating that one variable tweens it in lockstep. */
 
 .agent-composer[data-drop-active="true"] {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
@@ -5299,25 +5269,6 @@ input:focus-visible,
   transition: padding-right var(--t-slow) var(--ease-spring);
 }
 
-/* Collapsed: no sidebar to provide the left gutter, so the column supplies its
- * own — matching the right/bottom inset so the card floats evenly on all sides
- * instead of hugging the window edge. */
-.app-shell[data-sidebar="collapsed"] .main-column {
-  padding-left: var(--sp-3);
-}
-
-.app-shell[data-sidebar-preview="expanded"] .main-column {
-  padding-left: 0;
-}
-
-.app-shell[data-sidebar-preview="collapsed"] .main-column {
-  padding-left: var(--sp-3);
-}
-
-.app-shell[data-sidebar-preview="opening"] .main-column {
-  padding-left: 0;
-}
-
 .main-panel {
   position: relative;
   display: flex;
@@ -5325,7 +5276,13 @@ input:focus-visible,
   min-width: 0;
   min-height: 0;
   flex-direction: column;
-  margin: 0 0 var(--sp-3) 0;
+  /* Left gutter: 0 while the sidebar supplies one, growing to --sp-3 as the
+   * sidebar closes (so the card floats evenly on all sides instead of hugging
+   * the window edge). Derived from --sidebar-w-current so it tweens on the same
+   * clock as the grid — and lives on the card, not the whole .main-column, so
+   * the tab strip above isn't pushed by it. */
+  margin: 0 0 var(--sp-3)
+    max(0px, calc(var(--sp-3) - var(--sidebar-w-current)));
   border-radius: var(--r-window);
   background: var(--card);
   color: var(--card-foreground);
@@ -5348,16 +5305,20 @@ input:focus-visible,
   gap: var(--sp-2);
   min-width: 0;
   -webkit-app-region: drag;
-}
-
-/* Collapsed (or previewing collapsed): no sidebar to cover the window controls,
- * so the strip starts past the traffic lights + sidebar trigger. The column's
- * own collapse gutter (--sp-3) is already applied, so subtract it here. */
-.app-shell[data-sidebar="collapsed"] .tab-bar,
-.app-shell[data-sidebar-preview="collapsed"] .tab-bar {
-  padding-left: calc(
-    var(--titlebar-controls-end) + var(--titlebar-controls-gap) +
-      var(--control-md) + var(--sp-2) - var(--sp-3)
+  /* The strip starts at the sidebar's right edge when open, but must clear the
+   * traffic lights + sidebar trigger once the sidebar is gone. Both cases are
+   * one expression: pad by however much the clearance exceeds the live sidebar
+   * width. Because it reads --sidebar-w-current (the same animated value that
+   * drives the grid), the strip and the card move off ONE clock and can't drift
+   * out of sync mid-snap — which is what caused the flash. max() floors it at 0
+   * so a wide-open sidebar adds no padding. */
+  padding-left: max(
+    0px,
+    calc(
+      var(--titlebar-controls-end) + var(--titlebar-controls-gap) +
+        var(--control-md) + var(--titlebar-tabs-clearance) -
+        var(--sidebar-w-current)
+    )
   );
 }
 
@@ -6716,7 +6677,9 @@ input:focus-visible,
 
 .editor-footer {
   position: fixed;
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
+  /* Rides the card's left edge (max(width, gutter)) + reading inset, off the
+   * same animated --sidebar-w-current as the grid so it stays in lockstep. */
+  left: calc(max(var(--sidebar-w-current), var(--sp-3)) + var(--sp-8));
   right: calc(var(--sp-3) + var(--sp-8));
   /* Card sits --sp-3 off the window bottom; the body adds --sp-5 padding and
    * the old sticky recorder added another --sp-5 on top of that. Sum all three
@@ -6733,30 +6696,9 @@ input:focus-visible,
   pointer-events: none;
 }
 
-.app-shell[data-sidebar="collapsed"] .editor-footer {
-  left: calc(var(--sp-3) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-preview="expanded"] .editor-footer {
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-preview="collapsed"] .editor-footer {
-  left: calc(var(--sp-3) + var(--sp-8));
-}
-
-.app-shell[data-sidebar-preview="opening"] .editor-footer {
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
-}
-
-/* The fixed recorder's `left` rides the card's left edge. During a smooth
- * collapse/expand the sidebar grid tweens over --t-med, so match it here —
- * otherwise the pill snaps to its collapsed offset at frame 0 while the
- * sidebar is still in motion. While resizing (transition: none) the left
- * tracks --sidebar-w-current live, so no transition there. */
-.app-shell[data-sidebar-transition="smooth"] .editor-footer {
-  transition: left var(--t-med) var(--ease-out);
-}
+/* No per-state / collapsed overrides or left transition needed: the single
+ * max(--sidebar-w-current, --sp-3) rule above tracks the card edge in every
+ * state, and animating that one variable tweens it in lockstep with the grid. */
 
 .editor-footer > * {
   pointer-events: auto;
@@ -7845,7 +7787,11 @@ input:focus-visible,
 .settings-agent-card {
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
-  min-height: 640px;
+  min-height: clamp(
+    var(--settings-agent-card-min-h),
+    calc(100dvh - var(--settings-agent-card-viewport-offset)),
+    var(--settings-agent-card-max-h)
+  );
   padding: 0;
   overflow: hidden;
 }
@@ -7855,7 +7801,22 @@ input:focus-visible,
 }
 
 .settings-agent-card .agent-management-panel {
+  grid-row: 3;
+  height: 100%;
   min-height: 0;
+}
+
+.settings-agent-card .agent-skill-editor-panel,
+.settings-agent-card .agent-skill-editor {
+  height: 100%;
+}
+
+.settings-agent-card .agent-skill-editor-textarea {
+  min-height: clamp(
+    var(--settings-skill-editor-min-h),
+    var(--settings-skill-editor-ideal-h),
+    var(--settings-skill-editor-max-h)
+  );
 }
 
 .settings-agent-card .agent-messaging-layout {
@@ -9408,7 +9369,8 @@ input:focus-visible,
  * session pages. */
 .routines-describe {
   position: fixed;
-  left: calc(var(--sidebar-w-current, var(--sidebar-w)) + var(--sp-8));
+  /* Same card-edge tracking as .editor-footer / .agent-composer. */
+  left: calc(max(var(--sidebar-w-current), var(--sp-3)) + var(--sp-8));
   right: calc(var(--sp-3) + var(--sp-8));
   bottom: calc(var(--sp-3) + var(--sp-5) * 2);
   z-index: 5;
@@ -12318,6 +12280,13 @@ input:focus-visible,
   margin: calc(-1 * var(--sp-1));
 }
 
+.recording-inactivity-copy {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
 .dialog-field {
   display: flex;
   flex-direction: column;
@@ -12897,8 +12866,8 @@ input:focus-visible,
 
 /* The wizard's in-flight rows (sign-in handoff, trial checkout) keep the
    terracotta primary's exact footprint but fade it flat: a disabled-feeling
-   tint of the button it replaces, not a raised control. Only the spinner
-   keeps full terracotta — it's the live part. */
+   tint of the button it replaces, not a raised control. Flows that still have
+   active backend work can keep a terracotta spinner as the live part. */
 .welcome-auth-progress.onboarding-waiting {
   border-color: color-mix(in oklch, var(--brand) 16%, transparent);
   border-radius: var(--r-lg);
@@ -12984,6 +12953,43 @@ input:focus-visible,
   width: min(100%, 360px);
 }
 
+/* Welcome step lays its four what-is-June points out as a 2x2 grid rather
+ * than a tall single column, so the card needs a touch more width. Cells
+ * top-align (align-items: start in .onboarding-points li) so uneven body
+ * lengths sit cleanly rather than centering against each other. */
+.welcome-card-intro {
+  width: min(100%, 500px);
+}
+
+.welcome-card-intro .onboarding-points {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-6) var(--sp-6);
+}
+
+/* The 2x2 grid wants the full card width, but the sign-in button and footer
+ * shouldn't stretch with it — keep them in a centered, button-width column. */
+.welcome-card-intro .welcome-providers,
+.welcome-card-intro .welcome-status,
+.welcome-card-intro .welcome-terms {
+  width: 100%;
+  max-width: 320px;
+  margin-inline: auto;
+}
+
+/* The trial success step lays its privacy recap out as a 3-up row, so it
+ * needs more width than the 360px trial card — but, like the welcome step,
+ * the continue button stays in a centered, button-width column. */
+.trial-card-done {
+  width: min(100%, 540px);
+}
+
+.trial-card-done .welcome-providers {
+  width: 100%;
+  max-width: 320px;
+  margin-inline: auto;
+}
+
 .trial-timeline {
   display: flex;
   flex-direction: column;
@@ -13060,6 +13066,90 @@ input:focus-visible,
   font-size: var(--fs-sm);
   color: var(--muted-foreground);
   text-align: center;
+}
+
+/* Linear-style: three short, symmetric columns framed by faded-edge
+ * dividers. The privacy headline lives in the card subtitle instead of a
+ * third in-section heading, so the recap carries just two type styles
+ * (label + detail) rather than stacking heading/label/detail. Everything is
+ * centered, so it reads balanced under the hero. Static — no animation. */
+.trial-privacy-recap {
+  position: relative;
+  margin: var(--sp-1) 0;
+  padding: var(--sp-5) 0;
+  text-align: center;
+}
+
+/* Hairline dividers top and bottom, brightest in the middle and dissolving
+ * at both ends — frames the row without a hard boxed-in border. */
+.trial-privacy-recap::before,
+.trial-privacy-recap::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--border) 50%,
+    transparent
+  );
+}
+
+.trial-privacy-recap::before {
+  top: 0;
+}
+
+.trial-privacy-recap::after {
+  bottom: 0;
+}
+
+.trial-privacy-recap ul {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--sp-5);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.trial-privacy-recap li {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--sp-1);
+}
+
+/* Same 28px outlined chip as the welcome points and trial-timeline rows, so
+ * the icons read as one family across the flow. */
+.trial-privacy-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-bottom: var(--sp-1);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--card);
+  color: var(--warm-strong);
+}
+
+.trial-privacy-label {
+  display: block;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.trial-privacy-detail {
+  display: block;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  text-wrap: pretty;
 }
 
 .trial-gate-link {

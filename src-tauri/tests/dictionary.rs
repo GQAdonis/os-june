@@ -1,6 +1,7 @@
 use chrono::{Duration, SecondsFormat, Utc};
 use os_scribe_lib::db::{migrations::run_migrations, repositories::Repositories};
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::query::query;
+use sqlx_sqlite::SqlitePoolOptions;
 
 async fn repos() -> Repositories {
     let pool = SqlitePoolOptions::new()
@@ -18,7 +19,7 @@ async fn dictation_history_keeps_recent_items_and_prunes_old_items() {
     let old_created_at =
         (Utc::now() - Duration::days(8)).to_rfc3339_opts(SecondsFormat::Millis, true);
 
-    sqlx::query(
+    query(
         "INSERT INTO dictation_history (id, text, language, provider, created_at)
          VALUES ('old', 'Old dictation', NULL, 'openai', ?)",
     )
@@ -76,11 +77,11 @@ async fn deletes_a_dictation_history_item() {
 async fn creates_updates_and_soft_deletes_dictionary_entries() {
     let repos = repos().await;
     let created = repos
-        .create_dictionary_entry("  Junho Hong  ")
+        .create_dictionary_entry("  Jane Doe  ")
         .await
         .expect("create dictionary entry");
 
-    assert_eq!(created.phrase, "Junho Hong");
+    assert_eq!(created.phrase, "Jane Doe");
 
     let updated = repos
         .update_dictionary_entry(&created.id, "OpenAI")

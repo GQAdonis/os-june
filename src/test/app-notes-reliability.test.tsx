@@ -9,6 +9,7 @@ import type {
   NoteDto,
   RecoverableRecordingDto,
   RecordingSessionDto,
+  RecordingStatusDto,
 } from "../lib/tauri";
 
 type TauriListener = (event: { payload: unknown }) => unknown;
@@ -207,7 +208,7 @@ describe("notes recording reliability", () => {
     const account: AccountStatus = {
       signedIn: true,
       configured: true,
-      user: { id: "usr_123", handle: "junho", email: "junho@example.com" },
+      user: { id: "usr_123", handle: "alex", email: "alex@example.com" },
       balance: { usdMillis: 1200 },
       subscription: { subscribed: true, status: "active" },
     };
@@ -389,6 +390,47 @@ describe("notes recording reliability", () => {
     );
   });
 
+  it("does not overlap active recording status polls", async () => {
+    const pendingStatus = deferred<RecordingStatusDto>();
+    const resumedStatus = deferred<RecordingStatusDto>();
+    mocks.getRecordingStatus
+      .mockReturnValueOnce(pendingStatus.promise)
+      .mockReturnValue(resumedStatus.promise);
+
+    await startRecordingOnFirstNote();
+    await screen.findByRole("button", { name: "Done" });
+    await waitFor(() =>
+      expect(mocks.getRecordingStatus).toHaveBeenCalledTimes(1),
+    );
+
+    await new Promise((resolve) => window.setTimeout(resolve, 180));
+
+    expect(mocks.getRecordingStatus).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingStatus.resolve({
+        sessionId: "rec-1",
+        state: "recording",
+        elapsedMs: 500,
+        level: { peak: 0.2, rms: 0.1, recentPeaks: [0.2] },
+        silenceWarning: false,
+        bytesWritten: 2048,
+      });
+      await pendingStatus.promise;
+    });
+    await waitFor(() =>
+      expect(mocks.getRecordingStatus).toHaveBeenCalledTimes(2),
+    );
+    resumedStatus.resolve({
+      sessionId: "rec-1",
+      state: "recording",
+      elapsedMs: 550,
+      level: { peak: 0.2, rms: 0.1, recentPeaks: [0.2] },
+      silenceWarning: false,
+      bytesWritten: 2048,
+    });
+  });
+
   it("ignores meeting-start signals while a recording is already live", async () => {
     await startRecordingOnFirstNote();
 
@@ -547,6 +589,128 @@ describe("notes recording reliability", () => {
     expect(
       screen.queryByRole("button", { name: "Open recording: First note" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("keeps recovered transcription failures scoped to the failed note", async () => {
+    const failedNote = {
+      ...first,
+      processingStatus: "failed" as const,
+      lastError: "Microphone: upstream_provider_failed",
+      audioSources: [
+        {
+          id: "audio-1",
+          source: "microphone" as const,
+          format: "wav" as const,
+          durationMs: 1000,
+          sizeBytes: 2048,
+          checksum: "abc",
+          createdAt: now,
+        },
+      ],
+    };
+    let recoveryFailed = false;
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [first, second],
+      activeRecoveries: [recovery()],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) => {
+      if (noteId === "note-2") return second;
+      return recoveryFailed ? failedNote : first;
+    });
+    mocks.recoverRecording.mockImplementation(async () => {
+      recoveryFailed = true;
+      throw {
+        code: "transcription_failed",
+        message:
+          "Microphone: The transcription provider could not process this audio.",
+      };
+    });
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Meeting notes" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: /First note Preview/ }),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Recover" }));
+
+    await waitFor(() =>
+      expect(mocks.recoverRecording).toHaveBeenCalledWith("rec-1", "validate"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          /Microphone: The transcription provider could not process this audio\./,
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(container.querySelector(".note-failure-banner")).not.toBeNull();
+    expect(container.querySelector(".error-banner")).toBeNull();
+    expect(screen.queryByLabelText("Recoverable recording")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Dictation" }));
+    expect(container.querySelector(".note-failure-banner")).toBeNull();
+    expect(container.querySelector(".error-banner")).toBeNull();
+  });
+
+  it("clears the active recorder when a recovered transcription failure is scoped", async () => {
+    const failedNote = {
+      ...first,
+      processingStatus: "failed" as const,
+      lastError: "Microphone: upstream_provider_failed",
+      audioSources: [
+        {
+          id: "audio-1",
+          source: "microphone" as const,
+          format: "wav" as const,
+          durationMs: 1000,
+          sizeBytes: 2048,
+          checksum: "abc",
+          createdAt: now,
+        },
+      ],
+    };
+    let recoveryFailed = false;
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [first, second],
+      activeRecoveries: [recovery()],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) => {
+      if (noteId === "note-2") return second;
+      return recoveryFailed ? failedNote : first;
+    });
+    mocks.recoverRecording.mockImplementation(async () => {
+      recoveryFailed = true;
+      throw {
+        code: "transcription_failed",
+        message:
+          "Microphone: The transcription provider could not process this audio.",
+      };
+    });
+
+    await startRecordingOnFirstNote();
+    expect(await screen.findByRole("button", { name: "Done" })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole("button", { name: "Recover" }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          /Microphone: The transcription provider could not process this audio\./,
+        ),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("button", { name: "Done" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Open recording: First note" }),
+    ).toBeNull();
   });
 
   it("applies the finish result even when the note already sat in a terminal status", async () => {

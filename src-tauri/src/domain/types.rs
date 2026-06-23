@@ -19,8 +19,8 @@ impl AppError {
     }
 }
 
-impl From<sqlx::Error> for AppError {
-    fn from(value: sqlx::Error) -> Self {
+impl From<sqlx::error::Error> for AppError {
+    fn from(value: sqlx::error::Error) -> Self {
         Self::new("storage_unavailable", value.to_string())
     }
 }
@@ -351,6 +351,8 @@ pub struct RecordingSessionDto {
     pub device_label: Option<String>,
     pub level: AudioLevelDto,
     #[serde(default)]
+    pub live_preview_enabled: bool,
+    #[serde(default)]
     pub sources: Vec<SourceStatusDto>,
     #[serde(default)]
     pub warnings: Vec<SourceWarningDto>,
@@ -368,6 +370,8 @@ pub struct RecordingStatusDto {
     pub level: AudioLevelDto,
     pub silence_warning: bool,
     pub bytes_written: i64,
+    #[serde(default)]
+    pub live_preview_enabled: bool,
     #[serde(default)]
     pub sources: Vec<SourceStatusDto>,
     #[serde(default)]
@@ -881,6 +885,25 @@ pub enum RecordingState {
     Ready,
     Failed,
     Recoverable,
+}
+
+impl RecordingState {
+    pub fn as_db(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::PermissionDenied => "permission_denied",
+            Self::Starting => "starting",
+            Self::Recording => "recording",
+            Self::Paused => "paused",
+            Self::Finalizing => "finalizing",
+            Self::Validating => "validating",
+            Self::PartiallyValid => "partially_valid",
+            Self::Invalid => "invalid",
+            Self::Ready => "valid",
+            Self::Failed => "failed",
+            Self::Recoverable => "recoverable",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

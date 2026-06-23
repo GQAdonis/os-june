@@ -108,17 +108,27 @@ import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import {
   AGENT_GALLERY_EVENT,
   AGENT_OPEN_EVENT,
-  AGENT_REPLY_EVENT,
   AGENT_SESSION_STATUS_EVENT,
   dispatchAgentSessionStatus,
   type AgentGalleryDetail,
-  type AgentReplyDetail,
   type AgentSessionStatusDetail,
 } from "../lib/agent-events";
 import { notifyAgentSessionStatus } from "../lib/agent-notifications";
 import { messageFromError } from "../lib/errors";
 import { parseDictationHelperEvent } from "../lib/dictation-events";
 import { listHermesSessions, titleFromPrompt } from "../lib/hermes-adapter";
+import { upsertLiveTranscriptEvent } from "../lib/live-transcript-preview";
+import {
+  RECORDING_INACTIVITY_RESPONSE_MS,
+  RECORDING_INACTIVITY_SNOOZE_MS,
+  nextRecordingInactivityDecision,
+  recordingHasActivity,
+  type RecordingInactivityTracker,
+} from "../lib/recording-inactivity";
+import {
+  notifyRecordingAutoPaused,
+  notifyRecordingStillMeetingPrompt,
+} from "../lib/recording-notifications";
 import {
   AGENT_MENU_BAR_NEW_SESSION_EVENT,
   AGENT_MENU_BAR_OPEN_SESSION_EVENT,
@@ -198,6 +208,11 @@ function sidebarMaxWidth() {
 
 const TAB_ICON_SIZE = 14;
 
+type RecordingInactivityPrompt = {
+  sessionId: string;
+  expiresAt: number;
+};
+
 // The icon + label a tab shows for a snapshot. Titles for entity views (note,
 // project, agent session) are looked up live from the loaded data, so a tab's
 // label tracks renames without storing a stale copy.
@@ -269,28 +284,6 @@ function tabMeta(
   }
 }
 
-function upsertLiveTranscriptEvent(
-  current: LiveTranscriptEventDto[],
-  next: LiveTranscriptEventDto,
-) {
-  const events = current.filter(
-    (event) =>
-      !(
-        event.sessionId === next.sessionId &&
-        event.source === next.source &&
-        event.segmentId === next.segmentId
-      ),
-  );
-  events.push(next);
-  events.sort(
-    (left, right) =>
-      left.startMs - right.startMs ||
-      left.endMs - right.endMs ||
-      left.segmentId.localeCompare(right.segmentId),
-  );
-  return events.slice(-32);
-}
-
 export function App() {
   const replayOnboarding = shouldReplayOnboarding();
   const [state, dispatch] = useReducer(
@@ -330,8 +323,6 @@ export function App() {
   const restoreTargetRef = useRef<TabNav | null>(null);
   const [activeAgentSession, setActiveAgentSession] =
     useState<HermesSessionInfo>();
-  const [pendingAgentReply, setPendingAgentReply] =
-    useState<AgentReplyDetail>();
   // Reactive copy of the known agent sessions for the "view all" list and
   // project (folder) surfaces; the menu-bar refs below stay the source for
   // native menu state.
@@ -439,6 +430,12 @@ export function App() {
     string | undefined
   >(undefined);
   const recordingStatusRef = useRef(state.recordingStatus);
+  const recordingInactivityTrackerRef = useRef<RecordingInactivityTracker>({});
+  const [recordingInactivityPrompt, setRecordingInactivityPrompt] =
+    useState<RecordingInactivityPrompt | null>(null);
+  const [recordingInactivityNow, setRecordingInactivityNow] = useState(() =>
+    Date.now(),
+  );
   const recordingStartInFlightRef = useRef(false);
   const [liveTranscriptEvents, setLiveTranscriptEvents] = useState<
     LiveTranscriptEventDto[]
@@ -850,17 +847,35 @@ export function App() {
   );
 
   function handleRecovery(sessionId: string, action: "validate" | "discard") {
-    void recoverRecording(sessionId, action)
-      .then((note) => {
-        if (recordingStatusRef.current?.sessionId === sessionId) {
-          recordingStatusRef.current = undefined;
-          setRecordingNote(undefined);
-          dispatch({ type: "recordingStatusCleared" });
-        }
+    const recoveryNoteId = state.activeRecoveries.find(
+      (recovery) => recovery.sessionId === sessionId,
+    )?.noteId;
+    void (async () => {
+      try {
+        const note = await recoverRecording(sessionId, action);
+        clearActiveRecordingSession(sessionId);
         dispatch({ type: "noteProcessingUpdated", note });
         dispatch({ type: "recoveryRemoved", sessionId });
-      })
-      .catch((err: unknown) => setError(messageFromError(err)));
+      } catch (err) {
+        if (
+          action === "validate" &&
+          recoveryNoteId &&
+          (await applyNoteScopedProcessingFailure(recoveryNoteId, err))
+        ) {
+          clearActiveRecordingSession(sessionId);
+          dispatch({ type: "recoveryRemoved", sessionId });
+          return;
+        }
+        setError(messageFromError(err));
+      }
+    })();
+  }
+
+  function clearActiveRecordingSession(sessionId: string) {
+    if (recordingStatusRef.current?.sessionId !== sessionId) return;
+    recordingStatusRef.current = undefined;
+    setRecordingNote(undefined);
+    dispatch({ type: "recordingStatusCleared" });
   }
 
   const handleAccountChanged = useCallback(
@@ -1093,36 +1108,6 @@ export function App() {
       aborted = true;
       unlisten?.();
       window.removeEventListener(AGENT_OPEN_EVENT, handleOpenEvent);
-    };
-  }, []);
-
-  useEffect(() => {
-    function handleReply(detail?: AgentReplyDetail) {
-      if (!detail?.text.trim()) return;
-      setAgentOrigin(undefined);
-      setActiveAgentSession(detail.session);
-      setPendingAgentReply(detail);
-      setActiveView("agent");
-    }
-
-    function handleReplyEvent(event: Event) {
-      handleReply((event as CustomEvent<AgentReplyDetail>).detail);
-    }
-
-    let aborted = false;
-    let unlisten: (() => void) | undefined;
-    window.addEventListener(AGENT_REPLY_EVENT, handleReplyEvent);
-    void listen<AgentReplyDetail>(AGENT_REPLY_EVENT, (event) => {
-      handleReply(event.payload);
-    }).then((cleanup) => {
-      if (aborted) cleanup();
-      else unlisten = cleanup;
-    });
-
-    return () => {
-      aborted = true;
-      unlisten?.();
-      window.removeEventListener(AGENT_REPLY_EVENT, handleReplyEvent);
     };
   }, []);
 
@@ -1650,7 +1635,10 @@ export function App() {
     // each poll coalesces the peaks since the last one (see Waveform.tsx). Audio
     // is sampled every ~5–10ms in Rust, so there's always a fresh peak waiting;
     // 100ms left the bars a beat behind the voice.
+    let inFlight = false;
     const interval = window.setInterval(() => {
+      if (inFlight) return;
+      inFlight = true;
       getRecordingStatus(sessionId)
         .then((status) => {
           if (!cancelled) dispatch({ type: "recordingStatusChanged", status });
@@ -1665,6 +1653,9 @@ export function App() {
             return;
           }
           setError(messageFromError(err));
+        })
+        .finally(() => {
+          inFlight = false;
         });
     }, 50);
     return () => {
@@ -1717,7 +1708,6 @@ export function App() {
       return;
     }
     const noteId = selectedNote.id;
-    const startedAt = performance.now();
     // Drops in-flight responses once this effect is torn down (note switched,
     // status moved on, note deleted) so a late resolution can't apply a stale
     // snapshot — or surface a spurious "note not found" error after a delete.
@@ -1726,16 +1716,6 @@ export function App() {
       getNote(noteId)
         .then((note) => {
           if (cancelled) return;
-          if (
-            import.meta.env.DEV &&
-            !shouldPollProcessingStatus(note.processingStatus)
-          ) {
-            console.debug("[processing] polling complete", {
-              noteId,
-              status: note.processingStatus,
-              durationMs: Math.round(performance.now() - startedAt),
-            });
-          }
           dispatch({ type: "noteUpdated", note });
         })
         .catch((err: unknown) => {
@@ -2317,21 +2297,43 @@ export function App() {
       const result = await finishRecording(sessionId);
       dispatch({ type: "noteProcessingUpdated", note: result.note });
     } catch (err) {
-      setError(messageFromError(err));
+      if (
+        !owningNoteId ||
+        !(await applyNoteScopedProcessingFailure(owningNoteId, err))
+      ) {
+        setError(messageFromError(err));
+      }
     } finally {
       finishingSessionsRef.current.delete(sessionId);
     }
   }
 
-  async function handlePauseRecording(sessionId: string) {
+  async function applyNoteScopedProcessingFailure(
+    noteId: string,
+    err: unknown,
+  ) {
+    try {
+      const note = await getNote(noteId);
+      if (note.processingStatus !== "failed") return false;
+      dispatch({ type: "noteProcessingUpdated", note });
+      setError(null);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  const handlePauseRecording = useCallback(async (sessionId: string) => {
     try {
       const status = await pauseRecording(sessionId);
       dispatch({ type: "recordingStatusChanged", status });
       playRecordingSound("pause");
+      return true;
     } catch (err) {
       setError(messageFromError(err));
+      return false;
     }
-  }
+  }, []);
 
   async function handleResumeRecording(sessionId: string) {
     playRecordingSound("start");
@@ -2342,6 +2344,101 @@ export function App() {
       setError(messageFromError(err));
     }
   }
+
+  useEffect(() => {
+    const status = state.recordingStatus;
+    const now = Date.now();
+    const decision = nextRecordingInactivityDecision(
+      recordingInactivityTrackerRef.current,
+      status,
+      now,
+    );
+    recordingInactivityTrackerRef.current = decision.tracker;
+
+    if (
+      recordingInactivityPrompt &&
+      (!status ||
+        status.sessionId !== recordingInactivityPrompt.sessionId ||
+        status.state !== "recording" ||
+        recordingHasActivity(status))
+    ) {
+      setRecordingInactivityPrompt(null);
+      return;
+    }
+
+    if (
+      !status ||
+      !decision.shouldPrompt ||
+      recordingInactivityPrompt?.sessionId === status.sessionId
+    ) {
+      return;
+    }
+
+    const prompt = {
+      sessionId: status.sessionId,
+      expiresAt: now + RECORDING_INACTIVITY_RESPONSE_MS,
+    };
+    setRecordingInactivityNow(now);
+    setRecordingInactivityPrompt(prompt);
+    void notifyRecordingStillMeetingPrompt(status.sessionId);
+  }, [recordingInactivityPrompt, state.recordingStatus]);
+
+  useEffect(() => {
+    if (!recordingInactivityPrompt) return;
+
+    setRecordingInactivityNow(Date.now());
+    const tick = window.setInterval(() => {
+      setRecordingInactivityNow(Date.now());
+    }, 1000);
+    const timeout = window.setTimeout(() => {
+      const currentStatus = recordingStatusRef.current;
+      const sessionId = recordingInactivityPrompt.sessionId;
+      recordingInactivityTrackerRef.current = { sessionId };
+      setRecordingInactivityPrompt(null);
+      if (
+        currentStatus?.sessionId !== sessionId ||
+        currentStatus.state !== "recording"
+      ) {
+        return;
+      }
+      void handlePauseRecording(sessionId).then((paused) => {
+        if (paused) void notifyRecordingAutoPaused(sessionId);
+      });
+    }, Math.max(0, recordingInactivityPrompt.expiresAt - Date.now()));
+
+    return () => {
+      window.clearInterval(tick);
+      window.clearTimeout(timeout);
+    };
+  }, [handlePauseRecording, recordingInactivityPrompt]);
+
+  function handleKeepRecordingAfterInactivityPrompt() {
+    const sessionId = recordingInactivityPrompt?.sessionId;
+    if (sessionId) {
+      recordingInactivityTrackerRef.current = {
+        sessionId,
+        snoozedUntil: Date.now() + RECORDING_INACTIVITY_SNOOZE_MS,
+      };
+    }
+    setRecordingInactivityPrompt(null);
+  }
+
+  function handlePauseRecordingAfterInactivityPrompt() {
+    const sessionId = recordingInactivityPrompt?.sessionId;
+    if (!sessionId) return;
+    recordingInactivityTrackerRef.current = { sessionId };
+    setRecordingInactivityPrompt(null);
+    void handlePauseRecording(sessionId);
+  }
+
+  const recordingInactivitySecondsRemaining = recordingInactivityPrompt
+    ? Math.max(
+        0,
+        Math.ceil(
+          (recordingInactivityPrompt.expiresAt - recordingInactivityNow) / 1000,
+        ),
+      )
+    : 0;
 
   if (accountLoading) {
     return (
@@ -2455,7 +2552,10 @@ export function App() {
       data-sidebar-transition={sidebarTransition}
       style={
         {
-          "--sidebar-w-current": `${sidebarWidth}px`,
+          // The grid columns read this directly, so collapsed must pin it to 0
+          // (the stored width is preserved for the next expand). During a drag
+          // the resize logic overrides it imperatively.
+          "--sidebar-w-current": `${sidebarCollapsed ? 0 : sidebarWidth}px`,
         } as CSSProperties
       }
     >
@@ -2604,6 +2704,7 @@ export function App() {
           onClose={closeTab}
           onCloseOthers={closeOtherTabs}
           onNew={openNewChatTab}
+          layoutFrozen={sidebarResizing}
           onDragRegionPointerDown={handleTitlebarPointerDown}
         />
         <section className="main-panel">
@@ -2636,6 +2737,7 @@ export function App() {
                   onEnableSystemAudio={handleEnableSystemAudio}
                   activeTab={settingsTab}
                   onTabChange={setSettingsTab}
+                  onCheckForUpdates={() => runUpdateCheck("manual")}
                   onReportIssue={handleReportIssue}
                 />
               ) : activeView === "dictation" ? (
@@ -2685,7 +2787,6 @@ export function App() {
                 // session bar, so they persist while the chat scrolls beneath.
                 <AgentWorkspace
                   initialSession={activeAgentSession}
-                  pendingReply={pendingAgentReply}
                   origin={
                     agentOriginFolder
                       ? {
@@ -3074,6 +3175,38 @@ export function App() {
           </AnimatePresence>
         </section>
       </div>
+      <Dialog
+        open={recordingInactivityPrompt !== null}
+        onClose={handleKeepRecordingAfterInactivityPrompt}
+        title="Still in a meeting?"
+        description="June has not heard meeting audio for a while."
+        width={420}
+        footer={
+          <>
+            <button
+              type="button"
+              className="primary-action"
+              onClick={handlePauseRecordingAfterInactivityPrompt}
+            >
+              Pause recording
+            </button>
+            <button
+              type="button"
+              className="primary-action primary-solid"
+              onClick={handleKeepRecordingAfterInactivityPrompt}
+            >
+              Keep recording
+            </button>
+          </>
+        }
+      >
+        <div className="dialog-body">
+          <p className="recording-inactivity-copy">
+            June will pause this recording in{" "}
+            {recordingInactivitySecondsRemaining} seconds if you do not answer.
+          </p>
+        </div>
+      </Dialog>
       <MoveNoteToFolderDialog
         open={moveDialogNoteIds !== null}
         onClose={() => setMoveDialogNoteIds(null)}
@@ -3382,6 +3515,7 @@ function recordingToStatus(recording: {
   state: RecordingStatusDto["state"];
   elapsedMs: number;
   level: RecordingStatusDto["level"];
+  livePreviewEnabled?: RecordingStatusDto["livePreviewEnabled"];
   sources?: RecordingStatusDto["sources"];
   warnings?: RecordingStatusDto["warnings"];
 }): RecordingStatusDto {
@@ -3394,6 +3528,7 @@ function recordingToStatus(recording: {
     level: recording.level,
     silenceWarning: false,
     bytesWritten: 0,
+    livePreviewEnabled: recording.livePreviewEnabled ?? false,
     sources: recording.sources,
     warnings: recording.warnings,
   };
@@ -3435,6 +3570,7 @@ function startingRecordingStatus(
     level: { peak: 0, rms: 0, recentPeaks: [] },
     silenceWarning: false,
     bytesWritten: 0,
+    livePreviewEnabled: false,
     sources,
     warnings: [],
   };

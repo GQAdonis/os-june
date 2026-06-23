@@ -172,10 +172,44 @@ const IDLE_RAF_TIMEOUT_MS = 260;
 // way. Full rAF resumes the moment audio or bar motion returns.
 const SHIMMER_FRAME_MS = 33;
 const AUDIO_NOISE_GATE = 0.02;
-const AUDIO_VISUAL_GAIN = 5;
+// Soft-knee speech curve, mirroring the recorder's scaleLiveInputPeak
+// (LIVE_INPUT_KNEE / LIVE_INPUT_LOW_LIFT). The old sqrt(raw × 5) + clamp hit
+// the ceiling at raw ≈ 0.21, so everything louder slammed flat at 1.0 and the
+// bars jittered against the clamp. An exponential knee approaches 1.0
+// asymptotically instead — loud speech compresses gracefully like the recorder
+// does. The lift is a hair below the recorder's 0.6 so the HUD blooms a touch
+// faster at conversational volume (close-mic dictation, one speaker).
+// Lift note: a lower exponent makes the curve steeper near the bottom, which
+// over-amplified the noisy quiet region — whispers flickered as tiny mic
+// fluctuations swung the bars. 0.62 flattens the low end so quiet speech reads
+// steady, at a small cost to how fast it blooms at conversational volume.
+const AUDIO_KNEE = 6;
+const AUDIO_LOW_LIFT = 0.62;
 const AMBIENT_VISUAL_GAIN = 3;
 const AMBIENT_MAX_LEVEL = 0.03;
 const HUD_WHISPER_FLOOR = 0.06;
+// Input peak-hold — the HUD's stand-in for the recorder's Rust-side
+// max-over-window. The recorder reads max(recentPeaks) over ~66ms, which rides
+// the upper envelope: it bridges the dips between syllables and stays steady on
+// a noisy whisper instead of dropping into every trough. The HUD instead gets a
+// stream of single level events, so we hold the peak and let it decay: each
+// event jumps the held value up instantly to a louder sample (max) and bleeds
+// it down by AUDIO_HOLD_DECAY otherwise. With this feeding the meter, the bars
+// no longer bounce into inter-syllable gaps and the shared (recorder) ballistics
+// can faithfully track the envelope. Lower decay = livelier/twitchier, higher =
+// steadier but stickier. Slightly long so the tail eases down smoothly instead
+// of dropping out from under the bars.
+//
+// The decay is time-normalized: the helper emits levels at ~50Hz (20ms) on the
+// default-capture/recorder paths but ~25Hz (40ms) on the AVCapture path, so a
+// flat per-event multiply would give a 2× different wall-clock hold depending
+// on which metering source is live. AUDIO_HOLD_DECAY is the decay per
+// HOLD_REF_EVENT_MS; each event scales it by elapsed dt so the hold lasts the
+// same real time regardless of emit rate.
+const AUDIO_HOLD_DECAY = 0.8;
+const HOLD_REF_EVENT_MS = 20; // helper's nominal 50Hz emit cadence
+let audioPeakHold = 0;
+let lastHoldAt = 0; // performance.now() of the previous peak-hold update
 // The idle pulse + speech wave live in the shared meter (IDLE_PULSE_*,
 // SPEECH_WAVE_*, withWaveLayers) so the HUD and recorder move identically.
 
@@ -288,6 +322,8 @@ function startBarLoop() {
 
 function resetBars() {
   meter.reset();
+  audioPeakHold = 0;
+  lastHoldAt = 0;
   for (let i = 0; i < bars.length; i++) {
     bars[i].style.setProperty("--level", IDLE_LEVEL.toFixed(3));
   }
@@ -295,16 +331,29 @@ function resetBars() {
 }
 
 function renderAudioLevel(rawLevel: number) {
-  let shaped =
-    rawLevel <= AUDIO_NOISE_GATE
-      ? clamp(Math.sqrt(rawLevel * AMBIENT_VISUAL_GAIN), 0, AMBIENT_MAX_LEVEL)
-      : clamp(
-          AMBIENT_MAX_LEVEL +
-            Math.sqrt((rawLevel - AUDIO_NOISE_GATE) * AUDIO_VISUAL_GAIN),
-          0,
-          1,
-        );
-  if (rawLevel > AUDIO_NOISE_GATE && shaped > 0.0001 && HUD_WHISPER_FLOOR > 0) {
+  // Hold the raw envelope before shaping (mirrors the recorder windowing its
+  // raw peaks before scaleLiveInputPeak): jump up to a louder sample instantly,
+  // bleed down otherwise so the level rides through inter-syllable dips. The
+  // decay is scaled by elapsed time so its wall-clock duration doesn't drift
+  // with the helper's emit rate (see HOLD_REF_EVENT_MS). dt is clamped so a
+  // first event or a post-idle gap doesn't collapse the hold in one step.
+  const nowMs = performance.now();
+  const dt = lastHoldAt ? clamp(nowMs - lastHoldAt, 1, 250) : HOLD_REF_EVENT_MS;
+  lastHoldAt = nowMs;
+  const decay = Math.pow(AUDIO_HOLD_DECAY, dt / HOLD_REF_EVENT_MS);
+  audioPeakHold = Math.max(rawLevel, audioPeakHold * decay);
+  const held = audioPeakHold;
+  let shaped: number;
+  if (held <= AUDIO_NOISE_GATE) {
+    shaped = clamp(Math.sqrt(held * AMBIENT_VISUAL_GAIN), 0, AMBIENT_MAX_LEVEL);
+  } else {
+    // Continuous with the ambient branch: at gated → 0 the knee is 0, so
+    // shaped starts at AMBIENT_MAX_LEVEL and rises toward 1.0 without clipping.
+    const gated = (held - AUDIO_NOISE_GATE) / (1 - AUDIO_NOISE_GATE);
+    const knee = 1 - Math.exp(-AUDIO_KNEE * Math.pow(gated, AUDIO_LOW_LIFT));
+    shaped = clamp(AMBIENT_MAX_LEVEL + (1 - AMBIENT_MAX_LEVEL) * knee, 0, 1);
+  }
+  if (held > AUDIO_NOISE_GATE && shaped > 0.0001 && HUD_WHISPER_FLOOR > 0) {
     shaped = HUD_WHISPER_FLOOR + (1 - HUD_WHISPER_FLOOR) * shaped;
   }
   lastAudioLevelAt = performance.now();

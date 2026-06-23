@@ -43,32 +43,24 @@ impl Debug for AppConfig {
     }
 }
 
-/// Where user-submitted issue reports get forwarded. Every section is
-/// optional: with os-platform configured, reports become Issues in the
-/// tracker; else with a webhook, a JSON POST; else they land in the
-/// structured logs only.
+/// Where user-submitted issue reports get forwarded. The destination defaults
+/// to the June bug reports project in os-platform; only the bot API key is
+/// environment specific. Without that key, reports land in structured logs only.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct IssueReportsConfig {
-    /// Receives each report as a JSON POST. Often embeds a secret token
-    /// (Slack/Discord-style webhooks), hence the redacted Debug. Set via
-    /// `SCRIBE__ISSUE_REPORTS__WEBHOOK_URL`.
-    #[serde(default)]
-    pub webhook_url: String,
-    /// Base URL of the os-platform (fellow) API, e.g.
-    /// `https://api.platform.opensoftware.co`. Empty disables the
-    /// tracker sink. `SCRIBE__ISSUE_REPORTS__OS_PLATFORM_API_URL`.
-    #[serde(default)]
+    /// Base URL of the os-platform (fellow) API.
+    #[serde(default = "default_issue_report_api_url")]
     pub os_platform_api_url: String,
-    /// fellow API key (`osk_…`) of the reporting bot user — that user
+    /// os-platform API key of the reporting bot user — that user
     /// must be a member of the target Org/Project. Redacted Debug.
     /// `SCRIBE__ISSUE_REPORTS__OS_PLATFORM_API_KEY`.
     #[serde(default)]
     pub os_platform_api_key: String,
     /// Target Org handle (or opaque `org_…` id).
-    #[serde(default)]
+    #[serde(default = "default_issue_report_org")]
     pub os_platform_org: String,
     /// Target Project handle (or opaque `prj_…` id).
-    #[serde(default)]
+    #[serde(default = "default_issue_report_project")]
     pub os_platform_project: String,
     /// Label slug attached to every report Issue.
     #[serde(default = "default_issue_report_label")]
@@ -77,24 +69,39 @@ pub struct IssueReportsConfig {
     /// Issues are bounties under the hood, and creation fails when neither
     /// the Project nor the Org has a default reward asset — naming one here
     /// sidesteps that. Empty omits the field and relies on the defaults.
-    #[serde(default)]
+    #[serde(default = "default_issue_report_reward_asset")]
     pub os_platform_reward_asset: String,
+}
+
+fn default_issue_report_api_url() -> String {
+    "https://app.opensoftware.co/api".to_string()
+}
+
+fn default_issue_report_org() -> String {
+    "june".to_string()
+}
+
+fn default_issue_report_project() -> String {
+    "bug-reports".to_string()
 }
 
 fn default_issue_report_label() -> String {
     "bug".to_string()
 }
 
+fn default_issue_report_reward_asset() -> String {
+    "POINTS".to_string()
+}
+
 impl Default for IssueReportsConfig {
     fn default() -> Self {
         Self {
-            webhook_url: String::new(),
-            os_platform_api_url: String::new(),
+            os_platform_api_url: default_issue_report_api_url(),
             os_platform_api_key: String::new(),
-            os_platform_org: String::new(),
-            os_platform_project: String::new(),
+            os_platform_org: default_issue_report_org(),
+            os_platform_project: default_issue_report_project(),
             os_platform_label: default_issue_report_label(),
-            os_platform_reward_asset: String::new(),
+            os_platform_reward_asset: default_issue_report_reward_asset(),
         }
     }
 }
@@ -103,14 +110,6 @@ impl Debug for IssueReportsConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("IssueReportsConfig")
-            .field(
-                "webhook_url",
-                if self.webhook_url.is_empty() {
-                    &"<unset>"
-                } else {
-                    &REDACTED
-                },
-            )
             .field("os_platform_api_url", &self.os_platform_api_url)
             .field(
                 "os_platform_api_key",
@@ -559,7 +558,7 @@ impl Default for AppConfig {
             },
             attestation: AttestationConfig {
                 source_commit: String::new(),
-                source_repo_url: "https://github.com/open-software-network/os-scribe".to_string(),
+                source_repo_url: "https://github.com/open-software-network/os-june".to_string(),
                 image_repo: "ghcr.io/open-software-network/scribe-api".to_string(),
                 trust_center_url:
                     "https://trust.phala.com/app/15f8d2fd586da8b99c6082b3c2cba64127ceeb8c"
@@ -598,6 +597,20 @@ pub fn load() -> Result<AppConfig, ConfigError> {
     Ok(config)
 }
 
+const LEGACY_OS_ACCOUNTS_APP_API_KEY_PLACEHOLDER: &str = concat!("osk", "_REPLACE_ME");
+const LEGACY_OPENAI_API_KEY_PLACEHOLDER: &str = concat!("sk", "_REPLACE_ME");
+const OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS: &[&str] = &[
+    "REPLACE_WITH_OS_ACCOUNTS_APP_API_KEY",
+    LEGACY_OS_ACCOUNTS_APP_API_KEY_PLACEHOLDER,
+];
+const OPENAI_API_KEY_PLACEHOLDERS: &[&str] = &[
+    "REPLACE_WITH_OPENAI_API_KEY",
+    LEGACY_OPENAI_API_KEY_PLACEHOLDER,
+];
+const VENICE_API_KEY_PLACEHOLDERS: &[&str] = &["VENICE_API_KEY_REPLACE_ME"];
+const OSGUARD_API_KEY_PLACEHOLDERS: &[&str] = &[OSGUARD_API_KEY_PLACEHOLDER];
+const LOCAL_DEV_BEARER_TOKEN_PLACEHOLDERS: &[&str] = &[LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER];
+
 fn validate(config: &AppConfig) -> Result<(), ConfigError> {
     if config.local_dev.enabled {
         validate_local_dev_bearer_token(config)?;
@@ -613,7 +626,7 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
         validate_required_secret(
             "os_accounts.app_api_key",
             &config.os_accounts.app_api_key,
-            "osk_REPLACE_ME",
+            OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS,
         )?;
     }
     validate_positive_config(
@@ -682,7 +695,7 @@ fn validate_upstreams(config: &AppConfig) -> Result<(), ConfigError> {
             validate_required_secret(
                 "upstreams.openai.api_key",
                 &config.upstreams.openai.api_key,
-                OPENAI_API_KEY_PLACEHOLDER,
+                OPENAI_API_KEY_PLACEHOLDERS,
             )?;
         }
     }
@@ -695,7 +708,7 @@ fn validate_upstreams(config: &AppConfig) -> Result<(), ConfigError> {
             validate_required_secret(
                 "upstreams.venice.api_key",
                 &config.upstreams.venice.api_key,
-                VENICE_API_KEY_PLACEHOLDER,
+                VENICE_API_KEY_PLACEHOLDERS,
             )?;
         }
     }
@@ -709,7 +722,7 @@ fn validate_upstreams(config: &AppConfig) -> Result<(), ConfigError> {
         validate_required_secret(
             "upstreams.osguard.api_key",
             &config.upstreams.osguard.api_key,
-            OSGUARD_API_KEY_PLACEHOLDER,
+            OSGUARD_API_KEY_PLACEHOLDERS,
         )?;
     }
     Ok(())
@@ -722,7 +735,7 @@ fn validate_local_dev_bearer_token(config: &AppConfig) -> Result<(), ConfigError
         validate_required_secret(
             "local_dev.bearer_token",
             &config.local_dev.bearer_token,
-            LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER,
+            LOCAL_DEV_BEARER_TOKEN_PLACEHOLDERS,
         )
     }
 }
@@ -741,10 +754,13 @@ fn validate_required_text(field: &'static str, value: &str) -> Result<(), Config
 fn validate_required_secret(
     field: &'static str,
     value: &str,
-    placeholder: &'static str,
+    placeholders: &[&str],
 ) -> Result<(), ConfigError> {
     validate_required_text(field, value)?;
-    if value.trim() == placeholder {
+    if placeholders
+        .iter()
+        .any(|placeholder| value.trim() == *placeholder)
+    {
         return Err(ConfigError::InvalidRequired {
             field,
             reason: "placeholder value must be replaced",
@@ -779,7 +795,10 @@ fn validate_positive_rate(
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, ModelPriceConfig, ModelProvider, ModelType, PriceUnit, validate};
+    use super::{
+        AppConfig, ModelPriceConfig, ModelProvider, ModelType, OPENAI_API_KEY_PLACEHOLDERS,
+        OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS, PriceUnit, VENICE_API_KEY_PLACEHOLDERS, validate,
+    };
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
 
@@ -797,14 +816,14 @@ mod tests {
     #[test]
     fn config_debug_redacts_secrets() {
         let mut config = AppConfig::default();
+        config.os_accounts.app_api_key = "app_api_key_secret_value".to_string();
         config.local_dev.bearer_token = "local-secret-token".to_string();
-        config.os_accounts.app_api_key = "osk_secret_value".to_string();
         config.upstreams.openai.api_key = "sk-secret".to_string();
         config.upstreams.venice.api_key = "vc-secret".to_string();
         config.upstreams.osguard.api_key = "gw-secret".to_string();
         let dump = format!("{config:?}");
         assert!(
-            !dump.contains("osk_secret_value"),
+            !dump.contains("app_api_key_secret_value"),
             "app_api_key leaked in Debug: {dump}"
         );
         assert!(!dump.contains("local-secret-token"));
@@ -902,13 +921,35 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_provider_placeholder_key() {
-        let mut config = valid_config();
-        config.upstreams.venice.api_key = "VENICE_API_KEY_REPLACE_ME".to_string();
+    fn validate_rejects_os_accounts_placeholder_keys() {
+        for placeholder in OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS {
+            let mut config = valid_config();
+            config.os_accounts.app_api_key = (*placeholder).to_string();
 
-        let result = validate(&config);
+            let result = validate(&config);
 
-        assert!(result.is_err());
+            assert!(result.is_err(), "accepted placeholder: {placeholder}");
+        }
+    }
+
+    #[test]
+    fn validate_rejects_provider_placeholder_keys() {
+        for placeholder in OPENAI_API_KEY_PLACEHOLDERS {
+            let mut config = valid_config();
+            config.upstreams.openai.api_key = (*placeholder).to_string();
+
+            let result = validate(&config);
+
+            assert!(result.is_err(), "accepted placeholder: {placeholder}");
+        }
+        for placeholder in VENICE_API_KEY_PLACEHOLDERS {
+            let mut config = valid_config();
+            config.upstreams.venice.api_key = (*placeholder).to_string();
+
+            let result = validate(&config);
+
+            assert!(result.is_err(), "accepted placeholder: {placeholder}");
+        }
     }
 
     #[test]
