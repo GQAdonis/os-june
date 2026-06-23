@@ -3456,7 +3456,6 @@ async fn start_scribe_provider_proxy(
         token: Arc::new(token),
         decisions,
         policy_block_decisions,
-        mappings: Arc::new(Mutex::new(Vec::new())),
         direct_policy_fingerprints,
         approved_policy_fingerprints,
     });
@@ -3469,7 +3468,6 @@ struct ScribeProviderProxyState {
     token: Arc<String>,
     decisions: Arc<crate::tool_guard::ToolGuardDecisionHub>,
     policy_block_decisions: Arc<PolicyBlockDecisionHub>,
-    mappings: Arc<Mutex<Vec<crate::tool_guard::ToolGuardReplacementMapping>>>,
     direct_policy_fingerprints: Arc<Mutex<Vec<String>>>,
     approved_policy_fingerprints: Arc<Mutex<Vec<String>>>,
 }
@@ -3547,10 +3545,13 @@ async fn handle_scribe_provider_connection(
                 .unwrap_or_else(|_| serde_json::json!({}));
             let requested_stream = chat_completion_requested_stream(&body);
             force_non_streaming_chat_completion(&mut body);
-            if let Err(error) = guard_outbound_tool_results(&state, &mut body).await {
-                write_tool_guard_blocked_response(&mut stream, &error).await?;
-                return Ok(());
-            }
+            let outbound_mappings = match guard_outbound_tool_results(&state, &mut body).await {
+                Ok(mappings) => mappings,
+                Err(error) => {
+                    write_tool_guard_blocked_response(&mut stream, &error).await?;
+                    return Ok(());
+                }
+            };
             let direct_policy_route = body_matches_direct_policy_fingerprint(&state, &body);
             let proxy_result = if direct_policy_route {
                 crate::scribe_api::proxy_agent_chat_completions_direct(body.clone()).await
@@ -3585,6 +3586,7 @@ async fn handle_scribe_provider_connection(
                                     &state,
                                     requested_stream,
                                     direct,
+                                    &outbound_mappings,
                                 )
                                 .await?;
                             }
@@ -3624,6 +3626,7 @@ async fn handle_scribe_provider_connection(
                                             &state,
                                             requested_stream,
                                             direct,
+                                            &outbound_mappings,
                                         )
                                         .await?;
                                     }
@@ -3641,6 +3644,7 @@ async fn handle_scribe_provider_connection(
                                     &state,
                                     requested_stream,
                                     collected,
+                                    &outbound_mappings,
                                 )
                                 .await?;
                             }
@@ -3661,6 +3665,7 @@ async fn handle_scribe_provider_connection(
                             &state,
                             requested_stream,
                             collected,
+                            &outbound_mappings,
                         )
                         .await?;
                     }
@@ -3706,6 +3711,11 @@ async fn write_collected_agent_response(
     state: &Arc<ScribeProviderProxyState>,
     requested_stream: bool,
     response: CollectedAgentProxyResponse,
+    // Tool Guard replacement mappings produced while redacting this request's
+    // tool results (the outbound pass). They are scoped to this single
+    // request/response cycle — never a shared store — so one session's redacted
+    // PII can never rehydrate into another session's response.
+    outbound_mappings: &[crate::tool_guard::ToolGuardReplacementMapping],
 ) -> io::Result<()> {
     if response.status >= 400 {
         match translate_context_overflow_error(&response.body) {
@@ -3725,26 +3735,26 @@ async fn write_collected_agent_response(
     } else if requested_stream {
         let mut value = serde_json::from_slice::<serde_json::Value>(&response.body)
             .unwrap_or_else(|_| serde_json::json!({}));
-        if let Err(error) = guard_inbound_tool_calls(state, &mut value).await {
-            write_tool_guard_blocked_response(stream, &error).await?;
-            return Ok(());
-        }
-        if let Err(error) = rehydrate_assistant_text(state, &mut value) {
-            write_tool_guard_blocked_response(stream, &error).await?;
-            return Ok(());
-        }
+        let inbound_mappings = match guard_inbound_tool_calls(state, &mut value).await {
+            Ok(mappings) => mappings,
+            Err(error) => {
+                write_tool_guard_blocked_response(stream, &error).await?;
+                return Ok(());
+            }
+        };
+        rehydrate_assistant_text_cycle(&mut value, outbound_mappings, &inbound_mappings);
         write_synthetic_sse_response(stream, response.status, value).await?;
     } else {
         match serde_json::from_slice::<serde_json::Value>(&response.body) {
             Ok(mut value) => {
-                if let Err(error) = guard_inbound_tool_calls(state, &mut value).await {
-                    write_tool_guard_blocked_response(stream, &error).await?;
-                    return Ok(());
-                }
-                if let Err(error) = rehydrate_assistant_text(state, &mut value) {
-                    write_tool_guard_blocked_response(stream, &error).await?;
-                    return Ok(());
-                }
+                let inbound_mappings = match guard_inbound_tool_calls(state, &mut value).await {
+                    Ok(mappings) => mappings,
+                    Err(error) => {
+                        write_tool_guard_blocked_response(stream, &error).await?;
+                        return Ok(());
+                    }
+                };
+                rehydrate_assistant_text_cycle(&mut value, outbound_mappings, &inbound_mappings);
                 write_json_response(stream, response.status, value).await?;
             }
             Err(_) => {
@@ -3759,6 +3769,25 @@ async fn write_collected_agent_response(
         }
     }
     Ok(())
+}
+
+/// Rehydrates the assistant text using only the mappings produced in this one
+/// request/response cycle: the outbound pass (this request's tool results) plus
+/// the inbound pass (this response's tool calls). Keeping it cycle-local is what
+/// prevents cross-session PII bleed — the alternative, a proxy-wide mapping
+/// list, let a repeated replacement token (`[[OSG.EMAIL.1]]` is per analysis and
+/// can repeat) rehydrate one session's response with another's original value.
+fn rehydrate_assistant_text_cycle(
+    body: &mut serde_json::Value,
+    outbound_mappings: &[crate::tool_guard::ToolGuardReplacementMapping],
+    inbound_mappings: &[crate::tool_guard::ToolGuardReplacementMapping],
+) {
+    if outbound_mappings.is_empty() && inbound_mappings.is_empty() {
+        return;
+    }
+    let mut mappings = outbound_mappings.to_vec();
+    mappings.extend_from_slice(inbound_mappings);
+    rehydrate_assistant_text_from_mappings(body, &mappings);
 }
 
 async fn write_agent_proxy_error(
@@ -4069,8 +4098,9 @@ fn force_non_streaming_chat_completion(body: &mut serde_json::Value) {
 async fn guard_inbound_tool_calls(
     state: &ScribeProviderProxyState,
     body: &mut serde_json::Value,
-) -> Result<(), AppError> {
+) -> Result<Vec<crate::tool_guard::ToolGuardReplacementMapping>, AppError> {
     let agent_turn_id = uuid::Uuid::new_v4().to_string();
+    let mut mappings = Vec::new();
     let calls = proposed_tool_calls(body);
     for call in calls {
         let destination_id = call.tool_name.clone();
@@ -4123,9 +4153,9 @@ async fn guard_inbound_tool_calls(
             }
         };
         set_proposed_tool_call_arguments(body, &call, redaction.value)?;
-        remember_tool_guard_mappings(state, redaction.mappings)?;
+        mappings.extend(redaction.mappings);
     }
-    Ok(())
+    Ok(mappings)
 }
 
 #[derive(Debug)]
@@ -4223,27 +4253,6 @@ fn set_proposed_tool_call_arguments(
     Ok(())
 }
 
-fn rehydrate_assistant_text(
-    state: &ScribeProviderProxyState,
-    body: &mut serde_json::Value,
-) -> Result<(), AppError> {
-    let mappings = state
-        .mappings
-        .lock()
-        .map_err(|_| {
-            AppError::new(
-                "tool_guard_mapping_failed",
-                "Tool Guard mapping lock failed.",
-            )
-        })?
-        .clone();
-    if mappings.is_empty() {
-        return Ok(());
-    }
-    rehydrate_assistant_text_from_mappings(body, &mappings);
-    Ok(())
-}
-
 fn rehydrate_assistant_text_from_mappings(
     body: &mut serde_json::Value,
     mappings: &[crate::tool_guard::ToolGuardReplacementMapping],
@@ -4273,14 +4282,15 @@ fn rehydrate_assistant_text_from_mappings(
 async fn guard_outbound_tool_results(
     state: &ScribeProviderProxyState,
     body: &mut serde_json::Value,
-) -> Result<(), AppError> {
+) -> Result<Vec<crate::tool_guard::ToolGuardReplacementMapping>, AppError> {
     let agent_turn_id = uuid::Uuid::new_v4().to_string();
+    let mut mappings = Vec::new();
     let Some(messages) = body
         .as_object_mut()
         .and_then(|object| object.get_mut("messages"))
         .and_then(serde_json::Value::as_array_mut)
     else {
-        return Ok(());
+        return Ok(mappings);
     };
 
     for message in messages.iter_mut() {
@@ -4339,29 +4349,9 @@ async fn guard_outbound_tool_results(
             }
         };
         message["content"] = redaction.value;
-        remember_tool_guard_mappings(state, redaction.mappings)?;
+        mappings.extend(redaction.mappings);
     }
-    Ok(())
-}
-
-fn remember_tool_guard_mappings(
-    state: &ScribeProviderProxyState,
-    mappings: Vec<crate::tool_guard::ToolGuardReplacementMapping>,
-) -> Result<(), AppError> {
-    if mappings.is_empty() {
-        return Ok(());
-    }
-    state
-        .mappings
-        .lock()
-        .map_err(|_| {
-            AppError::new(
-                "tool_guard_mapping_failed",
-                "Tool Guard mapping lock failed.",
-            )
-        })?
-        .extend(mappings);
-    Ok(())
+    Ok(mappings)
 }
 
 fn tool_guard_deadline_ms() -> u64 {
@@ -4977,6 +4967,57 @@ mod tests {
         assert_eq!(
             body["choices"][0]["message"]["content"],
             "I found alice@example.com."
+        );
+    }
+
+    #[test]
+    fn provider_proxy_rehydration_is_scoped_to_its_own_cycle() {
+        // Two request/response cycles reuse the same replacement token but map it
+        // to different originals (the token is per analysis and can repeat). Each
+        // cycle must rehydrate with its own mapping only — never the other's. The
+        // mappings are passed per cycle (no shared store), so one session's PII
+        // can never bleed into another's response.
+        let rehydrate = |original: &str| {
+            let mut body = serde_json::json!({
+                "choices": [{ "message": { "role": "assistant", "content": "Sent to [[OSG.EMAIL.1]]." } }]
+            });
+            let outbound = vec![crate::tool_guard::ToolGuardReplacementMapping {
+                replacement: "[[OSG.EMAIL.1]]".to_string(),
+                original: original.to_string(),
+            }];
+            rehydrate_assistant_text_cycle(&mut body, &outbound, &[]);
+            body["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+
+        assert_eq!(rehydrate("alice@example.com"), "Sent to alice@example.com.");
+        assert_eq!(rehydrate("bob@example.com"), "Sent to bob@example.com.");
+    }
+
+    #[test]
+    fn provider_proxy_rehydration_merges_outbound_and_inbound_cycle_mappings() {
+        let mut body = serde_json::json!({
+            "choices": [{ "message": {
+                "role": "assistant",
+                "content": "Result [[OSG.EMAIL.1]] and arg [[OSG.PHONE.1]]."
+            } }]
+        });
+        let outbound = vec![crate::tool_guard::ToolGuardReplacementMapping {
+            replacement: "[[OSG.EMAIL.1]]".to_string(),
+            original: "alice@example.com".to_string(),
+        }];
+        let inbound = vec![crate::tool_guard::ToolGuardReplacementMapping {
+            replacement: "[[OSG.PHONE.1]]".to_string(),
+            original: "+15551234567".to_string(),
+        }];
+
+        rehydrate_assistant_text_cycle(&mut body, &outbound, &inbound);
+
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            "Result alice@example.com and arg +15551234567."
         );
     }
 
