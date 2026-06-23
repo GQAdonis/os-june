@@ -10,7 +10,10 @@ mod pricing;
 mod prompts;
 mod util;
 
-pub use agent_chat::{AgentChatOutput, AgentChatParams, AgentChatService, AgentChatServiceDeps};
+pub use agent_chat::{
+    AgentChatOutput, AgentChatParams, AgentChatRoute, AgentChatService, AgentChatServiceDeps,
+    AgentChatStreamOutput,
+};
 pub use dictate::{
     DictateCleanupOutput, DictateCleanupParams, DictateService, DictateServiceDeps,
     DictateTranscribeOutput, DictateTranscribeParams,
@@ -27,6 +30,7 @@ pub use pricing::{PricingError, PricingTable};
 #[cfg(test)]
 mod tests {
     use super::{
+        AgentChatParams, AgentChatRoute, AgentChatService, AgentChatServiceDeps,
         DictateCleanupParams, DictateService, DictateServiceDeps, DictateTranscribeParams,
         NoteGenerateParams, NoteGenerateService, NoteGenerateServiceDeps, NoteTranscribeParams,
         NoteTranscribeService, NoteTranscribeServiceDeps, PricingTable, ServiceError,
@@ -35,8 +39,9 @@ mod tests {
     use pretty_assertions::assert_eq;
     use scribe_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
     use scribe_domain::{
-        AudioDurationProbe, Authorization, AuthorizeRequest, ChargeRequest, CleanedText, Cleaner,
-        CleanupRequest, Credits, DomainError, GeneratedNote, GenerationRequest, Generator, ModelId,
+        AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AudioDurationProbe,
+        Authorization, AuthorizeRequest, ChargeRequest, CleanedText, Cleaner, CleanupRequest,
+        Credits, DomainError, GeneratedNote, GenerationRequest, Generator, ModelId,
         OsAccountsClient, Receipt, TokenUsage, Transcriber, Transcript, TranscriptionRequest,
         UserId,
     };
@@ -111,6 +116,97 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn agent_chat_direct_authorizes_then_charges_actual_usage() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = AgentChatService::new(AgentChatServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "text-model",
+                PriceUnit::Tokens,
+                2,
+                ModelType::Text,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            guarded_chat_completer: Arc::new(FixedAgentChatCompleter {
+                provider: "guarded",
+            }),
+            direct_chat_completer: Arc::new(FixedAgentChatCompleter { provider: "direct" }),
+            hold_ttl_seconds: 300,
+            flat_estimate_credits: 8200,
+        });
+
+        let output = service
+            .complete(AgentChatParams {
+                user_id: UserId("usr_123".to_string()),
+                model_id: ModelId("text-model".to_string()),
+                body: serde_json::json!({
+                    "model": "text-model",
+                    "messages": [{ "role": "user", "content": "hello" }],
+                }),
+                route: AgentChatRoute::Direct,
+            })
+            .await
+            .expect("direct agent chat succeeds");
+
+        assert_eq!(output.completion.provider, "direct");
+        assert_eq!(output.receipt.credits_charged.0, 60);
+        let events = os_accounts.events();
+        assert!(matches!(
+            events.first(),
+            Some(RecordedCall::Authorize { user_id, action, estimate, hold_ttl })
+                if user_id == "usr_123"
+                    && action == "agent_chat"
+                    && *estimate == 8200
+                    && *hold_ttl == 300
+        ));
+        assert!(matches!(
+            events.get(1),
+            Some(RecordedCall::Charge { action_token, credits, idempotency_key })
+                if action_token == "agt_test"
+                    && *credits == 60
+                    && idempotency_key.starts_with("agent_chat:usr_123:text-model:")
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_chat_direct_provider_failure_does_not_charge() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = AgentChatService::new(AgentChatServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "text-model",
+                PriceUnit::Tokens,
+                2,
+                ModelType::Text,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            guarded_chat_completer: Arc::new(FixedAgentChatCompleter {
+                provider: "guarded",
+            }),
+            direct_chat_completer: Arc::new(FailingAgentChatCompleter),
+            hold_ttl_seconds: 300,
+            flat_estimate_credits: 8200,
+        });
+
+        let result = service
+            .complete(AgentChatParams {
+                user_id: UserId("usr_123".to_string()),
+                model_id: ModelId("text-model".to_string()),
+                body: serde_json::json!({
+                    "model": "text-model",
+                    "messages": [{ "role": "user", "content": "hello" }],
+                }),
+                route: AgentChatRoute::Direct,
+            })
+            .await;
+
+        assert_eq!(result.err(), Some(ServiceError::UpstreamProvider));
+        assert_eq!(os_accounts.events().len(), 1);
+        assert!(matches!(
+            os_accounts.events().first(),
+            Some(RecordedCall::Authorize { action, .. }) if action == "agent_chat"
+        ));
     }
 
     #[tokio::test]
@@ -457,8 +553,11 @@ mod tests {
                 RecordedCall::Charge {
                     action_token: "agt_test".to_string(),
                     credits: 4,
-                    idempotency_key: "note_transcribe_preview:usr_123:live-preview-session-1"
-                        .to_string(),
+                    idempotency_key: concat!(
+                        "note_transcribe_preview:usr_123:live-preview-session-1:",
+                        "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                    )
+                    .to_string(),
                 },
             ]
         );
@@ -514,9 +613,74 @@ mod tests {
                 RecordedCall::Charge {
                     action_token: "agt_test".to_string(),
                     credits: 4,
-                    idempotency_key: "note_transcribe_preview:usr_123:live-preview-session-1"
-                        .to_string(),
+                    idempotency_key: concat!(
+                        "note_transcribe_preview:usr_123:live-preview-session-1:",
+                        "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                    )
+                    .to_string(),
                 },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn note_transcribe_preview_idempotency_key_distinguishes_audio_chunks() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let service = NoteTranscribeService::new(NoteTranscribeServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "audio-model",
+                PriceUnit::Seconds,
+                2,
+                ModelType::Asr,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            transcriber: Arc::new(FixedTranscriber),
+            duration_probe: Arc::new(FixedDurationProbe),
+            hold_ttl_seconds: 60,
+            flat_estimate_credits: 1024,
+            preview_max_audio_seconds: 30,
+        });
+
+        for audio in [vec![1, 2, 3], vec![4, 5, 6]] {
+            service
+                .transcribe(NoteTranscribeParams {
+                    user_id: UserId("usr_123".to_string()),
+                    note_id: "legacy-preview-note-id".to_string(),
+                    audio,
+                    filename: "preview.wav".to_string(),
+                    context: None,
+                    language: None,
+                    model_id: ModelId("audio-model".to_string()),
+                    preview: true,
+                })
+                .await
+                .expect("preview transcription succeeds");
+        }
+
+        let charge_keys = os_accounts
+            .events()
+            .into_iter()
+            .filter_map(|event| match event {
+                RecordedCall::Charge {
+                    idempotency_key, ..
+                } => Some(idempotency_key),
+                RecordedCall::Authorize { .. } => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            charge_keys,
+            vec![
+                concat!(
+                    "note_transcribe_preview:usr_123:legacy-preview-note-id:",
+                    "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81",
+                )
+                .to_string(),
+                concat!(
+                    "note_transcribe_preview:usr_123:legacy-preview-note-id:",
+                    "787c798e39a5bc1910355bae6d0cd87a36b2e10fd0202a83e3bb6b005da83472",
+                )
+                .to_string(),
             ]
         );
     }
@@ -804,6 +968,40 @@ mod tests {
     }
 
     struct FixedGenerator;
+
+    struct FixedAgentChatCompleter {
+        provider: &'static str,
+    }
+
+    #[async_trait]
+    impl AgentChatCompleter for FixedAgentChatCompleter {
+        async fn complete(
+            &self,
+            _request: AgentChatRequest,
+        ) -> Result<AgentChatCompletion, DomainError> {
+            Ok(AgentChatCompletion {
+                body: br#"{"ok":true}"#.to_vec(),
+                content_type: "application/json".to_string(),
+                provider: self.provider.to_string(),
+                usage: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 20,
+                },
+            })
+        }
+    }
+
+    struct FailingAgentChatCompleter;
+
+    #[async_trait]
+    impl AgentChatCompleter for FailingAgentChatCompleter {
+        async fn complete(
+            &self,
+            _request: AgentChatRequest,
+        ) -> Result<AgentChatCompletion, DomainError> {
+            Err(DomainError::UpstreamProvider)
+        }
+    }
 
     #[async_trait]
     impl Generator for FixedGenerator {

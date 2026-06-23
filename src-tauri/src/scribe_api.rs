@@ -1,6 +1,8 @@
 //! Scribe API client. The Tauri side calls the backend for every metered
 //! action; provider keys live there, never here.
+#![allow(clippy::items_after_test_module)]
 
+use crate::tool_guard::{ToolDestinationClass, ToolGuardAnalysis};
 use crate::{domain::types::AppError, providers::PROVIDER_OPENAI};
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,10 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(60);
 const AGENT_HTTP_TIMEOUT: Duration = Duration::from_secs(600);
 const AGENT_PROXY_MAX_MESSAGES: usize = 64;
 const AGENT_PROXY_MAX_INSTRUCTION_MESSAGES: usize = 4;
+// Mirrors the public Scribe API validation cap. Hermes may request a larger
+// per-call output budget than the backend accepts, which otherwise trips a
+// validation error that it misclassifies as prompt context overflow.
+const AGENT_PROXY_MAX_OUTPUT_TOKENS: u64 = 32_768;
 const AGENT_TITLE_MAX_CHARS: usize = 48;
 const ERR_INSUFFICIENT_CREDITS: i64 = 4301;
 const ERR_TOKEN_EXPIRED: i64 = 3001;
@@ -106,10 +112,10 @@ pub struct DictateCleanupRequestParams {
     pub utterance_id: String,
 }
 
-/// Response from the agent chat-completions proxy. Holds the upstream
-/// reqwest response so callers can forward body bytes as they arrive
-/// (Hermes requests `stream: true`) instead of buffering the whole
-/// generation before the first token is visible.
+/// Response from the agent chat-completions proxy. Holds the upstream reqwest
+/// response so callers can decide whether to buffer or stream the body. June's
+/// provider proxy buffers successful agent responses before forwarding them so
+/// Tool Guard can inspect proposed tool calls.
 pub struct AgentChatCompletionsResponse {
     pub status: u16,
     pub content_type: String,
@@ -208,6 +214,35 @@ struct DictateCleanupBody {
     dictionary_context: Option<String>,
     style: String,
     model: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolGuardCallAnalysisBody {
+    pub agent_turn_id: String,
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub destination_id: String,
+    pub destination_class: ToolDestinationClass,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_schema_ref: Option<String>,
+    pub arguments: serde_json::Value,
+    pub deadline_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_context: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolGuardResultAnalysisBody {
+    pub agent_turn_id: String,
+    pub tool_call_id: String,
+    pub destination_id: String,
+    pub destination_class: ToolDestinationClass,
+    pub result: serde_json::Value,
+    pub deadline_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_context: Option<serde_json::Value>,
 }
 
 pub async fn transcribe_saved_audio(
@@ -324,6 +359,18 @@ pub async fn cleanup_text(params: DictateCleanupRequestParams) -> Result<String,
     Ok(response.text)
 }
 
+pub async fn analyze_tool_guard_call(
+    body: ToolGuardCallAnalysisBody,
+) -> Result<ToolGuardAnalysis, AppError> {
+    post_json("/v1/tool-guard/calls", &body).await
+}
+
+pub async fn analyze_tool_guard_result(
+    body: ToolGuardResultAnalysisBody,
+) -> Result<ToolGuardAnalysis, AppError> {
+    post_json("/v1/tool-guard/results", &body).await
+}
+
 pub async fn list_models(model_type: &str) -> Result<Vec<ModelDto>, AppError> {
     let url = format!("{}/v1/models", scribe_api_url());
     let response = http_client()
@@ -336,16 +383,23 @@ pub async fn list_models(model_type: &str) -> Result<Vec<ModelDto>, AppError> {
 }
 
 pub async fn proxy_agent_chat_completions(
+    body: serde_json::Value,
+) -> Result<AgentChatCompletionsResponse, AppError> {
+    proxy_agent_chat_completions_to_path("/v1/chat/completions", body).await
+}
+
+pub async fn proxy_agent_chat_completions_direct(
+    body: serde_json::Value,
+) -> Result<AgentChatCompletionsResponse, AppError> {
+    proxy_agent_chat_completions_to_path("/v1/chat/completions/direct", body).await
+}
+
+async fn proxy_agent_chat_completions_to_path(
+    path: &str,
     mut body: serde_json::Value,
 ) -> Result<AgentChatCompletionsResponse, AppError> {
-    limit_agent_chat_messages_for_proxy(&mut body);
-    if let Some(object) = body.as_object_mut() {
-        object.insert(
-            "model".to_string(),
-            serde_json::Value::String(crate::providers::generation_model()),
-        );
-    }
-    let url = format!("{}/v1/chat/completions", scribe_api_url());
+    normalize_agent_chat_request_for_proxy(&mut body);
+    let url = format!("{}{}", scribe_api_url(), path);
     let mut token = crate::os_accounts::access_token().await?;
     for attempt in 0..2 {
         let response = agent_http_client()
@@ -377,6 +431,44 @@ pub async fn proxy_agent_chat_completions(
 
 fn limit_agent_chat_messages_for_proxy(body: &mut serde_json::Value) {
     limit_agent_chat_messages(body, AGENT_PROXY_MAX_MESSAGES);
+}
+
+fn normalize_agent_chat_request_for_proxy(body: &mut serde_json::Value) {
+    limit_agent_chat_messages_for_proxy(body);
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    object.insert(
+        "model".to_string(),
+        serde_json::Value::String(crate::providers::generation_model()),
+    );
+    clamp_agent_chat_output_tokens(object, "max_tokens");
+    clamp_agent_chat_output_tokens(object, "max_completion_tokens");
+}
+
+fn clamp_agent_chat_output_tokens(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) {
+    let Some(value) = object.get_mut(field) else {
+        return;
+    };
+    if output_tokens_exceeds_proxy_cap(value) {
+        *value = serde_json::Value::Number(AGENT_PROXY_MAX_OUTPUT_TOKENS.into());
+    }
+}
+
+fn output_tokens_exceeds_proxy_cap(value: &serde_json::Value) -> bool {
+    if let Some(tokens) = value.as_u64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS;
+    }
+    if let Some(tokens) = value.as_i64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS as i64;
+    }
+    if let Some(tokens) = value.as_f64() {
+        return tokens > AGENT_PROXY_MAX_OUTPUT_TOKENS as f64;
+    }
+    false
 }
 
 fn limit_agent_chat_messages(body: &mut serde_json::Value, max_messages: usize) {
@@ -809,7 +901,7 @@ fn clean_agent_session_title(value: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join(" ")
         .trim_matches(|ch: char| ch == '"' || ch == '\'' || ch == '`')
-        .trim_end_matches(|ch: char| matches!(ch, '.' | ':' | '-'))
+        .trim_end_matches(['.', ':', '-'])
         .trim()
         .to_string();
     if title.is_empty() {
@@ -1117,6 +1209,74 @@ mod tests {
                 .and_then(|value| value.as_u64()),
             Some(2_000)
         );
+    }
+
+    #[test]
+    fn agent_proxy_caps_oversized_output_token_budgets() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": AGENT_PROXY_MAX_OUTPUT_TOKENS + 1,
+            "max_completion_tokens": AGENT_PROXY_MAX_OUTPUT_TOKENS + 10,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+        assert_eq!(
+            body["max_completion_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_preserves_valid_output_token_budgets() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": 500,
+            "max_completion_tokens": AGENT_PROXY_MAX_OUTPUT_TOKENS,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(body["max_tokens"], serde_json::json!(500));
+        assert_eq!(
+            body["max_completion_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_caps_float_output_token_budgets_over_the_limit() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": 32769.0,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(
+            body["max_tokens"],
+            serde_json::json!(AGENT_PROXY_MAX_OUTPUT_TOKENS)
+        );
+    }
+
+    #[test]
+    fn agent_proxy_leaves_negative_output_token_budgets_for_backend_validation() {
+        let mut body = serde_json::json!({
+            "model": "hermes-selected-model",
+            "messages": [{ "role": "user", "content": "hello" }],
+            "max_tokens": -1,
+        });
+
+        normalize_agent_chat_request_for_proxy(&mut body);
+
+        assert_eq!(body["max_tokens"], serde_json::json!(-1));
     }
 
     #[test]

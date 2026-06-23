@@ -409,6 +409,66 @@ export type HermesBridgeStatus = {
   message?: string;
 };
 
+export const TOOL_GUARD_DECISION_EVENT = "tool-guard-decision-request";
+export const AGENT_POLICY_BLOCK_DECISION_EVENT =
+  "agent-policy-block-decision-request";
+
+export type ToolGuardDecisionKind = "toolCall" | "toolResult";
+
+export type ToolGuardDecisionFinding = {
+  findingId: string;
+  piiType: string;
+  confidenceBucket: string;
+  replacement: string;
+  originalText?: string | null;
+};
+
+export type ToolGuardAdvisory = {
+  advisoryId: string;
+  advisoryType: string;
+  confidenceBucket: string;
+  score?: number | null;
+  sourceRoles?: string[];
+  categories?: string[];
+};
+
+export type ToolGuardDecisionRequest = {
+  decisionId: string;
+  kind: ToolGuardDecisionKind;
+  toolCallId: string;
+  toolName?: string | null;
+  destinationId: string;
+  analysisRequestId: string;
+  findings: ToolGuardDecisionFinding[];
+  advisories: ToolGuardAdvisory[];
+};
+
+export type ToolGuardDecisionAction =
+  | "redactSelected"
+  | "redactAll"
+  | "allowRaw"
+  | "cancel";
+
+export type ToolGuardDecisionResponse = {
+  decisionId: string;
+  action: ToolGuardDecisionAction;
+  selectedFindingIds?: string[];
+};
+
+export type PolicyBlockDecisionAction = "continue" | "reject";
+
+export type PolicyBlockDecisionRequest = {
+  decisionId: string;
+  conversationFingerprint: string;
+  model?: string | null;
+  message: string;
+};
+
+export type PolicyBlockDecisionResponse = {
+  decisionId: string;
+  action: PolicyBlockDecisionAction;
+};
+
 export type HermesFilesystemEntry = {
   name: string;
   path: string;
@@ -449,6 +509,9 @@ export type HermesSkillDocument = {
   name: string;
   relativePath: string;
   content: string;
+  /** True for skills loaded from an external dir (e.g. ~/.agents/skills).
+   *  June can read but not write them, so the editor is read-only. */
+  readOnly?: boolean;
 };
 
 export type HermesToolsetInfo = {
@@ -751,14 +814,9 @@ export async function agentHudHide() {
 export async function agentHudSetLayout(input: {
   expanded: boolean;
   cardCount?: number;
-  replying?: boolean;
   contextMenuOpen?: boolean;
 }) {
   return invoke<void>("agent_hud_set_layout", { request: input });
-}
-
-export async function agentHudFocusReply() {
-  return invoke<void>("agent_hud_focus_reply");
 }
 
 export async function agentHudOpenAgent(session?: HermesSessionInfo) {
@@ -867,6 +925,22 @@ export async function listAgentToolEvents(taskId: string) {
 
 export async function hermesBridgeStatus() {
   return invoke<HermesBridgeStatus>("hermes_bridge_status");
+}
+
+export async function hermesBridgeToolGuardDecision(
+  response: ToolGuardDecisionResponse,
+) {
+  return invoke<void>("hermes_bridge_tool_guard_decision", { response });
+}
+
+export async function hermesBridgePolicyBlockDecision(
+  response: PolicyBlockDecisionResponse,
+) {
+  return invoke<void>("hermes_bridge_policy_block_decision", { response });
+}
+
+export async function hermesBridgeClearDirectPolicy() {
+  return invoke<void>("hermes_bridge_clear_direct_policy");
 }
 
 export async function hermesBridgeSkills() {
