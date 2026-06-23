@@ -28,6 +28,7 @@ export const CATEGORY_CHIP_NODE = "reportCategory";
 /** The single character that opens the category palette. "/" reads as a
  * command; "#" would read as a tag and is intentionally not used. */
 const TRIGGER_CHAR = "/";
+const SLASH_MENU_ITEM_LIMIT = 5;
 
 /** Reads the active category from a doc by scanning for the chip node. The
  * single-chip invariant (enforced on insert) means the first hit is the
@@ -204,22 +205,28 @@ export function createCategoryChip(options: CategoryChipOptions = {}) {
           const composerBox = props.editor.view.dom.closest<HTMLElement>(
             ".agent-composer-box",
           );
-          if (composerBox) {
-            const composerRect = composerBox.getBoundingClientRect();
-            host.style.top = "";
-            host.style.bottom = `${Math.max(
-              window.innerHeight - composerRect.top + gap,
-              pad,
-            )}px`;
-            host.style.left = `${left}px`;
-            return;
-          }
-          // Prefer opening above the caret (the composer sits low on screen),
-          // dropping below only when there's no room up top.
-          const aboveTop = rect.top - hostRect.height - gap;
-          const belowTop = rect.bottom + gap;
-          const fitsAbove = aboveTop >= pad;
-          const top = fitsAbove ? aboveTop : belowTop;
+
+          const anchorRect = composerBox?.getBoundingClientRect() ?? rect;
+          const belowTop = anchorRect.bottom + gap;
+          const belowSpace = window.innerHeight - belowTop - pad;
+          const aboveSpace = anchorRect.top - gap - pad;
+          const fitsBelow = belowSpace >= hostRect.height;
+          const placeBelow = fitsBelow || belowSpace >= aboveSpace;
+          const maxHeight = Math.max(
+            88,
+            Math.min(placeBelow ? belowSpace : aboveSpace, 280),
+          );
+          const top = placeBelow
+            ? belowTop
+            : Math.max(
+                anchorRect.top - Math.min(hostRect.height, maxHeight) - gap,
+                pad,
+              );
+
+          host.style.setProperty(
+            "--agent-category-menu-max-height",
+            `${maxHeight}px`,
+          );
           host.style.bottom = "";
           host.style.top = `${Math.max(top, pad)}px`;
           host.style.left = `${left}px`;
@@ -272,16 +279,21 @@ function composerSlashCommandItems(
   query: string,
   skills: HermesSkillInfo[] | null | undefined,
 ): ComposerSlashCommandItem[] {
+  const categories = matchReportCategories(query).map((category) => ({
+    kind: "category" as const,
+    category,
+  }));
   return [
-    ...matchReportCategories(query).map((category) => ({
-      kind: "category" as const,
-      category,
-    })),
-    ...matchSkillSlashSuggestions(query, skills).map((skill) => ({
+    ...categories,
+    ...matchSkillSlashSuggestions(
+      query,
+      skills,
+      Math.max(SLASH_MENU_ITEM_LIMIT - categories.length, 0),
+    ).map((skill) => ({
       kind: "skill" as const,
       skill,
     })),
-  ];
+  ].slice(0, SLASH_MENU_ITEM_LIMIT);
 }
 
 function insertSkillSlashCommand(
