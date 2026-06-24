@@ -266,6 +266,26 @@ describe("NoteEditor", () => {
     expect(screen.getByText("Previous system transcript")).toBeInTheDocument();
   });
 
+  it("shows transcript progress before any transcript text exists", () => {
+    render(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          processingStatus: "transcribing",
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Transcribing audio...",
+    );
+    expect(
+      screen.getByRole("progressbar", { name: "Note processing progress" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No transcript is available yet.")).toBeNull();
+  });
+
   it("orders source transcript turns by persisted turn metadata", () => {
     const { container } = render(
       <NoteEditor

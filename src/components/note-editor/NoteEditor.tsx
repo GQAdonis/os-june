@@ -256,10 +256,8 @@ export function NoteEditor({
     );
     return () => window.clearTimeout(timer);
   }, [consentReminderVisible]);
-  const processingLock =
-    note.processingStatus === "transcribing" ||
-    note.processingStatus === "generating" ||
-    note.processingStatus === "validating";
+  const processingStatus = processingStageStatus(note.processingStatus);
+  const processingLock = processingStatus !== null;
   const recordButtonDisabled = recordingDisabled;
   const recordOptionsDisabled = processingLock || recordingDisabled;
   const showProcessingSkeleton =
@@ -271,8 +269,7 @@ export function NoteEditor({
   const shellState = recordingForNote?.state ?? "idle";
   const processingText = processingMessage(note.processingStatus);
   const transcriptText = transcriptToText(note, liveTranscriptTurns);
-  const showTranscriptProcessing =
-    processingLock && transcriptText.trim().length > 0;
+  const showTranscriptProcessing = processingStatus !== null;
   const showLivePreviewWaiting =
     recordingForNote?.livePreviewEnabled === true &&
     liveTranscriptTurns.length === 0;
@@ -362,15 +359,13 @@ export function NoteEditor({
               >
                 <DotSpinner className="transcript-processing-spinner" />
                 <span className="transcript-processing-label">
-                  {showLivePreviewWaiting
-                    ? "Listening for transcript preview..."
-                    : (processingText ?? "Processing audio...")}
+                  Listening for transcript preview...
                 </span>
               </div>
-            ) : showTranscriptProcessing ? (
+            ) : showTranscriptProcessing && processingStatus ? (
               <ProcessingProgressIndicator
                 className="transcript-processing-progress"
-                status={note.processingStatus}
+                status={processingStatus}
               />
             ) : null}
             {visibleTurns.length ? (
@@ -385,7 +380,7 @@ export function NoteEditor({
               </div>
             ) : note.transcript?.text ? (
               <p>{note.transcript.text}</p>
-            ) : (
+            ) : showTranscriptProcessing ? null : (
               <div className="transcript-empty">
                 <p>
                   {recordingActive
@@ -411,9 +406,9 @@ export function NoteEditor({
                   : "Hit record to capture a conversation, or just start typing your thoughts here"
               }
             />
-            {processingLock ? (
+            {processingStatus ? (
               <ProcessingProgressIndicator
-                status={note.processingStatus}
+                status={processingStatus}
                 queuedRecordings={queuedRecordings}
                 queuedTooltipId={queuedTooltipId}
               />
@@ -797,7 +792,7 @@ function ProcessingProgressIndicator({
   queuedTooltipId,
   className,
 }: {
-  status: NoteDto["processingStatus"];
+  status: ProcessingStageStatus;
   queuedRecordings?: number;
   queuedTooltipId?: string;
   className?: string;
@@ -867,6 +862,19 @@ function ProcessingProgressIndicator({
       </ol>
     </div>
   );
+}
+
+function processingStageStatus(
+  status: NoteDto["processingStatus"],
+): ProcessingStageStatus | null {
+  switch (status) {
+    case "validating":
+    case "transcribing":
+    case "generating":
+      return status;
+    default:
+      return null;
+  }
 }
 
 function processingMessage(status: NoteDto["processingStatus"]): string | null {
