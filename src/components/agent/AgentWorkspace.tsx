@@ -2285,7 +2285,11 @@ export function AgentWorkspace({
     let clearedDraft = false;
     let clearedAttachments = false;
     let clearedIssueReportReview:
-      | { sessionId: string; report: PendingIssueReport }
+      | {
+          sessionId: string;
+          report: PendingIssueReport;
+          deliveryWasSubmitting: boolean;
+        }
       | undefined;
     try {
       const prepared = await prepareComposerSubmission(message, attachments);
@@ -2330,6 +2334,9 @@ export function AgentWorkspace({
         clearedIssueReportReview = {
           sessionId: reportFollowUpSessionId,
           report: reportFollowUp,
+          deliveryWasSubmitting: submittingIssueReportSessionIdsRef.current.has(
+            reportFollowUpSessionId,
+          ),
         };
       }
       setIssueReportNotice(null);
@@ -2366,9 +2373,10 @@ export function AgentWorkspace({
       }
       if (
         clearedIssueReportReview &&
-        submittingIssueReportSessionIdsRef.current.has(
-          clearedIssueReportReview.sessionId,
-        )
+        (!clearedIssueReportReview.deliveryWasSubmitting ||
+          submittingIssueReportSessionIdsRef.current.has(
+            clearedIssueReportReview.sessionId,
+          ))
       ) {
         setReviewableIssueReport(
           clearedIssueReportReview.sessionId,
