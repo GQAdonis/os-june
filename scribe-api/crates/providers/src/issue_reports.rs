@@ -699,7 +699,18 @@ fn is_common_diagnosis_tail(line: &str) -> bool {
         return true;
     }
     let normalized = strip_heading_markup(trimmed).to_ascii_lowercase();
-    normalized.starts_with("what the team should look at") || normalized.starts_with("thank you")
+    normalized.starts_with("what the team should look at") || is_thank_you_closing(&normalized)
+}
+
+fn is_thank_you_closing(normalized: &str) -> bool {
+    let closing = normalized.trim_end_matches(['.', '!', ':']).trim();
+    matches!(closing, "thank you" | "thanks")
+        || closing.starts_with("thank you for reporting")
+        || closing.starts_with("thank you for sharing")
+        || closing.starts_with("thank you for the feedback")
+        || closing.starts_with("thank you for the request")
+        || closing.starts_with("thanks for reporting")
+        || closing.starts_with("thanks for sharing")
 }
 
 fn issue_body(report: &IssueReport) -> String {
@@ -890,6 +901,21 @@ mod issue_title_tests {
             issues[0].diagnosis,
             "Overall, the crash appears in the rendering thread.\nMore details follow."
         );
+    }
+
+    #[test]
+    fn diagnosis_splitter_keeps_thank_you_content_inside_issue_sections() {
+        let diagnosis = "Issue 1: Thank you page crash\nThank you page crashes after submit.\nThe stack trace points at onboarding.\n\nIssue 2: Button copy\nButton text is unclear.\nThank you";
+
+        let issues = split_agent_diagnosis(diagnosis);
+
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[0].title, "Thank you page crash");
+        assert_eq!(
+            issues[0].diagnosis,
+            "Thank you page crashes after submit.\nThe stack trace points at onboarding."
+        );
+        assert_eq!(issues[1].diagnosis, "Button text is unclear.");
     }
 
     #[test]
