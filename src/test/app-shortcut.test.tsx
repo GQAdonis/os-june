@@ -321,11 +321,15 @@ describe("App shortcuts", () => {
 
   it("closes the active tab from the native close-tab menu event", async () => {
     render(<App />);
+    const closeTabListenerCount = () =>
+      mocks.listen.mock.calls.filter(([event]) => event === CLOSE_TAB_EVENT)
+        .length;
 
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
     await waitFor(() =>
       expect(mocks.listeners.has(CLOSE_TAB_EVENT)).toBe(true),
     );
+    expect(closeTabListenerCount()).toBe(1);
     fireEvent.keyDown(window, { key: "n", metaKey: true, shiftKey: true });
     await waitFor(() =>
       expect(screen.getByRole("tab", { name: "New note" })).toHaveAttribute(
@@ -333,6 +337,7 @@ describe("App shortcuts", () => {
         "true",
       ),
     );
+    expect(closeTabListenerCount()).toBe(1);
 
     mocks.listeners.get(CLOSE_TAB_EVENT)?.({});
 
@@ -345,6 +350,7 @@ describe("App shortcuts", () => {
       "data-active",
       "true",
     );
+    expect(closeTabListenerCount()).toBe(1);
   });
 
   it("opens settings from the native app menu event", async () => {

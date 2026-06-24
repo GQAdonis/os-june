@@ -318,6 +318,8 @@ export function App() {
     { id: makeTabId(), nav: { view: isMacLikePlatform() ? "agent" : "notes" } },
   ]);
   const [activeTabId, setActiveTabId] = useState<string>(() => tabs[0]!.id);
+  const tabsRef = useRef(tabs);
+  const activeTabIdRef = useRef(activeTabId);
   // Set while restoring a tab's snapshot into live state: the capture effect
   // skips writes until live navigation settles onto the target (note loads are
   // async), so a half-applied snapshot never overwrites the tab it came from.
@@ -600,6 +602,14 @@ export function App() {
     );
   }, [liveNav, activeTabId]);
 
+  useEffect(() => {
+    tabsRef.current = tabs;
+  }, [tabs]);
+
+  useEffect(() => {
+    activeTabIdRef.current = activeTabId;
+  }, [activeTabId]);
+
   // Keep the latest selected note id reachable from applyNav without making it
   // a dependency (which would rebuild the callback on every note change).
   const selectedNoteIdRef = useRef(selectedNoteId);
@@ -666,6 +676,10 @@ export function App() {
     },
     [agentSessions],
   );
+  const applyNavRef = useRef(applyNav);
+  useEffect(() => {
+    applyNavRef.current = applyNav;
+  }, [applyNav]);
 
   function activateTab(id: string) {
     if (id === activeTabId) return;
@@ -722,28 +736,35 @@ export function App() {
 
   const closeTab = useCallback(
     (id: string) => {
-      if (tabs.length <= 1) {
+      const currentTabs = tabsRef.current;
+      const currentActiveTabId = activeTabIdRef.current;
+
+      if (currentTabs.length <= 1) {
         // Never leave the strip empty — reset the sole tab to a fresh chat.
         const fresh = { id: makeTabId(), nav: defaultNav() };
+        tabsRef.current = [fresh];
+        activeTabIdRef.current = fresh.id;
         setTabs([fresh]);
         setActiveTabId(fresh.id);
         armNewChatLive();
         return;
       }
-      const index = tabs.findIndex((tab) => tab.id === id);
+      const index = currentTabs.findIndex((tab) => tab.id === id);
       if (index < 0) return;
-      const next = tabs.filter((tab) => tab.id !== id);
+      const next = currentTabs.filter((tab) => tab.id !== id);
+      tabsRef.current = next;
       setTabs(next);
-      if (id === activeTabId) {
+      if (id === currentActiveTabId) {
         // Focus the right neighbor, falling back to the left — browser behavior.
         const neighbor = next[index] ?? next[index - 1];
         if (neighbor) {
+          activeTabIdRef.current = neighbor.id;
           setActiveTabId(neighbor.id);
-          applyNav(neighbor.nav);
+          applyNavRef.current(neighbor.nav);
         }
       }
     },
-    [activeTabId, applyNav, armNewChatLive, tabs],
+    [armNewChatLive],
   );
 
   // Keep only the given tab, focusing it. From the tab right-click menu.
@@ -785,7 +806,7 @@ export function App() {
   useEffect(() => {
     let aborted = false;
     let unlisten: (() => void) | undefined;
-    void listen(CLOSE_TAB_EVENT, () => closeTab(activeTabId)).then(
+    void listen(CLOSE_TAB_EVENT, () => closeTab(activeTabIdRef.current)).then(
       (cleanup) => {
         if (aborted) cleanup();
         else unlisten = cleanup;
@@ -795,7 +816,7 @@ export function App() {
       aborted = true;
       unlisten?.();
     };
-  }, [activeTabId, closeTab]);
+  }, [closeTab]);
 
   // Tab keyboard shortcuts: ⌘T new, ⌘W close, ⌘[ / ⌘] cycle, ⌘1-9 jump
   // (9 = last).
