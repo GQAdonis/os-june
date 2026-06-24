@@ -789,6 +789,8 @@ type IssueReportFollowUpSubmitFailedDetail = {
 
 let sessionContinuity: AgentSessionContinuity | null = null;
 const NEW_SESSION_DRAFT_KEY = "new-session";
+const REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY =
+  "scribe:agent:reviewable-issue-reports";
 const ISSUE_REPORT_DELIVERY_SETTLED_EVENT =
   "june-agent-issue-report-delivery-settled";
 const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
@@ -881,6 +883,82 @@ function captureSessionContinuity(state: {
   };
 }
 
+function persistedReviewableIssueReports(): Record<string, PendingIssueReport> {
+  try {
+    const raw = window.localStorage.getItem(
+      REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY,
+    );
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>)
+        .map(([sessionId, value]) => [sessionId, persistedIssueReport(value)])
+        .filter(
+          (entry): entry is [string, PendingIssueReport] =>
+            typeof entry[0] === "string" && entry[1] !== undefined,
+        ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistReviewableIssueReports(
+  reports: Record<string, PendingIssueReport>,
+) {
+  try {
+    const entries = Object.entries(reports);
+    if (entries.length === 0) {
+      window.localStorage.removeItem(REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    // Best-effort: app reload restore can fail without blocking the report flow.
+  }
+}
+
+function persistedIssueReport(value: unknown): PendingIssueReport | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value as Partial<PendingIssueReport>;
+  if (
+    !isReportCategory(candidate.category) ||
+    typeof candidate.description !== "string" ||
+    !Array.isArray(candidate.followUps) ||
+    !Array.isArray(candidate.attachmentNames) ||
+    !Array.isArray(candidate.attachmentPaths)
+  ) {
+    return undefined;
+  }
+  const followUps = candidate.followUps.filter(
+    (followUp): followUp is string => typeof followUp === "string",
+  );
+  const attachmentNames = candidate.attachmentNames.filter(
+    (name): name is string => typeof name === "string",
+  );
+  const attachmentPaths = candidate.attachmentPaths.filter(
+    (path): path is string => typeof path === "string",
+  );
+  return {
+    category: candidate.category,
+    description: candidate.description,
+    followUps,
+    attachmentNames,
+    attachmentPaths,
+    ...(typeof candidate.diagnosisStartedAt === "string"
+      ? { diagnosisStartedAt: candidate.diagnosisStartedAt }
+      : {}),
+  };
+}
+
 function updateContinuityAfterIssueReportDelivery(
   detail: IssueReportDeliverySettledDetail,
 ) {
@@ -902,6 +980,7 @@ function updateContinuityAfterIssueReportDelivery(
     reviewableIssueReports[detail.sessionId] =
       reviewableIssueReports[detail.sessionId] ?? detail.report;
   }
+  persistReviewableIssueReports(reviewableIssueReports);
   sessionContinuity = captureSessionContinuity({
     sessionItems: sessionContinuity.sessionItems,
     pendingMessages: sessionContinuity.pendingMessages,
@@ -935,6 +1014,7 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
   if (detail.restoreReport && !reviewableIssueReports[detail.sessionId]) {
     reviewableIssueReports[detail.sessionId] = detail.restoreReport;
   }
+  persistReviewableIssueReports(reviewableIssueReports);
   sessionContinuity = captureSessionContinuity({
     sessionItems: sessionContinuity.sessionItems,
     pendingMessages: sessionContinuity.pendingMessages,
@@ -1304,7 +1384,10 @@ export function AgentWorkspace({
   );
   const [reviewableIssueReports, setReviewableIssueReports] = useState<
     Record<string, PendingIssueReport>
-  >(() => continuity?.reviewableIssueReports ?? {});
+  >(() => ({
+    ...persistedReviewableIssueReports(),
+    ...(continuity?.reviewableIssueReports ?? {}),
+  }));
   const reviewableIssueReportsRef = useRef<Record<string, PendingIssueReport>>(
     reviewableIssueReports,
   );
@@ -1358,6 +1441,7 @@ export function AgentWorkspace({
       delete next[sessionId];
     }
     reviewableIssueReportsRef.current = next;
+    persistReviewableIssueReports(next);
     setReviewableIssueReports(next);
   }
 
@@ -3899,6 +3983,8 @@ export function AgentWorkspace({
       return next;
     });
     scrubHermesSessionState(sessionId);
+    pendingIssueReportsRef.current.delete(sessionId);
+    setReviewableIssueReport(sessionId, null);
     forgetComposerDraft(sessionComposerDraftKey(sessionId));
     // Every deletion funnels through here (the in-workspace delete and the
     // sidebar/sessions-list AGENT_DELETE_SESSION_EVENT), so this is the one
