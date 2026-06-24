@@ -99,14 +99,21 @@ export function routineUnrestricted(
 }
 
 /** The dashboard API lives on the bridge process, so make sure one is up
- * before calling. Cron jobs are actually fired by Hermes's launchd-managed
- * gateway, so routine operations also ensure that persistent gateway is
- * registered before touching the jobs API. */
+ * before calling. */
 async function withBridge<T>(run: () => Promise<T>): Promise<T> {
   const status = await hermesBridgeStatus();
   if (!status.running) await startHermesBridge();
-  await ensureHermesBridgeGateway();
   return run();
+}
+
+/** Cron jobs are fired by Hermes's launchd-managed gateway. Require it only
+ * for operations that create or enable future work; read and cleanup actions
+ * must still work when the gateway is unhealthy. */
+async function withScheduler<T>(run: () => Promise<T>): Promise<T> {
+  return withBridge(async () => {
+    await ensureHermesBridgeGateway();
+    return run();
+  });
 }
 
 function routineFromRecord(record: HermesCronJobRecord): RoutineJob {
@@ -156,7 +163,7 @@ export async function createRoutine(input: {
   name?: string;
   unrestricted?: boolean;
 }): Promise<RoutineJob> {
-  return withBridge(async () => {
+  return withScheduler(async () => {
     const created = await createHermesBridgeCronJob({
       prompt: input.prompt,
       schedule: input.schedule,
@@ -195,7 +202,8 @@ export async function updateRoutine(
     payload.script = null;
     payload.no_agent = false;
   }
-  const record = await withBridge(() =>
+  const run = updates.schedule !== undefined ? withScheduler : withBridge;
+  const record = await run(() =>
     updateHermesBridgeCronJob(jobId, payload),
   );
   return routineFromRecord(record);
@@ -206,14 +214,14 @@ export function pauseRoutine(jobId: string) {
 }
 
 export function resumeRoutine(jobId: string) {
-  return withBridge(() => hermesBridgeCronJobAction(jobId, "resume"));
+  return withScheduler(() => hermesBridgeCronJobAction(jobId, "resume"));
 }
 
 /** Queues an immediate run. The launchd-managed gateway picks the job up on
  * its next scheduler tick, so the run starts within about a minute — and
  * only if the gateway is running. */
 export function triggerRoutine(jobId: string) {
-  return withBridge(() => hermesBridgeCronJobAction(jobId, "trigger"));
+  return withScheduler(() => hermesBridgeCronJobAction(jobId, "trigger"));
 }
 
 export function removeRoutine(jobId: string) {

@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createRoutine,
   listRoutines,
+  pauseRoutine,
+  removeRoutine,
+  resumeRoutine,
   triggerRoutine,
+  updateRoutine,
 } from "../lib/hermes-routines";
 
 const mocks = vi.hoisted(() => ({
@@ -11,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   ensureHermesBridgeGateway: vi.fn(),
   hermesBridgeCronJobs: vi.fn(),
   createHermesBridgeCronJob: vi.fn(),
+  updateHermesBridgeCronJob: vi.fn(),
+  deleteHermesBridgeCronJob: vi.fn(),
   hermesBridgeCronJobAction: vi.fn(),
 }));
 
@@ -20,6 +26,8 @@ vi.mock("../lib/tauri", () => ({
   ensureHermesBridgeGateway: mocks.ensureHermesBridgeGateway,
   hermesBridgeCronJobs: mocks.hermesBridgeCronJobs,
   createHermesBridgeCronJob: mocks.createHermesBridgeCronJob,
+  updateHermesBridgeCronJob: mocks.updateHermesBridgeCronJob,
+  deleteHermesBridgeCronJob: mocks.deleteHermesBridgeCronJob,
   hermesBridgeCronJobAction: mocks.hermesBridgeCronJobAction,
 }));
 
@@ -36,18 +44,43 @@ beforeEach(() => {
     schedule_display: "0 9 * * *",
     enabled: true,
   });
+  mocks.updateHermesBridgeCronJob.mockResolvedValue({
+    id: "routine-1",
+    name: "Morning brief",
+    prompt: "Summarize today.",
+    schedule_display: "0 10 * * *",
+    enabled: true,
+  });
+  mocks.deleteHermesBridgeCronJob.mockResolvedValue({});
   mocks.hermesBridgeCronJobAction.mockResolvedValue({});
 });
 
 describe("Routines Hermes integration", () => {
-  it("ensures the persistent gateway before listing routine jobs", async () => {
+  it("lists routine jobs without requiring the persistent gateway", async () => {
+    mocks.ensureHermesBridgeGateway.mockRejectedValue(
+      new Error("gateway unavailable"),
+    );
+
     await listRoutines();
 
-    expect(mocks.ensureHermesBridgeGateway).toHaveBeenCalledTimes(1);
+    expect(mocks.ensureHermesBridgeGateway).not.toHaveBeenCalled();
     expect(mocks.hermesBridgeCronJobs).toHaveBeenCalledTimes(1);
-    expect(
-      mocks.ensureHermesBridgeGateway.mock.invocationCallOrder[0],
-    ).toBeLessThan(mocks.hermesBridgeCronJobs.mock.invocationCallOrder[0]);
+  });
+
+  it("allows cleanup actions when the persistent gateway cannot start", async () => {
+    mocks.ensureHermesBridgeGateway.mockRejectedValue(
+      new Error("gateway unavailable"),
+    );
+
+    await pauseRoutine("routine-1");
+    await removeRoutine("routine-1");
+
+    expect(mocks.ensureHermesBridgeGateway).not.toHaveBeenCalled();
+    expect(mocks.hermesBridgeCronJobAction).toHaveBeenCalledWith(
+      "routine-1",
+      "pause",
+    );
+    expect(mocks.deleteHermesBridgeCronJob).toHaveBeenCalledWith("routine-1");
   });
 
   it("starts a stopped bridge and gateway before creating a routine job", async () => {
@@ -76,6 +109,33 @@ describe("Routines Hermes integration", () => {
     ).toBeLessThan(
       mocks.createHermesBridgeCronJob.mock.invocationCallOrder[0],
     );
+  });
+
+  it("ensures the persistent gateway before resuming or rescheduling a routine", async () => {
+    await resumeRoutine("routine-1");
+    await updateRoutine("routine-1", { schedule: "0 10 * * *" });
+
+    expect(mocks.ensureHermesBridgeGateway).toHaveBeenCalledTimes(2);
+    expect(mocks.hermesBridgeCronJobAction).toHaveBeenCalledWith(
+      "routine-1",
+      "resume",
+    );
+    expect(mocks.updateHermesBridgeCronJob).toHaveBeenCalledWith("routine-1", {
+      schedule: "0 10 * * *",
+    });
+  });
+
+  it("updates non-scheduler fields without requiring the persistent gateway", async () => {
+    mocks.ensureHermesBridgeGateway.mockRejectedValue(
+      new Error("gateway unavailable"),
+    );
+
+    await updateRoutine("routine-1", { name: "Renamed" });
+
+    expect(mocks.ensureHermesBridgeGateway).not.toHaveBeenCalled();
+    expect(mocks.updateHermesBridgeCronJob).toHaveBeenCalledWith("routine-1", {
+      name: "Renamed",
+    });
   });
 
   it("does not queue a manual run when the persistent gateway cannot start", async () => {
