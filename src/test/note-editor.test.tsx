@@ -260,6 +260,9 @@ describe("NoteEditor", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       "Transcribing audio...",
     );
+    expect(
+      screen.getByRole("progressbar", { name: "Note processing progress" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Previous system transcript")).toBeInTheDocument();
   });
 
@@ -558,6 +561,9 @@ describe("NoteEditor", () => {
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent("Generating notes");
     expect(status).toHaveTextContent("+1");
+    expect(
+      screen.getByRole("progressbar", { name: "Note processing progress" }),
+    ).toBeInTheDocument();
   });
 
   it("starts recording immediately without a consent gate", async () => {

@@ -87,11 +87,25 @@ type RenderedTranscriptTurn = TranscriptDto & {
   stability?: LiveTranscriptEventDto["stability"];
 };
 
+type ProcessingStageStatus = Extract<
+  NoteDto["processingStatus"],
+  "validating" | "transcribing" | "generating"
+>;
+
 const SOURCE_FILTERS = [
   { value: "all", label: "All" },
   { value: "microphone", label: "Microphone" },
   { value: "system", label: "System" },
 ] as const;
+
+const PROCESSING_STAGES: {
+  status: ProcessingStageStatus;
+  label: string;
+}[] = [
+  { status: "validating", label: "Audio" },
+  { status: "transcribing", label: "Transcript" },
+  { status: "generating", label: "Summary" },
+];
 
 const RECORD_CONSENT_REVEAL_DELAY_MS = 420;
 const RECORD_CONSENT_AUTO_HIDE_MS = 5000;
@@ -340,7 +354,7 @@ export function NoteEditor({
                 />
               </div>
             ) : null}
-            {showTranscriptProcessing || showLivePreviewWaiting ? (
+            {showLivePreviewWaiting ? (
               <div
                 className="transcript-processing"
                 role="status"
@@ -353,6 +367,11 @@ export function NoteEditor({
                     : (processingText ?? "Processing audio...")}
                 </span>
               </div>
+            ) : showTranscriptProcessing ? (
+              <ProcessingProgressIndicator
+                className="transcript-processing-progress"
+                status={note.processingStatus}
+              />
             ) : null}
             {visibleTurns.length ? (
               <div className="source-transcripts">
@@ -393,31 +412,11 @@ export function NoteEditor({
               }
             />
             {processingLock ? (
-              <div className="note-generating" role="status" aria-live="polite">
-                <DotSpinner className="note-generating-spinner" />
-                <span className="note-generating-label">
-                  {note.processingStatus === "generating"
-                    ? "Generating notes…"
-                    : "Transcribing audio…"}
-                </span>
-                {queuedRecordings > 0 ? (
-                  <span
-                    className="note-generating-count"
-                    tabIndex={0}
-                    aria-describedby={queuedTooltipId}
-                  >
-                    +{queuedRecordings}
-                    <span
-                      className="note-generating-tip"
-                      id={queuedTooltipId}
-                      role="tooltip"
-                    >
-                      {queuedRecordings} more recording
-                      {queuedRecordings > 1 ? "s" : ""} queued
-                    </span>
-                  </span>
-                ) : null}
-              </div>
+              <ProcessingProgressIndicator
+                status={note.processingStatus}
+                queuedRecordings={queuedRecordings}
+                queuedTooltipId={queuedTooltipId}
+              />
             ) : null}
             {showProcessingSkeleton ? (
               <div className="note-skeleton" aria-hidden="true">
@@ -792,12 +791,92 @@ function FolderChip({
   );
 }
 
+function ProcessingProgressIndicator({
+  status,
+  queuedRecordings = 0,
+  queuedTooltipId,
+  className,
+}: {
+  status: NoteDto["processingStatus"];
+  queuedRecordings?: number;
+  queuedTooltipId?: string;
+  className?: string;
+}) {
+  const activeIndex = PROCESSING_STAGES.findIndex(
+    (stage) => stage.status === status,
+  );
+  const label = processingMessage(status) ?? "Processing audio...";
+  const classes = ["note-processing-progress", className]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <div
+      className={classes}
+      data-status={status}
+      role="status"
+      aria-live="polite"
+    >
+      <div className="note-processing-progress-head">
+        <DotSpinner className="note-processing-progress-spinner" />
+        <span className="note-processing-progress-label">{label}</span>
+        {queuedRecordings > 0 && queuedTooltipId ? (
+          <span
+            className="note-generating-count"
+            tabIndex={0}
+            aria-describedby={queuedTooltipId}
+          >
+            +{queuedRecordings}
+            <span
+              className="note-generating-tip"
+              id={queuedTooltipId}
+              role="tooltip"
+            >
+              {queuedRecordings} more recording
+              {queuedRecordings > 1 ? "s" : ""} queued
+            </span>
+          </span>
+        ) : null}
+      </div>
+      <div
+        className="note-processing-progress-track"
+        role="progressbar"
+        aria-label="Note processing progress"
+      />
+      <ol className="note-processing-progress-steps" aria-hidden="true">
+        {PROCESSING_STAGES.map((stage, index) => {
+          const state =
+            index < activeIndex
+              ? "done"
+              : index === activeIndex
+                ? "active"
+                : "pending";
+          return (
+            <li
+              key={stage.status}
+              className="note-processing-progress-step"
+              data-state={state}
+            >
+              <span className="note-processing-progress-dot" />
+              <span className="note-processing-progress-step-label">
+                {stage.label}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
 function processingMessage(status: NoteDto["processingStatus"]): string | null {
   switch (status) {
+    case "validating":
+      return "Preparing audio...";
     case "transcribing":
       return "Transcribing audio...";
     case "generating":
-      return "Generating note...";
+      return "Generating notes...";
     default:
       return null;
   }
