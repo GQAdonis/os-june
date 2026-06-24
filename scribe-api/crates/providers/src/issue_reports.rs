@@ -3,12 +3,12 @@ use scribe_config::IssueReportsConfig;
 use scribe_domain::{DomainError, IssueReport, IssueReportSink};
 use serde::Deserialize;
 
-/// Files issue reports as Issues in the os-platform tracker, tagged with the
-/// configured label (default `bug`). Uses only os-platform's stock API:
-/// attachments are uploaded first (best-effort — a failed upload never
-/// blocks the report; the names are listed in the body either way), the
-/// Issue is created with `type: bug`, and the label is attached afterwards
-/// via the labels PUT — creating the label in the Project the first time.
+/// Files user reports as Issues in the os-platform tracker. Uses only
+/// os-platform's stock API: attachments are uploaded first (best-effort — a
+/// failed upload never blocks the report; the names are listed in the body
+/// either way), the Issue is created with the report category mapped to an
+/// os-platform Issue type, and the configured label is attached afterwards
+/// via the labels PUT when it applies.
 /// Delivery to os-platform is best-effort: the sink retries without a Project
 /// destination and finally logs the report rather than surfacing delivery
 /// failures to the user.
@@ -63,6 +63,13 @@ struct ProjectIssueFailure<'a> {
     report: &'a IssueReport,
     file_ids: &'a [String],
     project_message: &'a str,
+}
+
+struct IssueCreateRequest<'a> {
+    url: String,
+    report: &'a IssueReport,
+    entry: &'a IssueCreateEntry,
+    file_ids: &'a [String],
 }
 
 impl IssueCreateDestination {
@@ -146,6 +153,7 @@ impl OsPlatformIssueReportSink {
 
     fn issue_create_body(
         &self,
+        report: &IssueReport,
         entry: &IssueCreateEntry,
         file_ids: &[String],
     ) -> serde_json::Value {
@@ -153,7 +161,7 @@ impl OsPlatformIssueReportSink {
             "title": entry.title,
             "body_markdown": entry.body_markdown,
             "reward_amount_units": "0",
-            "type": "bug",
+            "type": issue_type_for_report(report),
             "status": "todo",
             "file_ids": file_ids,
         });
@@ -165,14 +173,12 @@ impl OsPlatformIssueReportSink {
 
     async fn create_issue_at(
         &self,
-        url: String,
-        entry: &IssueCreateEntry,
-        file_ids: &[String],
+        request: IssueCreateRequest<'_>,
     ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
         self.http
-            .post(url)
+            .post(request.url)
             .bearer_auth(&self.api_key)
-            .json(&self.issue_create_body(entry, file_ids))
+            .json(&self.issue_create_body(request.report, request.entry, request.file_ids))
             .send()
             .await
             .map_err(|error| {
@@ -189,30 +195,34 @@ impl OsPlatformIssueReportSink {
 
     async fn create_project_issue(
         &self,
+        report: &IssueReport,
         entry: &IssueCreateEntry,
         file_ids: &[String],
     ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
-        self.create_issue_at(
-            format!(
+        self.create_issue_at(IssueCreateRequest {
+            url: format!(
                 "{}/v1/orgs/{}/projects/{}/bounties",
                 self.api_url, self.org, self.project
             ),
+            report,
             entry,
             file_ids,
-        )
+        })
         .await
     }
 
     async fn create_org_issue(
         &self,
+        report: &IssueReport,
         entry: &IssueCreateEntry,
         file_ids: &[String],
     ) -> Result<FellowEnvelope<FellowIssue>, DomainError> {
-        self.create_issue_at(
-            format!("{}/v1/orgs/{}/bounties", self.api_url, self.org),
+        self.create_issue_at(IssueCreateRequest {
+            url: format!("{}/v1/orgs/{}/bounties", self.api_url, self.org),
+            report,
             entry,
             file_ids,
-        )
+        })
         .await
     }
 
@@ -225,7 +235,10 @@ impl OsPlatformIssueReportSink {
         entry: &IssueCreateEntry,
         failure: ProjectIssueFailure<'_>,
     ) -> Option<(FellowEnvelope<FellowIssue>, IssueCreateDestination)> {
-        match self.create_org_issue(entry, failure.file_ids).await {
+        match self
+            .create_org_issue(failure.report, entry, failure.file_ids)
+            .await
+        {
             Ok(envelope) if envelope.success => {
                 Some((envelope, IssueCreateDestination::OrgFallback))
             }
@@ -251,7 +264,7 @@ impl OsPlatformIssueReportSink {
         report: &IssueReport,
         file_ids: &[String],
     ) -> Option<(FellowEnvelope<FellowIssue>, IssueCreateDestination)> {
-        match self.create_project_issue(entry, file_ids).await {
+        match self.create_project_issue(report, entry, file_ids).await {
             Ok(project_envelope) if project_envelope.success => {
                 Some((project_envelope, IssueCreateDestination::Project))
             }
@@ -346,12 +359,24 @@ impl OsPlatformIssueReportSink {
         }
     }
 
+    fn should_attach_configured_label(&self, report: &IssueReport) -> bool {
+        if self.label.is_empty() {
+            return false;
+        }
+        self.label != "bug" || issue_type_for_report(report) == "bug"
+    }
+
     /// Best-effort tagging after the Issue exists. First report into a
     /// Project: the label won't exist yet, so the missing-label rejection
-    /// creates it and retries once. Failure here never fails the delivery —
-    /// the Issue is already filed (and carries `type: bug` regardless).
-    async fn tag_issue(&self, number_in_org: i64, destination: IssueCreateDestination) {
-        if self.label.is_empty() {
+    /// creates it and retries once. Failure here never fails the delivery;
+    /// the Issue is already filed.
+    async fn tag_issue(
+        &self,
+        report: &IssueReport,
+        number_in_org: i64,
+        destination: IssueCreateDestination,
+    ) {
+        if !self.should_attach_configured_label(report) {
             return;
         }
         let attached = match self.put_label(number_in_org).await {
@@ -458,13 +483,15 @@ impl IssueReportSink for OsPlatformIssueReportSink {
             };
             let issue = envelope.data.as_ref();
             if let Some(issue) = issue {
-                self.tag_issue(issue.number_in_org, destination).await;
+                self.tag_issue(&report, issue.number_in_org, destination)
+                    .await;
             }
             tracing::info!(
                 issue = issue.map_or("", |issue| issue.external_id.as_str()),
                 user_id = %report.user_id.0,
                 attachments = file_ids.len(),
                 split_issues = entries.len(),
+                issue_type = issue_type_for_report(&report),
                 destination = destination.as_str(),
                 "issue_reports: report filed as an os-platform issue"
             );
@@ -479,6 +506,22 @@ fn is_missing_label(message: &str) -> bool {
 
 const ISSUE_TITLE_MAX_CHARS: usize = 120;
 const MAX_SPLIT_ISSUES: usize = 10;
+
+fn report_category(report: &IssueReport) -> Option<&str> {
+    report
+        .category
+        .as_deref()
+        .map(str::trim)
+        .filter(|category| !category.is_empty())
+}
+
+fn issue_type_for_report(report: &IssueReport) -> &'static str {
+    match report_category(report) {
+        Some("bug") | None => "bug",
+        Some("feature") => "feature",
+        Some(_) => "other",
+    }
+}
 
 /// Strips the report form's field labels so a line's *content* drives the
 /// title: "What happened: X" yields "X", and a bare label line yields ""
@@ -524,9 +567,7 @@ fn prefixed_issue_title(summary: &str) -> String {
 }
 
 fn issue_create_entries(report: &IssueReport) -> Vec<IssueCreateEntry> {
-    if report_allows_split(report)
-        && let Some(diagnosis) = report.agent_diagnosis.as_deref()
-    {
+    if let Some(diagnosis) = report.agent_diagnosis.as_deref() {
         let split_issues = split_agent_diagnosis(diagnosis);
         if split_issues.len() > 1 && split_issues.len() <= MAX_SPLIT_ISSUES {
             let total = split_issues.len();
@@ -545,15 +586,6 @@ fn issue_create_entries(report: &IssueReport) -> Vec<IssueCreateEntry> {
         title: issue_title(&report.description),
         body_markdown: issue_body(report),
     }]
-}
-
-fn report_allows_split(report: &IssueReport) -> bool {
-    report
-        .category
-        .as_deref()
-        .map(str::trim)
-        .filter(|category| !category.is_empty())
-        .is_none_or(|category| category == "bug")
 }
 
 fn split_agent_diagnosis(diagnosis: &str) -> Vec<SplitDiagnosisIssue> {
@@ -794,7 +826,7 @@ impl IssueReportSink for LogIssueReportSink {
 
 #[cfg(test)]
 mod issue_title_tests {
-    use super::{issue_create_entries, issue_title, split_agent_diagnosis};
+    use super::{issue_create_entries, issue_title, issue_type_for_report, split_agent_diagnosis};
     use scribe_domain::{IssueReport, UserId};
 
     #[test]
@@ -910,7 +942,7 @@ mod issue_title_tests {
     }
 
     #[test]
-    fn issue_entries_keep_non_bug_reports_single() {
+    fn issue_entries_split_non_bug_reports_with_category_metadata() {
         let report = IssueReport {
             user_id: UserId("usr_test".to_string()),
             category: Some("feature".to_string()),
@@ -928,18 +960,46 @@ mod issue_title_tests {
 
         let entries = issue_create_entries(&report);
 
-        assert_eq!(entries.len(), 1);
+        assert_eq!(entries.len(), 2);
         assert_eq!(
             entries[0].title,
-            "June report: Please add separate controls for routine models."
+            "June report: Clipped chat box in Routines"
         );
         assert!(
             entries[0]
                 .body_markdown
-                .contains("Issue 2: Model control in Routines chat")
+                .contains("Text overflow is clipped.")
+        );
+        assert!(!entries[0].body_markdown.contains("product question"));
+        assert_eq!(
+            entries[1].title,
+            "June report: Model control in Routines chat"
         );
         assert!(entries[0].body_markdown.contains("- Category: feature"));
-        assert!(!entries[0].body_markdown.contains("- Split issue:"));
+        assert!(entries[1].body_markdown.contains("- Split issue: 2 of 2"));
+    }
+
+    #[test]
+    fn issue_type_maps_report_categories_to_tracker_types() {
+        let mut report = IssueReport {
+            user_id: UserId("usr_test".to_string()),
+            category: None,
+            description: "The recorder freezes".to_string(),
+            agent_diagnosis: None,
+            attachment_names: vec![],
+            attachments: vec![],
+            session_id: None,
+            app_version: None,
+            platform: None,
+        };
+
+        assert_eq!(issue_type_for_report(&report), "bug");
+        report.category = Some("bug".to_string());
+        assert_eq!(issue_type_for_report(&report), "bug");
+        report.category = Some("feature".to_string());
+        assert_eq!(issue_type_for_report(&report), "feature");
+        report.category = Some("feedback".to_string());
+        assert_eq!(issue_type_for_report(&report), "other");
     }
 
     #[test]
@@ -1278,6 +1338,55 @@ mod os_platform_tests {
             .await;
 
         let mut report = report();
+        report.attachments.clear();
+        report.agent_diagnosis = Some(
+            "Issue 1: Clipped chat box in Routines\nText overflow is clipped.\n\nIssue 2: Model control in Routines chat\nThis is a product question."
+                .to_string(),
+        );
+
+        assert!(sink(&server).deliver(report).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn os_platform_sink_files_feature_split_diagnosis_as_feature_issues() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/projects/bug-reports/bounties"))
+            .and(body_partial_json(serde_json::json!({
+                "title": "June report: Clipped chat box in Routines",
+                "type": "feature",
+                "file_ids": [],
+            })))
+            .respond_with(issue_created_with(7))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/orgs/june/projects/bug-reports/bounties"))
+            .and(body_partial_json(serde_json::json!({
+                "title": "June report: Model control in Routines chat",
+                "type": "feature",
+                "file_ids": [],
+            })))
+            .respond_with(issue_created_with(8))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/orgs/june/bounties/7/labels"))
+            .respond_with(labels_set())
+            .expect(0)
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/v1/orgs/june/bounties/8/labels"))
+            .respond_with(labels_set())
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let mut report = report();
+        report.category = Some("feature".to_string());
         report.attachments.clear();
         report.agent_diagnosis = Some(
             "Issue 1: Clipped chat box in Routines\nText overflow is clipped.\n\nIssue 2: Model control in Routines chat\nThis is a product question."
