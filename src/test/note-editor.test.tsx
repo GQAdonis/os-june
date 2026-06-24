@@ -565,6 +565,23 @@ describe("NoteEditor", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows validating progress in the notes tab", () => {
+    render(
+      <NoteEditor
+        {...props}
+        note={note({
+          processingStatus: "validating",
+          activeTab: "notes",
+        })}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Preparing audio...");
+    expect(
+      screen.getByRole("progressbar", { name: "Note processing progress" }),
+    ).toHaveAttribute("aria-valuetext", "Audio stage in progress");
+  });
+
   it("shows a queued count when a follow-up recording is stacked", () => {
     render(
       <NoteEditor
