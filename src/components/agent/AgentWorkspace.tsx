@@ -662,6 +662,9 @@ type PendingIssueReport = {
   /** Workspace paths captured at submit, so the files can be uploaded with
    * the report even after the composer clears its attachment chips. */
   attachmentPaths: string[];
+  /** Existing sessions can have old assistant replies; only use diagnoses
+   * produced after this queued report turn started. */
+  diagnosisStartedAt?: string;
 };
 
 type AgentWorkspaceError = {
@@ -790,6 +793,7 @@ const ISSUE_REPORT_DELIVERY_SETTLED_EVENT =
   "june-agent-issue-report-delivery-settled";
 const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
   "june-agent-issue-report-follow-up-submit-failed";
+const ISSUE_REPORT_DIAGNOSIS_REFRESH_TIMEOUT_MS = 1500;
 const agentComposerDrafts = new Map<string, ComposerDraftSnapshot>();
 
 function sessionComposerDraftKey(sessionId: string) {
@@ -1001,6 +1005,21 @@ function appendIssueReportFollowUp(
     attachmentNames: [...report.attachmentNames, ...attachmentNames],
     attachmentPaths: [...report.attachmentPaths, ...attachmentPaths],
   };
+}
+
+function messageAfterIssueReportDiagnosisBoundary(
+  message: HermesSessionMessage,
+  report: PendingIssueReport,
+) {
+  if (!report.diagnosisStartedAt) return true;
+  if (message.timestamp === undefined) return false;
+  const messageTime =
+    typeof message.timestamp === "number"
+      ? message.timestamp
+      : Date.parse(message.timestamp);
+  const boundaryTime = Date.parse(report.diagnosisStartedAt);
+  if (!Number.isFinite(boundaryTime)) return true;
+  return Number.isFinite(messageTime) && messageTime >= boundaryTime;
 }
 
 /** Test hook: the snapshot is module state, so a test that unmounts with a
@@ -2782,6 +2801,9 @@ export function AgentWorkspace({
       agentDiagnosis = messages
         .slice()
         .reverse()
+        .filter((message) =>
+          messageAfterIssueReportDiagnosisBoundary(message, report),
+        )
         .map((message) =>
           message.role === "assistant" ? visibleHermesMessageText(message) : "",
         )
@@ -2822,7 +2844,11 @@ export function AgentWorkspace({
     setIssueReportSubmitting(sessionId, true);
     let result: IssueReportDeliveryResult | undefined;
     try {
-      await waitForIssueReportDiagnosisRefresh(sessionId);
+      await withTimeout(
+        waitForIssueReportDiagnosisRefresh(sessionId),
+        ISSUE_REPORT_DIAGNOSIS_REFRESH_TIMEOUT_MS,
+        "Issue report diagnosis refresh timed out.",
+      ).catch(() => undefined);
       result = await deliverIssueReport(sessionId, report);
       if (
         result.sent &&
@@ -2883,6 +2909,9 @@ export function AgentWorkspace({
       targetSessionId ?? created?.stored_session_id ?? created?.session_id;
     if (!storedSessionId) throw new Error("Hermes did not create a session.");
     const queuedIssueReport = options?.issueReport;
+    if (queuedIssueReport && targetSessionId) {
+      queuedIssueReport.diagnosisStartedAt = new Date().toISOString();
+    }
     const clearQueuedIssueReport = () => {
       if (
         queuedIssueReport &&

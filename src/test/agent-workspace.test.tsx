@@ -603,6 +603,130 @@ describe("AgentWorkspace", () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
   });
 
+  it("does not use an old assistant reply as an existing-session report diagnosis", async () => {
+    const user = userEvent.setup();
+    mocks.submitIssueReport.mockResolvedValue({ received: true });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m1",
+        role: "user",
+        content: "Earlier question",
+        timestamp: "2026-06-11T10:00:00Z",
+      },
+      {
+        id: "m2",
+        role: "assistant",
+        content: "Earlier unrelated diagnosis.",
+        timestamp: "2026-06-11T10:00:10Z",
+      },
+    ]);
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Attach files or tag this message",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Bug report" }),
+    );
+    expect(await screen.findByText("Bug report")).toBeInTheDocument();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "The recorder crashes from this existing chat",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("---USER REPORT---"),
+      }),
+    );
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({ type: "turn.completed", session_id: "runtime-session-1" });
+      }
+    });
+
+    expect(await screen.findByText(/Report ready/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Send report" }));
+
+    await waitFor(() =>
+      expect(mocks.submitIssueReport).toHaveBeenCalledWith({
+        category: "bug",
+        description: "The recorder crashes from this existing chat",
+        agentDiagnosis: undefined,
+        attachmentNames: [],
+        attachmentPaths: [],
+        sessionId: "session-1",
+      }),
+    );
+    await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+  });
+
+  it("sends a report when the diagnosis refresh stalls", async () => {
+    const user = userEvent.setup();
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
+    );
+    mocks.submitIssueReport.mockResolvedValue({ received: true });
+    let stalledRefreshStarted = false;
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Bug report")).toBeInTheDocument();
+    await user.type(
+      await screen.findByRole("textbox"),
+      "The recorder crashes after long meetings",
+    );
+    await user.click(screen.getByRole("button", { name: "Start session" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: expect.stringContaining("---USER REPORT---"),
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({ type: "turn.completed", session_id: "runtime-session-2" });
+      }
+    });
+
+    expect(await screen.findByText(/Report ready/)).toBeInTheDocument();
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m1",
+        role: "assistant",
+        content: "The recorder failed while saving.",
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockImplementationOnce(() => {
+      stalledRefreshStarted = true;
+      return new Promise(() => {});
+    });
+    await user.click(screen.getByRole("button", { name: "Send report" }));
+    expect(await screen.findByText("Sending")).toBeInTheDocument();
+    await waitFor(() => expect(stalledRefreshStarted).toBe(true));
+
+    await waitFor(
+      () =>
+        expect(mocks.submitIssueReport).toHaveBeenCalledWith({
+          category: "bug",
+          description: "The recorder crashes after long meetings",
+          agentDiagnosis: "The recorder failed while saving.",
+          attachmentNames: [],
+          attachmentPaths: [],
+          sessionId: "session-2",
+        }),
+      { timeout: 3000 },
+    );
+  });
+
   it("appends report follow-ups before filing", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem(
@@ -666,12 +790,13 @@ describe("AgentWorkspace", () => {
     });
 
     expect(await screen.findByText(/Follow-up added/)).toBeInTheDocument();
+    const followUpDiagnosisAt = new Date(Date.now() + 1000).toISOString();
     mocks.listHermesSessionMessages.mockResolvedValue([
       {
         id: "m1",
         role: "assistant",
         content: "The added note points to transcript persistence.",
-        timestamp: "2026-06-11T10:00:20Z",
+        timestamp: followUpDiagnosisAt,
       },
     ]);
     await user.click(screen.getByRole("button", { name: "Send report" }));
@@ -1048,6 +1173,14 @@ describe("AgentWorkspace", () => {
     });
 
     expect(await screen.findByText(/Follow-up added/)).toBeInTheDocument();
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m2",
+        role: "assistant",
+        content: "The follow-up points to dropped audio persistence.",
+        timestamp: new Date(Date.now() + 1000).toISOString(),
+      },
+    ]);
     await user.click(screen.getByRole("button", { name: "Send report" }));
 
     await waitFor(() =>
@@ -1055,7 +1188,7 @@ describe("AgentWorkspace", () => {
         category: "bug",
         description:
           "The recorder crashes after long meetings\n\nFollow-up comments:\n1. It also drops audio",
-        agentDiagnosis: "The recorder failed while saving.",
+        agentDiagnosis: "The follow-up points to dropped audio persistence.",
         attachmentNames: [],
         attachmentPaths: [],
         sessionId: "session-2",
@@ -1140,6 +1273,14 @@ describe("AgentWorkspace", () => {
     });
 
     expect(await screen.findByText(/Follow-up added/)).toBeInTheDocument();
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m2",
+        role: "assistant",
+        content: "The follow-up points to dropped audio persistence.",
+        timestamp: new Date(Date.now() + 1000).toISOString(),
+      },
+    ]);
     await user.click(screen.getByRole("button", { name: "Send report" }));
 
     await waitFor(() =>
@@ -1147,7 +1288,7 @@ describe("AgentWorkspace", () => {
         category: "bug",
         description:
           "The recorder crashes after long meetings\n\nFollow-up comments:\n1. It also drops audio",
-        agentDiagnosis: "The recorder failed while saving.",
+        agentDiagnosis: "The follow-up points to dropped audio persistence.",
         attachmentNames: [],
         attachmentPaths: [],
         sessionId: "session-2",
