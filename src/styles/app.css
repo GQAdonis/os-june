@@ -1331,6 +1331,10 @@ input:focus-visible,
   color: var(--warm-strong);
 }
 
+.agent-approval-card > div {
+  min-width: 0;
+}
+
 .agent-approval-card .agent-tool-title > span:first-child {
   color: var(--foreground);
   font-weight: 600;
@@ -1343,6 +1347,10 @@ input:focus-visible,
   font-size: var(--fs-sm);
   line-height: 1.45;
   white-space: pre-wrap;
+}
+
+.agent-approval-card p {
+  overflow-wrap: anywhere;
 }
 
 .agent-clarify-card {
@@ -1439,6 +1447,8 @@ input:focus-visible,
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   line-height: 1.45;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
