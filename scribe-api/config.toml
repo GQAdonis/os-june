@@ -25,6 +25,9 @@ os_platform_label = "bug"
 # Reward asset for the zero-reward Issue (required when the target Org has
 # no default reward asset configured).
 os_platform_reward_asset = "POINTS"
+# Cheap Venice model used to rewrite tracker Issue titles. Empty disables
+# model-generated titles and keeps deterministic first-line titles.
+title_model = "nvidia-nemotron-3-nano-30b-a3b"
 
 [os_accounts]
 # api_url has no default — must come from SCRIBE__OS_ACCOUNTS__API_URL

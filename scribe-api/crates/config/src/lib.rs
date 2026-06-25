@@ -70,6 +70,10 @@ pub struct IssueReportsConfig {
     /// sidesteps that. Empty omits the field and relies on the defaults.
     #[serde(default = "default_issue_report_reward_asset")]
     pub os_platform_reward_asset: String,
+    /// Cheap Venice text model used to summarize tracker Issue titles.
+    /// Empty disables model-generated titles and keeps deterministic titles.
+    #[serde(default = "default_issue_report_title_model")]
+    pub title_model: String,
 }
 
 fn default_issue_report_api_url() -> String {
@@ -92,6 +96,10 @@ fn default_issue_report_reward_asset() -> String {
     "POINTS".to_string()
 }
 
+fn default_issue_report_title_model() -> String {
+    "nvidia-nemotron-3-nano-30b-a3b".to_string()
+}
+
 impl Default for IssueReportsConfig {
     fn default() -> Self {
         Self {
@@ -101,6 +109,7 @@ impl Default for IssueReportsConfig {
             os_platform_project: default_issue_report_project(),
             os_platform_label: default_issue_report_label(),
             os_platform_reward_asset: default_issue_report_reward_asset(),
+            title_model: default_issue_report_title_model(),
         }
     }
 }
@@ -122,6 +131,7 @@ impl Debug for IssueReportsConfig {
             .field("os_platform_project", &self.os_platform_project)
             .field("os_platform_label", &self.os_platform_label)
             .field("os_platform_reward_asset", &self.os_platform_reward_asset)
+            .field("title_model", &self.title_model)
             .finish()
     }
 }
