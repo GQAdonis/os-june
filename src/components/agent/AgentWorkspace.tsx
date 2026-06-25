@@ -657,10 +657,14 @@ export type AgentNewSessionDetail = {
 type PendingIssueReport = {
   category: ReportCategory;
   description: string;
+  followUps: string[];
   attachmentNames: string[];
   /** Workspace paths captured at submit, so the files can be uploaded with
    * the report even after the composer clears its attachment chips. */
   attachmentPaths: string[];
+  /** Existing sessions can have old assistant replies; only use diagnoses
+   * produced after this queued report turn started. */
+  diagnosisStartedAt?: string;
 };
 
 type AgentWorkspaceError = {
@@ -743,7 +747,10 @@ type AgentWorkspaceProps = {
 // state that exists nowhere outside this component: the optimistic list entry
 // (title + preview), the just-sent user bubble Hermes hasn't persisted yet,
 // the working/waiting flags that drive the reconcile poll, the stored→runtime
-// session mapping, the buffered live events, and the title override.
+// session mapping, the buffered live events, the title override, and any
+// queued issue report draft, the review-ready report waiting for the user to
+// send, and the delayed diagnosis refresh that makes the final June answer
+// available to the report payload.
 // Navigating away (e.g. to Settings) unmounts the workspace; without this
 // snapshot the remount restores only the selected id from localStorage, and a
 // session whose first turn hasn't persisted renders as an empty "Untitled
@@ -758,10 +765,38 @@ type AgentSessionContinuity = {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  pendingIssueReports: Record<string, PendingIssueReport>;
+  reviewableIssueReports: Record<string, PendingIssueReport>;
+  diagnosisRefreshIssueReportSessionIds: string[];
+  submittingIssueReportSessionIds: string[];
+};
+
+type IssueReportDeliveryResult =
+  | { sent: true }
+  | { sent: false; errorMessage: string };
+
+type IssueReportDeliverySettledDetail = {
+  sessionId: string;
+  report: PendingIssueReport;
+  result: IssueReportDeliveryResult;
+};
+
+type IssueReportFollowUpSubmitFailedDetail = {
+  sessionId: string;
+  queuedReport: PendingIssueReport;
+  restoreReport?: PendingIssueReport;
 };
 
 let sessionContinuity: AgentSessionContinuity | null = null;
 const NEW_SESSION_DRAFT_KEY = "new-session";
+const REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY =
+  "scribe:agent:reviewable-issue-reports";
+const ISSUE_REPORT_DELIVERY_SETTLED_EVENT =
+  "june-agent-issue-report-delivery-settled";
+const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
+  "june-agent-issue-report-follow-up-submit-failed";
+const ISSUE_REPORT_DIAGNOSIS_REFRESH_TIMEOUT_MS = 1500;
+const ISSUE_REPORT_DIAGNOSIS_BOUNDARY_SKEW_MS = 1500;
 const agentComposerDrafts = new Map<string, ComposerDraftSnapshot>();
 
 function sessionComposerDraftKey(sessionId: string) {
@@ -798,6 +833,10 @@ function captureSessionContinuity(state: {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  pendingIssueReports: Record<string, PendingIssueReport>;
+  reviewableIssueReports: Record<string, PendingIssueReport>;
+  diagnosisRefreshIssueReportSessionIds: Set<string>;
+  submittingIssueReportSessionIds: Set<string>;
 }): AgentSessionContinuity | null {
   const activeIds = new Set([
     ...state.workingSessionIds,
@@ -805,6 +844,18 @@ function captureSessionContinuity(state: {
   ]);
   for (const [sessionId, pending] of Object.entries(state.pendingMessages)) {
     if (pending.length > 0) activeIds.add(sessionId);
+  }
+  for (const sessionId of Object.keys(state.reviewableIssueReports)) {
+    activeIds.add(sessionId);
+  }
+  for (const sessionId of Object.keys(state.pendingIssueReports)) {
+    activeIds.add(sessionId);
+  }
+  for (const sessionId of state.diagnosisRefreshIssueReportSessionIds) {
+    activeIds.add(sessionId);
+  }
+  for (const sessionId of state.submittingIssueReportSessionIds) {
+    activeIds.add(sessionId);
   }
   if (activeIds.size === 0) return null;
   const pick = <T,>(record: Record<string, T>) =>
@@ -821,7 +872,234 @@ function captureSessionContinuity(state: {
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
+    pendingIssueReports: pick(state.pendingIssueReports),
+    reviewableIssueReports: pick(state.reviewableIssueReports),
+    diagnosisRefreshIssueReportSessionIds: [
+      ...state.diagnosisRefreshIssueReportSessionIds,
+    ].filter((sessionId) => activeIds.has(sessionId)),
+    submittingIssueReportSessionIds: [
+      ...state.submittingIssueReportSessionIds,
+    ].filter((sessionId) => activeIds.has(sessionId)),
   };
+}
+
+function persistedReviewableIssueReports(): Record<string, PendingIssueReport> {
+  try {
+    const raw = window.localStorage.getItem(
+      REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY,
+    );
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>)
+        .map(([sessionId, value]) => [sessionId, persistedIssueReport(value)])
+        .filter(
+          (entry): entry is [string, PendingIssueReport] =>
+            typeof entry[0] === "string" && entry[1] !== undefined,
+        ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistReviewableIssueReports(
+  reports: Record<string, PendingIssueReport>,
+) {
+  try {
+    const entries = Object.entries(reports);
+    if (entries.length === 0) {
+      window.localStorage.removeItem(REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    // Best-effort: app reload restore can fail without blocking the report flow.
+  }
+}
+
+function persistedIssueReport(value: unknown): PendingIssueReport | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value as Partial<PendingIssueReport>;
+  if (
+    !isReportCategory(candidate.category) ||
+    typeof candidate.description !== "string" ||
+    !Array.isArray(candidate.followUps) ||
+    !Array.isArray(candidate.attachmentNames) ||
+    !Array.isArray(candidate.attachmentPaths)
+  ) {
+    return undefined;
+  }
+  const followUps = candidate.followUps.filter(
+    (followUp): followUp is string => typeof followUp === "string",
+  );
+  const attachmentNames = candidate.attachmentNames.filter(
+    (name): name is string => typeof name === "string",
+  );
+  const attachmentPaths = candidate.attachmentPaths.filter(
+    (path): path is string => typeof path === "string",
+  );
+  return {
+    category: candidate.category,
+    description: candidate.description,
+    followUps,
+    attachmentNames,
+    attachmentPaths,
+    ...(typeof candidate.diagnosisStartedAt === "string"
+      ? { diagnosisStartedAt: candidate.diagnosisStartedAt }
+      : {}),
+  };
+}
+
+function updateContinuityAfterIssueReportDelivery(
+  detail: IssueReportDeliverySettledDetail,
+) {
+  if (!sessionContinuity) return;
+  const reviewableIssueReports = {
+    ...sessionContinuity.reviewableIssueReports,
+  };
+  const pendingIssueReports = { ...sessionContinuity.pendingIssueReports };
+  const diagnosisRefreshIssueReportSessionIds = new Set(
+    sessionContinuity.diagnosisRefreshIssueReportSessionIds,
+  );
+  if (
+    detail.result.sent &&
+    reviewableIssueReports[detail.sessionId] === detail.report
+  ) {
+    delete reviewableIssueReports[detail.sessionId];
+    diagnosisRefreshIssueReportSessionIds.delete(detail.sessionId);
+  } else if (!detail.result.sent && !pendingIssueReports[detail.sessionId]) {
+    reviewableIssueReports[detail.sessionId] =
+      reviewableIssueReports[detail.sessionId] ?? detail.report;
+  }
+  persistReviewableIssueReports(reviewableIssueReports);
+  sessionContinuity = captureSessionContinuity({
+    sessionItems: sessionContinuity.sessionItems,
+    pendingMessages: sessionContinuity.pendingMessages,
+    workingSessionIds: new Set(sessionContinuity.workingSessionIds),
+    waitingSessionIds: new Set(sessionContinuity.waitingSessionIds),
+    runtimeSessionIds: sessionContinuity.runtimeSessionIds,
+    liveEvents: sessionContinuity.liveEvents,
+    titleOverrides: sessionContinuity.titleOverrides,
+    pendingIssueReports,
+    reviewableIssueReports,
+    diagnosisRefreshIssueReportSessionIds,
+    submittingIssueReportSessionIds: new Set(
+      sessionContinuity.submittingIssueReportSessionIds.filter(
+        (sessionId) => sessionId !== detail.sessionId,
+      ),
+    ),
+  });
+}
+
+function updateContinuityAfterIssueReportFollowUpSubmitFailed(
+  detail: IssueReportFollowUpSubmitFailedDetail,
+) {
+  if (!sessionContinuity) return;
+  const pendingIssueReports = { ...sessionContinuity.pendingIssueReports };
+  if (pendingIssueReports[detail.sessionId] === detail.queuedReport) {
+    delete pendingIssueReports[detail.sessionId];
+  }
+  const reviewableIssueReports = {
+    ...sessionContinuity.reviewableIssueReports,
+  };
+  if (detail.restoreReport && !reviewableIssueReports[detail.sessionId]) {
+    reviewableIssueReports[detail.sessionId] = detail.restoreReport;
+  }
+  persistReviewableIssueReports(reviewableIssueReports);
+  sessionContinuity = captureSessionContinuity({
+    sessionItems: sessionContinuity.sessionItems,
+    pendingMessages: sessionContinuity.pendingMessages,
+    workingSessionIds: new Set(sessionContinuity.workingSessionIds),
+    waitingSessionIds: new Set(sessionContinuity.waitingSessionIds),
+    runtimeSessionIds: sessionContinuity.runtimeSessionIds,
+    liveEvents: sessionContinuity.liveEvents,
+    titleOverrides: sessionContinuity.titleOverrides,
+    pendingIssueReports,
+    reviewableIssueReports,
+    diagnosisRefreshIssueReportSessionIds: new Set(
+      sessionContinuity.diagnosisRefreshIssueReportSessionIds,
+    ),
+    submittingIssueReportSessionIds: new Set(
+      sessionContinuity.submittingIssueReportSessionIds,
+    ),
+  });
+}
+
+function dispatchIssueReportDeliverySettled(
+  detail: IssueReportDeliverySettledDetail,
+) {
+  updateContinuityAfterIssueReportDelivery(detail);
+  window.dispatchEvent(
+    new CustomEvent<IssueReportDeliverySettledDetail>(
+      ISSUE_REPORT_DELIVERY_SETTLED_EVENT,
+      { detail },
+    ),
+  );
+}
+
+function dispatchIssueReportFollowUpSubmitFailed(
+  detail: IssueReportFollowUpSubmitFailedDetail,
+) {
+  updateContinuityAfterIssueReportFollowUpSubmitFailed(detail);
+  window.dispatchEvent(
+    new CustomEvent<IssueReportFollowUpSubmitFailedDetail>(
+      ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT,
+      { detail },
+    ),
+  );
+}
+
+function issueReportDescription(report: PendingIssueReport) {
+  const followUps = report.followUps
+    .map((followUp) => followUp.trim())
+    .filter(Boolean);
+  if (followUps.length === 0) return report.description;
+  return [
+    report.description,
+    "",
+    "Follow-up comments:",
+    ...followUps.map((followUp, index) => `${index + 1}. ${followUp}`),
+  ].join("\n");
+}
+
+function appendIssueReportFollowUp(
+  report: PendingIssueReport,
+  followUp: string,
+  attachmentNames: string[],
+  attachmentPaths: string[],
+): PendingIssueReport {
+  return {
+    ...report,
+    followUps: [
+      ...report.followUps,
+      followUp.trim() || "No follow-up text was typed; see the attachments.",
+    ],
+    attachmentNames: [...report.attachmentNames, ...attachmentNames],
+    attachmentPaths: [...report.attachmentPaths, ...attachmentPaths],
+  };
+}
+
+function messageAfterIssueReportDiagnosisBoundary(
+  message: HermesSessionMessage,
+  report: PendingIssueReport,
+) {
+  if (!report.diagnosisStartedAt) return true;
+  const messageTime = hermesMessageTimestampMs(message);
+  const boundaryTime = Date.parse(report.diagnosisStartedAt);
+  if (!Number.isFinite(boundaryTime)) return true;
+  return (
+    messageTime !== undefined &&
+    messageTime >= boundaryTime - ISSUE_REPORT_DIAGNOSIS_BOUNDARY_SKEW_MS
+  );
 }
 
 /** Test hook: the snapshot is module state, so a test that unmounts with a
@@ -942,6 +1220,11 @@ export function AgentWorkspace({
     },
     [],
   );
+  const clearErrorForSession = useCallback((sessionId: string) => {
+    setErrorState((current) =>
+      current?.sessionId === sessionId ? null : current,
+    );
+  }, []);
   const [heroGreeting, setHeroGreeting] = useState(advanceHeroGreeting);
   const heroGreetingConsumedRef = useRef(false);
   const [heroDeck, setHeroDeck] = useState(shuffleAgentShortcuts);
@@ -1091,10 +1374,42 @@ export function AgentWorkspace({
   // the fetch *started*) — the scroll-settling logic needs the landing.
   const taskHistoryLoadedIdsRef = useRef<Set<string>>(new Set());
   const newSessionModeRef = useRef(newSessionMode);
-  // sessionId -> the report captured at submit time, delivered to the June
-  // team once the agent's diagnostic turn reaches a terminal event.
+  // sessionId -> the report captured for the active report turn. Once June's
+  // diagnostic turn finishes, it moves to reviewableIssueReports so the user
+  // can add context or send it.
   const pendingIssueReportsRef = useRef<Map<string, PendingIssueReport>>(
+    new Map(Object.entries(continuity?.pendingIssueReports ?? {})),
+  );
+  const [reviewableIssueReports, setReviewableIssueReports] = useState<
+    Record<string, PendingIssueReport>
+  >(() => ({
+    ...persistedReviewableIssueReports(),
+    ...(continuity?.reviewableIssueReports ?? {}),
+  }));
+  const reviewableIssueReportsRef = useRef<Record<string, PendingIssueReport>>(
+    reviewableIssueReports,
+  );
+  const [
+    diagnosisRefreshIssueReportSessionIds,
+    setDiagnosisRefreshIssueReportSessionIds,
+  ] = useState<Set<string>>(
+    () => new Set(continuity?.diagnosisRefreshIssueReportSessionIds ?? []),
+  );
+  const diagnosisRefreshIssueReportSessionIdsRef = useRef<Set<string>>(
+    diagnosisRefreshIssueReportSessionIds,
+  );
+  const issueReportDiagnosisRefreshesRef = useRef<Map<string, Promise<void>>>(
     new Map(),
+  );
+  const deferredFailedIssueReportDeliverySessionIdsRef = useRef<Set<string>>(
+    new Set(),
+  );
+  const [submittingIssueReportSessionIds, setSubmittingIssueReportSessionIds] =
+    useState<Set<string>>(
+      () => new Set(continuity?.submittingIssueReportSessionIds ?? []),
+    );
+  const submittingIssueReportSessionIdsRef = useRef<Set<string>>(
+    submittingIssueReportSessionIds,
   );
   // True only while a brand-new thread is being started from the hero. The
   // hero→dock composer FLIP keys off this so it glides *only* when the empty
@@ -1112,6 +1427,162 @@ export function AgentWorkspace({
   // A category to seed into the composer chip once the editor is ready, set by
   // startNewTask for the sidebar/settings report entry points.
   const pendingSeedCategoryRef = useRef<ReportCategory | null>(null);
+
+  function setReviewableIssueReport(
+    sessionId: string,
+    report: PendingIssueReport | null,
+  ) {
+    const next = { ...reviewableIssueReportsRef.current };
+    if (report) {
+      next[sessionId] = report;
+    } else {
+      delete next[sessionId];
+    }
+    reviewableIssueReportsRef.current = next;
+    persistReviewableIssueReports(next);
+    setReviewableIssueReports(next);
+  }
+
+  function setIssueReportDiagnosisRefreshing(
+    sessionId: string,
+    refreshing: boolean,
+  ) {
+    const next = new Set(diagnosisRefreshIssueReportSessionIdsRef.current);
+    if (refreshing) {
+      next.add(sessionId);
+    } else {
+      next.delete(sessionId);
+    }
+    diagnosisRefreshIssueReportSessionIdsRef.current = next;
+    setDiagnosisRefreshIssueReportSessionIds(next);
+  }
+
+  function queueIssueReportDiagnosisRefresh(sessionId: string, delayMs = 300) {
+    setIssueReportDiagnosisRefreshing(sessionId, true);
+    let refresh: Promise<void>;
+    refresh = new Promise<void>((resolve) => {
+      window.setTimeout(() => {
+        void refreshHermesSession(sessionId).finally(resolve);
+      }, delayMs);
+    }).finally(() => {
+      if (issueReportDiagnosisRefreshesRef.current.get(sessionId) === refresh) {
+        issueReportDiagnosisRefreshesRef.current.delete(sessionId);
+        setIssueReportDiagnosisRefreshing(sessionId, false);
+      }
+    });
+    issueReportDiagnosisRefreshesRef.current.set(sessionId, refresh);
+    return refresh;
+  }
+
+  function waitForIssueReportDiagnosisRefresh(sessionId: string) {
+    if (!diagnosisRefreshIssueReportSessionIdsRef.current.has(sessionId)) {
+      return Promise.resolve();
+    }
+    return (
+      issueReportDiagnosisRefreshesRef.current.get(sessionId) ??
+      queueIssueReportDiagnosisRefresh(sessionId)
+    );
+  }
+
+  function promotePendingIssueReportToReview(
+    sessionId: string,
+    options: { queueDiagnosisRefresh: boolean },
+  ) {
+    const issueReport = pendingIssueReportsRef.current.get(sessionId);
+    if (!issueReport) return false;
+    pendingIssueReportsRef.current.delete(sessionId);
+    deferredFailedIssueReportDeliverySessionIdsRef.current.delete(sessionId);
+    setReviewableIssueReport(sessionId, issueReport);
+    if (options.queueDiagnosisRefresh) {
+      queueIssueReportDiagnosisRefresh(sessionId);
+    } else {
+      setIssueReportDiagnosisRefreshing(sessionId, false);
+    }
+    return true;
+  }
+
+  function setIssueReportSubmitting(sessionId: string, submitting: boolean) {
+    const next = new Set(submittingIssueReportSessionIdsRef.current);
+    if (submitting) {
+      next.add(sessionId);
+    } else {
+      next.delete(sessionId);
+    }
+    submittingIssueReportSessionIdsRef.current = next;
+    setSubmittingIssueReportSessionIds(next);
+  }
+
+  useEffect(() => {
+    function onIssueReportDeliverySettled(event: Event) {
+      const detail = (event as CustomEvent<IssueReportDeliverySettledDetail>)
+        .detail;
+      if (!detail?.sessionId) return;
+      setIssueReportSubmitting(detail.sessionId, false);
+      if (detail.result.sent) {
+        deferredFailedIssueReportDeliverySessionIdsRef.current.delete(
+          detail.sessionId,
+        );
+        if (
+          reviewableIssueReportsRef.current[detail.sessionId] === detail.report
+        ) {
+          setReviewableIssueReport(detail.sessionId, null);
+        }
+        return;
+      }
+      if (pendingIssueReportsRef.current.has(detail.sessionId)) {
+        deferredFailedIssueReportDeliverySessionIdsRef.current.add(
+          detail.sessionId,
+        );
+      } else if (!reviewableIssueReportsRef.current[detail.sessionId]) {
+        setReviewableIssueReport(detail.sessionId, detail.report);
+      }
+      setError(detail.result.errorMessage, { sessionId: detail.sessionId });
+    }
+
+    function onIssueReportFollowUpSubmitFailed(event: Event) {
+      const detail = (
+        event as CustomEvent<IssueReportFollowUpSubmitFailedDetail>
+      ).detail;
+      if (!detail?.sessionId) return;
+      if (
+        pendingIssueReportsRef.current.get(detail.sessionId) ===
+        detail.queuedReport
+      ) {
+        pendingIssueReportsRef.current.delete(detail.sessionId);
+      }
+      if (
+        detail.restoreReport &&
+        !reviewableIssueReportsRef.current[detail.sessionId]
+      ) {
+        setReviewableIssueReport(detail.sessionId, detail.restoreReport);
+      }
+    }
+
+    window.addEventListener(
+      ISSUE_REPORT_DELIVERY_SETTLED_EVENT,
+      onIssueReportDeliverySettled,
+    );
+    window.addEventListener(
+      ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT,
+      onIssueReportFollowUpSubmitFailed,
+    );
+    return () => {
+      window.removeEventListener(
+        ISSUE_REPORT_DELIVERY_SETTLED_EVENT,
+        onIssueReportDeliverySettled,
+      );
+      window.removeEventListener(
+        ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT,
+        onIssueReportFollowUpSubmitFailed,
+      );
+    };
+  }, [setError]);
+
+  useEffect(() => {
+    for (const sessionId of diagnosisRefreshIssueReportSessionIdsRef.current) {
+      queueIssueReportDiagnosisRefresh(sessionId);
+    }
+  }, []);
 
   useEffect(() => {
     runtimeSessionIdsRef.current = runtimeSessionIds;
@@ -1311,6 +1782,25 @@ export function AgentWorkspace({
     issueReportNotice && issueReportNotice.sessionId === selectedHermesSessionId
       ? issueReportNotice.message
       : null;
+  const selectedIssueReportReview = selectedHermesSessionId
+    ? reviewableIssueReports[selectedHermesSessionId]
+    : undefined;
+  const visibleIssueReportReview =
+    selectedHermesSessionId && selectedIssueReportReview
+      ? {
+          report: selectedIssueReportReview,
+          sessionId: selectedHermesSessionId,
+          submitting: submittingIssueReportSessionIds.has(
+            selectedHermesSessionId,
+          ),
+        }
+      : undefined;
+  const visibleIssueReportHasUnsentContext = Boolean(
+    visibleIssueReportReview && (draft.trim() || attachments.length),
+  );
+  const visibleIssueReportImportingFiles = Boolean(
+    visibleIssueReportReview && importingFiles,
+  );
   // Holds the prior render's heroMode. Read by both the composer auto-grow
   // effect (to skip its glide across a hero transition) and the hero→dock FLIP
   // below (to detect the hero handoff); the FLIP effect, which runs last, is
@@ -1858,6 +2348,9 @@ export function AgentWorkspace({
           setSessionWorking(selectedHermesSessionId, true);
         }
         if (sessionHasAssistantAfterLatestUser(combined)) {
+          promotePendingIssueReportToReview(selectedHermesSessionId, {
+            queueDiagnosisRefresh: false,
+          });
           const wasActive = sessionHasActiveWork(
             selectedHermesSessionId,
             workingSessionIdsRef.current,
@@ -1955,6 +2448,12 @@ export function AgentWorkspace({
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
+        pendingIssueReports: Object.fromEntries(pendingIssueReportsRef.current),
+        reviewableIssueReports: reviewableIssueReportsRef.current,
+        diagnosisRefreshIssueReportSessionIds:
+          diagnosisRefreshIssueReportSessionIdsRef.current,
+        submittingIssueReportSessionIds:
+          submittingIssueReportSessionIdsRef.current,
       });
       for (const gateway of gatewaysRef.current.values()) {
         gateway.close();
@@ -2149,6 +2648,13 @@ export function AgentWorkspace({
     // frame it for the team and queue the delivery. Captured before the
     // composer clears so a failed send can restore the chip on retry.
     const reportCategory = category;
+    const reportFollowUpSessionId =
+      !reportCategory && !newSessionModeRef.current && selectedHermesSessionId
+        ? selectedHermesSessionId
+        : null;
+    const reportFollowUp = reportFollowUpSessionId
+      ? reviewableIssueReportsRef.current[reportFollowUpSessionId]
+      : undefined;
     const submittedDraftKey = composerDraftKeyRef.current;
     // A typed hero submit plays the same teardown as a run shortcut: greeting
     // up, suggestions down during the session-create latency. Without it they
@@ -2158,8 +2664,36 @@ export function AgentWorkspace({
     setSubmitting(true);
     let clearedDraft = false;
     let clearedAttachments = false;
+    let clearedIssueReportReview:
+      | {
+          sessionId: string;
+          report: PendingIssueReport;
+          queuedReport?: PendingIssueReport;
+          deliveryWasSubmitting: boolean;
+        }
+      | undefined;
     try {
       const prepared = await prepareComposerSubmission(message, attachments);
+      const nextIssueReport: PendingIssueReport | undefined = reportCategory
+        ? {
+            category: reportCategory,
+            // An attachments-only send has no typed text, but the server
+            // requires a description; the report must not bounce there.
+            description:
+              prepared.typedMessage ||
+              "No description was typed; see the attachments.",
+            followUps: [],
+            attachmentNames: attachments.map((attachment) => attachment.name),
+            attachmentPaths: attachments.map((attachment) => attachment.path),
+          }
+        : reportFollowUp
+          ? appendIssueReportFollowUp(
+              reportFollowUp,
+              prepared.typedMessage,
+              attachments.map((attachment) => attachment.name),
+              attachments.map((attachment) => attachment.path),
+            )
+          : undefined;
       if (
         draftRef.current.trim() === message &&
         categoryRef.current === reportCategory
@@ -2176,6 +2710,17 @@ export function AgentWorkspace({
         setComposerAttachments([]);
         clearedAttachments = true;
       }
+      if (reportFollowUpSessionId && reportFollowUp) {
+        setReviewableIssueReport(reportFollowUpSessionId, null);
+        clearedIssueReportReview = {
+          sessionId: reportFollowUpSessionId,
+          report: reportFollowUp,
+          queuedReport: nextIssueReport,
+          deliveryWasSubmitting: submittingIssueReportSessionIdsRef.current.has(
+            reportFollowUpSessionId,
+          ),
+        };
+      }
       setIssueReportNotice(null);
       await submitHermesSession(
         reportCategory
@@ -2185,26 +2730,14 @@ export function AgentWorkspace({
         {
           displayContent: prepared.displayContent,
           titleContent: prepared.titleContent,
-          ...(reportCategory
-            ? {
-                issueReport: {
-                  category: reportCategory,
-                  // An attachments-only send has no typed text, but the server
-                  // requires a description; the report must not bounce there.
-                  description:
-                    prepared.typedMessage ||
-                    "No description was typed; see the attachments.",
-                  attachmentNames: attachments.map(
-                    (attachment) => attachment.name,
-                  ),
-                  attachmentPaths: attachments.map(
-                    (attachment) => attachment.path,
-                  ),
-                },
-              }
-            : {}),
+          ...(nextIssueReport ? { issueReport: nextIssueReport } : {}),
         },
       );
+      if (reportFollowUpSessionId) {
+        deferredFailedIssueReportDeliverySessionIdsRef.current.delete(
+          reportFollowUpSessionId,
+        );
+      }
       setError(null);
       setBusyNotice(null);
     } catch (err) {
@@ -2224,6 +2757,34 @@ export function AgentWorkspace({
         setComposerAttachments((current) =>
           current.length ? current : attachments,
         );
+      }
+      if (clearedIssueReportReview) {
+        const shouldRestoreIssueReportReview =
+          !clearedIssueReportReview.deliveryWasSubmitting ||
+          submittingIssueReportSessionIdsRef.current.has(
+            clearedIssueReportReview.sessionId,
+          ) ||
+          deferredFailedIssueReportDeliverySessionIdsRef.current.has(
+            clearedIssueReportReview.sessionId,
+          );
+        if (clearedIssueReportReview.queuedReport) {
+          dispatchIssueReportFollowUpSubmitFailed({
+            sessionId: clearedIssueReportReview.sessionId,
+            queuedReport: clearedIssueReportReview.queuedReport,
+            ...(shouldRestoreIssueReportReview
+              ? { restoreReport: clearedIssueReportReview.report }
+              : {}),
+          });
+        }
+        if (shouldRestoreIssueReportReview) {
+          deferredFailedIssueReportDeliverySessionIdsRef.current.delete(
+            clearedIssueReportReview.sessionId,
+          );
+          setReviewableIssueReport(
+            clearedIssueReportReview.sessionId,
+            clearedIssueReportReview.report,
+          );
+        }
       }
       if (isSessionBusyError(err)) {
         // A busy rejection is proof the gateway is healthy — retire any stale
@@ -2387,13 +2948,16 @@ export function AgentWorkspace({
   async function deliverIssueReport(
     sessionId: string,
     report: PendingIssueReport,
-  ) {
+  ): Promise<IssueReportDeliveryResult> {
     let agentDiagnosis: string | undefined;
     try {
       const messages = await listHermesSessionMessages(sessionId);
       agentDiagnosis = messages
         .slice()
         .reverse()
+        .filter((message) =>
+          messageAfterIssueReportDiagnosisBoundary(message, report),
+        )
         .map((message) =>
           message.role === "assistant" ? visibleHermesMessageText(message) : "",
         )
@@ -2405,12 +2969,13 @@ export function AgentWorkspace({
     try {
       await submitIssueReport({
         category: report.category,
-        description: report.description,
+        description: issueReportDescription(report),
         agentDiagnosis,
         attachmentNames: report.attachmentNames,
         attachmentPaths: report.attachmentPaths,
         sessionId,
       });
+      clearErrorForSession(sessionId);
       if (selectedHermesSessionIdRef.current === sessionId) {
         setIssueReportNotice({
           message:
@@ -2418,10 +2983,38 @@ export function AgentWorkspace({
           sessionId,
         });
       }
+      return { sent: true };
     } catch (err) {
-      setError(`The issue report could not be sent. ${messageFromError(err)}`, {
-        sessionId,
-      });
+      const errorMessage = `The issue report could not be sent. ${messageFromError(err)}`;
+      setError(errorMessage, { sessionId });
+      return { sent: false, errorMessage };
+    }
+  }
+
+  async function sendReviewableIssueReport(sessionId: string) {
+    if (submittingIssueReportSessionIdsRef.current.has(sessionId)) return;
+    const report = reviewableIssueReportsRef.current[sessionId];
+    if (!report) return;
+    setIssueReportSubmitting(sessionId, true);
+    let result: IssueReportDeliveryResult | undefined;
+    try {
+      await withTimeout(
+        waitForIssueReportDiagnosisRefresh(sessionId),
+        ISSUE_REPORT_DIAGNOSIS_REFRESH_TIMEOUT_MS,
+        "Issue report diagnosis refresh timed out.",
+      ).catch(() => undefined);
+      result = await deliverIssueReport(sessionId, report);
+      if (
+        result.sent &&
+        reviewableIssueReportsRef.current[sessionId] === report
+      ) {
+        setReviewableIssueReport(sessionId, null);
+      }
+    } finally {
+      setIssueReportSubmitting(sessionId, false);
+      if (result) {
+        dispatchIssueReportDeliverySettled({ sessionId, report, result });
+      }
     }
   }
 
@@ -2477,7 +3070,20 @@ export function AgentWorkspace({
     const storedSessionId =
       targetSessionId ?? created?.stored_session_id ?? created?.session_id;
     if (!storedSessionId) throw new Error("Hermes did not create a session.");
-    if (options?.issueReport && !targetSessionId) {
+    const queuedIssueReport = options?.issueReport;
+    if (queuedIssueReport && targetSessionId) {
+      queuedIssueReport.diagnosisStartedAt = new Date().toISOString();
+    }
+    const clearQueuedIssueReport = () => {
+      if (
+        queuedIssueReport &&
+        pendingIssueReportsRef.current.get(storedSessionId) ===
+          queuedIssueReport
+      ) {
+        pendingIssueReportsRef.current.delete(storedSessionId);
+      }
+    };
+    if (options?.issueReport) {
       pendingIssueReportsRef.current.set(storedSessionId, options.issueReport);
     }
     if (!targetSessionId) {
@@ -2508,17 +3114,28 @@ export function AgentWorkspace({
       }),
       2500,
     ).catch(() => undefined);
-    const runtimeSessionId =
-      created?.session_id ??
-      runtimeSessionIds[storedSessionId] ??
-      (
-        await gateway.request<HermesRuntimeSessionResponse>("session.resume", {
-          session_id: storedSessionId,
-          cols: 96,
-        })
-      ).session_id;
-    if (!runtimeSessionId)
+    let runtimeSessionId: string | undefined;
+    try {
+      runtimeSessionId =
+        created?.session_id ??
+        runtimeSessionIds[storedSessionId] ??
+        (
+          await gateway.request<HermesRuntimeSessionResponse>(
+            "session.resume",
+            {
+              session_id: storedSessionId,
+              cols: 96,
+            },
+          )
+        ).session_id;
+    } catch (err) {
+      clearQueuedIssueReport();
+      throw err;
+    }
+    if (!runtimeSessionId) {
+      clearQueuedIssueReport();
       throw new Error("Hermes did not resume the session.");
+    }
     const createdAt = new Date().toISOString();
     // A new session (no target id) means the hero is handing over to a fresh
     // thread — arm the composer glide. Sending into an existing session leaves
@@ -2618,18 +3235,17 @@ export function AgentWorkspace({
         if (!activityCounts) {
           clearSessionActivity(storedSessionId);
         }
-        // The diagnostic turn is over (even on error): file the report now so
-        // the user's description isn't lost to a failed investigation.
-        const issueReport = pendingIssueReportsRef.current.get(storedSessionId);
-        if (issueReport) {
-          pendingIssueReportsRef.current.delete(storedSessionId);
+        // The diagnostic turn is over (even on error): let the user append
+        // anything June's summary surfaced before sending the bundled report.
+        const promotedIssueReport = promotePendingIssueReportToReview(
+          storedSessionId,
+          { queueDiagnosisRefresh: true },
+        );
+        if (!promotedIssueReport) {
+          window.setTimeout(() => {
+            void refreshHermesSession(storedSessionId);
+          }, 300);
         }
-        window.setTimeout(() => {
-          void refreshHermesSession(storedSessionId);
-          if (issueReport) {
-            void deliverIssueReport(storedSessionId, issueReport);
-          }
-        }, 300);
       }
     });
     const unlisten = () => {
@@ -2649,8 +3265,8 @@ export function AgentWorkspace({
       });
     } catch (err) {
       // A queued report must not outlive its failed prompt; submit() re-arms
-      // issue-report mode so the retry files it again.
-      pendingIssueReportsRef.current.delete(storedSessionId);
+      // issue-report mode so the retry can queue it again.
+      clearQueuedIssueReport();
       // The prompt never entered the session, so its optimistic bubble must
       // not linger — a retained pending message renders below every later
       // persisted message and reads as a send the agent ignored.
@@ -2917,6 +3533,9 @@ export function AgentWorkspace({
       if (
         sessionHasAssistantAfterLatestUser([...messages, ...retainedPending])
       ) {
+        promotePendingIssueReportToReview(sessionId, {
+          queueDiagnosisRefresh: false,
+        });
         const wasActive = sessionHasActiveWork(
           sessionId,
           workingSessionIdsRef.current,
@@ -3444,6 +4063,8 @@ export function AgentWorkspace({
       return next;
     });
     scrubHermesSessionState(sessionId);
+    pendingIssueReportsRef.current.delete(sessionId);
+    setReviewableIssueReport(sessionId, null);
     forgetComposerDraft(sessionComposerDraftKey(sessionId));
     // Every deletion funnels through here (the in-workspace delete and the
     // sidebar/sessions-list AGENT_DELETE_SESSION_EVENT), so this is the one
@@ -3878,6 +4499,48 @@ export function AgentWorkspace({
               <DotSpinner />
               {busyNotice ?? SESSION_BUSY_NOTICE}
             </motion.p>
+          ) : visibleIssueReportReview ? (
+            <motion.div
+              key="issue-report-review"
+              className="agent-composer-notice agent-composer-notice-action"
+              role="status"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+            >
+              <span>
+                {visibleIssueReportReview.report.followUps.length
+                  ? "Follow-up added. Add more context in chat, or send it to the June team."
+                  : "Report ready. Add more context in chat, or send it to the June team."}
+              </span>
+              <button
+                type="button"
+                className="agent-composer-notice-button"
+                disabled={
+                  visibleIssueReportReview.submitting ||
+                  visibleIssueReportImportingFiles ||
+                  visibleIssueReportHasUnsentContext
+                }
+                onClick={() =>
+                  void sendReviewableIssueReport(
+                    visibleIssueReportReview.sessionId,
+                  )
+                }
+              >
+                {visibleIssueReportReview.submitting ||
+                visibleIssueReportImportingFiles ? (
+                  <DotSpinner className="agent-composer-notice-button-spinner" />
+                ) : null}
+                {visibleIssueReportReview.submitting
+                  ? "Sending"
+                  : visibleIssueReportImportingFiles
+                    ? "Attaching files"
+                    : visibleIssueReportHasUnsentContext
+                      ? "Send message first"
+                      : "Send report"}
+              </button>
+            </motion.div>
           ) : visibleIssueReportNotice ? (
             <motion.p
               key="issue-report-notice"
