@@ -1,9 +1,18 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { HERO_GREETINGS } from "../components/agent/AgentWorkspace";
-import { AGENT_NEW_SESSION_EVENT } from "../lib/agent-events";
+import {
+  AGENT_NEW_SESSION_EVENT,
+  AGENT_SESSIONS_CHANGED_EVENT,
+} from "../lib/agent-events";
 import { CLOSE_TAB_EVENT, OPEN_SETTINGS_EVENT } from "../lib/menu-bar";
 import type { AccountStatus, BootstrapResponse, NoteDto } from "../lib/tauri";
 
@@ -273,6 +282,86 @@ describe("App shortcuts", () => {
     }
   });
 
+  it("keeps each agent tab tied to its selected session", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    const user = userEvent.setup();
+
+    try {
+      render(<App />);
+
+      expect(
+        await screen.findByRole("heading", { name: HERO_GREETING }),
+      ).toBeInTheDocument();
+
+      const firstSession = {
+        id: "session-1",
+        title: "First session",
+        preview: "First preview",
+        last_active: "2026-06-04T12:00:00Z",
+      };
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
+            detail: {
+              sessions: [firstSession],
+              selectedSessionId: firstSession.id,
+              workingSessionIds: [],
+            },
+          }),
+        );
+      });
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("tab", { name: "First session" }),
+        ).toHaveAttribute("data-active", "true"),
+      );
+
+      await user.click(screen.getByRole("button", { name: "New tab" }));
+      expect(
+        await screen.findByRole("tab", { name: "New session" }),
+      ).toHaveAttribute("data-active", "true");
+
+      const secondSession = {
+        id: "session-2",
+        title: "Second session",
+        preview: "Second preview",
+        last_active: "2026-06-05T12:00:00Z",
+      };
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
+            detail: {
+              sessions: [secondSession, firstSession],
+              selectedSessionId: secondSession.id,
+              workingSessionIds: [],
+            },
+          }),
+        );
+      });
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("tab", { name: "Second session" }),
+        ).toHaveAttribute("data-active", "true"),
+      );
+
+      await user.click(screen.getByRole("button", { name: "Show all 2 tabs" }));
+      await user.click(screen.getByRole("menuitem", { name: "First session" }));
+
+      await waitFor(() =>
+        expect(
+          screen.getByRole("tab", { name: "First session" }),
+        ).toHaveAttribute("data-active", "true"),
+      );
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("creates a loose note with Command-Shift-N but ignores bare n", async () => {
     render(<App />);
 
@@ -375,6 +464,46 @@ describe("App shortcuts", () => {
     expect(
       await screen.findByRole("heading", { name: "Appearance" }),
     ).toBeInTheDocument();
+  });
+
+  it("refreshes Accessibility after requesting access without opening settings over the native prompt", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(mocks.listeners.has("dictation-event")).toBe(true),
+    );
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+    mocks.dictationHelperCommand.mockClear();
+    mocks.openPrivacySettings.mockClear();
+
+    await act(async () => {
+      mocks.listeners.get("dictation-event")?.({
+        payload: JSON.stringify({
+          type: "permission_status",
+          payload: { microphone: "granted", accessibility: "missing" },
+        }),
+      });
+    });
+
+    expect(
+      await screen.findByText(
+        "Dictation can't paste into other apps until you grant accessibility access.",
+      ),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Grant access" }));
+
+    expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+      type: "request_accessibility_permission",
+    });
+    await waitFor(() =>
+      expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+        type: "get_permission_status",
+      }),
+    );
+    expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith("accessibility");
   });
 
   it("starts a session with Ctrl-N and creates a note with Ctrl-Shift-N on Windows", async () => {

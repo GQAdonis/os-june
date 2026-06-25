@@ -15,6 +15,7 @@ import {
   AGENT_SESSIONS_CHANGED_EVENT,
   AgentWorkspace,
   HERO_GREETINGS,
+  SkillsToolsPanel,
   resetAgentSessionContinuity,
   type AgentSessionsChangedDetail,
 } from "../components/agent/AgentWorkspace";
@@ -315,6 +316,162 @@ describe("AgentWorkspace", () => {
     });
   });
 
+  it("lets users cancel a clean skill editor without making changes", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SkillsToolsPanel
+        loading={false}
+        query=""
+        saving={null}
+        skills={[
+          {
+            name: "editing-skill",
+            description: "Drafts responses.",
+            category: "Writing",
+            enabled: true,
+          },
+        ]}
+        toolsets={[]}
+        onQueryChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onToggleSkill={vi.fn()}
+        onToggleToolset={vi.fn()}
+        onOpenSkill={async (skill) => ({
+          name: skill.name,
+          relativePath: `${skill.name}/SKILL.md`,
+          content: "# Editing skill\n\nDo the work.",
+        })}
+        onSaveSkill={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /editing-skill/i }));
+    const editor = await screen.findByRole("textbox", {
+      name: "editing-skill skill Markdown",
+    });
+    expect(editor).toHaveValue("# Editing skill\n\nDo the work.");
+
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    expect(cancel).toBeEnabled();
+    await user.click(cancel);
+
+    expect(
+      screen.queryByRole("textbox", {
+        name: "editing-skill skill Markdown",
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Skills and tools" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps skill editor cancel disabled while the document loads", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SkillsToolsPanel
+        loading={false}
+        query=""
+        saving={null}
+        skills={[
+          {
+            name: "editing-skill",
+            description: "Drafts responses.",
+            category: "Writing",
+            enabled: true,
+          },
+        ]}
+        toolsets={[]}
+        onQueryChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onToggleSkill={vi.fn()}
+        onToggleToolset={vi.fn()}
+        onOpenSkill={() => new Promise<never>(() => undefined)}
+        onSaveSkill={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /editing-skill/i }));
+
+    expect(
+      await screen.findByRole("button", { name: "Cancel" }),
+    ).toBeDisabled();
+  });
+
+  it("confirms before canceling dirty skill edits", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <SkillsToolsPanel
+        loading={false}
+        query=""
+        saving={null}
+        skills={[
+          {
+            name: "editing-skill",
+            description: "Drafts responses.",
+            category: "Writing",
+            enabled: true,
+          },
+        ]}
+        toolsets={[]}
+        onQueryChange={vi.fn()}
+        onRefresh={vi.fn()}
+        onToggleSkill={vi.fn()}
+        onToggleToolset={vi.fn()}
+        onOpenSkill={async (skill) => ({
+          name: skill.name,
+          relativePath: `${skill.name}/SKILL.md`,
+          content: "# Editing skill\n\nDo the work.",
+        })}
+        onSaveSkill={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /editing-skill/i }));
+    const editor = await screen.findByRole("textbox", {
+      name: "editing-skill skill Markdown",
+    });
+    await user.type(editor, "\nAdd more detail.");
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+
+    const dialog = await screen.findByRole("dialog", {
+      name: "Discard skill edits?",
+    });
+    expect(
+      screen.getByRole("textbox", {
+        name: "editing-skill skill Markdown",
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.queryByRole("dialog", { name: "Discard skill edits?" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("textbox", {
+        name: "editing-skill skill Markdown",
+      }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    const confirmDialog = await screen.findByRole("dialog", {
+      name: "Discard skill edits?",
+    });
+    await user.click(
+      within(confirmDialog).getByRole("button", { name: "Discard" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("textbox", {
+          name: "editing-skill skill Markdown",
+        }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
   it("honors a pending New Session request instead of selecting existing work", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
@@ -516,6 +673,31 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText("Bug report")).toBeInTheDocument();
     expect(screen.getByRole("textbox")).not.toHaveTextContent(
       "stale hero draft",
+    );
+  });
+
+  it("seeds a report chip immediately when the composer is already open", async () => {
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({ createdAt: Date.now() }),
+    );
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByRole("textbox")).toBeInTheDocument();
+
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_NEW_SESSION_EVENT, {
+          detail: { category: "bug" },
+        }),
+      );
+    });
+
+    expect(screen.getByText("Bug report")).toBeInTheDocument();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith(
+      "session.create",
+      expect.anything(),
     );
   });
 
@@ -745,6 +927,71 @@ describe("AgentWorkspace", () => {
         category: "bug",
         description: "The recorder crashes from this existing chat",
         agentDiagnosis: "The report turn reproduced the crash.",
+        attachmentNames: [],
+        attachmentPaths: [],
+        sessionId: "session-1",
+      }),
+    );
+    await act(() => new Promise((resolve) => setTimeout(resolve, 400)));
+  });
+
+  it("keeps chunk boundary spaces in issue report agent diagnosis", async () => {
+    const user = userEvent.setup();
+    mocks.submitIssueReport.mockResolvedValue({ received: true });
+    mocks.listHermesSessionMessages.mockResolvedValue([]);
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Attach files or tag this message",
+      }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "Bug report" }),
+    );
+    await user.type(
+      await screen.findByRole("textbox"),
+      "Agent response text is losing spaces",
+    );
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("---USER REPORT---"),
+      }),
+    );
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({ type: "turn.completed", session_id: "runtime-session-1" });
+      }
+    });
+
+    expect(await screen.findByText(/Report ready/)).toBeInTheDocument();
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m1",
+        role: "assistant",
+        content: [
+          "Let me get the full",
+          " details: ",
+          { text: "read releases to get detailed" },
+          { text: " information" },
+          " more",
+          " efficiently.",
+        ],
+        timestamp: new Date(Date.now() + 1000).toISOString(),
+      },
+    ]);
+    await user.click(screen.getByRole("button", { name: "Send report" }));
+
+    await waitFor(() =>
+      expect(mocks.submitIssueReport).toHaveBeenCalledWith({
+        category: "bug",
+        description: "Agent response text is losing spaces",
+        agentDiagnosis:
+          "Let me get the full details: read releases to get detailed information more efficiently.",
         attachmentNames: [],
         attachmentPaths: [],
         sessionId: "session-1",
@@ -2071,6 +2318,13 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText(/Report ready/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Send report" }));
     expect(await screen.findByText("Sending")).toBeInTheDocument();
+    // Sending the report first awaits the queued diagnosis refresh, so the
+    // submit promise (and its reject handle) only exists once that gate
+    // clears. Wait for it before rejecting, otherwise the reject is a no-op
+    // and the failure banner never renders.
+    await waitFor(() => expect(rejectFirstReport).toBeDefined(), {
+      timeout: 2000,
+    });
     await act(async () => {
       rejectFirstReport?.(new Error("upstream_provider_failed"));
       await Promise.resolve();
@@ -2801,6 +3055,29 @@ describe("AgentWorkspace", () => {
     expect(screen.queryByText("Newer session")).toBeNull();
   });
 
+  it("honors an initial session id before session metadata is available", async () => {
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-2",
+        title: "Newer session",
+        preview: "More recent work",
+        last_active: "2026-06-05T12:00:00Z",
+      },
+      existingSession,
+    ]);
+
+    render(<AgentWorkspace initialSessionId="session-1" />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-1"),
+    );
+    expect(mocks.listHermesSessionMessages).not.toHaveBeenCalledWith(
+      "session-2",
+    );
+    expect(screen.queryByText("Newer session")).toBeNull();
+  });
+
   it("restores an in-flight new session across a remount (settings round trip)", async () => {
     // Start a brand-new session whose first turn is still running: Hermes has
     // persisted nothing yet (no messages, absent from the server session
@@ -2865,6 +3142,36 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
 
     expect(await screen.findByText("CLI Run Tracking")).toBeInTheDocument();
+  });
+
+  it("keeps chunk boundary spaces when suggesting session titles", async () => {
+    const rawTitle = "I want you to find the release details";
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-raw",
+        title: rawTitle,
+        preview: rawTitle,
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-1",
+        role: "user",
+        content: ["Find the full", " details", " more", " efficiently"],
+        timestamp: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.suggestAgentSessionTitle.mockResolvedValue({
+      title: "Release Details",
+    });
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Release Details")).toBeInTheDocument();
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledWith(
+      "Find the full details more efficiently",
+    );
   });
 
   it("renders June's CLI access request as a card and enables the setting", async () => {
@@ -2964,6 +3271,101 @@ describe("AgentWorkspace", () => {
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith(
       "prompt.submit",
       expect.anything(),
+    );
+  });
+
+  it("copies visible user and assistant messages", async () => {
+    const user = userEvent.setup();
+    const writeText = vi
+      .spyOn(navigator.clipboard, "writeText")
+      .mockResolvedValue(undefined);
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "Draft the launch plan",
+        timestamp: "2026-06-12T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the launch plan.",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+
+    try {
+      render(<AgentWorkspace initialSession={existingSession} />);
+
+      const userTurn = (
+        await screen.findByText("Draft the launch plan")
+      ).closest("article");
+      const assistantTurn = (
+        await screen.findByText("Here is the launch plan.")
+      ).closest("article");
+      expect(userTurn).not.toBeNull();
+      expect(assistantTurn).not.toBeNull();
+
+      await user.click(
+        within(assistantTurn as HTMLElement).getByRole("button", {
+          name: "Copy message",
+        }),
+      );
+      expect(writeText).toHaveBeenLastCalledWith("Here is the launch plan.");
+
+      await user.click(
+        within(userTurn as HTMLElement).getByRole("button", {
+          name: "Copy message",
+        }),
+      );
+      expect(writeText).toHaveBeenLastCalledWith("Draft the launch plan");
+    } finally {
+      writeText.mockRestore();
+    }
+  });
+
+  it("prefills a user prompt for editing and resubmits the revision", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "Draft the launch plan",
+        timestamp: "2026-06-12T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the launch plan.",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const userTurn = (await screen.findByText("Draft the launch plan")).closest(
+      "article",
+    );
+    expect(userTurn).not.toBeNull();
+    await user.click(
+      within(userTurn as HTMLElement).getByRole("button", {
+        name: "Edit message",
+      }),
+    );
+
+    const composer = screen.getByRole("textbox");
+    expect(composer).toHaveTextContent("Draft the launch plan");
+    await user.type(composer, " for sales");
+
+    const send = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(send).not.toBeDisabled());
+    await user.click(send);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "Draft the launch plan for sales",
+      }),
     );
   });
 
@@ -5022,6 +5424,29 @@ describe("AgentWorkspace", () => {
     );
   });
 
+  it("imports typed file paths from the /file slash command", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    const composer = screen.getByRole("textbox");
+    await user.type(composer, '/file "/Users/alex/Desktop/Q2 report.pdf"');
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.importHermesBridgeFile).toHaveBeenCalledWith(
+        "/Users/alex/Desktop/Q2 report.pdf",
+      ),
+    );
+    expect(await screen.findByText("Q2 report.pdf")).toBeInTheDocument();
+    expect(composer.textContent).toBe("");
+    expect(
+      mocks.gatewayRequest.mock.calls.some(
+        ([method]) => method === "prompt.submit",
+      ),
+    ).toBe(false);
+  });
+
   it("attaches a dropped image to the session via image.attach and marks it attached", async () => {
     // Feature 19: on submit, an imported image is sent to the session through
     // the structured image.attach RPC, the chip flips to "Attached", and the
@@ -5514,14 +5939,14 @@ describe("AgentWorkspace", () => {
     }
   });
 
-  it("plays the hero teardown while a typed submit creates the session", async () => {
+  it("opens the conversation while a typed submit creates the session", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
       JSON.stringify({ createdAt: Date.now() }),
     );
-    // Hold session.create open so the in-flight teardown is observable —
-    // without it the greeting and chips sat frozen through the create
-    // latency and vanished in a single frame at the handoff.
+    // Hold session.create open so the optimistic handoff is observable: the
+    // user should land in the conversation immediately instead of waiting for
+    // the runtime session to be created.
     let releaseCreate: (() => void) | undefined;
     mocks.gatewayRequest.mockImplementation((method: string) => {
       if (method === "session.create") {
@@ -5544,21 +5969,91 @@ describe("AgentWorkspace", () => {
     await user.type(await screen.findByRole("textbox"), "first task");
     await user.click(screen.getByRole("button", { name: "Start session" }));
 
-    // Mid-flight: still the hero, but tearing down.
-    const hero = screen.getByRole("region", { name: "Agent task details" });
-    await waitFor(() =>
-      expect(hero).toHaveAttribute("data-hero-leaving", "true"),
-    );
-    expect(screen.getByText(HERO_GREETING)).toBeInTheDocument();
-
     await waitFor(() => expect(releaseCreate).toBeDefined());
-    act(() => releaseCreate?.());
-
-    // The handoff lands in the conversation with the pending message.
     await waitFor(() =>
       expect(screen.queryByText(HERO_GREETING)).not.toBeInTheDocument(),
     );
-    expect(await screen.findByText("first task")).toBeInTheDocument();
+    expect(screen.getAllByText("first task").length).toBeGreaterThan(0);
+    expect(mocks.listHermesSessionMessages).not.toHaveBeenCalledWith(
+      expect.stringMatching(/^pending:new-session:/),
+    );
+
+    act(() => releaseCreate?.());
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith(
+        "prompt.submit",
+        expect.objectContaining({
+          session_id: "runtime-session-2",
+          text: "first task",
+        }),
+      ),
+    );
+    expect(screen.getAllByText("first task").length).toBeGreaterThan(0);
+  });
+
+  it("restores the hero when optimistic session creation fails", async () => {
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({ createdAt: Date.now() }),
+    );
+    const sessionDetails: AgentSessionsChangedDetail[] = [];
+    const onSessionsChanged = (event: Event) =>
+      sessionDetails.push(
+        (event as CustomEvent<AgentSessionsChangedDetail>).detail,
+      );
+    window.addEventListener(AGENT_SESSIONS_CHANGED_EVENT, onSessionsChanged);
+
+    let rejectCreate: (() => void) | undefined;
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.create") {
+        return new Promise((_, reject) => {
+          rejectCreate = () => reject(new Error("create failed"));
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    try {
+      const user = userEvent.setup();
+      render(<AgentWorkspace />);
+
+      await user.type(await screen.findByRole("textbox"), "first task");
+      await user.click(screen.getByRole("button", { name: "Start session" }));
+
+      await waitFor(() => expect(rejectCreate).toBeDefined());
+      await waitFor(() =>
+        expect(screen.queryByText(HERO_GREETING)).not.toBeInTheDocument(),
+      );
+      expect(screen.getAllByText("first task").length).toBeGreaterThan(0);
+
+      act(() => rejectCreate?.());
+
+      expect(await screen.findByText(HERO_GREETING)).toBeInTheDocument();
+      expect(screen.getByText(/create failed/)).toBeInTheDocument();
+      await waitFor(() =>
+        expect(screen.getByRole("textbox").textContent ?? "").toContain(
+          "first task",
+        ),
+      );
+      expect(mocks.listHermesSessionMessages).not.toHaveBeenCalledWith(
+        expect.stringMatching(/^pending:new-session:/),
+      );
+      expect(
+        sessionDetails.some(
+          (detail) =>
+            detail.selectedSessionId?.startsWith("pending:new-session:") ||
+            detail.sessions.some((session) =>
+              session.id.startsWith("pending:new-session:"),
+            ),
+        ),
+      ).toBe(false);
+    } finally {
+      window.removeEventListener(
+        AGENT_SESSIONS_CHANGED_EVENT,
+        onSessionsChanged,
+      );
+    }
   });
 
   it("prefills the composer from a prefill shortcut without submitting", async () => {
@@ -6242,6 +6737,46 @@ describe("AgentWorkspace", () => {
           command: "/model kimi-k2-6",
         }),
       );
+      expect(
+        await screen.findByText("Switched this session to Kimi K2.6."),
+      ).toBeInTheDocument();
+    });
+
+    it("dispatches /model from the composer slash command", async () => {
+      mocks.listVeniceModels.mockResolvedValue({
+        mode: "generation",
+        modelType: "text",
+        selectedModel: "zai-org-glm-5-2",
+        models: toolCapableCatalog,
+      });
+      const user = userEvent.setup();
+
+      render(<AgentWorkspace initialSession={existingSession} />);
+
+      const composer = await screen.findByRole("textbox", {
+        name: "Message June",
+      });
+      await user.type(composer, "/model kimi");
+      await user.click(screen.getByRole("button", { name: "Send message" }));
+
+      await waitFor(() =>
+        expect(mocks.ensureHermesBridgeSession).toHaveBeenCalledWith({
+          sessionId: "session-1",
+          model: "kimi-k2-6",
+        }),
+      );
+      await waitFor(() =>
+        expect(mocks.gatewayRequest).toHaveBeenCalledWith("command.dispatch", {
+          session_id: "session-1",
+          command: "/model kimi-k2-6",
+        }),
+      );
+      expect(
+        mocks.gatewayRequest.mock.calls.some(
+          ([method]) => method === "prompt.submit",
+        ),
+      ).toBe(false);
+      expect(composer.textContent).toBe("");
       expect(
         await screen.findByText("Switched this session to Kimi K2.6."),
       ).toBeInTheDocument();

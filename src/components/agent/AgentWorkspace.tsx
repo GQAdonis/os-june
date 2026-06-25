@@ -8,6 +8,7 @@ import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconBubbleWide } from "central-icons/IconBubbleWide";
 import { IconCheckmark1Small } from "central-icons/IconCheckmark1Small";
 import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
+import { IconClipboard } from "central-icons/IconClipboard";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconFolder1 } from "central-icons/IconFolder1";
@@ -241,6 +242,13 @@ import {
   skillSlashResolutionError,
 } from "../../lib/skill-slash-commands";
 import {
+  isBuiltinComposerSlashCommand,
+  parseBuiltinComposerSlashCommand,
+  parseSlashFileArguments,
+  resolveSlashModel,
+  slashModelResolutionError,
+} from "../../lib/agent-composer-slash-commands";
+import {
   ComposerEditor,
   type ComposerEditorHandle,
 } from "./composer/ComposerEditor";
@@ -270,11 +278,13 @@ import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
   repairContractionSpacing,
+  textFromHermesContent,
   type AgentApprovalChoice,
   type AgentChatPart,
   type AgentChatTurn,
   type LiveHermesEvent,
 } from "../../lib/agent-chat-runtime";
+import { toolActivitySentence } from "../../lib/agent-tool-labels";
 import {
   buildAgentChatGallery,
   buildAgentErrorGallery,
@@ -698,6 +708,19 @@ const HERO_SHORTCUT_COUNT = 3;
 // the deck advances (300ms fade + 2 × 90ms stagger, see .agent-hero-chip).
 const HERO_ROTATE_MS = 8000;
 const HERO_CHIP_SWAP_MS = 500;
+const PROVISIONAL_HERMES_SESSION_PREFIX = "pending:new-session:";
+
+function makeProvisionalHermesSessionId() {
+  return `${PROVISIONAL_HERMES_SESSION_PREFIX}${Date.now()}:${Math.random()
+    .toString(36)
+    .slice(2)}`;
+}
+
+function isProvisionalHermesSessionId(sessionId?: string | null) {
+  return Boolean(
+    sessionId && sessionId.startsWith(PROVISIONAL_HERMES_SESSION_PREFIX),
+  );
+}
 
 // Fisher–Yates with the swap target mirrored (j = i − rand) so a rand() of 0
 // is the identity permutation: tests that mock Math.random get the curated
@@ -833,6 +856,7 @@ export type AgentWorkspaceOrigin = {
 
 type AgentWorkspaceProps = {
   initialSession?: HermesSessionInfo;
+  initialSessionId?: string;
   origin?: AgentWorkspaceOrigin;
 };
 
@@ -1205,9 +1229,10 @@ export function resetAgentSessionContinuity() {
 
 export function AgentWorkspace({
   initialSession,
+  initialSessionId: initialSessionIdProp,
   origin,
 }: AgentWorkspaceProps = {}) {
-  const initialSessionId = initialSession?.id;
+  const initialSessionId = initialSession?.id ?? initialSessionIdProp;
   // Read once per mount (lazy initializer): the continuity snapshot the
   // previous mount captured on unmount, if any session was still mid-run.
   const [continuity] = useState(() => sessionContinuity);
@@ -1409,6 +1434,7 @@ export function AgentWorkspace({
   const [generationModels, setGenerationModels] = useState<VeniceModelDto[]>(
     [],
   );
+  const generationModelsRef = useRef<VeniceModelDto[]>([]);
   const [composerModelOpen, setComposerModelOpen] = useState(false);
   const [composerModelFlyout, setComposerModelFlyout] =
     useState<ComposerModelFlyout>(null);
@@ -1826,6 +1852,9 @@ export function AgentWorkspace({
         (session) => session.id === selectedHermesSessionId,
       ),
     [hermesSessionItems, selectedHermesSessionId],
+  );
+  const selectedHermesSessionIsProvisional = isProvisionalHermesSessionId(
+    selectedHermesSessionId,
   );
   const activeGenerationModelId =
     selectedHermesSessionId && !newSessionMode
@@ -2389,14 +2418,18 @@ export function AgentWorkspace({
         modelsResponse.selectedModel;
       if (requestId === generationModelRequestSequence.current) {
         defaultGenerationModelIdRef.current = selectedModelId;
+        generationModelsRef.current = modelsResponse.models;
         setGenerationModels(modelsResponse.models);
         setDefaultGenerationModelId(selectedModelId);
       }
+      return { models: modelsResponse.models, selectedModelId };
     } catch {
       if (requestId === generationModelRequestSequence.current) {
         defaultGenerationModelIdRef.current = "";
+        generationModelsRef.current = [];
         setDefaultGenerationModelId("");
       }
+      return null;
     }
   }, []);
 
@@ -2457,14 +2490,16 @@ export function AgentWorkspace({
   // unsupported, so there is no confirming event to wait on.
   async function handleSelectGenerationModel(modelId: string) {
     setComposerModelOpen(false);
-    const chosen = generationModels.find((model) => model.id === modelId);
+    const chosen = generationModelsRef.current.find(
+      (model) => model.id === modelId,
+    );
     // Defense in depth: the picker already hides tool-less models, but the
     // agent bricks without function calling, so refuse one rather than switch.
     if (chosen && !modelSupportsTools(chosen)) {
       setError(
         `${chosen.name} can't run June's tools, so it can't be used for the agent.`,
       );
-      return;
+      return false;
     }
     const modelName = chosen?.name ?? modelId;
     const sessionId = newSessionModeRef.current
@@ -2481,7 +2516,7 @@ export function AgentWorkspace({
         setError(null);
       } catch (err) {
         setError(messageFromError(err));
-        return;
+        return false;
       }
       setModelSwitchNotice({
         message: resolveModelSwitchOutcome({
@@ -2491,7 +2526,7 @@ export function AgentWorkspace({
         }).notice,
         sessionId: null,
       });
-      return;
+      return true;
     }
 
     // Open chat: override the model for THIS chat only (never the global
@@ -2533,7 +2568,7 @@ export function AgentWorkspace({
         ),
       );
       setError(messageFromError(err));
-      return;
+      return false;
     }
     let dispatchSucceeded = false;
     try {
@@ -2558,6 +2593,7 @@ export function AgentWorkspace({
       }).notice,
       sessionId,
     });
+    return true;
   }
 
   useEffect(() => {
@@ -2595,13 +2631,15 @@ export function AgentWorkspace({
     selectedHermesSessionIdRef.current = initialSessionId;
     setSelectedHermesSessionId(initialSessionId);
     setSelectedTaskId(undefined);
-    if (initialSession) {
-      setHermesSessionItems((current) =>
-        current.some((session) => session.id === initialSession.id)
-          ? current
-          : [initialSession, ...current],
-      );
-    }
+  }, [initialSessionId]);
+
+  useEffect(() => {
+    if (!initialSession || initialSession.id !== initialSessionId) return;
+    setHermesSessionItems((current) =>
+      current.some((session) => session.id === initialSession.id)
+        ? current
+        : [initialSession, ...current],
+    );
   }, [initialSession, initialSessionId]);
 
   // Remember the open conversation for the restore-on-mount above. Entering
@@ -2610,6 +2648,7 @@ export function AgentWorkspace({
   // beats landing on the hero screen.
   useEffect(() => {
     if (selectedHermesSessionId) {
+      if (isProvisionalHermesSessionId(selectedHermesSessionId)) return;
       writeLastOpenSessionId(selectedHermesSessionId);
     }
   }, [selectedHermesSessionId]);
@@ -2621,10 +2660,18 @@ export function AgentWorkspace({
     // real fetch lands.
     if (!hermesSessionsHydrated) return;
     dispatchAgentSessionsChanged({
-      sessions: hermesSessionItems,
-      selectedSessionId: selectedHermesSessionId,
-      workingSessionIds: Array.from(workingSessionIds),
-      waitingSessionIds: Array.from(waitingSessionIds),
+      sessions: hermesSessionItems.filter(
+        (session) => !isProvisionalHermesSessionId(session.id),
+      ),
+      selectedSessionId: isProvisionalHermesSessionId(selectedHermesSessionId)
+        ? undefined
+        : selectedHermesSessionId,
+      workingSessionIds: Array.from(workingSessionIds).filter(
+        (sessionId) => !isProvisionalHermesSessionId(sessionId),
+      ),
+      waitingSessionIds: Array.from(waitingSessionIds).filter(
+        (sessionId) => !isProvisionalHermesSessionId(sessionId),
+      ),
     });
   }, [
     hermesSessionsHydrated,
@@ -2673,7 +2720,9 @@ export function AgentWorkspace({
 
     const pending = pendingNewSessionRequest();
     if (pending) {
-      void windowEventHandlersRef.current.startNewTask(pending);
+      void windowEventHandlersRef.current.startNewTask(pending, {
+        deferCategorySeed: true,
+      });
     }
 
     window.addEventListener(AGENT_NEW_SESSION_EVENT, handleNewSession);
@@ -2689,6 +2738,7 @@ export function AgentWorkspace({
 
   useEffect(() => {
     if (!bridge.running || !selectedHermesSessionId) return;
+    if (isProvisionalHermesSessionId(selectedHermesSessionId)) return;
     let cancelled = false;
     listSessionMessagesOrdered(selectedHermesSessionId)
       .then((messages) => {
@@ -2772,6 +2822,7 @@ export function AgentWorkspace({
 
   useEffect(() => {
     if (!bridge.running || !selectedHermesSessionId) return;
+    if (isProvisionalHermesSessionId(selectedHermesSessionId)) return;
     void loadFilesystemSnapshot();
   }, [bridge.running, selectedHermesSessionId, selectedHermesMessages.length]);
 
@@ -3020,11 +3071,99 @@ export function AgentWorkspace({
     };
   }
 
+  async function handleBuiltinComposerSlashCommand(commandText: string) {
+    if (categoryRef.current) return false;
+    const parsed = parseBuiltinComposerSlashCommand(commandText);
+    if (!parsed) return false;
+
+    if (parsed.name === "model") {
+      await runModelSlashCommand(parsed.argument, commandText);
+      return true;
+    }
+
+    await runFileSlashCommand(parsed.argument, commandText);
+    return true;
+  }
+
+  async function runModelSlashCommand(argument: string, commandText: string) {
+    const query = argument.trim();
+    if (!query) {
+      clearComposerCommandDraft(commandText);
+      openComposerModelPicker();
+      return;
+    }
+
+    const models = await generationModelsForSlashCommand();
+    if (!models.length) {
+      setError("Could not load models. Try again in a moment.");
+      return;
+    }
+
+    const resolution = resolveSlashModel(query, models);
+    if (resolution.status !== "resolved") {
+      setError(slashModelResolutionError(resolution));
+      return;
+    }
+
+    const selected = await handleSelectGenerationModel(resolution.model.id);
+    if (selected) clearComposerCommandDraft(commandText);
+  }
+
+  async function generationModelsForSlashCommand() {
+    if (generationModelsRef.current.length) return generationModelsRef.current;
+    const loaded = await loadGenerationModel();
+    return loaded?.models ?? generationModelsRef.current;
+  }
+
+  async function runFileSlashCommand(argument: string, commandText: string) {
+    if (!argument.trim()) {
+      clearComposerCommandDraft(commandText);
+      await pickAttachments();
+      return;
+    }
+
+    const parsed = parseSlashFileArguments(argument);
+    if (parsed.status === "error") {
+      setError(parsed.message);
+      return;
+    }
+    if (!parsed.paths.length) {
+      clearComposerCommandDraft(commandText);
+      await pickAttachments();
+      return;
+    }
+
+    const imported = await importDroppedFilePaths(parsed.paths);
+    if (imported) clearComposerCommandDraft(commandText);
+  }
+
+  function clearComposerCommandDraft(commandText: string) {
+    if (draftRef.current.trim() !== commandText.trim()) return;
+    if (categoryRef.current) return;
+    composerEditorRef.current?.clear();
+    draftRef.current = "";
+    categoryRef.current = null;
+    setDraft("");
+    setCategory(null);
+    rememberComposerDraft(
+      composerDraftKeyRef.current,
+      "",
+      null,
+      attachmentsRef.current,
+    );
+  }
+
   async function submit(event?: FormEvent) {
     event?.preventDefault();
     const message = draft.trim();
-    if ((!message && !attachments.length) || submitting || importingFiles)
+    if (
+      (!message && !attachments.length) ||
+      submitting ||
+      importingFiles ||
+      selectedHermesSessionIsProvisional
+    )
       return;
+    if (message && (await handleBuiltinComposerSlashCommand(message))) return;
     // The composer's category chip makes this a report: wrap the prompt to
     // frame it for the team and queue the delivery. Captured before the
     // composer clears so a failed send can restore the chip on retry.
@@ -3217,7 +3356,7 @@ export function AgentWorkspace({
     items: T[],
     importItem: (item: T) => Promise<ImportedHermesFile>,
   ) {
-    if (!items.length) return;
+    if (!items.length) return true;
     setImportingFiles(true);
     try {
       // One at a time on purpose: a dropped file's bytes can be 50 MB, so
@@ -3240,8 +3379,10 @@ export function AgentWorkspace({
       ]);
       setError(null);
       void loadFilesystemSnapshot();
+      return true;
     } catch (err) {
       setError(messageFromError(err));
+      return false;
     } finally {
       setImportingFiles(false);
     }
@@ -3252,7 +3393,7 @@ export function AgentWorkspace({
     const uniquePaths = Array.from(new Set(paths.map((path) => path.trim())))
       .filter(Boolean)
       .slice(0, 8);
-    await importAttachments(uniquePaths, importHermesBridgeFile);
+    return importAttachments(uniquePaths, importHermesBridgeFile);
   }
 
   // DOM drops are how Finder files actually arrive: Tauri's drag-drop
@@ -3319,11 +3460,12 @@ export function AgentWorkspace({
         multiple: true,
         title: "Attach files",
       });
-      if (!selected) return;
+      if (!selected) return false;
       const paths = Array.isArray(selected) ? selected : [selected];
-      await importDroppedFilePaths(paths);
+      return await importDroppedFilePaths(paths);
     } catch (err) {
       setError(messageFromError(err));
+      return false;
     }
   }
 
@@ -3496,6 +3638,175 @@ export function AgentWorkspace({
     }
   }
 
+  function startOptimisticHermesSession({
+    displayContent,
+    model,
+    title,
+  }: {
+    displayContent: string;
+    model?: string;
+    title: string;
+  }) {
+    const sessionId = makeProvisionalHermesSessionId();
+    const createdAt = new Date().toISOString();
+    const userMessage: HermesSessionMessage = {
+      id: `pending:user:${Date.now()}`,
+      role: "user",
+      content: displayContent,
+      timestamp: createdAt,
+    };
+    heroExitViaThreadRef.current = true;
+    newSessionModeRef.current = false;
+    setNewSessionMode(false);
+    selectedHermesSessionIdRef.current = sessionId;
+    setSelectedHermesSessionId(sessionId);
+    setSelectedTaskId(undefined);
+    setHermesSessionItems((current) => [
+      {
+        id: sessionId,
+        title,
+        preview: displayContent,
+        started_at: createdAt,
+        last_active: createdAt,
+        message_count: 1,
+        ...(model ? { model } : {}),
+      },
+      ...current,
+    ]);
+    setPendingHermesMessages((current) => {
+      const next = {
+        ...current,
+        [sessionId]: [...(current[sessionId] ?? []), userMessage],
+      };
+      pendingHermesMessagesRef.current = next;
+      return next;
+    });
+    setSessionWorking(sessionId, true);
+    setSessionWaiting(sessionId, false);
+    dispatchAgentSessionStatus({
+      title,
+      prompt: displayContent,
+      status: "starting",
+      summary: "Starting June.",
+    });
+    return { createdAt, id: sessionId, userMessage };
+  }
+
+  function migrateOptimisticHermesSession({
+    createdAt,
+    displayContent,
+    fromSessionId,
+    model,
+    title,
+    toSessionId,
+  }: {
+    createdAt: string;
+    displayContent: string;
+    fromSessionId: string;
+    model?: string;
+    title: string;
+    toSessionId: string;
+  }) {
+    if (fromSessionId === toSessionId) return;
+    setHermesSessionItems((current) => {
+      const replacement: HermesSessionInfo = {
+        id: toSessionId,
+        title,
+        preview: displayContent,
+        started_at: createdAt,
+        last_active: createdAt,
+        message_count: 1,
+        ...(model ? { model } : {}),
+      };
+      let replaced = false;
+      const next = current.flatMap((session) => {
+        if (session.id === toSessionId) return [];
+        if (session.id === fromSessionId) {
+          replaced = true;
+          return [{ ...session, ...replacement }];
+        }
+        return [session];
+      });
+      return replaced ? next : [replacement, ...next];
+    });
+    setHermesSessionMessages((current) =>
+      moveRecordKey(current, fromSessionId, toSessionId),
+    );
+    setPendingHermesMessages((current) => {
+      const next = moveRecordKey(current, fromSessionId, toSessionId);
+      pendingHermesMessagesRef.current = next;
+      return next;
+    });
+    liveEventsRef.current = moveRecordKey(
+      liveEventsRef.current,
+      fromSessionId,
+      toSessionId,
+    );
+    setLiveEvents(liveEventsRef.current);
+    setWorkingSessionIds((current) => {
+      const next = new Set(current);
+      if (next.delete(fromSessionId)) next.add(toSessionId);
+      workingSessionIdsRef.current = next;
+      return next;
+    });
+    setWaitingSessionIds((current) => {
+      const next = new Set(current);
+      if (next.delete(fromSessionId)) next.add(toSessionId);
+      waitingSessionIdsRef.current = next;
+      return next;
+    });
+    selectedHermesSessionIdRef.current = toSessionId;
+    setSelectedHermesSessionId(toSessionId);
+  }
+
+  function removeOptimisticHermesSession(
+    optimisticSessionId: string,
+    realSessionId?: string,
+  ) {
+    const ids = new Set(
+      [optimisticSessionId, realSessionId].filter(
+        (sessionId): sessionId is string => Boolean(sessionId),
+      ),
+    );
+    setHermesSessionItems((current) =>
+      current.filter((session) => !ids.has(session.id)),
+    );
+    setHermesSessionMessages((current) => {
+      let next = current;
+      for (const id of ids) next = omitRecordKey(next, id);
+      return next;
+    });
+    setPendingHermesMessages((current) => {
+      let next = current;
+      for (const id of ids) next = omitRecordKey(next, id);
+      pendingHermesMessagesRef.current = next;
+      return next;
+    });
+    let nextLiveEvents = liveEventsRef.current;
+    for (const id of ids) nextLiveEvents = omitRecordKey(nextLiveEvents, id);
+    liveEventsRef.current = nextLiveEvents;
+    setLiveEvents(nextLiveEvents);
+    setWorkingSessionIds((current) => {
+      const next = new Set(current);
+      for (const id of ids) next.delete(id);
+      workingSessionIdsRef.current = next;
+      return next;
+    });
+    setWaitingSessionIds((current) => {
+      const next = new Set(current);
+      for (const id of ids) next.delete(id);
+      waitingSessionIdsRef.current = next;
+      return next;
+    });
+    const selectedSessionId = selectedHermesSessionIdRef.current;
+    if (selectedSessionId && ids.has(selectedSessionId)) {
+      selectedHermesSessionIdRef.current = undefined;
+      setSelectedHermesSessionId(undefined);
+      newSessionModeRef.current = true;
+      setNewSessionMode(true);
+    }
+  }
+
   async function submitHermesSession(
     content: string,
     explicitSession?: HermesSessionInfo,
@@ -3530,29 +3841,70 @@ export function AgentWorkspace({
       targetSessionId || options?.issueReport
         ? undefined
         : agentSessionTitleForPrompt(titleContent);
+    const fallbackSessionTitle = options?.issueReport
+      ? "Issue report"
+      : explicitSession?.title?.trim() ||
+        explicitSession?.preview?.trim() ||
+        titleFromPrompt(titleContent);
+    const optimisticSession = targetSessionId
+      ? undefined
+      : startOptimisticHermesSession({
+          displayContent,
+          title: fallbackSessionTitle,
+          ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
+        });
+    let storedSessionIdForRollback: string | undefined;
+    const rollbackOptimisticBeforePrompt = (err: unknown): never => {
+      if (optimisticSession) {
+        removeOptimisticHermesSession(
+          optimisticSession.id,
+          storedSessionIdForRollback,
+        );
+      }
+      throw err;
+    };
     // The Unrestricted opt-in is made per session: a new session applies the
     // picker draft, and a follow-up routes to the runtime process matching
     // the mode its session was created with. Without this, one Unrestricted
     // session would leave the runtime unsandboxed under every other
     // session's follow-ups.
-    const gateway = await ensureHermesGateway(
-      targetSessionId
-        ? sessionUnrestricted(targetSessionId)
-        : fullModeDraftRef.current,
-    );
-    const sessionTitle = titlePromise ? await titlePromise : undefined;
-    const created = targetSessionId
-      ? undefined
-      : await gateway.request<HermesRuntimeSessionResponse>("session.create", {
-          title: options?.issueReport
-            ? "Issue report"
-            : (sessionTitle ?? titleFromPrompt(titleContent)),
-          cols: 96,
-          ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
-        });
-    const storedSessionId =
-      targetSessionId ?? created?.stored_session_id ?? created?.session_id;
-    if (!storedSessionId) throw new Error("Hermes did not create a session.");
+    const { created, gateway, sessionTitle, storedSessionId } =
+      await (async () => {
+        const [nextGateway, nextSessionTitle] = await Promise.all([
+          ensureHermesGateway(
+            targetSessionId
+              ? sessionUnrestricted(targetSessionId)
+              : fullModeDraftRef.current,
+          ),
+          titlePromise ?? Promise.resolve(undefined),
+        ]);
+        const nextCreated = targetSessionId
+          ? undefined
+          : await nextGateway.request<HermesRuntimeSessionResponse>(
+              "session.create",
+              {
+                title: nextSessionTitle ?? fallbackSessionTitle,
+                cols: 96,
+                ...(targetSessionModelId
+                  ? { model: targetSessionModelId }
+                  : {}),
+              },
+            );
+        const nextStoredSessionId =
+          targetSessionId ??
+          nextCreated?.stored_session_id ??
+          nextCreated?.session_id;
+        if (!nextStoredSessionId) {
+          throw new Error("Hermes did not create a session.");
+        }
+        return {
+          created: nextCreated,
+          gateway: nextGateway,
+          sessionTitle: nextSessionTitle,
+          storedSessionId: nextStoredSessionId,
+        };
+      })().catch(rollbackOptimisticBeforePrompt);
+    storedSessionIdForRollback = storedSessionId;
     const queuedIssueReport = options?.issueReport;
     if (queuedIssueReport && targetSessionId) {
       queuedIssueReport.diagnosisStartedAt = new Date().toISOString();
@@ -3572,12 +3924,17 @@ export function AgentWorkspace({
     if (!targetSessionId) {
       rememberSessionMode(storedSessionId, fullModeDraftRef.current);
     }
-    const sessionDisplayTitle = options?.issueReport
-      ? "Issue report"
-      : explicitSession?.title?.trim() ||
-        explicitSession?.preview?.trim() ||
-        sessionTitle ||
-        titleFromPrompt(titleContent);
+    const sessionDisplayTitle = sessionTitle || fallbackSessionTitle;
+    if (optimisticSession) {
+      migrateOptimisticHermesSession({
+        createdAt: optimisticSession.createdAt,
+        displayContent,
+        fromSessionId: optimisticSession.id,
+        ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
+        title: sessionDisplayTitle,
+        toSessionId: storedSessionId,
+      });
+    }
     if (sessionTitle) {
       sessionTitleOverridesRef.current = {
         ...sessionTitleOverridesRef.current,
@@ -3613,11 +3970,19 @@ export function AgentWorkspace({
         ).session_id;
     } catch (err) {
       clearQueuedIssueReport();
+      if (optimisticSession) {
+        removeOptimisticHermesSession(
+          optimisticSession.id,
+          storedSessionIdForRollback,
+        );
+      }
       throw err;
     }
     if (!runtimeSessionId) {
       clearQueuedIssueReport();
-      throw new Error("Hermes did not resume the session.");
+      rollbackOptimisticBeforePrompt(
+        new Error("Hermes did not resume the session."),
+      );
     }
     // Feature 19: send any imported images to the session through the
     // structured image.attach flow before the prompt, so the model/tools see
@@ -3625,42 +3990,45 @@ export function AgentWorkspace({
     // image-edit prompt names a concrete source. A failed attach throws here,
     // which the submit() catch turns into a restored composer the user can
     // retry — the prompt is NOT sent with a silently-missing image.
-    await attachPendingImages(
-      gateway,
-      runtimeSessionId,
-      storedSessionId,
-      options?.attachments ?? [],
-    );
-    const createdAt = new Date().toISOString();
-    // A new session (no target id) means the hero is handing over to a fresh
-    // thread — arm the composer glide. Sending into an existing session leaves
-    // the flag alone so a later hero dismissal via the sidebar stays instant.
-    if (!targetSessionId) heroExitViaThreadRef.current = true;
-    newSessionModeRef.current = false;
-    setNewSessionMode(false);
+    try {
+      await attachPendingImages(
+        gateway,
+        runtimeSessionId,
+        storedSessionId,
+        options?.attachments ?? [],
+      );
+    } catch (err) {
+      clearQueuedIssueReport();
+      rollbackOptimisticBeforePrompt(err);
+    }
+    const createdAt = optimisticSession?.createdAt ?? new Date().toISOString();
     setRuntimeSessionIds((current) => ({
       ...current,
       [storedSessionId]: runtimeSessionId,
     }));
-    selectedHermesSessionIdRef.current = storedSessionId;
-    setSelectedHermesSessionId(storedSessionId);
-    setSelectedTaskId(undefined);
-    setHermesSessionItems((current) => {
-      if (current.some((session) => session.id === storedSessionId))
-        return current;
-      return [
-        {
-          id: storedSessionId,
-          title: sessionDisplayTitle,
-          preview: displayContent,
-          started_at: createdAt,
-          last_active: createdAt,
-          message_count: 1,
-          ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
-        },
-        ...current,
-      ];
-    });
+    if (!optimisticSession) {
+      newSessionModeRef.current = false;
+      setNewSessionMode(false);
+      selectedHermesSessionIdRef.current = storedSessionId;
+      setSelectedHermesSessionId(storedSessionId);
+      setSelectedTaskId(undefined);
+      setHermesSessionItems((current) => {
+        if (current.some((session) => session.id === storedSessionId))
+          return current;
+        return [
+          {
+            id: storedSessionId,
+            title: sessionDisplayTitle,
+            preview: displayContent,
+            started_at: createdAt,
+            last_active: createdAt,
+            message_count: 1,
+            ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
+          },
+          ...current,
+        ];
+      });
+    }
     const knownSessionMessages =
       hermesSessionMessagesRef.current[storedSessionId];
     const insertAfterMessageId =
@@ -3670,7 +4038,7 @@ export function AgentWorkspace({
           ? undefined
           : null;
     const pendingUserMessage: HermesSessionMessage = {
-      id: `pending:user:${Date.now()}`,
+      id: optimisticSession?.userMessage.id ?? `pending:user:${Date.now()}`,
       role: "user",
       content: displayContent,
       timestamp: createdAt,
@@ -3678,17 +4046,19 @@ export function AgentWorkspace({
         ? { client_insert_after_message_id: insertAfterMessageId }
         : {}),
     };
-    setPendingHermesMessages((current) => {
-      const next = {
-        ...current,
-        [storedSessionId]: [
-          ...(current[storedSessionId] ?? []),
-          pendingUserMessage,
-        ],
-      };
-      pendingHermesMessagesRef.current = next;
-      return next;
-    });
+    if (!optimisticSession) {
+      setPendingHermesMessages((current) => {
+        const next = {
+          ...current,
+          [storedSessionId]: [
+            ...(current[storedSessionId] ?? []),
+            pendingUserMessage,
+          ],
+        };
+        pendingHermesMessagesRef.current = next;
+        return next;
+      });
+    }
     setSessionWorking(storedSessionId, true);
     setSessionWaiting(storedSessionId, false);
     dispatchAgentSessionStatus({
@@ -4525,7 +4895,10 @@ export function AgentWorkspace({
     );
   }
 
-  async function startNewTask(request?: AgentNewSessionDetail) {
+  async function startNewTask(
+    request?: AgentNewSessionDetail,
+    options: { deferCategorySeed?: boolean } = {},
+  ) {
     clearPendingNewSessionRequest();
     const seedCategory = request?.category ?? null;
     // A seeded report never auto-submits: the category chip lands in the
@@ -4561,7 +4934,7 @@ export function AgentWorkspace({
     pendingSeedCategoryRef.current = seedCategory;
     if (seedCategory) {
       clearComposerDraft(NEW_SESSION_DRAFT_KEY);
-      seedComposerCategory();
+      seedComposerCategory({ defer: options.deferCategorySeed });
     } else if (initialPrompt) {
       rememberComposerDraft(NEW_SESSION_DRAFT_KEY, initialPrompt, null);
       composerEditorRef.current?.setContent(initialPrompt);
@@ -4623,6 +4996,16 @@ export function AgentWorkspace({
     });
   }
 
+  function editUserPrompt(text: string) {
+    composerEditorRef.current?.setContent(text, null);
+    setDraft(text);
+    setCategory(null);
+    draftRef.current = text;
+    categoryRef.current = null;
+    setComposerAttachments([]);
+    rememberComposerDraft(composerDraftKeyRef.current, text, null, []);
+  }
+
   function setComposerAttachments(
     nextValue:
       | AgentAttachment[]
@@ -4645,18 +5028,29 @@ export function AgentWorkspace({
   /** Applies any pending seed category to the composer chip once the editor is
    * available. Called from startNewTask (best-effort, the editor may not be
    * mounted yet) and again from ComposerEditor's onReady. */
-  function seedComposerCategory() {
-    const seed = pendingSeedCategoryRef.current;
-    if (!seed) return;
+  function seedComposerCategory(options: { defer?: boolean } = {}) {
+    if (!pendingSeedCategoryRef.current) return;
     const editor = composerEditorRef.current;
     // Not mounted yet (cold open) — leave it pending for onReady to apply.
     if (!editor) return;
-    pendingSeedCategoryRef.current = null;
-    window.setTimeout(() => {
-      if (pendingSeedCategoryRef.current) return;
-      editor.setContent("", seed);
+    const applySeed = () => {
+      const seed = pendingSeedCategoryRef.current;
+      const currentEditor = composerEditorRef.current;
+      if (!seed || !currentEditor) return;
+      pendingSeedCategoryRef.current = null;
+      draftRef.current = "";
+      categoryRef.current = seed;
+      setDraft("");
+      setCategory(seed);
       rememberComposerDraft(NEW_SESSION_DRAFT_KEY, "", seed);
-    }, 0);
+      restoredComposerDraftKeyRef.current = NEW_SESSION_DRAFT_KEY;
+      currentEditor.setContent("", seed);
+    };
+    if (options.defer) {
+      window.setTimeout(applySeed, 0);
+    } else {
+      applySeed();
+    }
   }
 
   // Run shortcuts fire the session directly — the prompt never touches the
@@ -5470,6 +5864,7 @@ export function AgentWorkspace({
           ) : null}
         </AnimatePresence>
         {selectedHermesSessionId &&
+        !selectedHermesSessionIsProvisional &&
         workingSessionIds.has(selectedHermesSessionId) ? (
           // Feature 06: while June works, offer a compact steer input so the
           // user can redirect the running turn. Stop still owns the send slot
@@ -5539,7 +5934,8 @@ export function AgentWorkspace({
               if (
                 !skills &&
                 !skillCommandLoading &&
-                text.trimStart().startsWith("/")
+                text.trimStart().startsWith("/") &&
+                !isBuiltinComposerSlashCommand(text)
               ) {
                 void loadSkillCommands({ silent: true });
               }
@@ -5553,7 +5949,7 @@ export function AgentWorkspace({
             onSubmit={() => void submit()}
             onReady={() => {
               restoreComposerDraft(composerDraftKeyRef.current);
-              seedComposerCategory();
+              seedComposerCategory({ defer: true });
             }}
           />
           <div className="agent-composer-toolbar">
@@ -5617,6 +6013,7 @@ export function AgentWorkspace({
                 <IconMicrophone size={18} />
               </button>
               {selectedHermesSessionId &&
+              !selectedHermesSessionIsProvisional &&
               workingSessionIds.has(selectedHermesSessionId) ? (
                 // While June works, stop owns the send slot — sending would
                 // only bounce off the gateway's busy guard anyway.
@@ -5639,6 +6036,7 @@ export function AgentWorkspace({
                   disabled={
                     submitting ||
                     importingFiles ||
+                    selectedHermesSessionIsProvisional ||
                     (!draft.trim() && !attachments.length)
                   }
                   aria-label={
@@ -5902,6 +6300,7 @@ export function AgentWorkspace({
             void branchFromMessage(selectedHermesSessionId, messageId)
           }
           branchingMessageId={branchingMessageId}
+          onEditUserPrompt={editUserPrompt}
         />
       ))}
       {workingSessionIds.has(selectedHermesSessionId) &&
@@ -6014,6 +6413,7 @@ export function AgentWorkspace({
                 sessionUnrestricted(selectedTask.hermesSessionId),
               );
             }}
+            onEditUserPrompt={editUserPrompt}
           />
         ))}
         {workingTaskIds.has(selectedTask.id) &&
@@ -6101,7 +6501,9 @@ export function AgentWorkspace({
           // runtime from another session is still up. The hero composer's
           // picker covers the new-session draft.
           fullMode={
-            !newSessionMode && sessionUnrestricted(selectedHermesSessionId)
+            !newSessionMode &&
+            !selectedHermesSessionIsProvisional &&
+            sessionUnrestricted(selectedHermesSessionId)
           }
           title={
             !newSessionMode && selectedHermesSessionId
@@ -6109,22 +6511,30 @@ export function AgentWorkspace({
               : undefined
           }
           onRename={
-            !newSessionMode && selectedHermesSessionId
+            !newSessionMode &&
+            selectedHermesSessionId &&
+            !selectedHermesSessionIsProvisional
               ? (title) => renameHermesSession(selectedHermesSessionId, title)
               : undefined
           }
           onDelete={
-            !newSessionMode && selectedHermesSessionId
+            !newSessionMode &&
+            selectedHermesSessionId &&
+            !selectedHermesSessionIsProvisional
               ? () => void deleteSelectedHermesSession(selectedHermesSessionId)
               : undefined
           }
           onShowUsage={
-            !newSessionMode && selectedHermesSessionId
+            !newSessionMode &&
+            selectedHermesSessionId &&
+            !selectedHermesSessionIsProvisional
               ? () => setUsagePanelSessionId(selectedHermesSessionId)
               : undefined
           }
           onCompactContext={
-            !newSessionMode && selectedHermesSessionId
+            !newSessionMode &&
+            selectedHermesSessionId &&
+            !selectedHermesSessionIsProvisional
               ? () => setCompactSessionId(selectedHermesSessionId)
               : undefined
           }
@@ -6134,7 +6544,8 @@ export function AgentWorkspace({
           onOpenTuiDebug={
             hermesTuiDebugAvailable() &&
             !newSessionMode &&
-            selectedHermesSessionId
+            selectedHermesSessionId &&
+            !selectedHermesSessionIsProvisional
               ? () => {
                   setError(null);
                   void openHermesTuiDebug({
@@ -7346,7 +7757,7 @@ export function SkillsToolsPanel({
           skill={selectedSkill}
           value={skillDraft}
           onBack={requestCloseSkillEditor}
-          onCancel={() => setSkillDraft(skillDocument?.content ?? "")}
+          onCancel={requestCloseSkillEditor}
           onChange={setSkillDraft}
           onSave={() => void saveSkill()}
         />
@@ -7502,24 +7913,19 @@ function SkillEditorPanel({
           <p className="agent-skill-editor-readonly-note">
             Read-only. This skill loads from ~/.agents/skills. Edit it on disk.
           </p>
-        ) : (
-          <>
-            <button
-              type="button"
-              disabled={!dirty || saving || loading}
-              onClick={onCancel}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary-action primary-solid"
-              disabled={!dirty || saving || loading || !document}
-              onClick={onSave}
-            >
-              {saving ? "Saving..." : "Save changes"}
-            </button>
-          </>
+        ) : null}
+        <button type="button" disabled={saving || loading} onClick={onCancel}>
+          Cancel
+        </button>
+        {readOnly ? null : (
+          <button
+            type="button"
+            className="primary-action primary-solid"
+            disabled={!dirty || saving || loading || !document}
+            onClick={onSave}
+          >
+            {saving ? "Saving..." : "Save changes"}
+          </button>
         )}
       </footer>
     </section>
@@ -8188,6 +8594,7 @@ function AgentChatTurnRow({
   onThinkingOpenChange,
   onTopUp,
   onBranch,
+  onEditUserPrompt,
   branchingMessageId,
   turn,
 }: {
@@ -8221,6 +8628,7 @@ function AgentChatTurnRow({
   onOpenArtifact?: (artifact: AgentArtifact) => void;
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
+  onEditUserPrompt?: (text: string) => void;
   /** Fork the conversation from this turn into a new session (feature 07).
    * Optional: only Hermes-session rows pass it — task rows and the dev gallery
    * omit it, so the action is absent there. */
@@ -8259,6 +8667,8 @@ function AgentChatTurnRow({
     activeThinkingKey !== undefined &&
     thinkingOpen(activeThinkingKey);
   const thinkingIsOpen = thinkingOpen(thinkingKey) || carriedOpen;
+  const [copied, setCopied] = useState(false);
+  const copyResetTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const wasRunning = wasThinkingRunningRef.current;
@@ -8284,24 +8694,92 @@ function AgentChatTurnRow({
     toolParts.length,
   ]);
 
+  useEffect(
+    () => () => {
+      if (copyResetTimerRef.current !== undefined) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+    },
+    [],
+  );
+
   const contextParts = turn.parts.filter(
     (part): part is Extract<AgentChatPart, { type: "context" }> =>
       part.type === "context",
   );
   const nonTextParts = turn.parts.filter((part) => part.type !== "text");
+  const copyText = copyableTextForTurn(turn);
+  const userPromptText = turn.role === "user" ? copyText : "";
 
-  // Feature 07: the per-turn "Branch from here" control. Rendered only on
-  // Hermes-session rows (which pass `onBranch`); the action self-disables when
-  // the turn id is not a persisted message id (see isBranchableMessageId).
+  async function copyTurn() {
+    if (!copyText) return;
+    try {
+      if (!navigator.clipboard?.writeText) return;
+      await navigator.clipboard.writeText(copyText);
+      setCopied(true);
+      if (copyResetTimerRef.current !== undefined) {
+        window.clearTimeout(copyResetTimerRef.current);
+      }
+      copyResetTimerRef.current = window.setTimeout(() => {
+        setCopied(false);
+        copyResetTimerRef.current = undefined;
+      }, 1400);
+    } catch {
+      // Clipboard can fail in restricted contexts; leave the transcript alone.
+    }
+  }
+
+  // Per-turn transcript actions. Branch is rendered only on Hermes-session rows
+  // (which pass `onBranch`); it self-disables when the turn id is not a
+  // persisted message id (see isBranchableMessageId).
   const branchAction = onBranch ? (
-    <div className="agent-turn-actions">
-      <BranchFromHereAction
-        messageId={turn.id}
-        onBranch={onBranch}
-        submitting={branchingMessageId === turn.id}
-      />
-    </div>
+    <BranchFromHereAction
+      messageId={turn.id}
+      onBranch={onBranch}
+      submitting={branchingMessageId === turn.id}
+    />
   ) : null;
+  const copyAction = copyText ? (
+    <button
+      type="button"
+      className="agent-turn-action"
+      aria-label={copied ? "Copied message" : "Copy message"}
+      title={copied ? "Copied" : "Copy message"}
+      data-copied={copied ? "true" : undefined}
+      onClick={() => void copyTurn()}
+    >
+      {copied ? (
+        <IconCheckmark1Small size={13} aria-hidden />
+      ) : (
+        <IconClipboard size={13} aria-hidden />
+      )}
+      <span>{copied ? "Copied" : "Copy"}</span>
+    </button>
+  ) : null;
+  const editAction =
+    turn.role === "user" &&
+    !turn.isScheduledRun &&
+    userPromptText &&
+    onEditUserPrompt ? (
+      <button
+        type="button"
+        className="agent-turn-action"
+        aria-label="Edit message"
+        title="Edit message"
+        onClick={() => onEditUserPrompt(userPromptText)}
+      >
+        <IconPencilLine size={13} aria-hidden />
+        <span>Edit</span>
+      </button>
+    ) : null;
+  const turnActions =
+    copyAction || editAction || branchAction ? (
+      <div className="agent-turn-actions">
+        {copyAction}
+        {editAction}
+        {branchAction}
+      </div>
+    ) : null;
 
   if (
     contextParts.length &&
@@ -8342,7 +8820,7 @@ function AgentChatTurnRow({
             />
           ))}
         </div>
-        {branchAction}
+        {turnActions}
       </article>
     );
   }
@@ -8436,13 +8914,39 @@ function AgentChatTurnRow({
             <span className="text-shimmer">Thinking…</span>
           </p>
         ) : (
-          // No branch action on an empty/in-flight turn — there is nothing to
-          // fork from yet.
-          branchAction
+          // No actions on an empty/in-flight turn. There is nothing useful to
+          // copy or fork from yet.
+          turnActions
         )}
       </div>
     </article>
   );
+}
+
+function copyableTextForTurn(turn: AgentChatTurn): string {
+  if (turn.role === "user") return userPromptTextForTurn(turn);
+  if (turn.role !== "assistant") return "";
+  return turn.parts
+    .filter(
+      (part): part is Extract<AgentChatPart, { type: "text" }> =>
+        part.type === "text",
+    )
+    .map((part) => stripAgentCliAccessRequest(part.text).trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
+function userPromptTextForTurn(turn: AgentChatTurn): string {
+  return turn.parts
+    .filter(
+      (part): part is Extract<AgentChatPart, { type: "text" }> =>
+        part.type === "text",
+    )
+    .map((part) => displayedComposerUserMessageText(part.text).trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
 }
 
 function ContextCompactionPart({
@@ -10478,16 +10982,6 @@ function stringValue(value: unknown, preserveWhitespace = false) {
   return undefined;
 }
 
-function humanizeToolName(value: string) {
-  return value
-    .replace(/^tools?[._-]/i, "")
-    .replaceAll("_", " ")
-    .replaceAll("-", " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
 function capabilityMatches(
   item: HermesSkillInfo | HermesToolsetInfo | HermesMessagingPlatformInfo,
   query: string,
@@ -10883,7 +11377,7 @@ function agentStatusSummaryFromHermesEvent(
       stringValue(payload?.name) ??
       stringValue(payload?.tool_name) ??
       stringValue(payload?.tool);
-    return name ? `Using ${humanizeToolName(name)}.` : "Using a tool.";
+    return toolActivitySentence(name, payload);
   }
   if (event.type === "thinking.delta" || event.type === "reasoning.delta") {
     return "Thinking.";
@@ -10893,8 +11387,8 @@ function agentStatusSummaryFromHermesEvent(
 
 function visibleHermesMessageText(message: HermesSessionMessage) {
   const text =
-    textFromHermesValue(message.content) ??
-    textFromHermesValue(message.text) ??
+    textFromHermesContent(message.content) ??
+    textFromHermesContent(message.text) ??
     "";
   return displayedComposerUserMessageText(stripHermesVisibleContext(text));
 }
@@ -10956,25 +11450,6 @@ function displayedComposerUserMessageText(content: string): string {
     text = next;
   }
   return text;
-}
-
-function textFromHermesValue(value: unknown): string | undefined {
-  if (value === null || value === undefined) return undefined;
-  if (typeof value === "string") return value.trim() ? value.trim() : undefined;
-  if (typeof value === "number" || typeof value === "boolean")
-    return String(value);
-  if (Array.isArray(value)) {
-    const text = value.map((item) => textFromHermesValue(item) ?? "").join("");
-    return text.trim() ? text.trim() : undefined;
-  }
-  if (typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    for (const key of ["text", "content", "message", "output_text"]) {
-      const text = textFromHermesValue(record[key]);
-      if (text) return text;
-    }
-  }
-  return undefined;
 }
 
 function sameVisibleMessageText(left: string, right: string) {
@@ -11203,6 +11678,23 @@ function omitRecordKey<T>(record: Record<string, T>, key: string) {
   if (!(key in record)) return record;
   const next = { ...record };
   delete next[key];
+  return next;
+}
+
+function moveRecordKey<T>(
+  record: Record<string, T[]>,
+  from: string,
+  to: string,
+) {
+  const moved = record[from] ?? [];
+  const existing = record[to] ?? [];
+  const next = { ...record };
+  delete next[from];
+  if (moved.length || existing.length) {
+    next[to] = [...existing, ...moved];
+  } else {
+    delete next[to];
+  }
   return next;
 }
 

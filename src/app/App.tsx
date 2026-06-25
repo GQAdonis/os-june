@@ -193,6 +193,8 @@ const AGENT_MENU_BAR_SESSION_LIMIT = 6;
 const AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS = [
   250, 500, 1000, 2000, 4000, 8000,
 ];
+const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
+const ACCESSIBILITY_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
 // Floor for the note card so the sidebar can't be dragged wide enough to
 // crush it into a sliver — it always keeps a usable width plus its gutters.
 const MAIN_PANEL_MIN_WIDTH = 420;
@@ -324,12 +326,20 @@ export function App() {
   // skips writes until live navigation settles onto the target (note loads are
   // async), so a half-applied snapshot never overwrites the tab it came from.
   const restoreTargetRef = useRef<TabNav | null>(null);
-  const [activeAgentSession, setActiveAgentSession] =
-    useState<HermesSessionInfo>();
   // Reactive copy of the known agent sessions for the "view all" list and
   // project (folder) surfaces; the menu-bar refs below stay the source for
   // native menu state.
   const [agentSessions, setAgentSessions] = useState<HermesSessionInfo[]>([]);
+  const [activeAgentSessionId, setActiveAgentSessionId] = useState<string>();
+  const [activeAgentSessionSeed, setActiveAgentSessionSeed] =
+    useState<HermesSessionInfo>();
+  const setActiveAgentSession = useCallback(
+    (session: HermesSessionInfo | undefined) => {
+      setActiveAgentSessionId(session?.id);
+      setActiveAgentSessionSeed(session);
+    },
+    [],
+  );
   const [agentWorkingSessionIds, setAgentWorkingSessionIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
@@ -396,6 +406,8 @@ export function App() {
     useState<RecordingSourceReadinessDto>();
   const [checkingSourceReadiness, setCheckingSourceReadiness] = useState(false);
   const [accessibilityStatus, setAccessibilityStatus] = useState<string>();
+  const [accessibilityRefreshRequest, setAccessibilityRefreshRequest] =
+    useState(0);
   const [microphoneStatus, setMicrophoneStatus] = useState<string>();
   const [readyUpdate, setReadyUpdate] =
     useState<UpdatePromptPayload<ScribeUpdate> | null>(null);
@@ -567,8 +579,7 @@ export function App() {
       originFolderId: activeView === "meetings" ? originFolderId : undefined,
       originAllNotes: activeView === "meetings" ? originAllNotes : undefined,
       folderId: activeView === "folders" ? state.selectedFolderId : undefined,
-      agentSessionId:
-        activeView === "agent" ? activeAgentSession?.id : undefined,
+      agentSessionId: activeView === "agent" ? activeAgentSessionId : undefined,
       agentOrigin: activeView === "agent" ? agentOrigin : undefined,
     }),
     [
@@ -577,7 +588,7 @@ export function App() {
       originFolderId,
       originAllNotes,
       state.selectedFolderId,
-      activeAgentSession?.id,
+      activeAgentSessionId,
       agentOrigin,
     ],
   );
@@ -648,7 +659,8 @@ export function App() {
         const session = nav.agentSessionId
           ? agentSessions.find((s) => s.id === nav.agentSessionId)
           : undefined;
-        setActiveAgentSession(session);
+        setActiveAgentSessionId(nav.agentSessionId);
+        setActiveAgentSessionSeed(session);
       } else {
         setActiveAgentSession(undefined);
       }
@@ -1235,6 +1247,17 @@ export function App() {
       if (!detail) return;
       agentMenuBarSessionsRef.current = detail.sessions;
       setAgentSessions(detail.sessions);
+      if (activeViewRef.current === "agent") {
+        const selectedSessionId = detail.selectedSessionId;
+        if (selectedSessionId) {
+          setActiveAgentSessionId(selectedSessionId);
+          setActiveAgentSessionSeed((current) =>
+            current?.id === selectedSessionId ? current : undefined,
+          );
+        } else {
+          setActiveAgentSession(undefined);
+        }
+      }
       // "New session" started from a project: file the first brand-new
       // session that gets selected; switching to a known session instead
       // abandons the intent.
@@ -1407,9 +1430,12 @@ export function App() {
       (sessionId) => {
         setAgentOrigin(undefined);
         if (!sessionId) {
+          setActiveAgentSession(undefined);
           setActiveView("agent");
           return;
         }
+        setActiveAgentSessionId(sessionId);
+        setActiveAgentSessionSeed(undefined);
         const cachedSession = agentMenuBarSessionsRef.current.find(
           (session) => session.id === sessionId,
         );
@@ -1637,6 +1663,37 @@ export function App() {
     return () => window.removeEventListener("focus", refresh);
   }, [appBlocked, state.recordingStatus?.state]);
 
+  // After the user asks to grant Accessibility, keep checking briefly while
+  // macOS System Settings is in front. This avoids relying on a single webview
+  // focus event, which can be missed after the native TCC prompt hands off to
+  // System Settings.
+  useEffect(() => {
+    if (
+      appBlocked ||
+      !accessibilityBlocked ||
+      accessibilityRefreshRequest === 0
+    ) {
+      return;
+    }
+    function poll() {
+      void dictationHelperCommand({ type: "get_permission_status" }).catch(
+        () => undefined,
+      );
+    }
+    poll();
+    const interval = window.setInterval(
+      poll,
+      ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS,
+    );
+    const timeout = window.setTimeout(() => {
+      window.clearInterval(interval);
+    }, ACCESSIBILITY_PERMISSION_REFRESH_TIMEOUT_MS);
+    return () => {
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+    };
+  }, [accessibilityBlocked, accessibilityRefreshRequest, appBlocked]);
+
   function handleSourceModeChange(next: RecordingSourceMode) {
     setUserWantsSystemAudio(next === "microphonePlusSystem");
   }
@@ -1654,13 +1711,10 @@ export function App() {
   }
 
   function handleEnableAccessibility() {
-    void dictationHelperCommand({ type: "request_accessibility_permission" })
-      .catch(() => undefined)
-      .finally(() => {
-        window.setTimeout(() => {
-          void openPrivacySettings("accessibility");
-        }, 200);
-      });
+    setAccessibilityRefreshRequest((request) => request + 1);
+    void dictationHelperCommand({
+      type: "request_accessibility_permission",
+    }).catch(() => undefined);
   }
 
   useEffect(() => {
@@ -2437,21 +2491,24 @@ export function App() {
     const tick = window.setInterval(() => {
       setRecordingInactivityNow(Date.now());
     }, 1000);
-    const timeout = window.setTimeout(() => {
-      const currentStatus = recordingStatusRef.current;
-      const sessionId = recordingInactivityPrompt.sessionId;
-      recordingInactivityTrackerRef.current = { sessionId };
-      setRecordingInactivityPrompt(null);
-      if (
-        currentStatus?.sessionId !== sessionId ||
-        currentStatus.state !== "recording"
-      ) {
-        return;
-      }
-      void handlePauseRecording(sessionId).then((paused) => {
-        if (paused) void notifyRecordingAutoPaused(sessionId);
-      });
-    }, Math.max(0, recordingInactivityPrompt.expiresAt - Date.now()));
+    const timeout = window.setTimeout(
+      () => {
+        const currentStatus = recordingStatusRef.current;
+        const sessionId = recordingInactivityPrompt.sessionId;
+        recordingInactivityTrackerRef.current = { sessionId };
+        setRecordingInactivityPrompt(null);
+        if (
+          currentStatus?.sessionId !== sessionId ||
+          currentStatus.state !== "recording"
+        ) {
+          return;
+        }
+        void handlePauseRecording(sessionId).then((paused) => {
+          if (paused) void notifyRecordingAutoPaused(sessionId);
+        });
+      },
+      Math.max(0, recordingInactivityPrompt.expiresAt - Date.now()),
+    );
 
     return () => {
       window.clearInterval(tick);
@@ -2755,7 +2812,11 @@ export function App() {
           onDragRegionPointerDown={handleTitlebarPointerDown}
         />
         <section className="main-panel">
-          {accessibilityBlocked ? <PermissionBanner /> : null}
+          {accessibilityBlocked ? (
+            <PermissionBanner
+              onEnableAccessibility={handleEnableAccessibility}
+            />
+          ) : null}
           <div
             ref={mainPanelBodyRef}
             className="main-panel-body"
@@ -2833,7 +2894,8 @@ export function App() {
                 // The origin crumbs render inside the workspace's own sticky
                 // session bar, so they persist while the chat scrolls beneath.
                 <AgentWorkspace
-                  initialSession={activeAgentSession}
+                  initialSession={activeAgentSessionSeed}
+                  initialSessionId={activeAgentSessionId}
                   origin={
                     agentOriginFolder
                       ? {
