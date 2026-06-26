@@ -3939,6 +3939,18 @@ describe("AgentWorkspace", () => {
     expect(
       await screen.findByText(/Queued to run after this tool call/),
     ).toHaveTextContent("focus on the failing test");
+    await waitFor(() =>
+      expect(mocks.gatewayEventHandlers.size).toBeGreaterThan(0),
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    });
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(
+        ([method]) => method === "session.steer",
+      ),
+    ).toHaveLength(0);
 
     act(() => {
       for (const handler of mocks.gatewayEventHandlers) {

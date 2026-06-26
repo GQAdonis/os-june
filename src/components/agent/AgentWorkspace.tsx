@@ -1820,8 +1820,44 @@ export function AgentWorkspace({
   }, [runtimeSessionIds]);
 
   useEffect(() => {
+    const restoredSessionIds = continuity?.workingSessionIds ?? [];
+    if (!restoredSessionIds.length) return;
+    let cancelled = false;
+
+    void (async () => {
+      for (const sessionId of restoredSessionIds) {
+        const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
+        if (!runtimeSessionId) continue;
+        try {
+          const gateway = await ensureHermesGateway(
+            sessionUnrestricted(sessionId),
+          );
+          if (cancelled || !workingSessionIdsRef.current.has(sessionId)) {
+            continue;
+          }
+          attachHermesSessionEventListener({
+            gateway,
+            runtimeSessionId,
+            sessionDisplayTitle:
+              hermesSessionItemsRef.current.find(
+                (session) => session.id === sessionId,
+              )?.title ?? "Agent session",
+            storedSessionId: sessionId,
+          });
+        } catch {
+          // The working-session poll still reconciles if reconnecting fails.
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     for (const sessionId of Object.keys(queuedSteerBySessionIdRef.current)) {
-      scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
+      scheduleQueuedSteerRetry(sessionId);
     }
   }, []);
 
@@ -3957,6 +3993,153 @@ export function AgentWorkspace({
     }
   }
 
+  function attachHermesSessionEventListener({
+    gateway,
+    runtimeSessionId,
+    sessionDisplayTitle,
+    storedSessionId,
+  }: {
+    gateway: HermesGatewayClient;
+    runtimeSessionId: string;
+    sessionDisplayTitle: string;
+    storedSessionId: string;
+  }) {
+    sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
+    let unlisten = () => {};
+    const removeListener = gateway.onEvent((event) => {
+      if (
+        event.session_id !== runtimeSessionId &&
+        event.session_id !== storedSessionId
+      )
+        return;
+      const liveEvent = { ...event, receivedAt: new Date().toISOString() };
+      // Run every live frame through the typed control plane alongside the
+      // existing string-based handling below. This is the first consumer of
+      // the classifier: it doesn't drive rendering yet (later features migrate
+      // families onto it incrementally), but it proves the live path is typed
+      // and surfaces any raw type June can't yet model. Unknown frames classify
+      // as `unsupported` rather than being dropped, so a Hermes upgrade that
+      // adds an event shows up in dev instead of silently doing nothing.
+      const classified = classifyHermesEvent(liveEvent);
+      // Feature 15: record every inbound frame (raw type + the kind it
+      // classified to) into the bounded, sanitized trace buffer so the dev/debug
+      // trace panel can reconstruct the session. recordInbound re-classifies and
+      // sanitizes internally; nothing raw is retained.
+      hermesTraceBuffer.recordInbound(liveEvent);
+      if (classified.kind === "unsupported") {
+        // Feed the bounded per-session store so the user gets a recoverable
+        // notice (when this is the active session) and developers get a
+        // sanitized, issue-report-safe export. The payload is already sanitized
+        // by the classifier; nothing raw is retained or logged.
+        unsupportedEventStore.record(classified);
+        if (import.meta.env.DEV) {
+          console.debug(
+            "[hermes] unsupported event",
+            classified.rawType,
+            classified.sanitizedPayload,
+          );
+        }
+      } else if (classified.kind === "pending_action") {
+        // Feature 04: aggregate this blocker into the global "Needs you" tray,
+        // keyed by mode + session + request. The session's mode comes from its
+        // recorded opt-in (sudo carries its own; the rest derive it here). A
+        // fresh event for a known request also re-confirms a row that went
+        // stale across a reconnect (see the store's reconcile logic).
+        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
+      }
+      // Feature 11: roll EVERY classified event into the global activity store
+      // that backs the Agent activity drawer. The store is total and ignores
+      // unattributable events, so one unconditional call covers all kinds; it
+      // derives the session's phase (running/waiting/background/error/complete),
+      // current tool, and subagent count from the normalized event — never from
+      // the raw frame (raw JSON belongs to feature 15's trace panel).
+      hermesActivityStore.record(classified, hermesModeFor(storedSessionId));
+      // Feature 14: extract any file/artifact reference this event carries into
+      // the per-session artifact timeline behind the drawer's "Artifacts"
+      // section. The store is total and only acts on `tool` completions that
+      // name a known file/url field (conservative — never parses prose), so one
+      // unconditional call is safe for every kind. Mode rides along so each
+      // artifact can show its blast radius (sandboxed copy vs unrestricted path).
+      hermesArtifactStore.record(classified, hermesModeFor(storedSessionId));
+      const nextSessionEvents = [
+        ...(liveEventsRef.current[storedSessionId] ?? []),
+        liveEvent,
+      ].slice(-200);
+      liveEventsRef.current = {
+        ...liveEventsRef.current,
+        [storedSessionId]: nextSessionEvents,
+      };
+      setLiveEvents(liveEventsRef.current);
+      const toolEventPhase = hermesToolEventPhase(event.type);
+      const hasActiveToolCalls =
+        toolEventPhase !== undefined
+          ? updateSessionToolCallActivity(
+              storedSessionId,
+              event,
+              toolEventPhase,
+            )
+          : toolCallSessionIdsRef.current.has(storedSessionId);
+      if (toolEventPhase === "complete" && !hasActiveToolCalls) {
+        window.setTimeout(() => {
+          void flushQueuedSteerInstruction(storedSessionId);
+        }, 0);
+      }
+      const status = agentStatusFromHermesEvent(event);
+      if (status === "waitingForUser") {
+        setSessionWorking(storedSessionId, false);
+        setSessionWaiting(storedSessionId, true);
+      } else if (status === "running") {
+        setSessionWaiting(storedSessionId, false);
+        setSessionWorking(storedSessionId, true);
+      }
+      const activityCounts =
+        status === "completed" || status === "failed" || status === "cancelled"
+          ? clearSessionActivity(storedSessionId)
+          : undefined;
+      if (activityCounts) {
+        // Feature 04: the session reached a terminal state (completed, a
+        // terminal error, or an interrupt) — the agent is no longer blocked, so
+        // any of its outstanding "Needs you" rows are moot. Clear them so the
+        // tray never shows a dead blocker for a finished session.
+        pendingActionStore.resolveSession(storedSessionId);
+      }
+      if (status) {
+        dispatchAgentSessionStatus({
+          sessionId: storedSessionId,
+          title: sessionDisplayTitle,
+          status,
+          summary: agentStatusSummaryFromHermesEvent(event, status),
+          ...activityCounts,
+        });
+      }
+      if (isTerminalHermesEvent(event.type)) {
+        unlisten();
+        if (!activityCounts) {
+          clearSessionActivity(storedSessionId);
+        }
+        // The diagnostic turn is over (even on error): let the user append
+        // anything June's summary surfaced before sending the bundled report.
+        const promotedIssueReport = promotePendingIssueReportToReview(
+          storedSessionId,
+          { queueDiagnosisRefresh: true },
+        );
+        if (!promotedIssueReport) {
+          window.setTimeout(() => {
+            void refreshHermesSession(storedSessionId);
+          }, 300);
+        }
+      }
+    });
+    unlisten = () => {
+      removeListener();
+      if (sessionGatewayUnlistenRef.current.get(storedSessionId) === unlisten) {
+        sessionGatewayUnlistenRef.current.delete(storedSessionId);
+      }
+    };
+    sessionGatewayUnlistenRef.current.set(storedSessionId, unlisten);
+    return unlisten;
+  }
+
   async function submitHermesSession(
     content: string,
     explicitSession?: HermesSessionInfo,
@@ -4207,138 +4390,12 @@ export function AgentWorkspace({
       status: "running",
       summary: "June is working.",
     });
-    sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
-    const removeListener = gateway.onEvent((event) => {
-      if (
-        event.session_id !== runtimeSessionId &&
-        event.session_id !== storedSessionId
-      )
-        return;
-      const liveEvent = { ...event, receivedAt: new Date().toISOString() };
-      // Run every live frame through the typed control plane alongside the
-      // existing string-based handling below. This is the first consumer of
-      // the classifier: it doesn't drive rendering yet (later features migrate
-      // families onto it incrementally), but it proves the live path is typed
-      // and surfaces any raw type June can't yet model. Unknown frames classify
-      // as `unsupported` rather than being dropped, so a Hermes upgrade that
-      // adds an event shows up in dev instead of silently doing nothing.
-      const classified = classifyHermesEvent(liveEvent);
-      // Feature 15: record every inbound frame (raw type + the kind it
-      // classified to) into the bounded, sanitized trace buffer so the dev/debug
-      // trace panel can reconstruct the session. recordInbound re-classifies and
-      // sanitizes internally; nothing raw is retained.
-      hermesTraceBuffer.recordInbound(liveEvent);
-      if (classified.kind === "unsupported") {
-        // Feed the bounded per-session store so the user gets a recoverable
-        // notice (when this is the active session) and developers get a
-        // sanitized, issue-report-safe export. The payload is already sanitized
-        // by the classifier; nothing raw is retained or logged.
-        unsupportedEventStore.record(classified);
-        if (import.meta.env.DEV) {
-          console.debug(
-            "[hermes] unsupported event",
-            classified.rawType,
-            classified.sanitizedPayload,
-          );
-        }
-      } else if (classified.kind === "pending_action") {
-        // Feature 04: aggregate this blocker into the global "Needs you" tray,
-        // keyed by mode + session + request. The session's mode comes from its
-        // recorded opt-in (sudo carries its own; the rest derive it here). A
-        // fresh event for a known request also re-confirms a row that went
-        // stale across a reconnect (see the store's reconcile logic).
-        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
-      }
-      // Feature 11: roll EVERY classified event into the global activity store
-      // that backs the Agent activity drawer. The store is total and ignores
-      // unattributable events, so one unconditional call covers all kinds; it
-      // derives the session's phase (running/waiting/background/error/complete),
-      // current tool, and subagent count from the normalized event — never from
-      // the raw frame (raw JSON belongs to feature 15's trace panel).
-      hermesActivityStore.record(classified, hermesModeFor(storedSessionId));
-      // Feature 14: extract any file/artifact reference this event carries into
-      // the per-session artifact timeline behind the drawer's "Artifacts"
-      // section. The store is total and only acts on `tool` completions that
-      // name a known file/url field (conservative — never parses prose), so one
-      // unconditional call is safe for every kind. Mode rides along so each
-      // artifact can show its blast radius (sandboxed copy vs unrestricted path).
-      hermesArtifactStore.record(classified, hermesModeFor(storedSessionId));
-      const nextSessionEvents = [
-        ...(liveEventsRef.current[storedSessionId] ?? []),
-        liveEvent,
-      ].slice(-200);
-      liveEventsRef.current = {
-        ...liveEventsRef.current,
-        [storedSessionId]: nextSessionEvents,
-      };
-      setLiveEvents(liveEventsRef.current);
-      const toolEventPhase = hermesToolEventPhase(event.type);
-      const hasActiveToolCalls =
-        toolEventPhase !== undefined
-          ? updateSessionToolCallActivity(
-              storedSessionId,
-              event,
-              toolEventPhase,
-            )
-          : toolCallSessionIdsRef.current.has(storedSessionId);
-      if (toolEventPhase === "complete" && !hasActiveToolCalls) {
-        window.setTimeout(() => {
-          void flushQueuedSteerInstruction(storedSessionId);
-        }, 0);
-      }
-      const status = agentStatusFromHermesEvent(event);
-      if (status === "waitingForUser") {
-        setSessionWorking(storedSessionId, false);
-        setSessionWaiting(storedSessionId, true);
-      } else if (status === "running") {
-        setSessionWaiting(storedSessionId, false);
-        setSessionWorking(storedSessionId, true);
-      }
-      const activityCounts =
-        status === "completed" || status === "failed" || status === "cancelled"
-          ? clearSessionActivity(storedSessionId)
-          : undefined;
-      if (activityCounts) {
-        // Feature 04: the session reached a terminal state (completed, a
-        // terminal error, or an interrupt) — the agent is no longer blocked, so
-        // any of its outstanding "Needs you" rows are moot. Clear them so the
-        // tray never shows a dead blocker for a finished session.
-        pendingActionStore.resolveSession(storedSessionId);
-      }
-      if (status) {
-        dispatchAgentSessionStatus({
-          sessionId: storedSessionId,
-          title: sessionDisplayTitle,
-          status,
-          summary: agentStatusSummaryFromHermesEvent(event, status),
-          ...activityCounts,
-        });
-      }
-      if (isTerminalHermesEvent(event.type)) {
-        unlisten();
-        if (!activityCounts) {
-          clearSessionActivity(storedSessionId);
-        }
-        // The diagnostic turn is over (even on error): let the user append
-        // anything June's summary surfaced before sending the bundled report.
-        const promotedIssueReport = promotePendingIssueReportToReview(
-          storedSessionId,
-          { queueDiagnosisRefresh: true },
-        );
-        if (!promotedIssueReport) {
-          window.setTimeout(() => {
-            void refreshHermesSession(storedSessionId);
-          }, 300);
-        }
-      }
+    attachHermesSessionEventListener({
+      gateway,
+      runtimeSessionId,
+      sessionDisplayTitle,
+      storedSessionId,
     });
-    const unlisten = () => {
-      removeListener();
-      if (sessionGatewayUnlistenRef.current.get(storedSessionId) === unlisten) {
-        sessionGatewayUnlistenRef.current.delete(storedSessionId);
-      }
-    };
-    sessionGatewayUnlistenRef.current.set(storedSessionId, unlisten);
     try {
       // Feature 15: record the outbound prompt.submit in the trace buffer. Its
       // params are sanitized before storage (the text is the user's own prompt,
@@ -4387,7 +4444,7 @@ export function AgentWorkspace({
         // working state. Callers translate this into the composer notice.
         throw err;
       }
-      unlisten();
+      sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
       setSessionWorking(storedSessionId, false);
       setSessionWaiting(storedSessionId, false);
       dispatchAgentSessionStatus({
