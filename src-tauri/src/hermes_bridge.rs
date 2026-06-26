@@ -1356,8 +1356,9 @@ pub async fn ensure_hermes_bridge_session(
     // session is created through the gateway; REST is only a best-effort title
     // update for the sidebar/session browser. Model-only switches stay in the
     // frontend session override and live gateway dispatch path.
-    let Some(title) = title else {
-        return Ok(unchanged());
+    let title = match title {
+        Some(title) => title,
+        None => return Ok(unchanged()),
     };
     let patch_body = serde_json::json!({ "title": title.clone() });
     match hermes_api_json(
