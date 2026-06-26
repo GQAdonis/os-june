@@ -8,6 +8,7 @@ import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { IconAudio } from "central-icons/IconAudio";
 import { IconBrain2 } from "central-icons/IconBrain2";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
+import { IconFolderShared } from "central-icons/IconFolderShared";
 import { IconCreditCard1 } from "central-icons/IconCreditCard1";
 import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
 import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
@@ -232,6 +233,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         id: "skills",
         label: "Installed skills",
         icon: <IconPlugin2 size={16} />,
+      },
+      {
+        id: "external-dirs",
+        label: "External skill directories",
+        icon: <IconFolderShared size={16} />,
       },
       {
         id: "skill-review",
