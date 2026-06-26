@@ -45,6 +45,10 @@ export function isSensitiveKey(key: string): boolean {
   return SENSITIVE_KEY_PATTERN.test(key);
 }
 
+function isSensitiveUrlQueryKey(key: string): boolean {
+  return isSensitiveKey(key) || /^key$/i.test(key);
+}
+
 /**
  * Redacts secret-shaped fragments inside otherwise human-readable text. Use this
  * for fields that are intentionally surfaced as strings, such as error
@@ -169,7 +173,7 @@ function sanitizeUrl(value: string): string | undefined {
     }
 
     for (const key of Array.from(url.searchParams.keys())) {
-      if (isSensitiveKey(key)) {
+      if (isSensitiveUrlQueryKey(key)) {
         url.searchParams.set(key, REDACTED);
         changed = true;
       }

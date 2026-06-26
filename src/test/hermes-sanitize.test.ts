@@ -59,11 +59,13 @@ describe("sanitizePayload — value-shape backstop exempts paths/urls", () => {
 
   it("redacts sensitive query params in a URL under a benign key", () => {
     const out = sanitizePayload({
-      url: "https://example.com/callback?token=secret-token-123&view=1",
+      url: "https://example.com/callback?key=plain-api-key-123&token=secret-token-123&view=1",
     }) as Record<string, unknown>;
 
     expect(out.url).toContain("view=1");
+    expect(out.url).toContain("key=");
     expect(out.url).toContain("token=");
+    expect(out.url).not.toContain("plain-api-key-123");
     expect(out.url).not.toContain("secret-token-123");
   });
 
@@ -140,10 +142,11 @@ describe("sanitizeText", () => {
 
   it("redacts sensitive URL params inside longer text", () => {
     const out = sanitizeText(
-      "Fetch failed for https://example.com/callback?token=secret-token-123&view=1.",
+      "Fetch failed for https://example.com/callback?key=plain-api-key-123&token=secret-token-123&view=1.",
     );
 
     expect(out).toContain("view=1");
+    expect(out).not.toContain("plain-api-key-123");
     expect(out).not.toContain("secret-token-123");
   });
 
