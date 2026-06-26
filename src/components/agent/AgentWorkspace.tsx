@@ -4081,7 +4081,22 @@ export function AgentWorkspace({
         // recorded opt-in (sudo carries its own; the rest derive it here). A
         // fresh event for a known request also re-confirms a row that went
         // stale across a reconnect (see the store's reconcile logic).
-        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
+        //
+        // Record by the DURABLE stored session id, not the runtime id the event
+        // carries. The classifier stamps `sessionId` from `event.session_id`,
+        // which is the ephemeral runtime id when a session has split
+        // runtime/stored ids. The global tray writes that id into
+        // `selectedHermesSessionId` when the user opens the row; only the stored
+        // id is in `hermesSessionItems`, so a runtime id would mount no
+        // transcript and open the wrong/empty session. The runtime id is still
+        // available for the response RPC via `runtimeSessionIds[storedSessionId]`
+        // (and on the event part the inline card reads), so re-keying for UI
+        // routing costs nothing on the response path.
+        const routed =
+          classified.sessionId === storedSessionId
+            ? classified
+            : { ...classified, sessionId: storedSessionId };
+        pendingActionStore.record(routed, hermesModeFor(storedSessionId));
       }
       // Feature 11: roll EVERY classified event into the global activity store
       // that backs the Agent activity drawer. The store is total and ignores
@@ -4578,7 +4593,9 @@ export function AgentWorkspace({
       });
       // Feature 04: the user just answered this approval — clear its global
       // "Needs you" row immediately (the response itself is the resolution).
-      pendingActionStore.resolveRequest(sessionId, requestId);
+      // Records are keyed by the durable stored id (`liveEventKey`), not the
+      // runtime `sessionId` the RPC uses, so resolve against the stored id.
+      pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
@@ -4604,7 +4621,7 @@ export function AgentWorkspace({
         setLiveEvents(liveEventsRef.current);
         // The request can never be answered now — retire its card so neither the
         // "Needs you" tray nor the inline prompt offers a dead-end "Respond".
-        pendingActionStore.resolveRequest(sessionId, requestId);
+        pendingActionStore.resolveRequest(liveEventKey, requestId);
         void loadHermesSessions();
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
@@ -4688,14 +4705,16 @@ export function AgentWorkspace({
         payload: { request_id: requestId, granted: approved, mode },
       });
       // Feature 04: the user resolved the sudo prompt — clear its tray row.
-      pendingActionStore.resolveRequest(sessionId, requestId);
+      // Records are keyed by the durable stored id (`liveEventKey`); the runtime
+      // `sessionId` is only for the RPC.
+      pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
       if (isSessionGoneError(message)) {
         // The runtime is gone, so this prompt can never be answered — retire
         // its card and say so plainly instead of leaking the raw 404.
-        pendingActionStore.resolveRequest(sessionId, requestId);
+        pendingActionStore.resolveRequest(liveEventKey, requestId);
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
         setError(message, { sessionId });
@@ -4733,14 +4752,16 @@ export function AgentWorkspace({
         payload: { request_id: requestId, provided: true },
       });
       // Feature 04: the user provided the secret — clear its tray row.
-      pendingActionStore.resolveRequest(sessionId, requestId);
+      // Records are keyed by the durable stored id (`liveEventKey`); the runtime
+      // `sessionId` is only for the RPC.
+      pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
       if (isSessionGoneError(message)) {
         // The runtime is gone, so this secret prompt can never be answered —
         // retire its card and say so plainly instead of leaking the raw 404.
-        pendingActionStore.resolveRequest(sessionId, requestId);
+        pendingActionStore.resolveRequest(liveEventKey, requestId);
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
         setError(message, { sessionId });
