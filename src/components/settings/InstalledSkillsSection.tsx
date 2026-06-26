@@ -25,6 +25,7 @@ import {
 } from "../../lib/hermes-admin";
 import { Switch } from "../ui/Switch";
 import { AdminNotifications } from "./AdminNotifications";
+import { SkillDetailSection } from "./SkillDetailSection";
 import { SetupStatusBadge, SkillSetupSection } from "./SkillSetupSection";
 
 /** Sentinel for the "all categories" filter chip. */
@@ -34,9 +35,10 @@ type InstalledSkillsSectionProps = {
   /** The write-access mode whose runtime this page targets. Defaults to the
    * safe sandboxed runtime; the host can point it at Full mode explicitly. */
   mode?: HermesAdminMode;
-  /** Opens the skill detail surface for a given skill name. Wired by the host
-   * (Track 04 owns the detail page); when omitted the "Open" affordance is
-   * hidden so the page never offers a dead link. */
+  /** Opens the skill detail surface for a given skill name. When omitted, the
+   * section manages its own in-place detail sub-view (the default): clicking a
+   * row's open arrow swaps the list for {@link SkillDetailSection}. A host can
+   * override this to route detail elsewhere (e.g. a deep link). */
   onOpenSkill?: (name: string) => void;
 };
 
@@ -59,11 +61,30 @@ export function InstalledSkillsSection({
 }: InstalledSkillsSectionProps) {
   const state = useInstalledSkills(mode);
   const setup = useSkillsSetupOverview(mode);
+  // The detail surface is a sub-view OFF this section (matching how the setup
+  // panel and hub drawer are surfaced), not a top-level tab. When the host
+  // supplies its own `onOpenSkill`, we defer to it; otherwise we open the
+  // built-in detail view in place.
+  const [openSkill, setOpenSkill] = useState<string | null>(null);
+  const handleOpen = onOpenSkill ?? ((name) => setOpenSkill(name));
+
+  if (!onOpenSkill && openSkill) {
+    const info = state.skills.find((skill) => skill.name === openSkill);
+    return (
+      <SkillDetailSection
+        skill={openSkill}
+        info={info}
+        mode={state.mode ?? mode}
+        onBack={() => setOpenSkill(null)}
+      />
+    );
+  }
+
   return (
     <InstalledSkillsView
       state={state}
       mode={mode}
-      onOpenSkill={onOpenSkill}
+      onOpenSkill={handleOpen}
       setup={setup}
     />
   );

@@ -56,6 +56,8 @@ export * from "./installed-skills-view";
 export * from "./use-installed-skills";
 export * from "./skill-setup-view";
 export * from "./use-skill-setup";
+export * from "./skill-detail-view";
+export * from "./use-skill-detail";
 export * from "./mcp-servers-view";
 export * from "./use-mcp-servers";
 export * from "./mcp-catalog-view";

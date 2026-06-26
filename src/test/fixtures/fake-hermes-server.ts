@@ -212,6 +212,9 @@ export type FakeHermesScenario = {
   /** The auth token the server requires on `X-Hermes-Session-Token`. */
   token?: string;
   skills?: FakeSkill[];
+  /** SKILL.md text keyed by skill name, served by GET /api/skills/content and
+   * rewritten by PUT. A skill with no entry serves an empty document. */
+  skillContent?: Record<string, string>;
   toolsets?: FakeToolset[];
   mcpServers?: FakeMcpServer[];
   mcpCatalog?: FakeCatalogEntry[];
@@ -260,6 +263,7 @@ export class FakeHermesServer {
   readonly token: string;
 
   private skills: FakeSkill[];
+  private skillContent: Record<string, string>;
   private toolsets: FakeToolset[];
   private mcpServers: FakeMcpServer[];
   private mcpCatalog: FakeCatalogEntry[];
@@ -279,6 +283,7 @@ export class FakeHermesServer {
   constructor(scenario: FakeHermesScenario = {}) {
     this.token = scenario.token ?? "fake-dashboard-token";
     this.skills = clone(scenario.skills ?? []);
+    this.skillContent = clone(scenario.skillContent ?? {});
     this.toolsets = clone(scenario.toolsets ?? []);
     this.mcpServers = clone(scenario.mcpServers ?? []);
     this.mcpCatalog = clone(scenario.mcpCatalog ?? []);
@@ -342,6 +347,39 @@ export class FakeHermesServer {
       if (!skill) throw new HttpError(404, { code: "not_found" });
       skill.enabled = enabled;
       return json(200, { ok: true, name, enabled });
+    }
+    if (method === "GET" && path === "/api/skills/content") {
+      const name = query.name ?? "";
+      if (!name) throw new HttpError(422, { code: "name_required" });
+      if (!this.skills.some((s) => s.name === name)) {
+        throw new HttpError(404, { code: "not_found" });
+      }
+      return json(200, {
+        name,
+        relative_path: "SKILL.md",
+        content: this.skillContent[name] ?? "",
+      });
+    }
+    if (method === "PUT" && path === "/api/skills/content") {
+      const record = (body ?? {}) as {
+        name?: string;
+        content?: string;
+      };
+      const name = record.name ?? "";
+      if (!name || typeof record.content !== "string") {
+        throw new HttpError(422, { code: "invalid" });
+      }
+      const skill = this.skills.find((s) => s.name === name);
+      if (!skill) throw new HttpError(404, { code: "not_found" });
+      if (skill.read_only) {
+        throw new HttpError(403, { code: "read_only" });
+      }
+      this.skillContent[name] = record.content;
+      return json(200, {
+        name,
+        relative_path: "SKILL.md",
+        content: record.content,
+      });
     }
     if (method === "GET" && path === "/api/skills/hub/search") {
       const q = (query.q ?? "").toLowerCase();

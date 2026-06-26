@@ -36,6 +36,7 @@ import {
   parseMcpServer,
   parseMcpServerList,
   parseMcpTestResult,
+  parseSkillContent,
   parseSkillList,
   parseToggleResult,
   parseToolsetList,
@@ -51,6 +52,7 @@ import {
   type HermesMcpCatalogEntry,
   type HermesMcpServerInfo,
   type HermesMcpTestResult,
+  type HermesSkillContent,
   type HermesSkillInfo,
   type HermesToggleResult,
   type HermesToolsetInfo,
@@ -140,6 +142,18 @@ export type HermesAdminClient = {
       name: string,
       enabled: boolean,
     ): Promise<MutationOutcome<HermesToggleResult>>;
+    /** Reads a skill's raw SKILL.md text for the detail viewer/editor.
+     * `GET /api/skills/content?name=&profile=`. */
+    getContent(name: string): Promise<HermesSkillContent>;
+    /** Rewrites a skill's SKILL.md (full replace). `PUT /api/skills/content`
+     * with `SkillContentUpdate` (`{ name, content, profile? }`). The content is
+     * validated by the caller BEFORE this is invoked; this only transports it.
+     * Applies next session (the skill index/frontmatter is read at session
+     * start), like {@link toggle}. */
+    updateContent(
+      name: string,
+      content: string,
+    ): Promise<MutationOutcome<HermesSkillContent>>;
     hubSearch(query: string, source?: string): Promise<HermesHubSkillResult[]>;
     /** Installs a skill by identifier. `force` is sent ONLY when explicitly
      * true (the user completed the security review); it is omitted otherwise so
@@ -317,6 +331,31 @@ function makeSkills(send: AdminTransport): HermesAdminClient["skills"] {
         (raw) => parseToggleResult(name, enabled, raw),
       );
       return outcome("skill.toggle", result);
+    },
+    getContent(name) {
+      return send(
+        {
+          method: "GET",
+          path: "/api/skills/content",
+          query: { name },
+        },
+        parseSkillContent,
+      );
+    },
+    async updateContent(name, content) {
+      // SkillContentUpdate is `{ name, content, profile? }`; the profile rides
+      // the query param the transport injects for every call, so it is not
+      // duplicated in the body. The body is never logged at info level (the
+      // transport redacts), but SKILL.md is non-secret content anyway.
+      const result = await send(
+        {
+          method: "PUT",
+          path: "/api/skills/content",
+          body: { name, content },
+        },
+        parseSkillContent,
+      );
+      return outcome("skill.editContent", result);
     },
     hubSearch(query, source) {
       return send(

@@ -10522,6 +10522,429 @@ input:focus-visible,
   font-size: var(--fs-xs);
 }
 
+/* Skill detail viewer + safe editor (Hermes admin surface, spec 05). A sub-view
+ * off the installed-skills list: metadata + supporting files + setup + a
+ * SKILL.md read view or validated editor with a diff-before-save confirm.
+ * Tokens only; sentence case; no dashes in copy. */
+.skill-detail {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.skill-detail-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.skill-detail-back,
+.skill-detail-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.skill-detail-back:hover,
+.skill-detail-refresh:hover:not(:disabled) {
+  color: var(--foreground);
+}
+
+.skill-detail-refresh:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.skill-detail-name {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.skill-detail-source {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--sp-2);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+
+.skill-detail-source[data-source="bundled"] {
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+
+.skill-detail-source[data-source="hub"] {
+  background: color-mix(in oklch, var(--ring-focus) 22%, transparent);
+  color: var(--foreground);
+}
+
+.skill-detail-source[data-source="external"] {
+  background: color-mix(in oklch, var(--warm-strong) 16%, transparent);
+  color: var(--warm-strong);
+}
+
+.skill-detail-version {
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.skill-detail-readonly {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warm-strong);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+}
+
+.skill-detail-mode-note {
+  color: var(--muted-foreground);
+}
+
+.skill-detail-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  color: var(--destructive);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-retry {
+  border: 0;
+  background: transparent;
+  color: var(--destructive);
+  font-size: var(--fs-xs);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.skill-detail-loading {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.skill-detail-meta-card,
+.skill-detail-files-card,
+.skill-detail-setup-card,
+.skill-detail-doc-card {
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+}
+
+.skill-detail-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.skill-detail-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--sp-3);
+  margin: 0;
+}
+
+.skill-detail-meta-item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.skill-detail-meta-label {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-meta-value {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+}
+
+.skill-detail-meta-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  word-break: break-all;
+}
+
+.skill-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.skill-detail-tag {
+  padding: 1px var(--sp-2);
+  border-radius: 999px;
+  background: var(--surface-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-files-empty {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-file-group {
+  display: grid;
+  gap: 4px;
+}
+
+.skill-detail-file-group-heading {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.skill-detail-file-group[data-danger="true"] .skill-detail-file-group-heading {
+  color: var(--warm-strong);
+}
+
+.skill-detail-file-count {
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+.skill-detail-file-note {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.skill-detail-file {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  word-break: break-all;
+}
+
+.skill-detail-doc-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.skill-detail-doc-readonly {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--warm-strong);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-doc-timing {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-doc-subheading {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+}
+
+.skill-detail-doc-frontmatter,
+.skill-detail-doc-body,
+.skill-detail-diff {
+  overflow: auto;
+  max-height: 360px;
+  margin: 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.skill-detail-doc-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  margin: 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--warm-strong) 12%, transparent);
+  color: var(--warm-strong);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+
+.skill-detail-editor-label {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+}
+
+.skill-detail-editor {
+  width: 100%;
+  min-height: 260px;
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.skill-detail-editor[aria-invalid="true"] {
+  border-color: var(--destructive);
+}
+
+.skill-detail-issues {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.skill-detail-issue {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.skill-detail-issue[data-severity="error"] {
+  color: var(--destructive);
+}
+
+.skill-detail-issue[data-severity="warning"] {
+  color: var(--warm-strong);
+}
+
+.skill-detail-editor-actions,
+.skill-detail-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+.skill-detail-revert,
+.skill-detail-confirm-cancel {
+  padding: 5px var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.skill-detail-revert:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.skill-detail-save,
+.skill-detail-confirm-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--foreground);
+  color: var(--background);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.skill-detail-save:disabled,
+.skill-detail-confirm-save:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.skill-detail-confirm {
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-subtle);
+}
+
+.skill-detail-confirm-summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+
+.skill-detail-confirm-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  color: var(--warm-strong);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+}
+
+.skill-detail-diff-line[data-kind="added"] {
+  color: var(--success);
+}
+
+.skill-detail-diff-line[data-kind="removed"] {
+  color: var(--destructive);
+}
+
+.skill-detail-diff-line[data-kind="unchanged"] {
+  color: var(--muted-foreground);
+}
+
 /* MCP servers (Hermes admin surface). Mirrors the installed-skills chrome:
  * settings-group / settings-card, a toolbar, a lifecycle banner, durable
  * notifications, and server rows with transport / risk / status pills. Tokens
