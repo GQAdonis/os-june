@@ -1417,6 +1417,9 @@ export function AgentWorkspace({
     Record<string, QueuedSteerInstruction>
   >({});
   const queuedSteerBySessionIdRef = useRef(queuedSteerBySessionId);
+  const queuedSteerRetryTimersRef = useRef<
+    Map<string, ReturnType<typeof window.setTimeout>>
+  >(new Map());
   const [waitingSessionIds, setWaitingSessionIds] = useState<Set<string>>(
     () => new Set(continuity?.waitingSessionIds),
   );
@@ -1777,6 +1780,7 @@ export function AgentWorkspace({
   ]);
 
   const clearQueuedSteerInstruction = useCallback((sessionId: string) => {
+    cancelQueuedSteerRetry(sessionId);
     setQueuedSteerBySessionId((current) => {
       if (!current[sessionId]) return current;
       const next = omitRecordKey(current, sessionId);
@@ -1836,6 +1840,7 @@ export function AgentWorkspace({
   const clearSessionActivity = useCallback(
     (sessionId: string) => {
       setSessionToolCallActive(sessionId, false);
+      clearQueuedSteerInstruction(sessionId);
 
       const nextWorking = new Set(workingSessionIdsRef.current);
       nextWorking.delete(sessionId);
@@ -1852,7 +1857,7 @@ export function AgentWorkspace({
         needsUserCount: nextWaiting.size,
       };
     },
-    [setSessionToolCallActive],
+    [clearQueuedSteerInstruction, setSessionToolCallActive],
   );
 
   // Shared teardown for a session that is going away: its messages, pending
@@ -4921,9 +4926,27 @@ export function AgentWorkspace({
     );
   }
 
+  function cancelQueuedSteerRetry(sessionId: string) {
+    const timer = queuedSteerRetryTimersRef.current.get(sessionId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      queuedSteerRetryTimersRef.current.delete(sessionId);
+    }
+  }
+
+  function scheduleQueuedSteerRetry(sessionId: string) {
+    cancelQueuedSteerRetry(sessionId);
+    const timer = window.setTimeout(() => {
+      queuedSteerRetryTimersRef.current.delete(sessionId);
+      void flushQueuedSteerInstruction(sessionId);
+    }, 300);
+    queuedSteerRetryTimersRef.current.set(sessionId, timer);
+  }
+
   function queueSteerInstruction(sessionId: string, text: string) {
     const instruction = normalizeSteerText(text);
     if (!instruction) return;
+    cancelQueuedSteerRetry(sessionId);
     setQueuedSteerBySessionId((current) => {
       const next = {
         ...current,
@@ -4961,6 +4984,7 @@ export function AgentWorkspace({
       await steerActiveSession(sessionId, queued.text);
       clearQueuedSteerInstruction(sessionId);
     } catch (err) {
+      const busy = isSessionBusyError(err);
       setQueuedSteerBySessionId((current) => {
         const currentQueued = current[sessionId];
         if (!currentQueued || currentQueued.text !== queued.text) {
@@ -4971,7 +4995,7 @@ export function AgentWorkspace({
           [sessionId]: {
             ...currentQueued,
             flushing: false,
-            error: isSessionBusyError(err)
+            error: busy
               ? "June is finishing that tool call. The instruction is still queued."
               : steerErrorNotice(err),
           },
@@ -4979,6 +5003,9 @@ export function AgentWorkspace({
         queuedSteerBySessionIdRef.current = next;
         return next;
       });
+      if (busy) {
+        scheduleQueuedSteerRetry(sessionId);
+      }
     }
   }
 
