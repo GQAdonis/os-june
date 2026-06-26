@@ -305,6 +305,7 @@ const AGENT_WORKSPACE_MAX_SESSION_RETRY_DELAY_MS =
   ] ?? 2000;
 const QUEUED_STEER_RETRY_DELAY_MS = 300;
 const RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS = 1000;
+const RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS = 3000;
 
 // What the user reads instead of the gateway's "session busy" rejection. No
 // action in the pill — the composer's send slot already shows stop while
@@ -5148,7 +5149,10 @@ export function AgentWorkspace({
 
   function scheduleQueuedSteerRetry(
     sessionId: string,
-    options: { ignoreActiveToolGuard?: boolean } = {},
+    options: {
+      ignoreActiveToolGuard?: boolean;
+      restoredToolProbe?: boolean;
+    } = {},
   ) {
     cancelQueuedSteerRetry(sessionId);
     const timer = window.setTimeout(() => {
@@ -5171,13 +5175,16 @@ export function AgentWorkspace({
     restoredToolCallSessionIdsRef.current.delete(sessionId);
   }
 
-  function scheduleRestoredQueuedSteerReconcile(sessionId: string) {
+  function scheduleRestoredQueuedSteerReconcile(
+    sessionId: string,
+    delayMs = RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS,
+  ) {
     cancelRestoredQueuedSteerReconcile(sessionId);
     if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
     const timer = window.setTimeout(() => {
       restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
       void reconcileRestoredQueuedSteer(sessionId);
-    }, RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS);
+    }, delayMs);
     restoredQueuedSteerReconcileTimersRef.current.set(sessionId, timer);
   }
 
@@ -5200,11 +5207,17 @@ export function AgentWorkspace({
       return;
     }
 
+    if (runtimeSnapshotHasSession(snapshot, sessionId)) {
+      scheduleQueuedSteerRetry(sessionId, {
+        ignoreActiveToolGuard: true,
+        restoredToolProbe: true,
+      });
+      return;
+    }
+
     clearRestoredQueuedSteerReconcile(sessionId);
     clearSessionToolCalls(sessionId);
-    scheduleQueuedSteerRetry(sessionId, {
-      ignoreActiveToolGuard: runtimeSnapshotHasSession(snapshot, sessionId),
-    });
+    scheduleQueuedSteerRetry(sessionId);
   }
 
   function queueSteerInstruction(sessionId: string, text: string) {
@@ -5230,7 +5243,10 @@ export function AgentWorkspace({
 
   async function flushQueuedSteerInstruction(
     sessionId: string,
-    options: { ignoreActiveToolGuard?: boolean } = {},
+    options: {
+      ignoreActiveToolGuard?: boolean;
+      restoredToolProbe?: boolean;
+    } = {},
   ) {
     const queued = queuedSteerBySessionIdRef.current[sessionId];
     if (!queued || queued.flushing) return;
@@ -5257,6 +5273,9 @@ export function AgentWorkspace({
 
     try {
       await steerActiveSession(sessionId, queued.text);
+      if (options.restoredToolProbe) {
+        clearSessionToolCalls(sessionId);
+      }
       clearQueuedSteerInstruction(sessionId);
     } catch (err) {
       const busy = isSessionBusyError(err);
@@ -5278,7 +5297,14 @@ export function AgentWorkspace({
           queuedSteerBySessionIdRef.current = next;
           return next;
         });
-        scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
+        if (options.restoredToolProbe) {
+          scheduleRestoredQueuedSteerReconcile(
+            sessionId,
+            RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS,
+          );
+        } else {
+          scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
+        }
         return;
       }
       setError(steerErrorNotice(err), { sessionId });
