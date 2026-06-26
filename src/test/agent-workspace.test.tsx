@@ -3970,6 +3970,105 @@ describe("AgentWorkspace", () => {
     );
   });
 
+  it("flushes a restored queued steer when a tool completion is missed while unmounted", async () => {
+    const user = userEvent.setup();
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.create") {
+        return Promise.resolve({
+          session_id: "runtime-session-2",
+          stored_session_id: "session-2",
+        });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "session.active_list") {
+        return Promise.resolve({
+          sessions: [
+            {
+              id: "runtime-session-2",
+              session_key: "session-2",
+              status: "working",
+            },
+          ],
+        });
+      }
+      return Promise.resolve({});
+    });
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the project checks",
+      }),
+    );
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-2",
+        title: "Untitled session",
+        preview: "run the project checks",
+        last_active: "2026-06-04T12:01:00Z",
+      },
+    ]);
+
+    const first = render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the project checks",
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.start",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell" },
+        });
+      }
+    });
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Add instruction" }),
+      "focus on the failing test",
+    );
+    await user.click(screen.getByRole("button", { name: "Queue instruction" }));
+    expect(
+      await screen.findByText(/Queued to run after this tool call/),
+    ).toHaveTextContent("focus on the failing test");
+
+    first.unmount();
+    mocks.gatewayEventHandlers.clear();
+    render(<AgentWorkspace />);
+
+    expect(
+      await screen.findByText(/Queued to run after this tool call/),
+    ).toHaveTextContent("focus on the failing test");
+    await waitFor(() =>
+      expect(mocks.gatewayEventHandlers.size).toBeGreaterThan(0),
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 350));
+    });
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(
+        ([method]) => method === "session.steer",
+      ),
+    ).toHaveLength(0);
+
+    await waitFor(
+      () =>
+        expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.steer", {
+          session_id: "session-2",
+          text: "focus on the failing test",
+        }),
+      { timeout: 2500 },
+    );
+  });
+
   it("clears a queued steer when a working session is stopped", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem(
@@ -4119,6 +4218,107 @@ describe("AgentWorkspace", () => {
       session_id: "session-2",
       text: "focus on the failing test",
     });
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Queued to run after this tool call/),
+      ).toBeNull(),
+    );
+  });
+
+  it("reschedules a busy queued-steer retry after replacing the queued text", async () => {
+    const user = userEvent.setup();
+    const steerTexts: string[] = [];
+    mocks.gatewayRequest.mockImplementation(
+      (method: string, params?: { text?: string }) => {
+        if (method === "session.create") {
+          return Promise.resolve({
+            session_id: "runtime-session-2",
+            stored_session_id: "session-2",
+          });
+        }
+        if (method === "session.resume") {
+          return Promise.resolve({ session_id: "runtime-session-1" });
+        }
+        if (method === "session.steer") {
+          steerTexts.push(params?.text ?? "");
+          return steerTexts.length === 1
+            ? Promise.reject(new HermesGatewayError("session busy", 4009))
+            : Promise.resolve({});
+        }
+        return Promise.resolve({});
+      },
+    );
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the project checks",
+      }),
+    );
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-2",
+        title: "Untitled session",
+        preview: "run the project checks",
+        last_active: "2026-06-04T12:01:00Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the project checks",
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.start",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell" },
+        });
+      }
+    });
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Add instruction" }),
+      "focus on the failing test",
+    );
+    await user.click(screen.getByRole("button", { name: "Queue instruction" }));
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.complete",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell", status: "ok" },
+        });
+      }
+    });
+
+    expect(
+      await screen.findByText(
+        "June is finishing that tool call. The instruction is still queued.",
+      ),
+    ).toBeInTheDocument();
+
+    await user.type(
+      screen.getByRole("textbox", { name: "Add instruction" }),
+      "use the replacement",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Replace queued instruction" }),
+    );
+
+    await waitFor(() =>
+      expect(steerTexts).toEqual([
+        "focus on the failing test",
+        "use the replacement",
+      ]),
+    );
     await waitFor(() =>
       expect(
         screen.queryByText(/Queued to run after this tool call/),

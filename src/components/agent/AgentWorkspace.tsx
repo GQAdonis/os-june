@@ -303,6 +303,8 @@ const AGENT_WORKSPACE_MAX_SESSION_RETRY_DELAY_MS =
   AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS[
     AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS.length - 1
   ] ?? 2000;
+const QUEUED_STEER_RETRY_DELAY_MS = 300;
+const RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS = 1000;
 
 // What the user reads instead of the gateway's "session busy" rejection. No
 // action in the pill — the composer's send slot already shows stop while
@@ -1468,11 +1470,17 @@ export function AgentWorkspace({
     () => new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
   );
   const toolCallSessionIdsRef = useRef<Set<string>>(toolCallSessionIds);
+  const restoredToolCallSessionIdsRef = useRef(
+    new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
+  );
   const [queuedSteerBySessionId, setQueuedSteerBySessionId] = useState<
     Record<string, QueuedSteerInstruction>
   >(() => continuity?.queuedSteerBySessionId ?? {});
   const queuedSteerBySessionIdRef = useRef(queuedSteerBySessionId);
   const queuedSteerRetryTimersRef = useRef<
+    Map<string, ReturnType<typeof window.setTimeout>>
+  >(new Map());
+  const restoredQueuedSteerReconcileTimersRef = useRef<
     Map<string, ReturnType<typeof window.setTimeout>>
   >(new Map());
   const activeToolCallsBySessionRef = useRef<Map<string, Map<string, number>>>(
@@ -1857,7 +1865,11 @@ export function AgentWorkspace({
 
   useEffect(() => {
     for (const sessionId of Object.keys(queuedSteerBySessionIdRef.current)) {
-      scheduleQueuedSteerRetry(sessionId);
+      if (restoredToolCallSessionIdsRef.current.has(sessionId)) {
+        scheduleRestoredQueuedSteerReconcile(sessionId);
+      } else {
+        scheduleQueuedSteerRetry(sessionId);
+      }
     }
   }, []);
 
@@ -1881,6 +1893,7 @@ export function AgentWorkspace({
 
   const clearQueuedSteerInstruction = useCallback((sessionId: string) => {
     cancelQueuedSteerRetry(sessionId);
+    clearRestoredQueuedSteerReconcile(sessionId);
     setQueuedSteerBySessionId((current) => {
       if (!current[sessionId]) return current;
       const next = omitRecordKey(current, sessionId);
@@ -3073,6 +3086,10 @@ export function AgentWorkspace({
         window.clearTimeout(timer);
       }
       queuedSteerRetryTimersRef.current.clear();
+      for (const timer of restoredQueuedSteerReconcileTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      restoredQueuedSteerReconcileTimersRef.current.clear();
       for (const gateway of gatewaysRef.current.values()) {
         gateway.close();
       }
@@ -4071,6 +4088,9 @@ export function AgentWorkspace({
       };
       setLiveEvents(liveEventsRef.current);
       const toolEventPhase = hermesToolEventPhase(event.type);
+      if (toolEventPhase !== undefined) {
+        clearRestoredQueuedSteerReconcile(storedSessionId);
+      }
       const hasActiveToolCalls =
         toolEventPhase !== undefined
           ? updateSessionToolCallActivity(
@@ -4640,20 +4660,7 @@ export function AgentWorkspace({
   // locally-working session absent from it (or sitting idle) for two
   // consecutive polls gets its activity cleared. Two misses, not one: a
   // just-submitted prompt can race the runtime session registering.
-  async function reconcileWorkingSessionsAgainstRuntime() {
-    const working = Array.from(workingSessionIdsRef.current);
-    const misses = workingReconcileMissesRef.current;
-    for (const sessionId of misses.keys()) {
-      if (!working.includes(sessionId)) misses.delete(sessionId);
-    }
-    if (working.length === 0) return;
-    // Working sessions may span both runtime processes; ask each mode that
-    // has one and union the answers. A mode we can't reach keeps its
-    // sessions' current state rather than guessing — so a one-gateway
-    // failure must not mark the other mode's sessions dead either.
-    const modes = Array.from(
-      new Set(working.map((sessionId) => sessionUnrestricted(sessionId))),
-    );
+  async function liveRuntimeSessionsForModes(modes: boolean[]) {
     let rows: Array<{ id?: string; session_key?: string; status?: string }> =
       [];
     const reachableModes = new Set<boolean>();
@@ -4676,7 +4683,6 @@ export function AgentWorkspace({
         // than guess, while the reachable mode still reconciles below.
       }
     }
-    if (reachableModes.size === 0) return;
     const live = new Set<string>();
     for (const row of rows) {
       // "idle" means the runtime session exists but isn't processing a turn.
@@ -4684,15 +4690,42 @@ export function AgentWorkspace({
       if (row.session_key) live.add(String(row.session_key));
       if (row.id) live.add(String(row.id));
     }
+    return { live, reachableModes };
+  }
+
+  function runtimeSnapshotHasSession(
+    snapshot: { live: Set<string> },
+    sessionId: string,
+  ) {
+    const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
+    return (
+      snapshot.live.has(sessionId) ||
+      Boolean(runtimeSessionId && snapshot.live.has(runtimeSessionId))
+    );
+  }
+
+  async function reconcileWorkingSessionsAgainstRuntime() {
+    const working = Array.from(workingSessionIdsRef.current);
+    const misses = workingReconcileMissesRef.current;
+    for (const sessionId of misses.keys()) {
+      if (!working.includes(sessionId)) misses.delete(sessionId);
+    }
+    if (working.length === 0) return;
+    // Working sessions may span both runtime processes; ask each mode that
+    // has one and union the answers. A mode we can't reach keeps its
+    // sessions' current state rather than guessing — so a one-gateway
+    // failure must not mark the other mode's sessions dead either.
+    const modes = Array.from(
+      new Set(working.map((sessionId) => sessionUnrestricted(sessionId))),
+    );
+    const snapshot = await liveRuntimeSessionsForModes(modes);
+    if (snapshot.reachableModes.size === 0) return;
     for (const sessionId of working) {
       // Sessions of an unreachable mode were not in any answer we got;
       // counting them as misses would mark live work dead.
-      if (!reachableModes.has(sessionUnrestricted(sessionId))) continue;
-      const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
-      if (
-        live.has(sessionId) ||
-        (runtimeSessionId && live.has(runtimeSessionId))
-      ) {
+      if (!snapshot.reachableModes.has(sessionUnrestricted(sessionId)))
+        continue;
+      if (runtimeSnapshotHasSession(snapshot, sessionId)) {
         misses.delete(sessionId);
         continue;
       }
@@ -5115,13 +5148,63 @@ export function AgentWorkspace({
     const timer = window.setTimeout(() => {
       queuedSteerRetryTimersRef.current.delete(sessionId);
       void flushQueuedSteerInstruction(sessionId, options);
-    }, 300);
+    }, QUEUED_STEER_RETRY_DELAY_MS);
     queuedSteerRetryTimersRef.current.set(sessionId, timer);
+  }
+
+  function cancelRestoredQueuedSteerReconcile(sessionId: string) {
+    const timer = restoredQueuedSteerReconcileTimersRef.current.get(sessionId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
+    }
+  }
+
+  function clearRestoredQueuedSteerReconcile(sessionId: string) {
+    cancelRestoredQueuedSteerReconcile(sessionId);
+    restoredToolCallSessionIdsRef.current.delete(sessionId);
+  }
+
+  function scheduleRestoredQueuedSteerReconcile(sessionId: string) {
+    cancelRestoredQueuedSteerReconcile(sessionId);
+    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
+    const timer = window.setTimeout(() => {
+      restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
+      void reconcileRestoredQueuedSteer(sessionId);
+    }, RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS);
+    restoredQueuedSteerReconcileTimersRef.current.set(sessionId, timer);
+  }
+
+  async function reconcileRestoredQueuedSteer(sessionId: string) {
+    if (!queuedSteerBySessionIdRef.current[sessionId]) return;
+    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
+    if (!toolCallSessionIdsRef.current.has(sessionId)) {
+      clearRestoredQueuedSteerReconcile(sessionId);
+      scheduleQueuedSteerRetry(sessionId);
+      return;
+    }
+
+    const snapshot = await liveRuntimeSessionsForModes([
+      sessionUnrestricted(sessionId),
+    ]);
+    if (!queuedSteerBySessionIdRef.current[sessionId]) return;
+    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
+    if (!snapshot.reachableModes.has(sessionUnrestricted(sessionId))) {
+      scheduleRestoredQueuedSteerReconcile(sessionId);
+      return;
+    }
+
+    clearRestoredQueuedSteerReconcile(sessionId);
+    clearSessionToolCalls(sessionId);
+    scheduleQueuedSteerRetry(sessionId, {
+      ignoreActiveToolGuard: runtimeSnapshotHasSession(snapshot, sessionId),
+    });
   }
 
   function queueSteerInstruction(sessionId: string, text: string) {
     const instruction = normalizeSteerText(text);
     if (!instruction) return;
+    const shouldRetryAfterQueue = !toolCallSessionIdsRef.current.has(sessionId);
     cancelQueuedSteerRetry(sessionId);
     setQueuedSteerBySessionId((current) => {
       const next = {
@@ -5134,6 +5217,9 @@ export function AgentWorkspace({
       queuedSteerBySessionIdRef.current = next;
       return next;
     });
+    if (shouldRetryAfterQueue) {
+      scheduleQueuedSteerRetry(sessionId);
+    }
   }
 
   async function flushQueuedSteerInstruction(
