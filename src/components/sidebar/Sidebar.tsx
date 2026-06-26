@@ -21,6 +21,7 @@ import { IconNoteText } from "central-icons/IconNoteText";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconPin } from "central-icons/IconPin";
 import { IconPlugin2 } from "central-icons/IconPlugin2";
+import { IconToolbox } from "central-icons/IconToolbox";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconProjects } from "central-icons/IconProjects";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
@@ -225,6 +226,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         id: "skills",
         label: "Installed skills",
         icon: <IconPlugin2 size={16} />,
+      },
+      {
+        id: "toolsets",
+        label: "Toolsets",
+        icon: <IconToolbox size={16} />,
       },
     ],
   },
