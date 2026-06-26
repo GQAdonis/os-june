@@ -59,8 +59,8 @@ export type SubagentStopTarget = { sessionId: string; subagentId: string };
  * host can resolve it, the model/provider. Each row offers open / steer / stop
  * actions routed back to the host.
  *
- * Pure presentational, mirroring {@link SessionUsagePanel} and
- * {@link PendingActionTray}: it takes the already-aggregated records (from
+ * Pure presentational, mirroring {@link SessionUsagePanel}: it takes the
+ * already-aggregated records (from
  * `hermesActivityStore`), resolver callbacks for title and model, and action
  * callbacks the host wires to its session-open / steer / stop mechanisms. `now`
  * is injected so age rendering is deterministic in tests.
