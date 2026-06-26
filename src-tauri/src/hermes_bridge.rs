@@ -413,6 +413,83 @@ pub struct ResetHermesSkillResult {
     pub timed_out: bool,
 }
 
+/// Request to list, add, or remove a custom GitHub skill tap (admin surfaces
+/// spec 13). The dashboard REST surface (v2026.6.19) exposes no tap endpoints, so
+/// June runs the pinned Hermes CLI with a SAFE argument array — the `owner/repo`
+/// and optional `path` are validated argument-safe on both sides and passed as
+/// discrete CLI arguments, never shell-interpolated. `mode` names the runtime
+/// explicitly (`sandboxed` / `unrestricted`), like `hermes_admin_request`;
+/// `profile` targets a Hermes profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSkillTapRequest {
+    pub mode: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+}
+
+/// Request to add a tap: a validated `owner/repo` and an optional path override
+/// (default `skills/`), both held to argument-safe rules on both sides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSkillTapAddRequest {
+    pub mode: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// The tap repository as `owner/repo`. Validated `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`.
+    pub repo: String,
+    /// Optional path override inside the repo (default `skills/`). No `..`, no
+    /// shell metacharacters.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
+/// Request to remove a tap by its validated `owner/repo`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSkillTapRemoveRequest {
+    pub mode: String,
+    #[serde(default)]
+    pub profile: Option<String>,
+    pub repo: String,
+}
+
+/// One configured tap as June parses it from `hermes skills tap list`. Carries
+/// only a repo identifier, optional path, and an optional trust marker — never
+/// any token. `trusted` is set only when the CLI explicitly marks the tap
+/// trusted; everything else is treated as community by the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSkillTap {
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub trusted: bool,
+}
+
+/// The result of listing taps. `taps` is the parsed list; `message` is an
+/// already-redacted status line when the CLI failed (so the UI can show why).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSkillTapListResult {
+    pub ok: bool,
+    pub taps: Vec<HermesSkillTap>,
+    pub message: Option<String>,
+    pub timed_out: bool,
+}
+
+/// The redacted result of a tap add/remove. It never carries a token: only
+/// whether the CLI reported success, an already-redacted status message, and
+/// whether the bounded wait elapsed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HermesSkillTapWriteResult {
+    pub ok: bool,
+    pub message: Option<String>,
+    pub timed_out: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HermesSkillDocument {
@@ -2868,6 +2945,393 @@ pub async fn hermes_reset_bundled_skill(
 
     let combined = format!("{}\n{}", join.stdout, join.stderr);
     Ok(ResetHermesSkillResult {
+        ok: join.exit_success,
+        message: redact_cli_message(&combined),
+        timed_out: join.timed_out,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Team skill taps manager (admin surfaces spec 13).
+//
+// A Hermes skill tap is a GitHub repository of reusable SKILL.md directories
+// (default under `skills/`). The dashboard REST surface (v2026.6.19) exposes NO
+// tap endpoints, so June drives the pinned Hermes CLI:
+//
+//     hermes skills tap list
+//     hermes skills tap add <owner/repo> [--path <path>]
+//     hermes skills tap remove <owner/repo>
+//
+// The `owner/repo` and optional path are validated argument-safe on BOTH the TS
+// and Rust sides and passed as DISCRETE Command arguments (no shell), so a
+// malformed value can never inject a flag, a traversal, or a shell metacharacter.
+// Once a tap is configured its skills surface through the existing Skills Hub
+// search/install flow (`/api/skills/hub/search` + `/api/skills/hub/install`),
+// so June adds no separate install path here. Private/rate-limited taps are
+// served by the GITHUB_TOKEN secret the secret-setup UI configures.
+// ---------------------------------------------------------------------------
+
+/// How long June waits for a `hermes skills tap` CLI call to finish. Listing is a
+/// quick local read; add/remove may touch the network (resolving the repo), so
+/// the window is generous but still bounded so June never blocks indefinitely.
+const SKILL_TAP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// True when a tap identifier is a safe `owner/repo`: exactly one `/`, each side a
+/// non-empty run of `[A-Za-z0-9._-]`, neither side a bare `.`/`..`, total length
+/// bounded. Mirrors the TS `isSafeTapRepo` validator. Defense in depth — the value
+/// is already a discrete `Command` argument (no shell), but rejecting anything
+/// outside this shape stops a malformed value from ever reaching the CLI as a
+/// stray `--flag`, a traversal, or a shell metacharacter.
+fn is_safe_tap_repo(repo: &str) -> bool {
+    if repo.is_empty() || repo.len() > 140 {
+        return false;
+    }
+    let mut parts = repo.split('/');
+    let (Some(owner), Some(name), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    is_safe_tap_segment(owner) && is_safe_tap_segment(name)
+}
+
+/// True when one `owner` or `repo` segment starts with an alphanumeric (so a
+/// leading `-` can never reach the CLI as a stray flag) and is otherwise a run of
+/// `[A-Za-z0-9._-]`, and is not a bare `.` or `..` (a traversal).
+fn is_safe_tap_segment(segment: &str) -> bool {
+    if segment.is_empty() || segment == "." || segment == ".." {
+        return false;
+    }
+    let mut chars = segment.chars();
+    if !chars.next().unwrap().is_ascii_alphanumeric() {
+        return false;
+    }
+    segment
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// True when an optional tap path override is safe: a relative path of
+/// `[A-Za-z0-9._/-]` segments with no traversal (`..`), no leading slash, and no
+/// shell metacharacter. Mirrors the TS `isSafeTapPath` validator. An empty path
+/// is rejected here (the caller passes `None` for "use the default").
+fn is_safe_tap_path(path: &str) -> bool {
+    if path.is_empty() || path.len() > 200 {
+        return false;
+    }
+    if path.starts_with('/') || path.starts_with('\\') {
+        return false;
+    }
+    for segment in path.split('/') {
+        // An empty segment comes from `//` or a leading/trailing slash; reject so
+        // the path stays a clean relative tree. `..` is a traversal. A leading `.`
+        // (e.g. `.github`) is allowed; only a bare `..` is barred.
+        if segment.is_empty() || segment == ".." {
+            return false;
+        }
+        if !segment
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+/// Builds `hermes skills tap <subcommand> [args...] [--profile <p>]`, isolated to
+/// the connection's home/token, non-interactive, in the connection's mode. Pure
+/// (no spawn) so a test can assert the exact argument vector and that every value
+/// is a discrete argument rather than shell-interpolated.
+fn build_hermes_skill_tap_command(
+    connection: &HermesBridgeConnection,
+    subcommand: &str,
+    repo: Option<&str>,
+    path: Option<&str>,
+    profile: Option<&str>,
+) -> Command {
+    let hermes_home = PathBuf::from(&connection.hermes_home);
+    let mut cmd = Command::new(&connection.command);
+    cmd.args(["skills", "tap", subcommand]);
+    if let Some(repo) = repo {
+        cmd.arg(repo);
+    }
+    if let Some(path) = path {
+        cmd.args(["--path", path]);
+    }
+    if let Some(profile) = profile {
+        cmd.args(["--profile", profile]);
+    }
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
+    cmd.env("HERMES_NONINTERACTIVE", "1");
+    cmd.current_dir(&hermes_home);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd
+}
+
+/// Parses `hermes skills tap list` output into a tap list. The exact CLI format
+/// is not pinned in the v2026.6.19 contract, so this is intentionally lenient: it
+/// accepts one tap per line, ignores blank lines and obvious headers, extracts the
+/// first `owner/repo` token on the line, and reads an optional `path=<p>` or
+/// `(path: <p>)` hint and a `trusted`/`verified` marker. A tap whose repo token is
+/// not argument-safe is dropped (it could not have been added through June, and we
+/// never surface an unvalidated identifier). Pure so a test pins the parsing.
+fn parse_skill_tap_list(output: &str) -> Vec<HermesSkillTap> {
+    let mut taps: Vec<HermesSkillTap> = Vec::new();
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let lower = line.to_ascii_lowercase();
+        // Skip obvious header/footer chrome the CLI may print.
+        if lower.starts_with("configured tap")
+            || lower.starts_with("no tap")
+            || lower.starts_with("tap")
+                && (lower.contains("repo") && lower.contains("path") && !line.contains('/'))
+        {
+            continue;
+        }
+        let Some(repo) = line
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| matches!(c, '-' | '*' | '•' | ',' | ';')))
+            .find(|token| token.contains('/') && is_safe_tap_repo(token))
+        else {
+            continue;
+        };
+        if taps.iter().any(|tap| tap.repo == repo) {
+            continue;
+        }
+        let path = extract_tap_path_hint(line);
+        let trusted = lower.contains("trusted") || lower.contains("verified");
+        taps.push(HermesSkillTap {
+            repo: repo.to_string(),
+            path,
+            trusted,
+        });
+    }
+    taps
+}
+
+/// Extracts a path hint from a tap list line if present (`path=skills/`,
+/// `path: skills/`, or `(path skills/)`). Returns a safe path or `None`.
+fn extract_tap_path_hint(line: &str) -> Option<String> {
+    let lower = line.to_ascii_lowercase();
+    let marker = lower.find("path")?;
+    let after = &line[marker + "path".len()..];
+    let candidate = after
+        .trim_start_matches(|c: char| matches!(c, '=' | ':' | ' ' | '(' | '\t'))
+        .split_whitespace()
+        .next()?
+        .trim_matches(|c: char| matches!(c, ')' | ',' | ';'));
+    let candidate = candidate.trim_end_matches('/');
+    if !candidate.is_empty() && is_safe_tap_path(candidate) {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+/// Resolves the connection for an explicit admin mode (sandboxed / unrestricted)
+/// with NO first-connection fallback, mirroring `hermes_admin_request`. Shared by
+/// the tap commands so the mode parsing + "not running" handling is identical.
+fn tap_connection_for_mode(
+    bridge: &State<'_, HermesBridge>,
+    mode: &str,
+) -> Result<HermesBridgeConnection, AppError> {
+    let full_mode = match mode {
+        "unrestricted" => true,
+        "sandboxed" => false,
+        other => {
+            return Err(AppError::new(
+                "hermes_admin_invalid_mode",
+                format!("Unknown Hermes admin mode \"{other}\"."),
+            ));
+        }
+    };
+    let connections = live_connections(bridge)?;
+    connections
+        .iter()
+        .find(|connection| connection.full_mode == full_mode)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::new(
+                "hermes_bridge_not_running",
+                "Hermes bridge is not running in the requested mode.",
+            )
+        })
+}
+
+/// Validates an optional Hermes profile id that rides the tap CLI. Held to the
+/// same slug rule the other CLI fallbacks use so it can never arrive as a stray
+/// flag or traversal.
+fn validate_tap_profile(profile: Option<&str>) -> Result<(), AppError> {
+    if let Some(profile) = profile {
+        if !is_safe_skill_name(profile) {
+            return Err(AppError::new(
+                "hermes_skill_tap_invalid_profile",
+                "Invalid Hermes profile.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Lists the configured skill taps for the explicitly-named runtime/profile via
+/// the pinned Hermes CLI. The output is parsed leniently (see
+/// `parse_skill_tap_list`) and REDACTED on the failure path — it carries only
+/// validated `owner/repo` identifiers, optional safe paths, and a trust marker,
+/// never a token.
+#[tauri::command]
+pub async fn hermes_skill_tap_list(
+    bridge: State<'_, HermesBridge>,
+    request: HermesSkillTapRequest,
+) -> Result<HermesSkillTapListResult, AppError> {
+    let connection = tap_connection_for_mode(&bridge, &request.mode)?;
+    validate_tap_profile(request.profile.as_deref())?;
+
+    let profile = request.profile.clone();
+    let mut cmd =
+        build_hermes_skill_tap_command(&connection, "list", None, None, profile.as_deref());
+
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let child = cmd.spawn().map_err(|error| {
+            AppError::new(
+                "hermes_skill_tap_failed",
+                format!("Could not run `hermes skills tap list`. {error}"),
+            )
+        })?;
+        wait_with_timeout(child, SKILL_TAP_TIMEOUT)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "hermes_skill_tap_failed",
+            format!("Could not run the tap list. {error}"),
+        )
+    })??;
+
+    let combined = format!("{}\n{}", join.stdout, join.stderr);
+    Ok(HermesSkillTapListResult {
+        ok: join.exit_success,
+        taps: if join.exit_success {
+            parse_skill_tap_list(&combined)
+        } else {
+            Vec::new()
+        },
+        message: redact_cli_message(&combined),
+        timed_out: join.timed_out,
+    })
+}
+
+/// Adds a custom GitHub skill tap (`owner/repo`, optional `--path`) for the
+/// explicitly-named runtime/profile via the pinned Hermes CLI. The repo and path
+/// are validated argument-safe and passed as discrete arguments (no shell). The
+/// result is REDACTED — it carries no token, only success and a safe message.
+#[tauri::command]
+pub async fn hermes_skill_tap_add(
+    bridge: State<'_, HermesBridge>,
+    request: HermesSkillTapAddRequest,
+) -> Result<HermesSkillTapWriteResult, AppError> {
+    let connection = tap_connection_for_mode(&bridge, &request.mode)?;
+    validate_tap_profile(request.profile.as_deref())?;
+    if !is_safe_tap_repo(&request.repo) {
+        return Err(AppError::new(
+            "hermes_skill_tap_invalid_repo",
+            "Invalid tap repository. Use owner/repo.",
+        ));
+    }
+    if let Some(path) = request.path.as_deref() {
+        if !is_safe_tap_path(path) {
+            return Err(AppError::new(
+                "hermes_skill_tap_invalid_path",
+                "Invalid tap path.",
+            ));
+        }
+    }
+
+    let repo = request.repo.clone();
+    let path = request.path.clone();
+    let profile = request.profile.clone();
+    let mut cmd = build_hermes_skill_tap_command(
+        &connection,
+        "add",
+        Some(&repo),
+        path.as_deref(),
+        profile.as_deref(),
+    );
+
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let child = cmd.spawn().map_err(|error| {
+            AppError::new(
+                "hermes_skill_tap_failed",
+                format!("Could not run `hermes skills tap add`. {error}"),
+            )
+        })?;
+        wait_with_timeout(child, SKILL_TAP_TIMEOUT)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "hermes_skill_tap_failed",
+            format!("Could not run the tap add. {error}"),
+        )
+    })??;
+
+    let combined = format!("{}\n{}", join.stdout, join.stderr);
+    Ok(HermesSkillTapWriteResult {
+        ok: join.exit_success,
+        message: redact_cli_message(&combined),
+        timed_out: join.timed_out,
+    })
+}
+
+/// Removes a custom GitHub skill tap (`owner/repo`) for the explicitly-named
+/// runtime/profile via the pinned Hermes CLI. The repo is validated argument-safe
+/// and passed as a discrete argument (no shell). The result is REDACTED.
+#[tauri::command]
+pub async fn hermes_skill_tap_remove(
+    bridge: State<'_, HermesBridge>,
+    request: HermesSkillTapRemoveRequest,
+) -> Result<HermesSkillTapWriteResult, AppError> {
+    let connection = tap_connection_for_mode(&bridge, &request.mode)?;
+    validate_tap_profile(request.profile.as_deref())?;
+    if !is_safe_tap_repo(&request.repo) {
+        return Err(AppError::new(
+            "hermes_skill_tap_invalid_repo",
+            "Invalid tap repository. Use owner/repo.",
+        ));
+    }
+
+    let repo = request.repo.clone();
+    let profile = request.profile.clone();
+    let mut cmd = build_hermes_skill_tap_command(
+        &connection,
+        "remove",
+        Some(&repo),
+        None,
+        profile.as_deref(),
+    );
+
+    let join = tauri::async_runtime::spawn_blocking(move || {
+        let child = cmd.spawn().map_err(|error| {
+            AppError::new(
+                "hermes_skill_tap_failed",
+                format!("Could not run `hermes skills tap remove`. {error}"),
+            )
+        })?;
+        wait_with_timeout(child, SKILL_TAP_TIMEOUT)
+    })
+    .await
+    .map_err(|error| {
+        AppError::new(
+            "hermes_skill_tap_failed",
+            format!("Could not run the tap remove. {error}"),
+        )
+    })??;
+
+    let combined = format!("{}\n{}", join.stdout, join.stderr);
+    Ok(HermesSkillTapWriteResult {
         ok: join.exit_success,
         message: redact_cli_message(&combined),
         timed_out: join.timed_out,
@@ -6117,6 +6581,98 @@ mod tests {
         assert!(!is_safe_skill_name("../etc/passwd"));
         assert!(!is_safe_skill_name("rm -rf / ; curl evil"));
         assert!(!is_safe_skill_name("skill;name"));
+    }
+
+    #[test]
+    fn skill_tap_list_command_passes_profile_as_discrete_argument() {
+        let connection = oauth_test_connection();
+        let cmd =
+            build_hermes_skill_tap_command(&connection, "list", None, None, Some("work"));
+        let program = cmd.get_program().to_string_lossy().to_string();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(program, "/usr/local/bin/hermes");
+        assert_eq!(args, vec!["skills", "tap", "list", "--profile", "work"]);
+    }
+
+    #[test]
+    fn skill_tap_add_command_passes_repo_and_path_as_discrete_arguments() {
+        let connection = oauth_test_connection();
+        let cmd = build_hermes_skill_tap_command(
+            &connection,
+            "add",
+            Some("acme/runbooks"),
+            Some("skills/ops"),
+            None,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            vec!["skills", "tap", "add", "acme/runbooks", "--path", "skills/ops"]
+        );
+    }
+
+    #[test]
+    fn skill_tap_remove_command_omits_path_and_profile() {
+        let connection = oauth_test_connection();
+        let cmd = build_hermes_skill_tap_command(
+            &connection,
+            "remove",
+            Some("acme/runbooks"),
+            None,
+            None,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["skills", "tap", "remove", "acme/runbooks"]);
+    }
+
+    #[test]
+    fn rejects_unsafe_tap_repos() {
+        assert!(is_safe_tap_repo("acme/runbooks"));
+        assert!(is_safe_tap_repo("acme-org/team.skills_1"));
+        assert!(!is_safe_tap_repo(""));
+        assert!(!is_safe_tap_repo("acme"));
+        assert!(!is_safe_tap_repo("acme/runbooks/extra"));
+        assert!(!is_safe_tap_repo("../acme/runbooks"));
+        assert!(!is_safe_tap_repo("acme/.."));
+        assert!(!is_safe_tap_repo("--flag/repo"));
+        assert!(!is_safe_tap_repo("acme/runbooks; rm -rf /"));
+        assert!(!is_safe_tap_repo("acme/run books"));
+        assert!(!is_safe_tap_repo("acme repo/runbooks"));
+    }
+
+    #[test]
+    fn rejects_unsafe_tap_paths() {
+        assert!(is_safe_tap_path("skills"));
+        assert!(is_safe_tap_path("skills/ops"));
+        assert!(is_safe_tap_path(".github/skills"));
+        assert!(!is_safe_tap_path(""));
+        assert!(!is_safe_tap_path("/etc/passwd"));
+        assert!(!is_safe_tap_path("../escape"));
+        assert!(!is_safe_tap_path("skills/../../etc"));
+        assert!(!is_safe_tap_path("skills/ops;rm -rf"));
+        assert!(!is_safe_tap_path("skills//ops"));
+    }
+
+    #[test]
+    fn parses_tap_list_and_drops_unsafe_identifiers() {
+        let output = "Configured taps:\n  acme/runbooks  path=skills/ops  trusted\n- team/workflows (path: skills)\n  ../evil/repo\nNo more taps\n";
+        let taps = parse_skill_tap_list(output);
+        assert_eq!(taps.len(), 2);
+        assert_eq!(taps[0].repo, "acme/runbooks");
+        assert_eq!(taps[0].path.as_deref(), Some("skills/ops"));
+        assert!(taps[0].trusted);
+        assert_eq!(taps[1].repo, "team/workflows");
+        assert_eq!(taps[1].path.as_deref(), Some("skills"));
+        assert!(!taps[1].trusted);
     }
 
     #[test]

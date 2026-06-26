@@ -1178,6 +1178,89 @@ export async function hermesResetBundledSkill(input: {
   });
 }
 
+/** One configured custom GitHub skill tap, as parsed from `hermes skills tap
+ * list` by the Rust bridge. Carries only a validated `owner/repo`, an optional
+ * safe path, and a trust marker. Never a token. Mirrors the Rust `HermesSkillTap`
+ * (camelCase). */
+export type HermesSkillTapDto = {
+  /** The tap repository as `owner/repo` (validated argument-safe). */
+  repo: string;
+  /** The path override inside the repo, when the tap declares one. */
+  path?: string;
+  /** True only when Hermes explicitly marks the tap trusted/verified. The UI
+   * treats every other tap as community. */
+  trusted: boolean;
+};
+
+/** The result of listing taps. `taps` is the parsed list; `message` is an
+ * already-redacted status line when the CLI failed. */
+export type HermesSkillTapListResult = {
+  ok: boolean;
+  taps: HermesSkillTapDto[];
+  /** A safe, already-redacted status message, or null. Never carries a token. */
+  message: string | null;
+  /** True when the bounded wait elapsed before the CLI reported a result. */
+  timedOut: boolean;
+};
+
+/** The redacted result of a tap add/remove. Carries no token: only whether the
+ * CLI reported success, an already-redacted status message, and whether the
+ * bounded wait elapsed. */
+export type HermesSkillTapWriteResult = {
+  ok: boolean;
+  message: string | null;
+  timedOut: boolean;
+};
+
+/**
+ * Lists the configured custom GitHub skill taps for the chosen runtime/profile.
+ * The dashboard (v2026.6.19) exposes no tap endpoints, so this runs the pinned
+ * `hermes skills tap list` CLI through the Rust bridge. `mode` selects the
+ * runtime explicitly (sandboxed vs unrestricted) with no first-connection
+ * fallback. The output is parsed and redacted in Rust; no token is returned.
+ */
+export async function hermesSkillTapList(input: {
+  mode: "sandboxed" | "unrestricted";
+  profile?: string;
+}) {
+  return invoke<HermesSkillTapListResult>("hermes_skill_tap_list", {
+    request: input,
+  });
+}
+
+/**
+ * Adds a custom GitHub skill tap (`owner/repo`, optional path override) through
+ * the Rust bridge: `hermes skills tap add <owner/repo> [--path <path>]`. The repo
+ * and path are validated argument-safe on both sides and passed as discrete CLI
+ * arguments (no shell). `mode` selects the runtime explicitly. The result is
+ * redacted in Rust; no token is returned.
+ */
+export async function hermesSkillTapAdd(input: {
+  mode: "sandboxed" | "unrestricted";
+  profile?: string;
+  repo: string;
+  path?: string;
+}) {
+  return invoke<HermesSkillTapWriteResult>("hermes_skill_tap_add", {
+    request: input,
+  });
+}
+
+/**
+ * Removes a custom GitHub skill tap by `owner/repo` through the Rust bridge:
+ * `hermes skills tap remove <owner/repo>`. The repo is validated argument-safe on
+ * both sides and passed as a discrete CLI argument (no shell).
+ */
+export async function hermesSkillTapRemove(input: {
+  mode: "sandboxed" | "unrestricted";
+  profile?: string;
+  repo: string;
+}) {
+  return invoke<HermesSkillTapWriteResult>("hermes_skill_tap_remove", {
+    request: input,
+  });
+}
+
 /** The read-only filesystem status of one configured external skill directory,
  * as reported by the June-side `hermes_inspect_external_dirs` command. Carries
  * both the raw configured path and the resolved one. Mirrors the Rust

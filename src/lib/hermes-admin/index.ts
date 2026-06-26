@@ -84,3 +84,5 @@ export * from "./external-dirs-view";
 export * from "./use-external-dirs";
 export * from "./skill-bundles-view";
 export * from "./use-skill-bundles";
+export * from "./taps-view";
+export * from "./use-skill-taps";

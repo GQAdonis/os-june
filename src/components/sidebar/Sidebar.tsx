@@ -24,6 +24,7 @@ import { IconMoveFolder } from "central-icons/IconMoveFolder";
 import { IconNoteText } from "central-icons/IconNoteText";
 import { IconPeople } from "central-icons/IconPeople";
 import { IconPin } from "central-icons/IconPin";
+import { IconGithub } from "central-icons/IconGithub";
 import { IconPlugin2 } from "central-icons/IconPlugin2";
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { IconToolbox } from "central-icons/IconToolbox";
@@ -265,6 +266,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         id: "skills-hub",
         label: "Skills hub",
         icon: <IconArrowInbox size={16} />,
+      },
+      {
+        id: "taps",
+        label: "Team skill taps",
+        icon: <IconGithub size={16} />,
       },
       {
         id: "toolsets",
