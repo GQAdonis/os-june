@@ -17,6 +17,8 @@ const REDACTED = "[redacted]";
 const URL_REDACTION_VALUE = "redacted";
 const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi;
 const BEARER_PATTERN = /\bbearer\s+[^\s"'<>]+/gi;
+const SENSITIVE_TEXT_ASSIGNMENT_PATTERN =
+  /(^|[?&\s,;({[])(token|access[_-]?token|refresh[_-]?token|api[_-]?key|key|secret|password|passphrase|private[_-]?key|credential|authorization|pin|otp)(\s*[:=]\s*)(?:bearer\s+)?([^\s"'<>),;&]+)/gi;
 const JWT_PATTERN =
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
 const KNOWN_SECRET_PATTERN =
@@ -60,6 +62,11 @@ export function sanitizeText(value: string): string {
 
 function redactTokenFragments(value: string): string {
   return value
+    .replace(
+      SENSITIVE_TEXT_ASSIGNMENT_PATTERN,
+      (_match, prefix: string, key: string, separator: string) =>
+        `${prefix}${key}${separator}${REDACTED}`,
+    )
     .replace(BEARER_PATTERN, (match) =>
       match.replace(/\s+\S+$/u, " [redacted]"),
     )
@@ -151,7 +158,7 @@ function sanitizeString(value: string): string {
   const sanitizedUrl = sanitizeUrl(value);
   if (sanitizedUrl !== undefined) return sanitizedUrl;
   if (isLikelySecretValue(value)) return REDACTED;
-  if (looksLikeStandalonePathOrUrl(value.trim())) return value;
+  if (looksLikeStandalonePathOrUrl(value.trim())) return sanitizeText(value);
   return sanitizeText(value);
 }
 
