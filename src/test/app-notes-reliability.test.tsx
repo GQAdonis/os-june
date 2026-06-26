@@ -276,6 +276,7 @@ describe("notes recording reliability", () => {
       items: [],
       retentionDays: 7,
     });
+    mocks.localDataRetentionPolicies.mockResolvedValue({ policies: [] });
     mocks.listDictionaryEntries.mockResolvedValue([]);
     mocks.deleteDictationHistoryItem.mockResolvedValue(undefined);
     mocks.osAccountsStatus.mockResolvedValue(account);
