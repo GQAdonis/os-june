@@ -54,3 +54,5 @@ export * from "./cache";
 export * from "./gateway-lifecycle";
 export * from "./installed-skills-view";
 export * from "./use-installed-skills";
+export * from "./hub-search-view";
+export * from "./use-skills-hub";
