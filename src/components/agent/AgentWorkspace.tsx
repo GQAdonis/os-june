@@ -9568,15 +9568,15 @@ export function ComposerSteerInput({
   const trimmed = normalizeSteerText(text);
   const queuedText = queuedInstruction?.text;
   const disabled = sending || Boolean(queuedInstruction?.flushing);
-  const submitLabel = queueWhileToolActive
-    ? queuedText
-      ? "Replace queued instruction"
-      : "Queue instruction"
-    : "Send instruction";
+  const submitLabel = queuedText
+    ? "Replace queued instruction"
+    : queueWhileToolActive
+      ? "Queue instruction"
+      : "Send instruction";
 
   async function send() {
     if (!trimmed || disabled) return;
-    if (queueWhileToolActive && onQueue) {
+    if ((queueWhileToolActive || queuedInstruction) && onQueue) {
       onQueue(trimmed);
       setText("");
       setError(null);

@@ -109,6 +109,34 @@ describe("ComposerSteerInput", () => {
     ).toHaveTextContent("focus after this command");
   });
 
+  it("replaces a queued instruction through the queue after the active tool flag drops", async () => {
+    const onSteer = vi.fn().mockResolvedValue(undefined);
+    const onQueue = vi.fn();
+    render(
+      <ComposerSteerInput
+        onSteer={onSteer}
+        onQueue={onQueue}
+        queuedInstruction={{
+          text: "original queued instruction",
+          queuedAt: "2026-06-26T10:00:00Z",
+          error:
+            "June is finishing that tool call. The instruction is still queued.",
+        }}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByRole("textbox", { name: /add instruction|steer june/i }),
+      "use the correction instead",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Replace queued instruction" }),
+    );
+
+    expect(onQueue).toHaveBeenCalledWith("use the correction instead");
+    expect(onSteer).not.toHaveBeenCalled();
+  });
+
   it("clears the input after a successful steer", async () => {
     const steer = vi.fn().mockResolvedValue(undefined);
     render(<ComposerSteerInput onSteer={steer} />);
