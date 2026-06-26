@@ -98,4 +98,28 @@ describe("createRustAdminFetch — routes through invoke, not webview fetch", ()
 
     await expect(client.skills.list()).rejects.toThrow();
   });
+
+  it("surfaces a non-2xx Hermes response as an HTTP error with its real status, not a network error", async () => {
+    // The Rust proxy turns a non-2xx into `Hermes API returned <status>: <body>`.
+    // The adapter must report that as an HTTP error carrying the real status, so
+    // the UI shows the actual problem instead of the misleading "Could not reach
+    // Hermes" that a network-kind error renders.
+    const invoke = vi
+      .fn()
+      .mockRejectedValue(
+        new Error(
+          'Hermes API returned 422 Unprocessable Entity: {"detail":"bad env"}',
+        ),
+      );
+    const client = createHermesAdminClient(target("sandboxed"), {
+      fetch: createRustAdminFetch("sandboxed", invoke),
+    });
+
+    const error = await client.skills.list().then(
+      () => null,
+      (e: { kind?: string; status?: number }) => e,
+    );
+    expect(error?.kind).toBe("http");
+    expect(error?.status).toBe(422);
+  });
 });

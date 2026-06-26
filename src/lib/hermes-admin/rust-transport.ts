@@ -72,9 +72,22 @@ export function createRustAdminFetch(
         body,
       });
     } catch (error) {
-      // A rejected invoke is a transport failure. Surface it as a thrown error
-      // so the admin transport normalizes it to a `network`-kind
-      // HermesAdminError, exactly as a failed webview fetch would have.
+      // The Rust side (`hermes_connection_json`) turns a non-2xx Hermes response
+      // into an Err whose message is `Hermes API returned <status>: <body>`.
+      // That is an HTTP error, NOT an unreachable Hermes — surface it WITH its
+      // real status so the transport reports the actual problem (e.g. a 422 the
+      // install body tripped) instead of the misleading network-kind "Could not
+      // reach Hermes". A genuine transport failure (bridge not running,
+      // connection refused) carries no such status and is re-thrown, so it still
+      // normalizes to `network`, exactly as a failed webview fetch would have.
+      const httpError = parseHermesHttpError(toMessage(error));
+      if (httpError) {
+        return makeResponse(
+          httpError.status,
+          httpError.body,
+          true,
+        ) as unknown as Response;
+      }
       throw error instanceof Error ? error : new Error(toMessage(error));
     }
 
@@ -113,16 +126,40 @@ function parseBody(body: BodyInit | null | undefined): unknown {
   return body;
 }
 
-/** A minimal Response-like over a parsed JSON value. Only `status`, `ok`, and
- * `text()` are read by the transport. */
-function makeResponse(status: number, value: unknown): ResponseLike {
-  const text =
-    value === null || value === undefined ? "" : JSON.stringify(value);
+/** A minimal Response-like over a value. Only `status`, `ok`, and `text()` are
+ * read by the transport. On the 2xx path `value` is a parsed JSON value that is
+ * re-serialized; on the error path (`rawText`) `value` is Hermes's already-
+ * serialized error body, passed through untouched so the transport's
+ * `extractErrorCode` / rawBody preview see exactly what Hermes returned. */
+function makeResponse(
+  status: number,
+  value: unknown,
+  rawText = false,
+): ResponseLike {
+  const text = rawText
+    ? typeof value === "string"
+      ? value
+      : String(value ?? "")
+    : value === null || value === undefined
+      ? ""
+      : JSON.stringify(value);
   return {
     status,
     ok: status >= 200 && status < 300,
     text: () => Promise.resolve(text),
   };
+}
+
+/** Parses the Rust proxy's non-2xx error message (`Hermes API returned
+ * <status>: <body>`) into its status + raw body. Returns null for any other
+ * failure (bridge not running, connection refused), which stays a `network`
+ * error rather than being mislabeled as an HTTP response. */
+function parseHermesHttpError(
+  message: string,
+): { status: number; body: string } | null {
+  const match = /Hermes API returned (\d{3})[^:]*:\s?([\s\S]*)$/.exec(message);
+  if (!match) return null;
+  return { status: Number(match[1]), body: match[2] ?? "" };
 }
 
 function toMessage(error: unknown): string {
