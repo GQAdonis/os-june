@@ -161,6 +161,13 @@ fn is_public_ipv6(addr: Ipv6Addr) -> bool {
     }
 
     let first = segments[0];
+    if is_well_known_nat64_ipv6(segments) {
+        return is_public_ipv4(ipv4_from_segments(segments[6], segments[7]));
+    }
+    if is_6to4_ipv6(segments) {
+        return is_public_ipv4(ipv4_from_segments(segments[1], segments[2]));
+    }
+
     if (first & 0xfe00) == 0xfc00
         || (first & 0xffc0) == 0xfe80
         || is_discard_only_ipv6(segments)
@@ -170,6 +177,25 @@ fn is_public_ipv6(addr: Ipv6Addr) -> bool {
     }
 
     !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+fn is_well_known_nat64_ipv6(segments: [u16; 8]) -> bool {
+    segments[0] == 0x0064
+        && segments[1] == 0xff9b
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0
+}
+
+fn is_6to4_ipv6(segments: [u16; 8]) -> bool {
+    segments[0] == 0x2002
+}
+
+fn ipv4_from_segments(high: u16, low: u16) -> Ipv4Addr {
+    let [a, b] = high.to_be_bytes();
+    let [c, d] = low.to_be_bytes();
+    Ipv4Addr::new(a, b, c, d)
 }
 
 fn is_discard_only_ipv6(segments: [u16; 8]) -> bool {
@@ -192,6 +218,14 @@ mod tests {
         );
         assert_eq!(
             validate_public_http_literal_url("https://[2606:2800:220:1:248:1893:25c8:1946]/post"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_public_http_literal_url("http://[64:ff9b::5db8:d822]/post"),
+            Ok(())
+        );
+        assert_eq!(
+            validate_public_http_literal_url("http://[2002:5db8:d822::]/post"),
             Ok(())
         );
     }
@@ -261,6 +295,10 @@ mod tests {
             "http://[2001:2::1]/",
             "http://[2001:2:0:abcd::1]/",
             "http://[2001:db8::1]/",
+            "http://[64:ff9b::a9fe:a9fe]/",
+            "http://[64:ff9b::10.0.0.1]/",
+            "http://[2002:7f00:1::]/",
+            "http://[2002:a00:1::]/",
         ] {
             assert_eq!(
                 validate_public_http_literal_url(url),
