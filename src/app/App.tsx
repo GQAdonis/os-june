@@ -387,19 +387,6 @@ export function App() {
     }
     setActiveView("settings");
   }, []);
-  // Open Settings on a specific tab (e.g. the global "Needs you" tray routing a
-  // staged skill write to its review queue).
-  const openSettingsTab = useCallback(
-    (tab: SettingsTab) => {
-      openSettings();
-      setSettingsTab(tab);
-    },
-    [openSettings],
-  );
-  const reviewSkillChanges = useCallback(
-    () => openSettingsTab("skill-review"),
-    [openSettingsTab],
-  );
   const [originFolderId, setOriginFolderId] = useState<string | undefined>();
   // Tracks that the open note was drilled into from the All notes view, so the
   // note shows the same back-arrow + breadcrumb chrome folders use. Cleared
@@ -2976,7 +2963,6 @@ export function App() {
                             ],
                           }
                   }
-                  onReviewSkillChanges={reviewSkillChanges}
                 />
               ) : activeView === "agent-sessions" ? (
                 <AgentSessionsList

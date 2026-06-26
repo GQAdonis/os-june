@@ -185,7 +185,6 @@ import {
 } from "../../lib/hermes-session-steer";
 import { unsupportedEventStore } from "../../lib/hermes-unsupported-events";
 import { pendingActionStore } from "../../lib/hermes-pending-actions";
-import { useSkillReview } from "../../lib/hermes-admin";
 import { hermesActivityStore } from "../../lib/hermes-activity-store";
 import {
   hermesArtifactStore,
@@ -194,7 +193,6 @@ import {
   type AgentArtifact as TimelineArtifact,
 } from "../../lib/hermes-artifact-store";
 import { SessionUsagePanel } from "./SessionUsagePanel";
-import { PendingActionTray } from "./PendingActionTray";
 import {
   AgentActivityDrawer,
   AgentArtifactsSection,
@@ -871,10 +869,6 @@ type AgentWorkspaceProps = {
   initialSession?: HermesSessionInfo;
   initialSessionId?: string;
   origin?: AgentWorkspaceOrigin;
-  /** Opens the agent-managed skill write review queue (Settings → Pending skill
-   * changes). Wired by the host so the global "Needs you" tray can route a
-   * staged skill write to its review surface. Omitted → no skill-review row. */
-  onReviewSkillChanges?: () => void;
 };
 
 // Mid-run continuity across remounts. While June is working, a session has
@@ -1301,7 +1295,6 @@ export function AgentWorkspace({
   initialSession,
   initialSessionId: initialSessionIdProp,
   origin,
-  onReviewSkillChanges,
 }: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id ?? initialSessionIdProp;
   // Read once per mount (lazy initializer): the continuity snapshot the
@@ -2185,67 +2178,13 @@ export function AgentWorkspace({
     // `unsupportedStoreVersion` is the change signal; the lookup reads live state.
     [unsupportedStoreVersion, selectedHermesSessionId],
   );
-  // Feature 04: the global "Needs you" tray. Subscribing to the store's version
-  // re-derives the open rows whenever an action is recorded or resolved; the
-  // tray is one top-level surface visible across every session.
-  const pendingActionsVersion = useSyncExternalStore(
-    pendingActionStore.subscribe,
-    pendingActionStore.getVersion,
-    pendingActionStore.getVersion,
-  );
-  const pendingActionRecords = useMemo(
-    () => pendingActionStore.openRecords(),
-    // `pendingActionsVersion` is the change signal; the read returns live rows.
-    [pendingActionsVersion],
-  );
-  // Resolve a session id to its display title for a tray row, falling back to
-  // the raw id when the session isn't in the loaded list (unknown title must
-  // never crash or blank the row).
+  // Resolve a session id to its display title for an activity-drawer row,
+  // falling back to the raw id when the session isn't in the loaded list
+  // (unknown title must never crash or blank the row).
   const titleForPendingSession = useCallback(
     (sessionId: string) =>
       hermesSessionItems.find((session) => session.id === sessionId)?.title,
     [hermesSessionItems],
-  );
-  // Admin surfaces spec 12: agent-managed skill writes awaiting review. A staged
-  // write is a durable pending action, so it shares the global "Needs you" tray
-  // as a distinct row that routes to the review queue. Only wired when the host
-  // can open that surface (`onReviewSkillChanges`).
-  const skillReviewState = useSkillReview();
-  const skillReviewSummary = useMemo(
-    () =>
-      onReviewSkillChanges && skillReviewState.writes.length > 0
-        ? {
-            count: skillReviewState.writes.length,
-            onReview: onReviewSkillChanges,
-          }
-        : undefined,
-    [onReviewSkillChanges, skillReviewState.writes.length],
-  );
-  // Clicking a tray row opens the owning session and best-effort focuses the
-  // inline card for that request. Selecting the session reuses the same recipe
-  // the deep-link path uses; the scroll is deferred a frame so the transcript
-  // for the newly-selected session has mounted. If the exact card isn't found
-  // (e.g. not yet rendered), the transcript still auto-scrolls to the latest
-  // turn where a fresh pending action lives — see the limitation note.
-  const handleOpenPendingAction = useCallback(
-    ({ sessionId, requestId }: { sessionId: string; requestId: string }) => {
-      newSessionModeRef.current = false;
-      setNewSessionMode(false);
-      setActivePanel("chat");
-      selectedHermesSessionIdRef.current = sessionId;
-      setSelectedHermesSessionId(sessionId);
-      setSelectedTaskId(undefined);
-      // Defer past this render + the transcript mount so the card exists.
-      window.requestAnimationFrame(() => {
-        const card = document.querySelector(
-          `[data-pending-request="${CSS.escape(requestId)}"]`,
-        );
-        if (card) {
-          card.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-      });
-    },
-    [],
   );
 
   // Feature 11: the Agent activity drawer. Subscribing to the activity store's
@@ -2275,8 +2214,8 @@ export function AgentWorkspace({
   // copy rather than the empty state flashing before any event lands.
   const activityStatus: "loading" | "ready" =
     activityStoreVersion === 0 ? "loading" : "ready";
-  // Open a session from a drawer row: reuse the same select recipe the tray's
-  // open-action uses (clear new-session mode, switch panel + selection).
+  // Open a session from a drawer row: clear new-session mode, switch panel +
+  // selection.
   const openSessionFromDrawer = useCallback((sessionId: string) => {
     newSessionModeRef.current = false;
     setNewSessionMode(false);
@@ -4085,27 +4024,12 @@ export function AgentWorkspace({
           );
         }
       } else if (classified.kind === "pending_action") {
-        // Feature 04: aggregate this blocker into the global "Needs you" tray,
+        // Feature 04: aggregate this blocker into the pending-action store
         // keyed by mode + session + request. The session's mode comes from its
         // recorded opt-in (sudo carries its own; the rest derive it here). A
         // fresh event for a known request also re-confirms a row that went
         // stale across a reconnect (see the store's reconcile logic).
-        //
-        // Record by the DURABLE stored session id, not the runtime id the event
-        // carries. The classifier stamps `sessionId` from `event.session_id`,
-        // which is the ephemeral runtime id when a session has split
-        // runtime/stored ids. The global tray writes that id into
-        // `selectedHermesSessionId` when the user opens the row; only the stored
-        // id is in `hermesSessionItems`, so a runtime id would mount no
-        // transcript and open the wrong/empty session. The runtime id is still
-        // available for the response RPC via `runtimeSessionIds[storedSessionId]`
-        // (and on the event part the inline card reads), so re-keying for UI
-        // routing costs nothing on the response path.
-        const routed =
-          classified.sessionId === storedSessionId
-            ? classified
-            : { ...classified, sessionId: storedSessionId };
-        pendingActionStore.record(routed, hermesModeFor(storedSessionId));
+        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
       }
       // Feature 11: roll EVERY classified event into the global activity store
       // that backs the Agent activity drawer. The store is total and ignores
@@ -4163,7 +4087,8 @@ export function AgentWorkspace({
         // Feature 04: the session reached a terminal state (completed, a
         // terminal error, or an interrupt) — the agent is no longer blocked, so
         // any of its outstanding "Needs you" rows are moot. Clear them so the
-        // tray never shows a dead blocker for a finished session.
+        // sidebar "Needs you" count never shows a dead blocker for a finished
+        // session.
         pendingActionStore.resolveSession(storedSessionId);
       }
       if (status) {
@@ -4783,7 +4708,7 @@ export function AgentWorkspace({
       }
       misses.delete(sessionId);
       const activityCounts = clearSessionActivity(sessionId);
-      // "completed" (not "failed") keeps the tray quiet: its title falls back
+      // "completed" (not "failed") keeps the status quiet: its title falls back
       // to lastStatus when nothing is active, and a stale "running" there
       // would still render "Working…".
       dispatchAgentSessionStatus({
@@ -4895,9 +4820,7 @@ export function AgentWorkspace({
       });
       // Feature 04: the user just answered this approval — clear its global
       // "Needs you" row immediately (the response itself is the resolution).
-      // Records are keyed by the durable stored id (`liveEventKey`), not the
-      // runtime `sessionId` the RPC uses, so resolve against the stored id.
-      pendingActionStore.resolveRequest(liveEventKey, requestId);
+      pendingActionStore.resolveRequest(sessionId, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
@@ -4922,8 +4845,8 @@ export function AgentWorkspace({
         );
         setLiveEvents(liveEventsRef.current);
         // The request can never be answered now — retire its card so neither the
-        // "Needs you" tray nor the inline prompt offers a dead-end "Respond".
-        pendingActionStore.resolveRequest(liveEventKey, requestId);
+        // sidebar count nor the inline prompt offers a dead-end "Respond".
+        pendingActionStore.resolveRequest(sessionId, requestId);
         void loadHermesSessions();
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
@@ -4955,7 +4878,7 @@ export function AgentWorkspace({
         type: "clarify.response",
         payload: { request_id: requestId, answer },
       });
-      // Feature 04: the user answered the clarification — clear its tray row.
+      // Feature 04: the user answered the clarification — clear its pending record.
       pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
@@ -5006,17 +4929,15 @@ export function AgentWorkspace({
         session_id: sessionId,
         payload: { request_id: requestId, granted: approved, mode },
       });
-      // Feature 04: the user resolved the sudo prompt — clear its tray row.
-      // Records are keyed by the durable stored id (`liveEventKey`); the runtime
-      // `sessionId` is only for the RPC.
-      pendingActionStore.resolveRequest(liveEventKey, requestId);
+      // Feature 04: the user resolved the sudo prompt — clear its pending record.
+      pendingActionStore.resolveRequest(sessionId, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
       if (isSessionGoneError(message)) {
         // The runtime is gone, so this prompt can never be answered — retire
         // its card and say so plainly instead of leaking the raw 404.
-        pendingActionStore.resolveRequest(liveEventKey, requestId);
+        pendingActionStore.resolveRequest(sessionId, requestId);
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
         setError(message, { sessionId });
@@ -5053,17 +4974,15 @@ export function AgentWorkspace({
         session_id: sessionId,
         payload: { request_id: requestId, provided: true },
       });
-      // Feature 04: the user provided the secret — clear its tray row.
-      // Records are keyed by the durable stored id (`liveEventKey`); the runtime
-      // `sessionId` is only for the RPC.
-      pendingActionStore.resolveRequest(liveEventKey, requestId);
+      // Feature 04: the user provided the secret — clear its pending record.
+      pendingActionStore.resolveRequest(sessionId, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
       if (isSessionGoneError(message)) {
         // The runtime is gone, so this secret prompt can never be answered —
         // retire its card and say so plainly instead of leaking the raw 404.
-        pendingActionStore.resolveRequest(liveEventKey, requestId);
+        pendingActionStore.resolveRequest(sessionId, requestId);
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
         setError(message, { sessionId });
@@ -6924,19 +6843,8 @@ export function AgentWorkspace({
       data-artifact-panel={artifactPanel ? "open" : undefined}
       data-hero={heroMode ? "true" : undefined}
     >
-      {/* Feature 04: the one global "Needs you" tray. Mounted at the top level
-          of the workspace (not inside a single session view) so outstanding
-          actions from EVERY session stay visible; a row click opens the owning
-          session. Renders nothing when nothing is pending. */}
-      <PendingActionTray
-        records={pendingActionRecords}
-        titleForSession={titleForPendingSession}
-        onOpenAction={handleOpenPendingAction}
-        now={Date.now()}
-        skillReview={skillReviewSummary}
-      />
       {/* Feature 11: the Agent activity drawer and its toggle. One top-level
-          surface (like the tray) so it shows every session's live activity, not
+          surface so it shows every session's live activity, not
           just the selected one. The toggle is hidden while the drawer is open
           (the drawer carries its own close control) and surfaces the count of
           sessions currently doing work.
@@ -9144,11 +9052,11 @@ function AgentChatTurnRow({
     (part): part is Extract<AgentChatPart, { type: "tool" }> =>
       part.type === "tool",
   );
-  // Reasoning + the tool/terminal calls it made fold into one "Thinking" /
-  // "Thought" disclosure so the conversation isn't littered with terminal rows.
-  const thinkingRunning =
-    reasoningParts.some((part) => part.status === "running") ||
-    toolParts.some((part) => part.status === "running");
+  // The disclosure owns internal reasoning only. Tool/action rows stay visible
+  // outside it so users can see what June is doing without expanding Thought.
+  const thinkingRunning = reasoningParts.some(
+    (part) => part.status === "running",
+  );
   const completedThinkingKey = `turn:${turn.id}:thinking`;
   const thinkingKey =
     thinkingRunning && activeThinkingKey
@@ -9171,7 +9079,7 @@ function AgentChatTurnRow({
       !wasRunning ||
       thinkingRunning ||
       activeThinkingKey === undefined ||
-      reasoningParts.length + toolParts.length === 0 ||
+      reasoningParts.length === 0 ||
       !thinkingOpen(activeThinkingKey)
     ) {
       return;
@@ -9324,14 +9232,20 @@ function AgentChatTurnRow({
   return (
     <article className="agent-assistant-turn" data-status={turn.status}>
       <div className="agent-assistant-turn-body">
-        {reasoningParts.length > 0 || toolParts.length > 0 ? (
+        {reasoningParts.length > 0 ? (
           <AgentThinkingGroup
             reasoning={reasoningParts}
-            tools={toolParts}
             running={thinkingRunning}
             open={thinkingIsOpen}
             onOpenChange={(open) => onThinkingOpenChange(thinkingKey, open)}
           />
+        ) : null}
+        {toolParts.length > 0 ? (
+          <div className="agent-tool-stack">
+            {toolParts.map((tool) => (
+              <AgentToolPartRow key={`tool:${tool.id}`} part={tool} />
+            ))}
+          </div>
         ) : null}
         {turn.parts.map((part, index) =>
           part.type === "text" ? (
@@ -9900,9 +9814,6 @@ function ClarifyPart({
     <article
       className="agent-clarify-card"
       data-status={part.status}
-      // Feature 04: scroll target so the "Needs you" tray can focus this exact
-      // card after opening the session (`part.id` is the requestId).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         <IconBubbleWide size={14} />
@@ -10138,8 +10049,6 @@ function ApprovalPart({
     <article
       className="agent-approval-card"
       data-status={part.status}
-      // Feature 04: tray scroll target (see ClarifyPart).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         <IconShieldCheck size={14} />
@@ -10351,8 +10260,6 @@ export function SudoPart({
     <article
       className="agent-approval-card"
       data-status={part.status}
-      // Feature 04: tray scroll target (see ClarifyPart).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         {unrestricted ? (
@@ -10486,8 +10393,6 @@ export function SecretPart({
     <article
       className="agent-approval-card"
       data-status={part.status}
-      // Feature 04: tray scroll target (see ClarifyPart).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         <IconLock size={14} />
@@ -10582,18 +10487,16 @@ function AgentThinkingGroup({
   open,
   onOpenChange,
   reasoning,
-  tools,
   running,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   reasoning: Extract<AgentChatPart, { type: "reasoning" }>[];
-  tools: Extract<AgentChatPart, { type: "tool" }>[];
   running: boolean;
 }) {
   // Collapsed by default to a short label — "Thinking" while it works, "Thought"
-  // once done (terracotta while live). Expanding reveals the reasoning prose and
-  // any terminal calls it ran, nested together.
+  // once done (terracotta while live). Expanding reveals only the reasoning
+  // prose; tool/action rows render outside this disclosure.
   const reasoningText = reasoning
     .map((part) => part.text)
     .join("\n\n")
@@ -10615,9 +10518,6 @@ function AgentThinkingGroup({
         {reasoningText ? (
           <div className="agent-reasoning-text">{reasoningText}</div>
         ) : null}
-        {tools.map((tool) => (
-          <AgentToolPartRow key={`tool:${tool.id}`} part={tool} />
-        ))}
       </div>
     </details>
   );
