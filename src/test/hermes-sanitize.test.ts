@@ -115,7 +115,7 @@ describe("sanitizePayload — value-shape backstop exempts paths/urls", () => {
 describe("sanitizeText", () => {
   it("redacts embedded bearer tokens and secret-looking values", () => {
     const text =
-      "Request failed with Bearer abcdef0123456789abcdef0123456789 and sk-abcdefghijklmnopqrstuvwxyz123456";
+      "Request failed with Bearer abcdef0123456789abcdef0123456789, sk-abcdefghijklmnopqrstuvwxyz123456, and opaque-token-value-987654321";
 
     const out = sanitizeText(text);
 
@@ -123,6 +123,7 @@ describe("sanitizeText", () => {
     expect(out).toContain("Bearer [redacted]");
     expect(out).not.toContain("abcdef0123456789abcdef0123456789");
     expect(out).not.toContain("sk-abcdefghijklmnopqrstuvwxyz123456");
+    expect(out).not.toContain("opaque-token-value-987654321");
   });
 
   it("redacts sensitive URL params inside longer text", () => {

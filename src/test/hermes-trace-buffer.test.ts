@@ -84,14 +84,12 @@ describe("createHermesTraceBuffer", () => {
       sessionId: "s1",
       method: "session.steer",
       message:
-        "Hermes request failed with Bearer abcdef0123456789abcdef0123456789",
+        "Hermes request failed with opaque token opaque-token-value-987654321",
     });
 
     const entry = buffer.entriesFor("s1")[0];
-    expect(entry.message).toContain("Bearer [redacted]");
-    expect(JSON.stringify(entry)).not.toContain(
-      "abcdef0123456789abcdef0123456789",
-    );
+    expect(entry.message).toContain("[redacted]");
+    expect(JSON.stringify(entry)).not.toContain("opaque-token-value-987654321");
   });
 
   it("drops the oldest entry once the per-session cap is exceeded", () => {

@@ -21,6 +21,8 @@ const JWT_PATTERN =
   /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g;
 const KNOWN_SECRET_PATTERN =
   /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[0-9A-Z]{16})\b/g;
+const NAMED_SECRET_FRAGMENT_PATTERN =
+  /\b[A-Za-z0-9_-]*(?:token|secret|credential|password|api[_-]?key)[A-Za-z0-9_-]*\b/gi;
 const LONG_OPAQUE_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{40,}\b/g;
 
 /** Cap on how deep we recurse, so a cyclic or pathologically nested payload
@@ -56,6 +58,9 @@ export function sanitizeText(value: string): string {
     )
     .replace(JWT_PATTERN, REDACTED)
     .replace(KNOWN_SECRET_PATTERN, REDACTED)
+    .replace(NAMED_SECRET_FRAGMENT_PATTERN, (match) =>
+      match.length >= 16 && /[0-9_-]/u.test(match) ? REDACTED : match,
+    )
     .replace(LONG_OPAQUE_TOKEN_PATTERN, REDACTED);
 }
 
