@@ -303,6 +303,9 @@ const AGENT_WORKSPACE_MAX_SESSION_RETRY_DELAY_MS =
   AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS[
     AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS.length - 1
   ] ?? 2000;
+const QUEUED_STEER_RETRY_DELAY_MS = 300;
+const RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS = 1000;
+const RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS = 3000;
 
 // What the user reads instead of the gateway's "session busy" rejection. No
 // action in the pill — the composer's send slot already shows stop while
@@ -765,6 +768,15 @@ type PendingIssueReport = {
   diagnosisStartedAt?: string;
 };
 
+type QueuedSteerInstruction = {
+  text: string;
+  queuedAt: string;
+  flushing?: boolean;
+  error?: string;
+};
+
+type HermesToolEventPhase = "start" | "progress" | "complete";
+
 type AgentWorkspaceError = {
   message: string;
   /** Null means the error belongs to the no-session workspace surface. */
@@ -882,6 +894,8 @@ type AgentSessionContinuity = {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  queuedSteerBySessionId: Record<string, QueuedSteerInstruction>;
+  activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: string[];
@@ -942,6 +956,32 @@ function forgetComposerDraft(key: string | null) {
   if (key) agentComposerDrafts.delete(key);
 }
 
+function activeToolCallsRecord(
+  activeToolCallsBySession: Map<string, Map<string, number>>,
+): Record<string, Record<string, number>> {
+  return Object.fromEntries(
+    Array.from(activeToolCallsBySession.entries())
+      .filter(([, tools]) => tools.size > 0)
+      .map(([sessionId, tools]) => [sessionId, Object.fromEntries(tools)]),
+  );
+}
+
+function activeToolCallsMap(
+  activeToolCallsBySession: Record<string, Record<string, number>> | undefined,
+) {
+  return new Map(
+    Object.entries(activeToolCallsBySession ?? {}).map(([sessionId, tools]) => [
+      sessionId,
+      new Map(
+        Object.entries(tools).filter(
+          (entry): entry is [string, number] =>
+            Number.isFinite(entry[1]) && entry[1] > 0,
+        ),
+      ),
+    ]),
+  );
+}
+
 function captureSessionContinuity(state: {
   sessionItems: HermesSessionInfo[];
   pendingMessages: Record<string, HermesSessionMessage[]>;
@@ -950,6 +990,8 @@ function captureSessionContinuity(state: {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  queuedSteerBySessionId: Record<string, QueuedSteerInstruction>;
+  activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: Set<string>;
@@ -974,11 +1016,28 @@ function captureSessionContinuity(state: {
   for (const sessionId of state.submittingIssueReportSessionIds) {
     activeIds.add(sessionId);
   }
+  for (const sessionId of Object.keys(state.queuedSteerBySessionId)) {
+    activeIds.add(sessionId);
+  }
+  for (const sessionId of Object.keys(state.activeToolCallsBySession)) {
+    activeIds.add(sessionId);
+  }
   if (activeIds.size === 0) return null;
   const pick = <T,>(record: Record<string, T>) =>
     Object.fromEntries(
       Object.entries(record).filter(([sessionId]) => activeIds.has(sessionId)),
     );
+  const queuedSteerBySessionId = Object.fromEntries(
+    Object.entries(pick(state.queuedSteerBySessionId)).map(
+      ([sessionId, queued]) => [
+        sessionId,
+        {
+          ...queued,
+          flushing: false,
+        },
+      ],
+    ),
+  );
   return {
     sessionItems: state.sessionItems.filter((session) =>
       activeIds.has(session.id),
@@ -989,6 +1048,8 @@ function captureSessionContinuity(state: {
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
+    queuedSteerBySessionId,
+    activeToolCallsBySession: pick(state.activeToolCallsBySession),
     pendingIssueReports: pick(state.pendingIssueReports),
     reviewableIssueReports: pick(state.reviewableIssueReports),
     diagnosisRefreshIssueReportSessionIds: [
@@ -1106,6 +1167,8 @@ function updateContinuityAfterIssueReportDelivery(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    queuedSteerBySessionId: sessionContinuity.queuedSteerBySessionId,
+    activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds,
@@ -1140,6 +1203,8 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    queuedSteerBySessionId: sessionContinuity.queuedSteerBySessionId,
+    activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds: new Set(
@@ -1402,6 +1467,26 @@ export function AgentWorkspace({
     () => new Set(continuity?.workingSessionIds),
   );
   const workingSessionIdsRef = useRef<Set<string>>(workingSessionIds);
+  const [toolCallSessionIds, setToolCallSessionIds] = useState<Set<string>>(
+    () => new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
+  );
+  const toolCallSessionIdsRef = useRef<Set<string>>(toolCallSessionIds);
+  const restoredToolCallSessionIdsRef = useRef(
+    new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
+  );
+  const [queuedSteerBySessionId, setQueuedSteerBySessionId] = useState<
+    Record<string, QueuedSteerInstruction>
+  >(() => continuity?.queuedSteerBySessionId ?? {});
+  const queuedSteerBySessionIdRef = useRef(queuedSteerBySessionId);
+  const queuedSteerRetryTimersRef = useRef<
+    Map<string, ReturnType<typeof window.setTimeout>>
+  >(new Map());
+  const restoredQueuedSteerReconcileTimersRef = useRef<
+    Map<string, ReturnType<typeof window.setTimeout>>
+  >(new Map());
+  const activeToolCallsBySessionRef = useRef<Map<string, Map<string, number>>>(
+    activeToolCallsMap(continuity?.activeToolCallsBySession),
+  );
   const [waitingSessionIds, setWaitingSessionIds] = useState<Set<string>>(
     () => new Set(continuity?.waitingSessionIds),
   );
@@ -1744,18 +1829,140 @@ export function AgentWorkspace({
   }, [runtimeSessionIds]);
 
   useEffect(() => {
+    const restoredSessionIds = continuity?.workingSessionIds ?? [];
+    if (!restoredSessionIds.length) return;
+    let cancelled = false;
+
+    void (async () => {
+      for (const sessionId of restoredSessionIds) {
+        const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
+        if (!runtimeSessionId) continue;
+        try {
+          const gateway = await ensureHermesGateway(
+            sessionUnrestricted(sessionId),
+          );
+          if (cancelled || !workingSessionIdsRef.current.has(sessionId)) {
+            continue;
+          }
+          attachHermesSessionEventListener({
+            gateway,
+            runtimeSessionId,
+            sessionDisplayTitle:
+              hermesSessionItemsRef.current.find(
+                (session) => session.id === sessionId,
+              )?.title ?? "Agent session",
+            storedSessionId: sessionId,
+          });
+        } catch {
+          // The working-session poll still reconciles if reconnecting fails.
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    for (const sessionId of Object.keys(queuedSteerBySessionIdRef.current)) {
+      if (restoredToolCallSessionIdsRef.current.has(sessionId)) {
+        scheduleRestoredQueuedSteerReconcile(sessionId);
+      } else {
+        scheduleQueuedSteerRetry(sessionId);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
     selectedHermesSessionIdRef.current = selectedHermesSessionId;
     workingSessionIdsRef.current = workingSessionIds;
+    toolCallSessionIdsRef.current = toolCallSessionIds;
+    queuedSteerBySessionIdRef.current = queuedSteerBySessionId;
     waitingSessionIdsRef.current = waitingSessionIds;
     pendingHermesMessagesRef.current = pendingHermesMessages;
     hermesSessionItemsRef.current = hermesSessionItems;
   }, [
     hermesSessionItems,
     pendingHermesMessages,
+    queuedSteerBySessionId,
     selectedHermesSessionId,
+    toolCallSessionIds,
     waitingSessionIds,
     workingSessionIds,
   ]);
+
+  const clearQueuedSteerInstruction = useCallback((sessionId: string) => {
+    cancelQueuedSteerRetry(sessionId);
+    clearRestoredQueuedSteerReconcile(sessionId);
+    setQueuedSteerBySessionId((current) => {
+      if (!current[sessionId]) return current;
+      const next = omitRecordKey(current, sessionId);
+      queuedSteerBySessionIdRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const setSessionToolCallActive = useCallback(
+    (sessionId: string, active: boolean) => {
+      setToolCallSessionIds((current) => {
+        const next = new Set(current);
+        if (active) {
+          next.add(sessionId);
+        } else {
+          next.delete(sessionId);
+        }
+        toolCallSessionIdsRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
+
+  function clearSessionToolCalls(sessionId: string) {
+    activeToolCallsBySessionRef.current.delete(sessionId);
+    setSessionToolCallActive(sessionId, false);
+  }
+
+  function updateSessionToolCallActivity(
+    sessionId: string,
+    event: HermesGatewayEvent,
+    phase: HermesToolEventPhase,
+  ) {
+    const eventKey = toolEventActivityKey(event);
+    const current = new Map(
+      activeToolCallsBySessionRef.current.get(sessionId) ?? [],
+    );
+
+    if (phase === "progress" && eventKey === undefined) {
+      return current.size > 0;
+    }
+
+    const key = eventKey ?? "__anonymous_tool__";
+
+    if (phase === "start") {
+      current.set(key, (current.get(key) ?? 0) + 1);
+    } else if (phase === "progress") {
+      if (!current.has(key)) current.set(key, 1);
+    } else {
+      const count = current.get(key) ?? 0;
+      if (count > 1) {
+        current.set(key, count - 1);
+      } else {
+        current.delete(key);
+      }
+    }
+
+    if (current.size > 0) {
+      activeToolCallsBySessionRef.current.set(sessionId, current);
+      setSessionToolCallActive(sessionId, true);
+      return true;
+    }
+
+    activeToolCallsBySessionRef.current.delete(sessionId);
+    setSessionToolCallActive(sessionId, false);
+    return false;
+  }
 
   const setSessionWorking = useCallback(
     (sessionId: string, working: boolean) => {
@@ -1789,22 +1996,28 @@ export function AgentWorkspace({
     [],
   );
 
-  const clearSessionActivity = useCallback((sessionId: string) => {
-    const nextWorking = new Set(workingSessionIdsRef.current);
-    nextWorking.delete(sessionId);
-    workingSessionIdsRef.current = nextWorking;
-    setWorkingSessionIds(nextWorking);
+  const clearSessionActivity = useCallback(
+    (sessionId: string) => {
+      clearSessionToolCalls(sessionId);
+      clearQueuedSteerInstruction(sessionId);
 
-    const nextWaiting = new Set(waitingSessionIdsRef.current);
-    nextWaiting.delete(sessionId);
-    waitingSessionIdsRef.current = nextWaiting;
-    setWaitingSessionIds(nextWaiting);
+      const nextWorking = new Set(workingSessionIdsRef.current);
+      nextWorking.delete(sessionId);
+      workingSessionIdsRef.current = nextWorking;
+      setWorkingSessionIds(nextWorking);
 
-    return {
-      activeCount: nextWorking.size + nextWaiting.size,
-      needsUserCount: nextWaiting.size,
-    };
-  }, []);
+      const nextWaiting = new Set(waitingSessionIdsRef.current);
+      nextWaiting.delete(sessionId);
+      waitingSessionIdsRef.current = nextWaiting;
+      setWaitingSessionIds(nextWaiting);
+
+      return {
+        activeCount: nextWorking.size + nextWaiting.size,
+        needsUserCount: nextWaiting.size,
+      };
+    },
+    [clearQueuedSteerInstruction, setSessionToolCallActive],
+  );
 
   // Shared teardown for a session that is going away: its messages, pending
   // sends, working/waiting flags, live gateway listener, and buffered live
@@ -1819,6 +2032,7 @@ export function AgentWorkspace({
         return next;
       });
       clearSessionActivity(sessionId);
+      clearQueuedSteerInstruction(sessionId);
       // Feature 11: a deleted session has no activity to show, so drop its row
       // from the activity drawer's store as well.
       hermesActivityStore.clearSession(sessionId);
@@ -1830,7 +2044,7 @@ export function AgentWorkspace({
       // A deleted session must not be the restore target on the next mount.
       forgetLastOpenSessionId(sessionId);
     },
-    [clearSessionActivity],
+    [clearQueuedSteerInstruction, clearSessionActivity],
   );
 
   const selectedTask = useMemo(
@@ -2864,6 +3078,10 @@ export function AgentWorkspace({
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
+        queuedSteerBySessionId: queuedSteerBySessionIdRef.current,
+        activeToolCallsBySession: activeToolCallsRecord(
+          activeToolCallsBySessionRef.current,
+        ),
         pendingIssueReports: Object.fromEntries(pendingIssueReportsRef.current),
         reviewableIssueReports: reviewableIssueReportsRef.current,
         diagnosisRefreshIssueReportSessionIds:
@@ -2871,6 +3089,14 @@ export function AgentWorkspace({
         submittingIssueReportSessionIds:
           submittingIssueReportSessionIdsRef.current,
       });
+      for (const timer of queuedSteerRetryTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      queuedSteerRetryTimersRef.current.clear();
+      for (const timer of restoredQueuedSteerReconcileTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      restoredQueuedSteerReconcileTimersRef.current.clear();
       for (const gateway of gatewaysRef.current.values()) {
         gateway.close();
       }
@@ -3791,6 +4017,156 @@ export function AgentWorkspace({
     }
   }
 
+  function attachHermesSessionEventListener({
+    gateway,
+    runtimeSessionId,
+    sessionDisplayTitle,
+    storedSessionId,
+  }: {
+    gateway: HermesGatewayClient;
+    runtimeSessionId: string;
+    sessionDisplayTitle: string;
+    storedSessionId: string;
+  }) {
+    sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
+    let unlisten = () => {};
+    const removeListener = gateway.onEvent((event) => {
+      if (
+        event.session_id !== runtimeSessionId &&
+        event.session_id !== storedSessionId
+      )
+        return;
+      const liveEvent = { ...event, receivedAt: new Date().toISOString() };
+      // Run every live frame through the typed control plane alongside the
+      // existing string-based handling below. This is the first consumer of
+      // the classifier: it doesn't drive rendering yet (later features migrate
+      // families onto it incrementally), but it proves the live path is typed
+      // and surfaces any raw type June can't yet model. Unknown frames classify
+      // as `unsupported` rather than being dropped, so a Hermes upgrade that
+      // adds an event shows up in dev instead of silently doing nothing.
+      const classified = classifyHermesEvent(liveEvent);
+      // Feature 15: record every inbound frame (raw type + the kind it
+      // classified to) into the bounded, sanitized trace buffer so the dev/debug
+      // trace panel can reconstruct the session. recordInbound re-classifies and
+      // sanitizes internally; nothing raw is retained.
+      hermesTraceBuffer.recordInbound(liveEvent);
+      if (classified.kind === "unsupported") {
+        // Feed the bounded per-session store so the user gets a recoverable
+        // notice (when this is the active session) and developers get a
+        // sanitized, issue-report-safe export. The payload is already sanitized
+        // by the classifier; nothing raw is retained or logged.
+        unsupportedEventStore.record(classified);
+        if (import.meta.env.DEV) {
+          console.debug(
+            "[hermes] unsupported event",
+            classified.rawType,
+            classified.sanitizedPayload,
+          );
+        }
+      } else if (classified.kind === "pending_action") {
+        // Feature 04: aggregate this blocker into the global "Needs you" tray,
+        // keyed by mode + session + request. The session's mode comes from its
+        // recorded opt-in (sudo carries its own; the rest derive it here). A
+        // fresh event for a known request also re-confirms a row that went
+        // stale across a reconnect (see the store's reconcile logic).
+        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
+      }
+      // Feature 11: roll EVERY classified event into the global activity store
+      // that backs the Agent activity drawer. The store is total and ignores
+      // unattributable events, so one unconditional call covers all kinds; it
+      // derives the session's phase (running/waiting/background/error/complete),
+      // current tool, and subagent count from the normalized event — never from
+      // the raw frame (raw JSON belongs to feature 15's trace panel).
+      hermesActivityStore.record(classified, hermesModeFor(storedSessionId));
+      // Feature 14: extract any file/artifact reference this event carries into
+      // the per-session artifact timeline behind the drawer's "Artifacts"
+      // section. The store is total and only acts on `tool` completions that
+      // name a known file/url field (conservative — never parses prose), so one
+      // unconditional call is safe for every kind. Mode rides along so each
+      // artifact can show its blast radius (sandboxed copy vs unrestricted path).
+      hermesArtifactStore.record(classified, hermesModeFor(storedSessionId));
+      const nextSessionEvents = [
+        ...(liveEventsRef.current[storedSessionId] ?? []),
+        liveEvent,
+      ].slice(-200);
+      liveEventsRef.current = {
+        ...liveEventsRef.current,
+        [storedSessionId]: nextSessionEvents,
+      };
+      setLiveEvents(liveEventsRef.current);
+      const toolEventPhase = hermesToolEventPhase(event.type);
+      if (toolEventPhase !== undefined) {
+        clearRestoredQueuedSteerReconcile(storedSessionId);
+      }
+      const hasActiveToolCalls =
+        toolEventPhase !== undefined
+          ? updateSessionToolCallActivity(
+              storedSessionId,
+              event,
+              toolEventPhase,
+            )
+          : toolCallSessionIdsRef.current.has(storedSessionId);
+      if (toolEventPhase === "complete" && !hasActiveToolCalls) {
+        window.setTimeout(() => {
+          void flushQueuedSteerInstruction(storedSessionId);
+        }, 0);
+      }
+      const status = agentStatusFromHermesEvent(event);
+      if (status === "waitingForUser") {
+        setSessionWorking(storedSessionId, false);
+        setSessionWaiting(storedSessionId, true);
+      } else if (status === "running") {
+        setSessionWaiting(storedSessionId, false);
+        setSessionWorking(storedSessionId, true);
+      }
+      const activityCounts =
+        status === "completed" || status === "failed" || status === "cancelled"
+          ? clearSessionActivity(storedSessionId)
+          : undefined;
+      if (activityCounts) {
+        // Feature 04: the session reached a terminal state (completed, a
+        // terminal error, or an interrupt) — the agent is no longer blocked, so
+        // any of its outstanding "Needs you" rows are moot. Clear them so the
+        // tray never shows a dead blocker for a finished session.
+        pendingActionStore.resolveSession(storedSessionId);
+      }
+      if (status) {
+        dispatchAgentSessionStatus({
+          sessionId: storedSessionId,
+          title: sessionDisplayTitle,
+          status,
+          summary: agentStatusSummaryFromHermesEvent(event, status),
+          ...activityCounts,
+        });
+      }
+      if (isTerminalHermesEvent(event.type)) {
+        unlisten();
+        if (!activityCounts) {
+          clearSessionActivity(storedSessionId);
+        }
+        // The diagnostic turn is over (even on error): let the user append
+        // anything June's summary surfaced before sending the bundled report.
+        const promotedIssueReport = promotePendingIssueReportToReview(
+          storedSessionId,
+          { queueDiagnosisRefresh: true },
+        );
+        if (!promotedIssueReport) {
+          window.setTimeout(() => {
+            void refreshHermesSession(storedSessionId);
+          }, 300);
+        }
+      }
+    });
+    unlisten = () => {
+      removeListener();
+      if (sessionGatewayUnlistenRef.current.get(storedSessionId) === unlisten) {
+        sessionGatewayUnlistenRef.current.delete(storedSessionId);
+      }
+    };
+    sessionGatewayUnlistenRef.current.set(storedSessionId, unlisten);
+    return unlisten;
+  }
+
   async function submitHermesSession(
     content: string,
     explicitSession?: HermesSessionInfo,
@@ -4045,124 +4421,12 @@ export function AgentWorkspace({
       status: "running",
       summary: "June is working.",
     });
-    sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
-    const removeListener = gateway.onEvent((event) => {
-      if (
-        event.session_id !== runtimeSessionId &&
-        event.session_id !== storedSessionId
-      )
-        return;
-      const liveEvent = { ...event, receivedAt: new Date().toISOString() };
-      // Run every live frame through the typed control plane alongside the
-      // existing string-based handling below. This is the first consumer of
-      // the classifier: it doesn't drive rendering yet (later features migrate
-      // families onto it incrementally), but it proves the live path is typed
-      // and surfaces any raw type June can't yet model. Unknown frames classify
-      // as `unsupported` rather than being dropped, so a Hermes upgrade that
-      // adds an event shows up in dev instead of silently doing nothing.
-      const classified = classifyHermesEvent(liveEvent);
-      // Feature 15: record every inbound frame (raw type + the kind it
-      // classified to) into the bounded, sanitized trace buffer so the dev/debug
-      // trace panel can reconstruct the session. recordInbound re-classifies and
-      // sanitizes internally; nothing raw is retained.
-      hermesTraceBuffer.recordInbound(liveEvent);
-      if (classified.kind === "unsupported") {
-        // Feed the bounded per-session store so the user gets a recoverable
-        // notice (when this is the active session) and developers get a
-        // sanitized, issue-report-safe export. The payload is already sanitized
-        // by the classifier; nothing raw is retained or logged.
-        unsupportedEventStore.record(classified);
-        if (import.meta.env.DEV) {
-          console.debug(
-            "[hermes] unsupported event",
-            classified.rawType,
-            classified.sanitizedPayload,
-          );
-        }
-      } else if (classified.kind === "pending_action") {
-        // Feature 04: aggregate this blocker into the global "Needs you" tray,
-        // keyed by mode + session + request. The session's mode comes from its
-        // recorded opt-in (sudo carries its own; the rest derive it here). A
-        // fresh event for a known request also re-confirms a row that went
-        // stale across a reconnect (see the store's reconcile logic).
-        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
-      }
-      // Feature 11: roll EVERY classified event into the global activity store
-      // that backs the Agent activity drawer. The store is total and ignores
-      // unattributable events, so one unconditional call covers all kinds; it
-      // derives the session's phase (running/waiting/background/error/complete),
-      // current tool, and subagent count from the normalized event — never from
-      // the raw frame (raw JSON belongs to feature 15's trace panel).
-      hermesActivityStore.record(classified, hermesModeFor(storedSessionId));
-      // Feature 14: extract any file/artifact reference this event carries into
-      // the per-session artifact timeline behind the drawer's "Artifacts"
-      // section. The store is total and only acts on `tool` completions that
-      // name a known file/url field (conservative — never parses prose), so one
-      // unconditional call is safe for every kind. Mode rides along so each
-      // artifact can show its blast radius (sandboxed copy vs unrestricted path).
-      hermesArtifactStore.record(classified, hermesModeFor(storedSessionId));
-      const nextSessionEvents = [
-        ...(liveEventsRef.current[storedSessionId] ?? []),
-        liveEvent,
-      ].slice(-200);
-      liveEventsRef.current = {
-        ...liveEventsRef.current,
-        [storedSessionId]: nextSessionEvents,
-      };
-      setLiveEvents(liveEventsRef.current);
-      const status = agentStatusFromHermesEvent(event);
-      if (status === "waitingForUser") {
-        setSessionWorking(storedSessionId, false);
-        setSessionWaiting(storedSessionId, true);
-      } else if (status === "running") {
-        setSessionWaiting(storedSessionId, false);
-        setSessionWorking(storedSessionId, true);
-      }
-      const activityCounts =
-        status === "completed" || status === "failed" || status === "cancelled"
-          ? clearSessionActivity(storedSessionId)
-          : undefined;
-      if (activityCounts) {
-        // Feature 04: the session reached a terminal state (completed, a
-        // terminal error, or an interrupt) — the agent is no longer blocked, so
-        // any of its outstanding "Needs you" rows are moot. Clear them so the
-        // tray never shows a dead blocker for a finished session.
-        pendingActionStore.resolveSession(storedSessionId);
-      }
-      if (status) {
-        dispatchAgentSessionStatus({
-          sessionId: storedSessionId,
-          title: sessionDisplayTitle,
-          status,
-          summary: agentStatusSummaryFromHermesEvent(event, status),
-          ...activityCounts,
-        });
-      }
-      if (isTerminalHermesEvent(event.type)) {
-        unlisten();
-        if (!activityCounts) {
-          clearSessionActivity(storedSessionId);
-        }
-        // The diagnostic turn is over (even on error): let the user append
-        // anything June's summary surfaced before sending the bundled report.
-        const promotedIssueReport = promotePendingIssueReportToReview(
-          storedSessionId,
-          { queueDiagnosisRefresh: true },
-        );
-        if (!promotedIssueReport) {
-          window.setTimeout(() => {
-            void refreshHermesSession(storedSessionId);
-          }, 300);
-        }
-      }
+    attachHermesSessionEventListener({
+      gateway,
+      runtimeSessionId,
+      sessionDisplayTitle,
+      storedSessionId,
     });
-    const unlisten = () => {
-      removeListener();
-      if (sessionGatewayUnlistenRef.current.get(storedSessionId) === unlisten) {
-        sessionGatewayUnlistenRef.current.delete(storedSessionId);
-      }
-    };
-    sessionGatewayUnlistenRef.current.set(storedSessionId, unlisten);
     try {
       // Feature 15: record the outbound prompt.submit in the trace buffer. Its
       // params are sanitized before storage (the text is the user's own prompt,
@@ -4211,7 +4475,7 @@ export function AgentWorkspace({
         // working state. Callers translate this into the composer notice.
         throw err;
       }
-      unlisten();
+      sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
       setSessionWorking(storedSessionId, false);
       setSessionWaiting(storedSessionId, false);
       dispatchAgentSessionStatus({
@@ -4407,20 +4671,7 @@ export function AgentWorkspace({
   // locally-working session absent from it (or sitting idle) for two
   // consecutive polls gets its activity cleared. Two misses, not one: a
   // just-submitted prompt can race the runtime session registering.
-  async function reconcileWorkingSessionsAgainstRuntime() {
-    const working = Array.from(workingSessionIdsRef.current);
-    const misses = workingReconcileMissesRef.current;
-    for (const sessionId of misses.keys()) {
-      if (!working.includes(sessionId)) misses.delete(sessionId);
-    }
-    if (working.length === 0) return;
-    // Working sessions may span both runtime processes; ask each mode that
-    // has one and union the answers. A mode we can't reach keeps its
-    // sessions' current state rather than guessing — so a one-gateway
-    // failure must not mark the other mode's sessions dead either.
-    const modes = Array.from(
-      new Set(working.map((sessionId) => sessionUnrestricted(sessionId))),
-    );
+  async function liveRuntimeSessionsForModes(modes: boolean[]) {
     let rows: Array<{ id?: string; session_key?: string; status?: string }> =
       [];
     const reachableModes = new Set<boolean>();
@@ -4443,7 +4694,6 @@ export function AgentWorkspace({
         // than guess, while the reachable mode still reconciles below.
       }
     }
-    if (reachableModes.size === 0) return;
     const live = new Set<string>();
     for (const row of rows) {
       // "idle" means the runtime session exists but isn't processing a turn.
@@ -4451,15 +4701,42 @@ export function AgentWorkspace({
       if (row.session_key) live.add(String(row.session_key));
       if (row.id) live.add(String(row.id));
     }
+    return { live, reachableModes };
+  }
+
+  function runtimeSnapshotHasSession(
+    snapshot: { live: Set<string> },
+    sessionId: string,
+  ) {
+    const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
+    return (
+      snapshot.live.has(sessionId) ||
+      Boolean(runtimeSessionId && snapshot.live.has(runtimeSessionId))
+    );
+  }
+
+  async function reconcileWorkingSessionsAgainstRuntime() {
+    const working = Array.from(workingSessionIdsRef.current);
+    const misses = workingReconcileMissesRef.current;
+    for (const sessionId of misses.keys()) {
+      if (!working.includes(sessionId)) misses.delete(sessionId);
+    }
+    if (working.length === 0) return;
+    // Working sessions may span both runtime processes; ask each mode that
+    // has one and union the answers. A mode we can't reach keeps its
+    // sessions' current state rather than guessing — so a one-gateway
+    // failure must not mark the other mode's sessions dead either.
+    const modes = Array.from(
+      new Set(working.map((sessionId) => sessionUnrestricted(sessionId))),
+    );
+    const snapshot = await liveRuntimeSessionsForModes(modes);
+    if (snapshot.reachableModes.size === 0) return;
     for (const sessionId of working) {
       // Sessions of an unreachable mode were not in any answer we got;
       // counting them as misses would mark live work dead.
-      if (!reachableModes.has(sessionUnrestricted(sessionId))) continue;
-      const runtimeSessionId = runtimeSessionIdsRef.current[sessionId];
-      if (
-        live.has(sessionId) ||
-        (runtimeSessionId && live.has(runtimeSessionId))
-      ) {
+      if (!snapshot.reachableModes.has(sessionUnrestricted(sessionId)))
+        continue;
+      if (runtimeSnapshotHasSession(snapshot, sessionId)) {
         misses.delete(sessionId);
         continue;
       }
@@ -4878,6 +5155,184 @@ export function AgentWorkspace({
         receivedAt: new Date().toISOString(),
       }),
     );
+  }
+
+  function cancelQueuedSteerRetry(sessionId: string) {
+    const timer = queuedSteerRetryTimersRef.current.get(sessionId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      queuedSteerRetryTimersRef.current.delete(sessionId);
+    }
+  }
+
+  function scheduleQueuedSteerRetry(
+    sessionId: string,
+    options: {
+      ignoreActiveToolGuard?: boolean;
+      restoredToolProbe?: boolean;
+    } = {},
+  ) {
+    cancelQueuedSteerRetry(sessionId);
+    const timer = window.setTimeout(() => {
+      queuedSteerRetryTimersRef.current.delete(sessionId);
+      void flushQueuedSteerInstruction(sessionId, options);
+    }, QUEUED_STEER_RETRY_DELAY_MS);
+    queuedSteerRetryTimersRef.current.set(sessionId, timer);
+  }
+
+  function cancelRestoredQueuedSteerReconcile(sessionId: string) {
+    const timer = restoredQueuedSteerReconcileTimersRef.current.get(sessionId);
+    if (timer !== undefined) {
+      window.clearTimeout(timer);
+      restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
+    }
+  }
+
+  function clearRestoredQueuedSteerReconcile(sessionId: string) {
+    cancelRestoredQueuedSteerReconcile(sessionId);
+    restoredToolCallSessionIdsRef.current.delete(sessionId);
+  }
+
+  function scheduleRestoredQueuedSteerReconcile(
+    sessionId: string,
+    delayMs = RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS,
+  ) {
+    cancelRestoredQueuedSteerReconcile(sessionId);
+    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
+    const timer = window.setTimeout(() => {
+      restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
+      void reconcileRestoredQueuedSteer(sessionId);
+    }, delayMs);
+    restoredQueuedSteerReconcileTimersRef.current.set(sessionId, timer);
+  }
+
+  async function reconcileRestoredQueuedSteer(sessionId: string) {
+    if (!queuedSteerBySessionIdRef.current[sessionId]) return;
+    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
+    if (!toolCallSessionIdsRef.current.has(sessionId)) {
+      clearRestoredQueuedSteerReconcile(sessionId);
+      scheduleQueuedSteerRetry(sessionId);
+      return;
+    }
+
+    const snapshot = await liveRuntimeSessionsForModes([
+      sessionUnrestricted(sessionId),
+    ]);
+    if (!queuedSteerBySessionIdRef.current[sessionId]) return;
+    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
+    if (!snapshot.reachableModes.has(sessionUnrestricted(sessionId))) {
+      scheduleRestoredQueuedSteerReconcile(sessionId);
+      return;
+    }
+
+    if (runtimeSnapshotHasSession(snapshot, sessionId)) {
+      scheduleQueuedSteerRetry(sessionId, {
+        ignoreActiveToolGuard: true,
+        restoredToolProbe: true,
+      });
+      return;
+    }
+
+    clearRestoredQueuedSteerReconcile(sessionId);
+    clearSessionToolCalls(sessionId);
+    scheduleQueuedSteerRetry(sessionId);
+  }
+
+  function queueSteerInstruction(sessionId: string, text: string) {
+    const instruction = normalizeSteerText(text);
+    if (!instruction) return;
+    const shouldRetryAfterQueue = !toolCallSessionIdsRef.current.has(sessionId);
+    const shouldReconcileRestoredTool =
+      !shouldRetryAfterQueue &&
+      restoredToolCallSessionIdsRef.current.has(sessionId);
+    cancelQueuedSteerRetry(sessionId);
+    setQueuedSteerBySessionId((current) => {
+      const next = {
+        ...current,
+        [sessionId]: {
+          text: instruction,
+          queuedAt: new Date().toISOString(),
+        },
+      };
+      queuedSteerBySessionIdRef.current = next;
+      return next;
+    });
+    if (shouldRetryAfterQueue) {
+      scheduleQueuedSteerRetry(sessionId);
+    } else if (shouldReconcileRestoredTool) {
+      scheduleRestoredQueuedSteerReconcile(sessionId);
+    }
+  }
+
+  async function flushQueuedSteerInstruction(
+    sessionId: string,
+    options: {
+      ignoreActiveToolGuard?: boolean;
+      restoredToolProbe?: boolean;
+    } = {},
+  ) {
+    const queued = queuedSteerBySessionIdRef.current[sessionId];
+    if (!queued || queued.flushing) return;
+    if (
+      !options.ignoreActiveToolGuard &&
+      toolCallSessionIdsRef.current.has(sessionId)
+    )
+      return;
+
+    setQueuedSteerBySessionId((current) => {
+      const currentQueued = current[sessionId];
+      if (!currentQueued || currentQueued.text !== queued.text) return current;
+      const next = {
+        ...current,
+        [sessionId]: {
+          ...currentQueued,
+          flushing: true,
+          error: undefined,
+        },
+      };
+      queuedSteerBySessionIdRef.current = next;
+      return next;
+    });
+
+    try {
+      await steerActiveSession(sessionId, queued.text);
+      if (options.restoredToolProbe) {
+        clearSessionToolCalls(sessionId);
+      }
+      clearQueuedSteerInstruction(sessionId);
+    } catch (err) {
+      const busy = isSessionBusyError(err);
+      if (busy) {
+        setQueuedSteerBySessionId((current) => {
+          const currentQueued = current[sessionId];
+          if (!currentQueued || currentQueued.text !== queued.text) {
+            return current;
+          }
+          const next = {
+            ...current,
+            [sessionId]: {
+              ...currentQueued,
+              flushing: false,
+              error:
+                "June is finishing that tool call. The instruction is still queued.",
+            },
+          };
+          queuedSteerBySessionIdRef.current = next;
+          return next;
+        });
+        if (options.restoredToolProbe) {
+          scheduleRestoredQueuedSteerReconcile(
+            sessionId,
+            RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS,
+          );
+        } else {
+          scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
+        }
+        return;
+      }
+      setError(steerErrorNotice(err), { sessionId });
+      clearQueuedSteerInstruction(sessionId);
+    }
   }
 
   async function startNewTask(
@@ -5858,6 +6313,13 @@ export function AgentWorkspace({
             onSteer={(text) =>
               steerActiveSession(selectedHermesSessionId, text)
             }
+            onQueue={(text) =>
+              queueSteerInstruction(selectedHermesSessionId, text)
+            }
+            queueWhileToolActive={toolCallSessionIds.has(
+              selectedHermesSessionId,
+            )}
+            queuedInstruction={queuedSteerBySessionId[selectedHermesSessionId]}
           />
         ) : null}
         <div ref={composerBoxRef} className="agent-composer-box">
@@ -9230,23 +9692,43 @@ function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void }) {
  * Compact instruction input shown while a session is working (feature 06). It
  * lets the user steer the running turn through the dedicated `session.steer`
  * method (injected as `onSteer`) WITHOUT touching the Stop control that owns the
- * send slot. Submit (Enter or the send button) sends the trimmed text; a blank
- * instruction is inert. On success the field clears; on a rejection it keeps the
- * unsent text and shows a clear, recoverable message (busy / dropped connection
- * / generic) so a failed steer never crashes the composer.
+ * send slot. Submit (Enter or the send button) sends or queues the trimmed
+ * text; a blank instruction is inert. On success the field clears; on a
+ * rejection it keeps the unsent text and shows a clear, recoverable message
+ * (busy / dropped connection / generic) so a failed steer never crashes the
+ * composer.
  */
 export function ComposerSteerInput({
   onSteer,
+  onQueue,
+  queueWhileToolActive = false,
+  queuedInstruction,
 }: {
   onSteer: (text: string) => Promise<unknown>;
+  onQueue?: (text: string) => void;
+  queueWhileToolActive?: boolean;
+  queuedInstruction?: QueuedSteerInstruction;
 }) {
   const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const trimmed = normalizeSteerText(text);
+  const queuedText = queuedInstruction?.text;
+  const disabled = sending || Boolean(queuedInstruction?.flushing);
+  const submitLabel = queuedText
+    ? "Replace queued instruction"
+    : queueWhileToolActive
+      ? "Queue instruction"
+      : "Send instruction";
 
   async function send() {
-    if (!trimmed || sending) return;
+    if (!trimmed || disabled) return;
+    if ((queueWhileToolActive || queuedInstruction) && onQueue) {
+      onQueue(trimmed);
+      setText("");
+      setError(null);
+      return;
+    }
     setSending(true);
     setError(null);
     try {
@@ -9263,13 +9745,7 @@ export function ComposerSteerInput({
 
   return (
     <div className="agent-composer-steer">
-      <form
-        className="agent-composer-steer-row"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void send();
-        }}
-      >
+      <div className="agent-composer-steer-row">
         <span className="agent-composer-steer-icon" aria-hidden>
           <IconArrowCornerDownRight size={14} />
         </span>
@@ -9277,27 +9753,61 @@ export function ComposerSteerInput({
           type="text"
           className="agent-composer-steer-input"
           aria-label="Add instruction"
-          placeholder="Add an instruction while June works"
+          placeholder={
+            queuedText
+              ? "Replace queued instruction"
+              : queueWhileToolActive
+                ? "Queue after this tool call"
+                : "Add an instruction while June works"
+          }
           value={text}
-          disabled={sending}
+          disabled={disabled}
           onChange={(event) => {
             setText(event.target.value);
             if (error) setError(null);
           }}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            void send();
+          }}
         />
         <button
-          type="submit"
+          type="button"
           className="agent-composer-steer-send"
-          aria-label="Send instruction"
-          title="Send instruction"
-          disabled={!trimmed || sending}
+          aria-label={submitLabel}
+          title={submitLabel}
+          disabled={!trimmed || disabled}
+          onClick={() => {
+            void send();
+          }}
         >
-          {sending ? <Spinner /> : <IconArrowUp size={14} />}
+          {sending || queuedInstruction?.flushing ? (
+            <Spinner />
+          ) : (
+            <IconArrowUp size={14} />
+          )}
         </button>
-      </form>
+      </div>
+      {queuedInstruction ? (
+        <p className="agent-composer-steer-queued" role="status">
+          {queuedInstruction.flushing ? (
+            "Sending queued instruction..."
+          ) : (
+            <>
+              Queued to run after this tool call:{" "}
+              <span>{queuedInstruction.text}</span>
+            </>
+          )}
+        </p>
+      ) : null}
       {error ? (
         <p className="agent-composer-steer-error" role="alert">
           {error}
+        </p>
+      ) : queuedInstruction?.error ? (
+        <p className="agent-composer-steer-error" role="alert">
+          {queuedInstruction.error}
         </p>
       ) : null}
     </div>
@@ -11282,6 +11792,25 @@ function isTerminalHermesEvent(type: string) {
     normalized === "session.completed" ||
     normalized === "background.complete" ||
     normalized === "background.completed"
+  );
+}
+
+function hermesToolEventPhase(type: string): HermesToolEventPhase | undefined {
+  const normalized = type.toLowerCase();
+  if (normalized === "tool.complete") return "complete";
+  if (normalized === "tool.start") return "start";
+  if (normalized === "tool.progress") return "progress";
+  return undefined;
+}
+
+function toolEventActivityKey(event: HermesGatewayEvent) {
+  const payload = event.payload as Record<string, unknown> | undefined;
+  return (
+    stringValue(payload?.tool_id) ??
+    stringValue(payload?.tool_call_id) ??
+    stringValue(payload?.call_id) ??
+    stringValue(payload?.id) ??
+    stringValue(payload?.request_id)
   );
 }
 
