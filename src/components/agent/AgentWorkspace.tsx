@@ -180,7 +180,6 @@ import {
 } from "../../lib/hermes-session-branch";
 import {
   normalizeSteerText,
-  steerErrorNotice,
   steeringLiveEvent,
 } from "../../lib/hermes-session-steer";
 import { unsupportedEventStore } from "../../lib/hermes-unsupported-events";
@@ -767,13 +766,6 @@ type PendingIssueReport = {
   diagnosisStartedAt?: string;
 };
 
-type QueuedSteerInstruction = {
-  text: string;
-  queuedAt: string;
-  flushing?: boolean;
-  error?: string;
-};
-
 type HermesToolEventPhase = "start" | "progress" | "complete";
 
 type AgentWorkspaceError = {
@@ -893,7 +885,6 @@ type AgentSessionContinuity = {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
-  queuedSteerBySessionId: Record<string, QueuedSteerInstruction>;
   activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
@@ -989,7 +980,6 @@ function captureSessionContinuity(state: {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
-  queuedSteerBySessionId: Record<string, QueuedSteerInstruction>;
   activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
@@ -1015,9 +1005,6 @@ function captureSessionContinuity(state: {
   for (const sessionId of state.submittingIssueReportSessionIds) {
     activeIds.add(sessionId);
   }
-  for (const sessionId of Object.keys(state.queuedSteerBySessionId)) {
-    activeIds.add(sessionId);
-  }
   for (const sessionId of Object.keys(state.activeToolCallsBySession)) {
     activeIds.add(sessionId);
   }
@@ -1026,17 +1013,6 @@ function captureSessionContinuity(state: {
     Object.fromEntries(
       Object.entries(record).filter(([sessionId]) => activeIds.has(sessionId)),
     );
-  const queuedSteerBySessionId = Object.fromEntries(
-    Object.entries(pick(state.queuedSteerBySessionId)).map(
-      ([sessionId, queued]) => [
-        sessionId,
-        {
-          ...queued,
-          flushing: false,
-        },
-      ],
-    ),
-  );
   return {
     sessionItems: state.sessionItems.filter((session) =>
       activeIds.has(session.id),
@@ -1047,7 +1023,6 @@ function captureSessionContinuity(state: {
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
-    queuedSteerBySessionId,
     activeToolCallsBySession: pick(state.activeToolCallsBySession),
     pendingIssueReports: pick(state.pendingIssueReports),
     reviewableIssueReports: pick(state.reviewableIssueReports),
@@ -1166,7 +1141,6 @@ function updateContinuityAfterIssueReportDelivery(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
-    queuedSteerBySessionId: sessionContinuity.queuedSteerBySessionId,
     activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
@@ -1202,7 +1176,6 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
-    queuedSteerBySessionId: sessionContinuity.queuedSteerBySessionId,
     activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
@@ -1477,19 +1450,6 @@ export function AgentWorkspace({
   const pendingSteerBySessionIdRef = useRef<
     Record<string, { text: string; accepted: boolean; toolDrained: boolean }[]>
   >({});
-  const restoredToolCallSessionIdsRef = useRef(
-    new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
-  );
-  const [queuedSteerBySessionId, setQueuedSteerBySessionId] = useState<
-    Record<string, QueuedSteerInstruction>
-  >(() => continuity?.queuedSteerBySessionId ?? {});
-  const queuedSteerBySessionIdRef = useRef(queuedSteerBySessionId);
-  const queuedSteerRetryTimersRef = useRef<
-    Map<string, ReturnType<typeof window.setTimeout>>
-  >(new Map());
-  const restoredQueuedSteerReconcileTimersRef = useRef<
-    Map<string, ReturnType<typeof window.setTimeout>>
-  >(new Map());
   const activeToolCallsBySessionRef = useRef<Map<string, Map<string, number>>>(
     activeToolCallsMap(continuity?.activeToolCallsBySession),
   );
@@ -1871,43 +1831,20 @@ export function AgentWorkspace({
   }, []);
 
   useEffect(() => {
-    for (const sessionId of Object.keys(queuedSteerBySessionIdRef.current)) {
-      if (restoredToolCallSessionIdsRef.current.has(sessionId)) {
-        scheduleRestoredQueuedSteerReconcile(sessionId);
-      } else {
-        scheduleQueuedSteerRetry(sessionId);
-      }
-    }
-  }, []);
-
-  useEffect(() => {
     selectedHermesSessionIdRef.current = selectedHermesSessionId;
     workingSessionIdsRef.current = workingSessionIds;
     toolCallSessionIdsRef.current = toolCallSessionIds;
-    queuedSteerBySessionIdRef.current = queuedSteerBySessionId;
     waitingSessionIdsRef.current = waitingSessionIds;
     pendingHermesMessagesRef.current = pendingHermesMessages;
     hermesSessionItemsRef.current = hermesSessionItems;
   }, [
     hermesSessionItems,
     pendingHermesMessages,
-    queuedSteerBySessionId,
     selectedHermesSessionId,
     toolCallSessionIds,
     waitingSessionIds,
     workingSessionIds,
   ]);
-
-  const clearQueuedSteerInstruction = useCallback((sessionId: string) => {
-    cancelQueuedSteerRetry(sessionId);
-    clearRestoredQueuedSteerReconcile(sessionId);
-    setQueuedSteerBySessionId((current) => {
-      if (!current[sessionId]) return current;
-      const next = omitRecordKey(current, sessionId);
-      queuedSteerBySessionIdRef.current = next;
-      return next;
-    });
-  }, []);
 
   const setSessionToolCallActive = useCallback(
     (sessionId: string, active: boolean) => {
@@ -2005,7 +1942,6 @@ export function AgentWorkspace({
   const clearSessionActivity = useCallback(
     (sessionId: string) => {
       clearSessionToolCalls(sessionId);
-      clearQueuedSteerInstruction(sessionId);
 
       const nextWorking = new Set(workingSessionIdsRef.current);
       nextWorking.delete(sessionId);
@@ -2022,7 +1958,7 @@ export function AgentWorkspace({
         needsUserCount: nextWaiting.size,
       };
     },
-    [clearQueuedSteerInstruction, setSessionToolCallActive],
+    [setSessionToolCallActive],
   );
 
   // Shared teardown for a session that is going away: its messages, pending
@@ -2038,7 +1974,6 @@ export function AgentWorkspace({
         return next;
       });
       clearSessionActivity(sessionId);
-      clearQueuedSteerInstruction(sessionId);
       // Feature 11: a deleted session has no activity to show, so drop its row
       // from the activity drawer's store as well.
       hermesActivityStore.clearSession(sessionId);
@@ -2050,7 +1985,7 @@ export function AgentWorkspace({
       // A deleted session must not be the restore target on the next mount.
       forgetLastOpenSessionId(sessionId);
     },
-    [clearQueuedSteerInstruction, clearSessionActivity],
+    [clearSessionActivity],
   );
 
   const selectedTask = useMemo(
@@ -3034,7 +2969,6 @@ export function AgentWorkspace({
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
-        queuedSteerBySessionId: queuedSteerBySessionIdRef.current,
         activeToolCallsBySession: activeToolCallsRecord(
           activeToolCallsBySessionRef.current,
         ),
@@ -3045,14 +2979,6 @@ export function AgentWorkspace({
         submittingIssueReportSessionIds:
           submittingIssueReportSessionIdsRef.current,
       });
-      for (const timer of queuedSteerRetryTimersRef.current.values()) {
-        window.clearTimeout(timer);
-      }
-      queuedSteerRetryTimersRef.current.clear();
-      for (const timer of restoredQueuedSteerReconcileTimersRef.current.values()) {
-        window.clearTimeout(timer);
-      }
-      restoredQueuedSteerReconcileTimersRef.current.clear();
       for (const gateway of gatewaysRef.current.values()) {
         gateway.close();
       }
@@ -4112,9 +4038,6 @@ export function AgentWorkspace({
         if (list) {
           for (const entry of list) entry.toolDrained = true;
         }
-      }
-      if (toolEventPhase !== undefined) {
-        clearRestoredQueuedSteerReconcile(storedSessionId);
       }
       const hasActiveToolCalls =
         toolEventPhase !== undefined
@@ -5212,179 +5135,6 @@ export function AgentWorkspace({
       sessionId,
       text: instruction,
     });
-  }
-
-  function cancelQueuedSteerRetry(sessionId: string) {
-    const timer = queuedSteerRetryTimersRef.current.get(sessionId);
-    if (timer !== undefined) {
-      window.clearTimeout(timer);
-      queuedSteerRetryTimersRef.current.delete(sessionId);
-    }
-  }
-
-  function scheduleQueuedSteerRetry(
-    sessionId: string,
-    options: {
-      ignoreActiveToolGuard?: boolean;
-      restoredToolProbe?: boolean;
-    } = {},
-  ) {
-    cancelQueuedSteerRetry(sessionId);
-    const timer = window.setTimeout(() => {
-      queuedSteerRetryTimersRef.current.delete(sessionId);
-      void flushQueuedSteerInstruction(sessionId, options);
-    }, QUEUED_STEER_RETRY_DELAY_MS);
-    queuedSteerRetryTimersRef.current.set(sessionId, timer);
-  }
-
-  function cancelRestoredQueuedSteerReconcile(sessionId: string) {
-    const timer = restoredQueuedSteerReconcileTimersRef.current.get(sessionId);
-    if (timer !== undefined) {
-      window.clearTimeout(timer);
-      restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
-    }
-  }
-
-  function clearRestoredQueuedSteerReconcile(sessionId: string) {
-    cancelRestoredQueuedSteerReconcile(sessionId);
-    restoredToolCallSessionIdsRef.current.delete(sessionId);
-  }
-
-  function scheduleRestoredQueuedSteerReconcile(
-    sessionId: string,
-    delayMs = RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS,
-  ) {
-    cancelRestoredQueuedSteerReconcile(sessionId);
-    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
-    const timer = window.setTimeout(() => {
-      restoredQueuedSteerReconcileTimersRef.current.delete(sessionId);
-      void reconcileRestoredQueuedSteer(sessionId);
-    }, delayMs);
-    restoredQueuedSteerReconcileTimersRef.current.set(sessionId, timer);
-  }
-
-  async function reconcileRestoredQueuedSteer(sessionId: string) {
-    if (!queuedSteerBySessionIdRef.current[sessionId]) return;
-    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
-    if (!toolCallSessionIdsRef.current.has(sessionId)) {
-      clearRestoredQueuedSteerReconcile(sessionId);
-      scheduleQueuedSteerRetry(sessionId);
-      return;
-    }
-
-    const snapshot = await liveRuntimeSessionsForModes([
-      sessionUnrestricted(sessionId),
-    ]);
-    if (!queuedSteerBySessionIdRef.current[sessionId]) return;
-    if (!restoredToolCallSessionIdsRef.current.has(sessionId)) return;
-    if (!snapshot.reachableModes.has(sessionUnrestricted(sessionId))) {
-      scheduleRestoredQueuedSteerReconcile(sessionId);
-      return;
-    }
-
-    if (runtimeSnapshotHasSession(snapshot, sessionId)) {
-      scheduleQueuedSteerRetry(sessionId, {
-        ignoreActiveToolGuard: true,
-        restoredToolProbe: true,
-      });
-      return;
-    }
-
-    clearRestoredQueuedSteerReconcile(sessionId);
-    clearSessionToolCalls(sessionId);
-    scheduleQueuedSteerRetry(sessionId);
-  }
-
-  function queueSteerInstruction(sessionId: string, text: string) {
-    const instruction = normalizeSteerText(text);
-    if (!instruction) return;
-    // Hold the instruction until the session finishes its current turn, then
-    // submit it as a NEW prompt (see the terminal branch of the gateway
-    // listener). We deliberately do not steer the running turn — the user's
-    // intent is "run this after June is done", not "redirect the live run".
-    cancelQueuedSteerRetry(sessionId);
-    setQueuedSteerBySessionId((current) => {
-      const next = {
-        ...current,
-        [sessionId]: {
-          text: instruction,
-          queuedAt: new Date().toISOString(),
-        },
-      };
-      queuedSteerBySessionIdRef.current = next;
-      return next;
-    });
-  }
-
-  async function flushQueuedSteerInstruction(
-    sessionId: string,
-    options: {
-      ignoreActiveToolGuard?: boolean;
-      restoredToolProbe?: boolean;
-    } = {},
-  ) {
-    const queued = queuedSteerBySessionIdRef.current[sessionId];
-    if (!queued || queued.flushing) return;
-    if (
-      !options.ignoreActiveToolGuard &&
-      toolCallSessionIdsRef.current.has(sessionId)
-    )
-      return;
-
-    setQueuedSteerBySessionId((current) => {
-      const currentQueued = current[sessionId];
-      if (!currentQueued || currentQueued.text !== queued.text) return current;
-      const next = {
-        ...current,
-        [sessionId]: {
-          ...currentQueued,
-          flushing: true,
-          error: undefined,
-        },
-      };
-      queuedSteerBySessionIdRef.current = next;
-      return next;
-    });
-
-    try {
-      await steerActiveSession(sessionId, queued.text);
-      if (options.restoredToolProbe) {
-        clearSessionToolCalls(sessionId);
-      }
-      clearQueuedSteerInstruction(sessionId);
-    } catch (err) {
-      const busy = isSessionBusyError(err);
-      if (busy) {
-        setQueuedSteerBySessionId((current) => {
-          const currentQueued = current[sessionId];
-          if (!currentQueued || currentQueued.text !== queued.text) {
-            return current;
-          }
-          const next = {
-            ...current,
-            [sessionId]: {
-              ...currentQueued,
-              flushing: false,
-              error:
-                "June is finishing that tool call. The instruction is still queued.",
-            },
-          };
-          queuedSteerBySessionIdRef.current = next;
-          return next;
-        });
-        if (options.restoredToolProbe) {
-          scheduleRestoredQueuedSteerReconcile(
-            sessionId,
-            RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS,
-          );
-        } else {
-          scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
-        }
-        return;
-      }
-      setError(steerErrorNotice(err), { sessionId });
-      clearQueuedSteerInstruction(sessionId);
-    }
   }
 
   async function startNewTask(
