@@ -19381,6 +19381,470 @@ input:focus-visible,
   border-top: 1px solid var(--border-subtle);
 }
 
+/* Team skill taps manager (Hermes admin surface, spec 13). Lists configured
+ * GitHub skill taps, adds/removes them, and searches/installs a tap's skills by
+ * reusing the Skills Hub install flow. Reuses the same token palette as the hub
+ * surface so the two read as one family. */
+.team-taps-card,
+.team-taps-search-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.team-taps-mode-note {
+  color: var(--muted-foreground);
+}
+
+.team-taps-add {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.team-taps-add-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) auto;
+  gap: var(--sp-3);
+  align-items: end;
+}
+
+.team-taps-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.team-taps-field-label {
+  font-size: var(--fs-sm);
+  color: var(--muted-foreground);
+}
+
+.team-taps-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.team-taps-input-icon {
+  position: absolute;
+  left: var(--sp-3);
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.team-taps-field input {
+  width: 100%;
+  min-height: var(--control-md);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  outline: none;
+}
+
+.team-taps-input-wrap input {
+  padding-left: calc(var(--sp-3) * 2 + 15px);
+}
+
+.team-taps-field input:focus {
+  border-color: var(--ring-focus);
+}
+
+.team-taps-field input[aria-invalid="true"] {
+  border-color: var(--destructive);
+}
+
+.team-taps-add-button,
+.team-taps-refresh {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--control-md);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.team-taps-add-button:disabled,
+.team-taps-refresh:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.team-taps-field-error,
+.team-taps-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0;
+  color: var(--destructive);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-error {
+  padding: var(--sp-3) var(--sp-5) 0;
+}
+
+.team-taps-add-hint {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--sp-3) var(--sp-5);
+}
+
+.team-taps-body {
+  padding: var(--sp-2) 0;
+}
+
+.team-taps-list,
+.team-taps-skill-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.team-taps-row,
+.team-taps-skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.team-taps-row:last-child,
+.team-taps-skill-row:last-child {
+  border-bottom: none;
+}
+
+.team-taps-row[data-selected="true"] {
+  background: var(--secondary);
+}
+
+.team-taps-row-main,
+.team-taps-skill-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.team-taps-row-headline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.team-taps-row-icon {
+  color: var(--muted-foreground);
+}
+
+.team-taps-row-repo,
+.team-taps-skill-name {
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.team-taps-row-path,
+.team-taps-skill-description {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-trust {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+
+.team-taps-trust[data-tone="trusted"] {
+  background: color-mix(
+    in oklch,
+    var(--success, var(--ring-focus)) 16%,
+    transparent
+  );
+  color: var(--foreground);
+}
+
+.team-taps-trust[data-tone="caution"] {
+  background: color-mix(in oklch, var(--warm-strong) 16%, transparent);
+  color: var(--warm-strong);
+}
+
+.team-taps-row-actions,
+.team-taps-skill-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.team-taps-row-search,
+.team-taps-row-remove,
+.team-taps-skill-install,
+.team-taps-token-button,
+.team-taps-search-retry,
+.team-taps-skill-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--control-sm);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.team-taps-row-remove:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.team-taps-token-callout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: color-mix(in oklch, var(--warm-strong) 8%, var(--card));
+}
+
+.team-taps-token-callout[data-tone="warning"] {
+  border-color: color-mix(
+    in oklch,
+    var(--warm-strong) 40%,
+    var(--border-subtle)
+  );
+}
+
+.team-taps-token-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.team-taps-token-body {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-token-button {
+  align-self: flex-start;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+}
+
+.team-taps-lifecycle {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+}
+
+.team-taps-lifecycle-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-weight: 500;
+}
+
+.team-taps-lifecycle-body {
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-search-card {
+  margin-top: var(--sp-4);
+}
+
+.team-taps-search-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--sp-4) var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.team-taps-search-title {
+  margin: 0;
+  font-size: var(--fs-md);
+}
+
+.team-taps-search-repo {
+  font-family: var(--font-mono, monospace);
+}
+
+.team-taps-search-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.team-taps-search-form {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.team-taps-search-icon {
+  position: absolute;
+  left: calc(var(--sp-5) + var(--sp-3));
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.team-taps-search-form input {
+  width: 100%;
+  min-height: var(--control-md);
+  padding: 0 var(--sp-3) 0 calc(var(--sp-3) * 2 + 15px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  outline: none;
+}
+
+.team-taps-search-form input:focus {
+  border-color: var(--ring-focus);
+}
+
+.team-taps-search-body {
+  padding: var(--sp-2) 0;
+}
+
+.team-taps-search-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-5);
+  color: var(--destructive);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-skill-install {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+
+.team-taps-skill-installing,
+.team-taps-skill-done {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-skill-done {
+  color: var(--success);
+}
+
+.team-taps-skill-failed {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.team-taps-skill-failed-text {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--destructive);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-skill-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.team-taps-loading,
+.team-taps-search-empty {
+  margin: 0;
+  padding: var(--sp-4) var(--sp-5);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.team-taps-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-6) var(--sp-5);
+  text-align: center;
+}
+
+.team-taps-empty-icon {
+  color: var(--muted-foreground);
+}
+
+.team-taps-empty-title {
+  margin: 0;
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.team-taps-empty-description {
+  margin: 0;
+  max-width: 42ch;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
 /* Skill install security review (Hermes admin surface, spec 07). A native
  * dialog (the shared .dialog-card) shown before a non-trusted Skills Hub
  * install: it surfaces source/trust, the scan's findings + affected files, what

@@ -87,6 +87,7 @@ import { ProfileBuilderSection } from "./ProfileBuilderSection";
 import { SetupSnapshotSection } from "./SetupSnapshotSection";
 import { SkillBundlesSection } from "./SkillBundlesSection";
 import { SkillsHubSection } from "./SkillsHubSection";
+import { TeamTapsSection } from "./TeamTapsSection";
 import { ToolsetsSection } from "./ToolsetsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
@@ -198,6 +199,7 @@ export type SettingsTab =
   | "mcp-catalog"
   | "mcp-diagnostics"
   | "skills-hub"
+  | "taps"
   | "toolsets"
   | "bundles"
   | "profile-builder"
@@ -220,6 +222,7 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "mcp-catalog", label: "MCP catalog" },
   { id: "mcp-diagnostics", label: "MCP diagnostics" },
   { id: "skills-hub", label: "Skills hub" },
+  { id: "taps", label: "Team skill taps" },
   { id: "toolsets", label: "Toolsets" },
   { id: "bundles", label: "Bundles" },
   { id: "profile-builder", label: "Profile builder" },
@@ -1246,6 +1249,11 @@ export function AppSettings({
         {activeTab === "mcp-catalog" ? <McpCatalogSection /> : null}
         {activeTab === "mcp-diagnostics" ? <McpDiagnosticsSection /> : null}
         {activeTab === "skills-hub" ? <SkillsHubSection /> : null}
+        {activeTab === "taps" ? (
+          <TeamTapsSection
+            onConfigureGithubToken={() => setActiveTab("skills")}
+          />
+        ) : null}
         {activeTab === "toolsets" ? <ToolsetsSection /> : null}
         {activeTab === "bundles" ? (
           <SkillBundlesSection onStartChat={onStartBundleChat} />
