@@ -142,16 +142,7 @@ pub async fn delete_note(app: AppHandle, request: DeleteNoteRequest) -> Result<(
         .audio_artifact_paths_for_note(&request.note_id)
         .await?;
     repos.delete_note(&request.note_id).await?;
-    for path in audio_paths {
-        if path.trim().is_empty() {
-            continue;
-        }
-        if let Err(error) = paths.remove_recording_file(&path) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("failed to remove deleted note audio {path}: {error}");
-            }
-        }
-    }
+    remove_deleted_audio_files(&paths, audio_paths);
     Ok(())
 }
 
@@ -173,6 +164,11 @@ pub async fn delete_notes(app: AppHandle, request: DeleteNotesRequest) -> Result
     let repos = repositories(&app).await?;
     let audio_paths = repos.audio_artifact_paths_for_notes(&note_ids).await?;
     repos.delete_notes(&note_ids).await?;
+    remove_deleted_audio_files(&paths, audio_paths);
+    Ok(())
+}
+
+fn remove_deleted_audio_files(paths: &AppPaths, audio_paths: Vec<String>) {
     for path in audio_paths {
         if path.trim().is_empty() {
             continue;
@@ -183,7 +179,6 @@ pub async fn delete_notes(app: AppHandle, request: DeleteNotesRequest) -> Result
             }
         }
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -252,10 +247,23 @@ pub async fn list_folders(
 
 #[tauri::command]
 pub async fn delete_folder(app: AppHandle, request: DeleteFolderRequest) -> Result<(), AppError> {
-    repositories(&app)
-        .await?
+    let repos = repositories(&app).await?;
+    let audio_cleanup = if request.delete_notes {
+        Some((
+            app_paths(&app)?,
+            repos
+                .audio_artifact_paths_for_folder(&request.folder_id)
+                .await?,
+        ))
+    } else {
+        None
+    };
+    repos
         .delete_folder(&request.folder_id, request.delete_notes)
         .await?;
+    if let Some((paths, audio_paths)) = audio_cleanup {
+        remove_deleted_audio_files(&paths, audio_paths);
+    }
     Ok(())
 }
 
