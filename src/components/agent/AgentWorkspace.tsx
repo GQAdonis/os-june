@@ -5111,27 +5111,29 @@ export function AgentWorkspace({
       clearQueuedSteerInstruction(sessionId);
     } catch (err) {
       const busy = isSessionBusyError(err);
-      setQueuedSteerBySessionId((current) => {
-        const currentQueued = current[sessionId];
-        if (!currentQueued || currentQueued.text !== queued.text) {
-          return current;
-        }
-        const next = {
-          ...current,
-          [sessionId]: {
-            ...currentQueued,
-            flushing: false,
-            error: busy
-              ? "June is finishing that tool call. The instruction is still queued."
-              : steerErrorNotice(err),
-          },
-        };
-        queuedSteerBySessionIdRef.current = next;
-        return next;
-      });
       if (busy) {
+        setQueuedSteerBySessionId((current) => {
+          const currentQueued = current[sessionId];
+          if (!currentQueued || currentQueued.text !== queued.text) {
+            return current;
+          }
+          const next = {
+            ...current,
+            [sessionId]: {
+              ...currentQueued,
+              flushing: false,
+              error:
+                "June is finishing that tool call. The instruction is still queued.",
+            },
+          };
+          queuedSteerBySessionIdRef.current = next;
+          return next;
+        });
         scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
+        return;
       }
+      setError(steerErrorNotice(err), { sessionId });
+      clearQueuedSteerInstruction(sessionId);
     }
   }
 

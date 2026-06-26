@@ -4114,6 +4114,115 @@ describe("AgentWorkspace", () => {
     );
   });
 
+  it("clears a queued steer after a non-busy flush failure", async () => {
+    const user = userEvent.setup();
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.create") {
+        return Promise.resolve({
+          session_id: "runtime-session-2",
+          stored_session_id: "session-2",
+        });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "session.steer") {
+        return Promise.reject(new Error("gateway rejected the steer"));
+      }
+      return Promise.resolve({});
+    });
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the project checks",
+      }),
+    );
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-2",
+        title: "Untitled session",
+        preview: "run the project checks",
+        last_active: "2026-06-04T12:01:00Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the project checks",
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.start",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell" },
+        });
+      }
+    });
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Add instruction" }),
+      "focus on the failing test",
+    );
+    await user.click(screen.getByRole("button", { name: "Queue instruction" }));
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.complete",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell", status: "ok" },
+        });
+      }
+    });
+
+    expect(
+      await screen.findByText(
+        "Couldn't send that instruction. Please try again.",
+      ),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/Queued to run after this tool call/),
+      ).toBeNull(),
+    );
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(
+        ([method]) => method === "session.steer",
+      ),
+    ).toHaveLength(1);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.start",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-2", tool_name: "shell" },
+        });
+        handler({
+          type: "tool.complete",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-2", tool_name: "shell", status: "ok" },
+        });
+      }
+    });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 10));
+    });
+
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(
+        ([method]) => method === "session.steer",
+      ),
+    ).toHaveLength(1);
+  });
+
   it("stops instantly even when the interrupt request hasn't resolved", async () => {
     // Immediacy regression: the stopped UI must not wait on the gateway
     // round-trip. Make session.interrupt hang forever and assert the Stop
