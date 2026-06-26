@@ -891,6 +891,8 @@ type AgentSessionContinuity = {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  queuedSteerBySessionId: Record<string, QueuedSteerInstruction>;
+  activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: string[];
@@ -951,6 +953,32 @@ function forgetComposerDraft(key: string | null) {
   if (key) agentComposerDrafts.delete(key);
 }
 
+function activeToolCallsRecord(
+  activeToolCallsBySession: Map<string, Map<string, number>>,
+): Record<string, Record<string, number>> {
+  return Object.fromEntries(
+    Array.from(activeToolCallsBySession.entries())
+      .filter(([, tools]) => tools.size > 0)
+      .map(([sessionId, tools]) => [sessionId, Object.fromEntries(tools)]),
+  );
+}
+
+function activeToolCallsMap(
+  activeToolCallsBySession: Record<string, Record<string, number>> | undefined,
+) {
+  return new Map(
+    Object.entries(activeToolCallsBySession ?? {}).map(([sessionId, tools]) => [
+      sessionId,
+      new Map(
+        Object.entries(tools).filter(
+          (entry): entry is [string, number] =>
+            Number.isFinite(entry[1]) && entry[1] > 0,
+        ),
+      ),
+    ]),
+  );
+}
+
 function captureSessionContinuity(state: {
   sessionItems: HermesSessionInfo[];
   pendingMessages: Record<string, HermesSessionMessage[]>;
@@ -959,6 +987,8 @@ function captureSessionContinuity(state: {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, LiveHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  queuedSteerBySessionId: Record<string, QueuedSteerInstruction>;
+  activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: Set<string>;
@@ -983,11 +1013,28 @@ function captureSessionContinuity(state: {
   for (const sessionId of state.submittingIssueReportSessionIds) {
     activeIds.add(sessionId);
   }
+  for (const sessionId of Object.keys(state.queuedSteerBySessionId)) {
+    activeIds.add(sessionId);
+  }
+  for (const sessionId of Object.keys(state.activeToolCallsBySession)) {
+    activeIds.add(sessionId);
+  }
   if (activeIds.size === 0) return null;
   const pick = <T,>(record: Record<string, T>) =>
     Object.fromEntries(
       Object.entries(record).filter(([sessionId]) => activeIds.has(sessionId)),
     );
+  const queuedSteerBySessionId = Object.fromEntries(
+    Object.entries(pick(state.queuedSteerBySessionId)).map(
+      ([sessionId, queued]) => [
+        sessionId,
+        {
+          ...queued,
+          flushing: false,
+        },
+      ],
+    ),
+  );
   return {
     sessionItems: state.sessionItems.filter((session) =>
       activeIds.has(session.id),
@@ -998,6 +1045,8 @@ function captureSessionContinuity(state: {
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
+    queuedSteerBySessionId,
+    activeToolCallsBySession: pick(state.activeToolCallsBySession),
     pendingIssueReports: pick(state.pendingIssueReports),
     reviewableIssueReports: pick(state.reviewableIssueReports),
     diagnosisRefreshIssueReportSessionIds: [
@@ -1115,6 +1164,8 @@ function updateContinuityAfterIssueReportDelivery(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    queuedSteerBySessionId: sessionContinuity.queuedSteerBySessionId,
+    activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds,
@@ -1149,6 +1200,8 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    queuedSteerBySessionId: sessionContinuity.queuedSteerBySessionId,
+    activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds: new Set(
@@ -1412,18 +1465,18 @@ export function AgentWorkspace({
   );
   const workingSessionIdsRef = useRef<Set<string>>(workingSessionIds);
   const [toolCallSessionIds, setToolCallSessionIds] = useState<Set<string>>(
-    () => new Set(),
+    () => new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
   );
   const toolCallSessionIdsRef = useRef<Set<string>>(toolCallSessionIds);
   const [queuedSteerBySessionId, setQueuedSteerBySessionId] = useState<
     Record<string, QueuedSteerInstruction>
-  >({});
+  >(() => continuity?.queuedSteerBySessionId ?? {});
   const queuedSteerBySessionIdRef = useRef(queuedSteerBySessionId);
   const queuedSteerRetryTimersRef = useRef<
     Map<string, ReturnType<typeof window.setTimeout>>
   >(new Map());
   const activeToolCallsBySessionRef = useRef<Map<string, Map<string, number>>>(
-    new Map(),
+    activeToolCallsMap(continuity?.activeToolCallsBySession),
   );
   const [waitingSessionIds, setWaitingSessionIds] = useState<Set<string>>(
     () => new Set(continuity?.waitingSessionIds),
@@ -1765,6 +1818,12 @@ export function AgentWorkspace({
   useEffect(() => {
     runtimeSessionIdsRef.current = runtimeSessionIds;
   }, [runtimeSessionIds]);
+
+  useEffect(() => {
+    for (const sessionId of Object.keys(queuedSteerBySessionIdRef.current)) {
+      scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
+    }
+  }, []);
 
   useEffect(() => {
     selectedHermesSessionIdRef.current = selectedHermesSessionId;
@@ -2963,6 +3022,10 @@ export function AgentWorkspace({
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
+        queuedSteerBySessionId: queuedSteerBySessionIdRef.current,
+        activeToolCallsBySession: activeToolCallsRecord(
+          activeToolCallsBySessionRef.current,
+        ),
         pendingIssueReports: Object.fromEntries(pendingIssueReportsRef.current),
         reviewableIssueReports: reviewableIssueReportsRef.current,
         diagnosisRefreshIssueReportSessionIds:
@@ -2970,6 +3033,10 @@ export function AgentWorkspace({
         submittingIssueReportSessionIds:
           submittingIssueReportSessionIdsRef.current,
       });
+      for (const timer of queuedSteerRetryTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      queuedSteerRetryTimersRef.current.clear();
       for (const gateway of gatewaysRef.current.values()) {
         gateway.close();
       }
@@ -4983,11 +5050,14 @@ export function AgentWorkspace({
     }
   }
 
-  function scheduleQueuedSteerRetry(sessionId: string) {
+  function scheduleQueuedSteerRetry(
+    sessionId: string,
+    options: { ignoreActiveToolGuard?: boolean } = {},
+  ) {
     cancelQueuedSteerRetry(sessionId);
     const timer = window.setTimeout(() => {
       queuedSteerRetryTimersRef.current.delete(sessionId);
-      void flushQueuedSteerInstruction(sessionId);
+      void flushQueuedSteerInstruction(sessionId, options);
     }, 300);
     queuedSteerRetryTimersRef.current.set(sessionId, timer);
   }
@@ -5009,10 +5079,17 @@ export function AgentWorkspace({
     });
   }
 
-  async function flushQueuedSteerInstruction(sessionId: string) {
+  async function flushQueuedSteerInstruction(
+    sessionId: string,
+    options: { ignoreActiveToolGuard?: boolean } = {},
+  ) {
     const queued = queuedSteerBySessionIdRef.current[sessionId];
     if (!queued || queued.flushing) return;
-    if (toolCallSessionIdsRef.current.has(sessionId)) return;
+    if (
+      !options.ignoreActiveToolGuard &&
+      toolCallSessionIdsRef.current.has(sessionId)
+    )
+      return;
 
     setQueuedSteerBySessionId((current) => {
       const currentQueued = current[sessionId];
@@ -5053,7 +5130,7 @@ export function AgentWorkspace({
         return next;
       });
       if (busy) {
-        scheduleQueuedSteerRetry(sessionId);
+        scheduleQueuedSteerRetry(sessionId, { ignoreActiveToolGuard: true });
       }
     }
   }

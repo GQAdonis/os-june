@@ -3884,6 +3884,80 @@ describe("AgentWorkspace", () => {
     );
   });
 
+  it("preserves a queued steer across a workspace remount", async () => {
+    const user = userEvent.setup();
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the project checks",
+      }),
+    );
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-2",
+        title: "Untitled session",
+        preview: "run the project checks",
+        last_active: "2026-06-04T12:01:00Z",
+      },
+    ]);
+
+    const first = render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the project checks",
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.start",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell" },
+        });
+      }
+    });
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Add instruction" }),
+      "focus on the failing test",
+    );
+    await user.click(screen.getByRole("button", { name: "Queue instruction" }));
+    expect(
+      await screen.findByText(/Queued to run after this tool call/),
+    ).toHaveTextContent("focus on the failing test");
+
+    first.unmount();
+    // The real gateway close tears down live listeners; the mock keeps the
+    // callbacks in a Set, so clear it before mounting the replacement surface.
+    mocks.gatewayEventHandlers.clear();
+    render(<AgentWorkspace />);
+
+    expect(
+      await screen.findByText(/Queued to run after this tool call/),
+    ).toHaveTextContent("focus on the failing test");
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "tool.complete",
+          session_id: "runtime-session-2",
+          payload: { tool_id: "tool-1", tool_name: "shell", status: "ok" },
+        });
+      }
+    });
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.steer", {
+        session_id: "session-2",
+        text: "focus on the failing test",
+      }),
+    );
+  });
+
   it("clears a queued steer when a working session is stopped", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem(
