@@ -193,7 +193,6 @@ import {
   type AgentArtifact as TimelineArtifact,
 } from "../../lib/hermes-artifact-store";
 import { SessionUsagePanel } from "./SessionUsagePanel";
-import { PendingActionTray } from "./PendingActionTray";
 import {
   AgentActivityDrawer,
   AgentArtifactsSection,
@@ -2179,52 +2178,13 @@ export function AgentWorkspace({
     // `unsupportedStoreVersion` is the change signal; the lookup reads live state.
     [unsupportedStoreVersion, selectedHermesSessionId],
   );
-  // Feature 04: the global "Needs you" tray. Subscribing to the store's version
-  // re-derives the open rows whenever an action is recorded or resolved; the
-  // tray is one top-level surface visible across every session.
-  const pendingActionsVersion = useSyncExternalStore(
-    pendingActionStore.subscribe,
-    pendingActionStore.getVersion,
-    pendingActionStore.getVersion,
-  );
-  const pendingActionRecords = useMemo(
-    () => pendingActionStore.openRecords(),
-    // `pendingActionsVersion` is the change signal; the read returns live rows.
-    [pendingActionsVersion],
-  );
-  // Resolve a session id to its display title for a tray row, falling back to
-  // the raw id when the session isn't in the loaded list (unknown title must
-  // never crash or blank the row).
+  // Resolve a session id to its display title for an activity-drawer row,
+  // falling back to the raw id when the session isn't in the loaded list
+  // (unknown title must never crash or blank the row).
   const titleForPendingSession = useCallback(
     (sessionId: string) =>
       hermesSessionItems.find((session) => session.id === sessionId)?.title,
     [hermesSessionItems],
-  );
-  // Clicking a tray row opens the owning session and best-effort focuses the
-  // inline card for that request. Selecting the session reuses the same recipe
-  // the deep-link path uses; the scroll is deferred a frame so the transcript
-  // for the newly-selected session has mounted. If the exact card isn't found
-  // (e.g. not yet rendered), the transcript still auto-scrolls to the latest
-  // turn where a fresh pending action lives — see the limitation note.
-  const handleOpenPendingAction = useCallback(
-    ({ sessionId, requestId }: { sessionId: string; requestId: string }) => {
-      newSessionModeRef.current = false;
-      setNewSessionMode(false);
-      setActivePanel("chat");
-      selectedHermesSessionIdRef.current = sessionId;
-      setSelectedHermesSessionId(sessionId);
-      setSelectedTaskId(undefined);
-      // Defer past this render + the transcript mount so the card exists.
-      window.requestAnimationFrame(() => {
-        const card = document.querySelector(
-          `[data-pending-request="${CSS.escape(requestId)}"]`,
-        );
-        if (card) {
-          card.scrollIntoView({ behavior: "smooth", block: "center" });
-        }
-      });
-    },
-    [],
   );
 
   // Feature 11: the Agent activity drawer. Subscribing to the activity store's
@@ -2254,8 +2214,8 @@ export function AgentWorkspace({
   // copy rather than the empty state flashing before any event lands.
   const activityStatus: "loading" | "ready" =
     activityStoreVersion === 0 ? "loading" : "ready";
-  // Open a session from a drawer row: reuse the same select recipe the tray's
-  // open-action uses (clear new-session mode, switch panel + selection).
+  // Open a session from a drawer row: clear new-session mode, switch panel +
+  // selection.
   const openSessionFromDrawer = useCallback((sessionId: string) => {
     newSessionModeRef.current = false;
     setNewSessionMode(false);
@@ -4064,7 +4024,7 @@ export function AgentWorkspace({
           );
         }
       } else if (classified.kind === "pending_action") {
-        // Feature 04: aggregate this blocker into the global "Needs you" tray,
+        // Feature 04: aggregate this blocker into the pending-action store
         // keyed by mode + session + request. The session's mode comes from its
         // recorded opt-in (sudo carries its own; the rest derive it here). A
         // fresh event for a known request also re-confirms a row that went
@@ -4127,7 +4087,8 @@ export function AgentWorkspace({
         // Feature 04: the session reached a terminal state (completed, a
         // terminal error, or an interrupt) — the agent is no longer blocked, so
         // any of its outstanding "Needs you" rows are moot. Clear them so the
-        // tray never shows a dead blocker for a finished session.
+        // sidebar "Needs you" count never shows a dead blocker for a finished
+        // session.
         pendingActionStore.resolveSession(storedSessionId);
       }
       if (status) {
@@ -4747,7 +4708,7 @@ export function AgentWorkspace({
       }
       misses.delete(sessionId);
       const activityCounts = clearSessionActivity(sessionId);
-      // "completed" (not "failed") keeps the tray quiet: its title falls back
+      // "completed" (not "failed") keeps the status quiet: its title falls back
       // to lastStatus when nothing is active, and a stale "running" there
       // would still render "Working…".
       dispatchAgentSessionStatus({
@@ -4884,7 +4845,7 @@ export function AgentWorkspace({
         );
         setLiveEvents(liveEventsRef.current);
         // The request can never be answered now — retire its card so neither the
-        // "Needs you" tray nor the inline prompt offers a dead-end "Respond".
+        // sidebar count nor the inline prompt offers a dead-end "Respond".
         pendingActionStore.resolveRequest(sessionId, requestId);
         void loadHermesSessions();
         setError(SESSION_GONE_MESSAGE, { sessionId });
@@ -4917,7 +4878,7 @@ export function AgentWorkspace({
         type: "clarify.response",
         payload: { request_id: requestId, answer },
       });
-      // Feature 04: the user answered the clarification — clear its tray row.
+      // Feature 04: the user answered the clarification — clear its pending record.
       pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
@@ -4968,7 +4929,7 @@ export function AgentWorkspace({
         session_id: sessionId,
         payload: { request_id: requestId, granted: approved, mode },
       });
-      // Feature 04: the user resolved the sudo prompt — clear its tray row.
+      // Feature 04: the user resolved the sudo prompt — clear its pending record.
       pendingActionStore.resolveRequest(sessionId, requestId);
       setError(null);
     } catch (err) {
@@ -5013,7 +4974,7 @@ export function AgentWorkspace({
         session_id: sessionId,
         payload: { request_id: requestId, provided: true },
       });
-      // Feature 04: the user provided the secret — clear its tray row.
+      // Feature 04: the user provided the secret — clear its pending record.
       pendingActionStore.resolveRequest(sessionId, requestId);
       setError(null);
     } catch (err) {
@@ -6882,18 +6843,8 @@ export function AgentWorkspace({
       data-artifact-panel={artifactPanel ? "open" : undefined}
       data-hero={heroMode ? "true" : undefined}
     >
-      {/* Feature 04: the one global "Needs you" tray. Mounted at the top level
-          of the workspace (not inside a single session view) so outstanding
-          actions from EVERY session stay visible; a row click opens the owning
-          session. Renders nothing when nothing is pending. */}
-      <PendingActionTray
-        records={pendingActionRecords}
-        titleForSession={titleForPendingSession}
-        onOpenAction={handleOpenPendingAction}
-        now={Date.now()}
-      />
       {/* Feature 11: the Agent activity drawer and its toggle. One top-level
-          surface (like the tray) so it shows every session's live activity, not
+          surface so it shows every session's live activity, not
           just the selected one. The toggle is hidden while the drawer is open
           (the drawer carries its own close control) and surfaces the count of
           sessions currently doing work.
@@ -9857,9 +9808,6 @@ function ClarifyPart({
     <article
       className="agent-clarify-card"
       data-status={part.status}
-      // Feature 04: scroll target so the "Needs you" tray can focus this exact
-      // card after opening the session (`part.id` is the requestId).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         <IconBubbleWide size={14} />
@@ -10095,8 +10043,6 @@ function ApprovalPart({
     <article
       className="agent-approval-card"
       data-status={part.status}
-      // Feature 04: tray scroll target (see ClarifyPart).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         <IconShieldCheck size={14} />
@@ -10308,8 +10254,6 @@ export function SudoPart({
     <article
       className="agent-approval-card"
       data-status={part.status}
-      // Feature 04: tray scroll target (see ClarifyPart).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         {unrestricted ? (
@@ -10443,8 +10387,6 @@ export function SecretPart({
     <article
       className="agent-approval-card"
       data-status={part.status}
-      // Feature 04: tray scroll target (see ClarifyPart).
-      data-pending-request={part.id}
     >
       <span className="agent-tool-icon">
         <IconLock size={14} />
