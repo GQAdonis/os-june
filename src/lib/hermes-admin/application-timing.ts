@@ -26,6 +26,7 @@ export type ApplicationTiming =
 /** The admin mutations whose timing June states explicitly. */
 export type AdminMutation =
   | "skill.toggle"
+  | "skill.editContent"
   | "skill.hubInstall"
   | "skill.hubUpdate"
   | "skill.hubUninstall"
@@ -58,6 +59,7 @@ export type AdminMutation =
 const TIMING: Readonly<Record<AdminMutation, ApplicationTiming>> =
   Object.freeze({
     "skill.toggle": "next-session",
+    "skill.editContent": "next-session",
     "skill.hubInstall": "next-session",
     "skill.hubUpdate": "next-session",
     "skill.hubUninstall": "next-session",
@@ -107,6 +109,8 @@ export function mutationNotification(
   switch (mutation) {
     case "skill.toggle":
       return `Skill updated. New sessions can use it.`;
+    case "skill.editContent":
+      return `Saved ${subject}. New sessions use the edited skill.`;
     case "skill.hubInstall":
       return `Installed ${subject}. New sessions can use it.`;
     case "skill.hubUpdate":

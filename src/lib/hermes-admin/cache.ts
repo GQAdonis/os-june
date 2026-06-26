@@ -45,6 +45,8 @@ export type AdminResource =
 /** The resources each mutation invalidates. These encode the spec's rules:
  * - skill toggle / hub install-update-uninstall: skills (+ hub + toolsets for
  *   hub ops, since a new skill can register tools);
+ * - skill content edit (SKILL.md rewrite): skills (the metadata/description a
+ *   row shows is read from SKILL.md frontmatter, so a rewrite can change it);
  * - MCP add/remove/test/enable/filter: mcpServers AND toolsets;
  * - catalog install: mcpServers, catalog, toolsets;
  * - env writes: envConfig (+ gatewayStatus, since a restart may be needed);
@@ -55,6 +57,7 @@ export type AdminResource =
 const INVALIDATION: Readonly<Record<AdminMutation, readonly AdminResource[]>> =
   Object.freeze({
     "skill.toggle": ["skills"],
+    "skill.editContent": ["skills"],
     "skill.hubInstall": ["skills", "hubSearch", "toolsets"],
     "skill.hubUpdate": ["skills", "hubSearch", "toolsets"],
     "skill.hubUninstall": ["skills", "hubSearch", "toolsets"],

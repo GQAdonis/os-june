@@ -112,6 +112,44 @@ export function parseSkillList(raw: unknown): HermesSkillInfo[] {
 }
 
 // ----------------------------------------------------------------------------
+// Skill content (`GET /api/skills/content`, `PUT /api/skills/content`)
+// ----------------------------------------------------------------------------
+
+/** The raw SKILL.md document Hermes returns for the editor. The dashboard
+ * contract for `/api/skills/content` is loosely typed (`{}`); we read the text
+ * body defensively and tolerate a bare string, `{ content }`, or `{ text }`.
+ * `relativePath` is the file the text came from (e.g. `SKILL.md`) when reported,
+ * shown so the editor states exactly what it is editing. */
+export type HermesSkillContent = {
+  /** The full SKILL.md text. Empty string when the wire carried no body (a
+   * brand-new skill with no content yet), never undefined, so the editor always
+   * has a defined starting value. */
+  content: string;
+  /** The on-disk relative path the content was read from, when reported. */
+  relativePath?: string;
+};
+
+/** Parses a `/api/skills/content` response into {@link HermesSkillContent}.
+ * Tolerates a bare string body, `{ content }`, or `{ text }`; anything else
+ * degrades to an empty document rather than throwing, so a contract drift shows
+ * as an empty editor (visibly wrong) instead of a crash. */
+export function parseSkillContent(raw: unknown): HermesSkillContent {
+  if (typeof raw === "string") return { content: raw };
+  const record = asRecord(raw);
+  if (!record) return { content: "" };
+  const content =
+    pickString([record], ["content", "text", "body", "skill_md", "skillMd"]) ??
+    "";
+  return {
+    content,
+    relativePath: pickString(
+      [record],
+      ["relative_path", "relativePath", "path", "file"],
+    ),
+  };
+}
+
+// ----------------------------------------------------------------------------
 // Toolsets (`GET /api/tools/toolsets`)
 // ----------------------------------------------------------------------------
 
