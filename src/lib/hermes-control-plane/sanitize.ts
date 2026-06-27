@@ -215,8 +215,9 @@ function redactSensitiveRelativePath(candidate: string): string {
 
   if (sensitivePosition === -1) return candidate;
   // Avoid treating arbitrary filesystem paths as URLs: without an HTTP-ish
-  // method prefix, require the sensitive route to appear near the path root.
-  if (!methodPrefix && sensitivePosition > 1) return candidate;
+  // method/hash-route prefix, require the sensitive route to appear near the
+  // path root.
+  if (!methodPrefix && !routePrefix && sensitivePosition > 1) return candidate;
 
   let seenSensitiveSegment = false;
   const redacted = segments.map((segment) => {
