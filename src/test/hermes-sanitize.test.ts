@@ -208,6 +208,31 @@ describe("sanitizeText", () => {
     expect(out).not.toContain(shareToken);
   });
 
+  it("redacts opaque tokens in SPA hash-route sensitive URL paths", () => {
+    const resetToken = "g".repeat(32);
+    const out = sanitizeText(
+      `Reset at https://app.example.com/#/reset-password/${resetToken}?view=1`,
+    );
+
+    expect(out).toContain(
+      "https://app.example.com/#/reset-password/[redacted]?view=1",
+    );
+    expect(out).not.toContain(resetToken);
+  });
+
+  it("redacts relative sensitive URL paths inside key-value assignments", () => {
+    const resetToken = "h".repeat(40);
+    const shareToken = "i".repeat(32);
+    const out = sanitizeText(
+      `Request failed: url=/reset-password/${resetToken}?view=1 path=/share/${shareToken}`,
+    );
+
+    expect(out).toContain("url=/reset-password/[redacted]?view=1");
+    expect(out).toContain("path=/share/[redacted]");
+    expect(out).not.toContain(resetToken);
+    expect(out).not.toContain(shareToken);
+  });
+
   it("preserves opaque-looking path segments in ordinary URLs", () => {
     const docId = "abcdef0123456789abcdef0123456789abcdef01";
     const out = sanitizeText(

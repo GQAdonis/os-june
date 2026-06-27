@@ -41,7 +41,7 @@ const NAMED_SECRET_FRAGMENT_PATTERN =
   /\b[A-Za-z0-9_-]*(?:token|secret|credential|password|api[_-]?key)[A-Za-z0-9_-]*\b/gi;
 const OPAQUE_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{32,}\b/g;
 const RELATIVE_PATH_CANDIDATE_PATTERN =
-  /(^|[\s"'(])((?:[A-Z]+\s+)?(?:\.{0,2}\/)[^\s"'<>),;]+)/g;
+  /(^|[\s"'(=])((?:[A-Z]+\s+)?(?:\.{0,2}\/)[^\s"'<>),;]+)/g;
 const SENSITIVE_URL_PATH_SEGMENT_PATTERN =
   /^(?:auth|callback|callbacks|credential|credentials|download|downloads|file|files|invite|invites|oauth|password|passwords|private|reset|secret|secrets|share|shares|signed|token|tokens)$/i;
 const SENSITIVE_URL_HOST_FRAGMENT_PATTERN =
@@ -345,7 +345,8 @@ function sanitizeUrl(value: string): string | undefined {
       changed = true;
     }
 
-    const sensitiveUrlContext = hasSensitiveUrlPathContext(url);
+    const sensitiveUrlContext =
+      hasSensitiveUrlPathContext(url) || hasSensitiveUrlHashPathContext(url);
     if (redactSensitiveUrlParams(url.searchParams, sensitiveUrlContext)) {
       changed = true;
     }
@@ -404,6 +405,15 @@ function sanitizeUrlFragment(url: URL, sensitiveUrlContext: boolean): boolean {
 function hasSensitiveUrlPathContext(url: URL): boolean {
   if (SENSITIVE_URL_HOST_FRAGMENT_PATTERN.test(url.hostname)) return true;
   return hasSensitivePathSegments(url.pathname);
+}
+
+function hasSensitiveUrlHashPathContext(url: URL): boolean {
+  const fragment = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  if (!fragment) return false;
+  const suffixStart = firstPathSuffixIndex(fragment);
+  const fragmentPath =
+    suffixStart === -1 ? fragment : fragment.slice(0, suffixStart);
+  return hasSensitivePathSegments(fragmentPath);
 }
 
 function hasSensitivePathSegments(path: string): boolean {
