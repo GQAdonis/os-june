@@ -266,6 +266,17 @@ describe("sanitizeText", () => {
     expect(out).not.toContain("def456");
   });
 
+  it("redacts codes in nested colon-prefixed relative callback routes", () => {
+    const out = sanitizeText(
+      "Auth failed: url:/projects/123/oauth/callback?code=abc123&state=ok",
+    );
+
+    expect(out).toContain(
+      "url:/projects/123/oauth/callback?code=[redacted]&state=ok",
+    );
+    expect(out).not.toContain("abc123");
+  });
+
   it("redacts codes in relative sensitive route query strings", () => {
     const out = sanitizeText(
       "Request failed: url=/reset-password?code=abc123&state=ok path=/share?code=def456",

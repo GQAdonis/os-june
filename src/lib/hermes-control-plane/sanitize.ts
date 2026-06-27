@@ -169,7 +169,7 @@ function redactSensitiveRelativePathTokens(value: string): string {
         suffix = `${path.at(-1) ?? ""}${suffix}`;
         path = path.slice(0, -1);
       }
-      return `${prefix}${redactSensitiveRelativePath(path)}${suffix}`;
+      return `${prefix}${redactSensitiveRelativePath(path, prefix === ":" || prefix === "=")}${suffix}`;
     },
   );
 }
@@ -193,7 +193,10 @@ function redactNamedSecretFragment(
   return match.length >= 16 && /[0-9_-]/u.test(match) ? REDACTED : match;
 }
 
-function redactSensitiveRelativePath(candidate: string): string {
+function redactSensitiveRelativePath(
+  candidate: string,
+  hasRouteLabelPrefix = false,
+): string {
   const methodMatch = /^([A-Z]+\s+)(.+)$/u.exec(candidate);
   const methodPrefix = methodMatch?.[1] ?? "";
   let path = methodMatch?.[2] ?? candidate;
@@ -217,7 +220,13 @@ function redactSensitiveRelativePath(candidate: string): string {
   // Avoid treating arbitrary filesystem paths as URLs: without an HTTP-ish
   // method/hash-route prefix, require the sensitive route to appear near the
   // path root.
-  if (!methodPrefix && !routePrefix && sensitivePosition > 1) return candidate;
+  if (
+    !methodPrefix &&
+    !routePrefix &&
+    !hasRouteLabelPrefix &&
+    sensitivePosition > 1
+  )
+    return candidate;
 
   let seenSensitiveSegment = false;
   const redacted = segments.map((segment) => {
