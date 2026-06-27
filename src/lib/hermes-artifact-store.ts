@@ -41,7 +41,6 @@ import type { HermesMode, JuneHermesEvent } from "./hermes-control-plane";
 import {
   artifactLocationsFromPayload,
   asRecord,
-  isArtifactUrlLocation,
   nonEmpty,
   sanitizeText,
 } from "./hermes-control-plane";
@@ -324,7 +323,6 @@ export function artifactsFromToolEvent(
           ...preservedNavigationLocations,
           ...sanitizedPayloadLocations.filter(
             (location) =>
-              !isArtifactUrlLocation(location) &&
               !preservedNavigationLocations.includes(location) &&
               !sanitizedPreservedNavigationLocations.has(location),
           ),

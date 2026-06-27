@@ -196,6 +196,50 @@ describe("artifactsFromToolEvent", () => {
     expect(artifact.path).toContain("report.pdf");
   });
 
+  it("keeps sanitized URL artifacts alongside preserved raw URLs", () => {
+    const signedUrl =
+      "https://files.example.com/report.pdf?token=signed-token-123&view=1";
+    const sanitizedOnlyUrl =
+      "https://app.example.com/share/share-token-123/report2.pdf?token=other-token-456&view=1";
+    const event = toolClassified("tool.complete", "s1", {
+      name: "download_file",
+      url: signedUrl,
+      uri: sanitizedOnlyUrl,
+    });
+
+    expect(event.artifactLocations).toEqual([signedUrl]);
+    expect(JSON.stringify(event.payload)).not.toContain("signed-token-123");
+    expect(JSON.stringify(event.payload)).not.toContain("share-token-123");
+    expect(JSON.stringify(event.payload)).not.toContain("other-token-456");
+
+    const artifacts = artifactsFromToolEvent(event);
+    expect(artifacts).toHaveLength(2);
+    expect(artifacts.map((artifact) => artifact.path)).toContain(signedUrl);
+    const sanitizedArtifact = artifacts.find(
+      (artifact) => artifact.path !== signedUrl,
+    );
+    expect(sanitizedArtifact?.path).toContain("report2.pdf");
+    expect(sanitizedArtifact?.path).not.toContain("share-token-123");
+    expect(sanitizedArtifact?.path).not.toContain("other-token-456");
+  });
+
+  it("preserves signed artifact urls with filenames under share routes", () => {
+    const signedUrl =
+      "https://app.example.com/share/report.pdf?token=signed-token-123&view=1";
+    const event = toolClassified("tool.complete", "s1", {
+      name: "download_file",
+      url: signedUrl,
+    });
+
+    expect(event.artifactLocations).toEqual([signedUrl]);
+    expect(JSON.stringify(event.payload)).not.toContain("signed-token-123");
+    expect(JSON.stringify(event)).not.toContain("signed-token-123");
+
+    const [artifact] = artifactsFromToolEvent(event);
+    expect(artifact.path).toBe(signedUrl);
+    expect(artifact.path).toContain("signed-token-123");
+  });
+
   it("does not preserve signed artifact urls with dotted route tokens", () => {
     const jwt =
       "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzaGFyZSJ9.signature123";

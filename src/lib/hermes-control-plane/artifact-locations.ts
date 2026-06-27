@@ -287,9 +287,16 @@ function isSensitiveRawRouteSegment(segment: string): boolean {
 
 function isRouteSecretSegment(segment: string): boolean {
   const normalized = safeDecodeURIComponent(segment);
+  if (
+    /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}$/u.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
   return (
     normalized.length >= 4 &&
-    /^[A-Za-z0-9_.-]+$/u.test(normalized) &&
+    /^[A-Za-z0-9_-]+$/u.test(normalized) &&
     /[A-Za-z0-9]/u.test(normalized)
   );
 }
