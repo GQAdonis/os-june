@@ -84,12 +84,15 @@ describe("sanitizePayload — value-shape backstop exempts paths/urls", () => {
     const out = sanitizePayload({
       pathUrl: "https://api.example.com/sk-abcdefghijklmnopqrstuvwxyz123456",
       callbackUrl: `https://host.example/callback?code=${jwt}&view=1`,
+      hashUrl: "https://host.example/callback#access_token=abc123&state=ok",
       relativeUrl: "/callback?key=short-secret&view=1",
     }) as Record<string, unknown>;
 
     expect(out.pathUrl).not.toContain("sk-abcdefghijklmnopqrstuvwxyz123456");
     expect(out.callbackUrl).toContain("view=1");
     expect(out.callbackUrl).not.toContain(jwt);
+    expect(out.hashUrl).toContain("state=ok");
+    expect(out.hashUrl).not.toContain("abc123");
     expect(out.relativeUrl).toContain("view=1");
     expect(out.relativeUrl).not.toContain("short-secret");
   });
@@ -155,16 +158,32 @@ describe("sanitizeText", () => {
 
   it("redacts short key-value token fragments inside longer text", () => {
     const out = sanitizeText(
-      "Request failed: token=1234 access_token=abc123 url=/callback?key=short-key&view=1 monkey=banana",
+      "Request failed: token=1234 access_token=abc123 url=/callback?key=short-key&view=1 hash=#access_token=hash-token&state=ok monkey=banana",
     );
 
     expect(out).toContain("token=[redacted]");
     expect(out).toContain("access_token=[redacted]");
     expect(out).toContain("view=1");
+    expect(out).toContain("state=ok");
     expect(out).toContain("monkey=banana");
     expect(out).not.toContain("1234");
     expect(out).not.toContain("abc123");
     expect(out).not.toContain("short-key");
+    expect(out).not.toContain("hash-token");
+  });
+
+  it("redacts quoted key-value token fragments inside longer text", () => {
+    const out = sanitizeText(
+      `Request failed: {"access_token":"abc123"} token: "1234" password: 'pw' note="safe"`,
+    );
+
+    expect(out).toContain(`"access_token":"[redacted]"`);
+    expect(out).toContain(`token: "[redacted]"`);
+    expect(out).toContain(`password: '[redacted]'`);
+    expect(out).toContain(`note="safe"`);
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("1234");
+    expect(out).not.toContain("'pw'");
   });
 
   it("redacts websocket URL tokens inside longer text", () => {
