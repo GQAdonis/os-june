@@ -19,8 +19,12 @@ const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi;
 const BEARER_PATTERN = /\bbearer\s+[^\s"'<>]+/gi;
 const SENSITIVE_ASSIGNMENT_KEY =
   "token|access[_-]?token|refresh[_-]?token|api[_-]?key|key|secret|password|passphrase|private[_-]?key|credential|authorization|pin|otp";
-const SENSITIVE_QUOTED_ASSIGNMENT_PATTERN = new RegExp(
-  `(^|[?#&\\s,;({\\[])(["']?)(${SENSITIVE_ASSIGNMENT_KEY})\\2(\\s*[:=]\\s*)(["'])([^\\r\\n]*?)\\5`,
+const SENSITIVE_DOUBLE_QUOTED_ASSIGNMENT_PATTERN = new RegExp(
+  `(^|[?#&\\s,;({\\[])(["']?)(${SENSITIVE_ASSIGNMENT_KEY})\\2(\\s*[:=]\\s*)"((?:\\\\.|[^"\\\\\\r\\n])*)"`,
+  "gi",
+);
+const SENSITIVE_SINGLE_QUOTED_ASSIGNMENT_PATTERN = new RegExp(
+  `(^|[?#&\\s,;({\\[])(["']?)(${SENSITIVE_ASSIGNMENT_KEY})\\2(\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\\\r\\n])*)'`,
   "gi",
 );
 const SENSITIVE_TEXT_ASSIGNMENT_PATTERN =
@@ -66,19 +70,29 @@ export function sanitizeText(value: string): string {
   return redactTokenFragments(value.replace(URL_PATTERN, sanitizeUrlMatch));
 }
 
-function redactTokenFragments(value: string): string {
+function redactSensitiveAssignments(value: string): string {
   return value
     .replace(
-      SENSITIVE_QUOTED_ASSIGNMENT_PATTERN,
+      SENSITIVE_DOUBLE_QUOTED_ASSIGNMENT_PATTERN,
       (
         _match,
         prefix: string,
         keyQuote: string,
         key: string,
         separator: string,
-        valueQuote: string,
       ) =>
-        `${prefix}${keyQuote}${key}${keyQuote}${separator}${valueQuote}${REDACTED}${valueQuote}`,
+        `${prefix}${keyQuote}${key}${keyQuote}${separator}"${REDACTED}"`,
+    )
+    .replace(
+      SENSITIVE_SINGLE_QUOTED_ASSIGNMENT_PATTERN,
+      (
+        _match,
+        prefix: string,
+        keyQuote: string,
+        key: string,
+        separator: string,
+      ) =>
+        `${prefix}${keyQuote}${key}${keyQuote}${separator}'${REDACTED}'`,
     )
     .replace(
       SENSITIVE_TEXT_ASSIGNMENT_PATTERN,
@@ -91,7 +105,11 @@ function redactTokenFragments(value: string): string {
         _value: string,
       ) =>
         `${prefix}${keyQuote}${key}${keyQuote}${separator}${REDACTED}`,
-    )
+    );
+}
+
+function redactTokenFragments(value: string): string {
+  return redactSensitiveAssignments(value)
     .replace(BEARER_PATTERN, (match) =>
       match.replace(/\s+\S+$/u, " [redacted]"),
     )
@@ -100,7 +118,26 @@ function redactTokenFragments(value: string): string {
     .replace(NAMED_SECRET_FRAGMENT_PATTERN, (match) =>
       match.length >= 16 && /[0-9_-]/u.test(match) ? REDACTED : match,
     )
-    .replace(LONG_OPAQUE_TOKEN_PATTERN, REDACTED);
+    .replace(LONG_OPAQUE_TOKEN_PATTERN, redactLongOpaqueToken);
+}
+
+function redactLongOpaqueToken(
+  match: string,
+  offset: number,
+  source: string,
+): string {
+  const before = offset > 0 ? source.at(offset - 1) : undefined;
+  const after = source.at(offset + match.length);
+  if (
+    before === "/" ||
+    before === "\\" ||
+    after === "/" ||
+    after === "\\" ||
+    after === "."
+  ) {
+    return match;
+  }
+  return REDACTED;
 }
 
 function sanitize(

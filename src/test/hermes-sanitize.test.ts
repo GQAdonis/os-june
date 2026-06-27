@@ -81,11 +81,14 @@ describe("sanitizePayload — value-shape backstop exempts paths/urls", () => {
 
   it("redacts token substrings inside a standalone URL", () => {
     const jwt = "eyJaaaaaaaaaa.bbbbbbbbbbbb.cccccccccccc";
+    const artifactPath =
+      "/tmp/artifacts/1234567890abcdef1234567890abcdef12345678.png";
     const out = sanitizePayload({
       pathUrl: "https://api.example.com/sk-abcdefghijklmnopqrstuvwxyz123456",
       callbackUrl: `https://host.example/callback?code=${jwt}&view=1`,
       hashUrl: "https://host.example/callback#access_token=abc123&state=ok",
       relativeUrl: "/callback?key=short-secret&view=1",
+      artifactPath,
     }) as Record<string, unknown>;
 
     expect(out.pathUrl).not.toContain("sk-abcdefghijklmnopqrstuvwxyz123456");
@@ -95,6 +98,7 @@ describe("sanitizePayload — value-shape backstop exempts paths/urls", () => {
     expect(out.hashUrl).not.toContain("abc123");
     expect(out.relativeUrl).toContain("view=1");
     expect(out.relativeUrl).not.toContain("short-secret");
+    expect(out.artifactPath).toBe(artifactPath);
   });
 
   it("preserves a ~/ home path and a Windows drive path", () => {
@@ -188,6 +192,20 @@ describe("sanitizeText", () => {
     expect(out).not.toContain("abc def");
     expect(out).not.toContain("abc,def");
     expect(out).not.toContain("dXNlcjpwYXNz");
+  });
+
+  it("redacts escaped quoted key-value token fragments inside longer text", () => {
+    const out = sanitizeText(
+      String.raw`Request failed: {"password":"abc\"def"} token='abc\'def' note="safe"`,
+    );
+
+    expect(out).toContain(`"password":"[redacted]"`);
+    expect(out).toContain(`token='[redacted]'`);
+    expect(out).toContain(`note="safe"`);
+    expect(out).not.toContain(String.raw`abc\"def`);
+    expect(out).not.toContain(String.raw`abc\'def`);
+    expect(out).not.toContain("abc");
+    expect(out).not.toContain("def");
   });
 
   it("redacts websocket URL tokens inside longer text", () => {
