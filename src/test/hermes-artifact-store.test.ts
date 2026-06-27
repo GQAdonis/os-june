@@ -176,6 +176,26 @@ describe("artifactsFromToolEvent", () => {
     expect(artifact.path).toContain("#/reset-password/[redacted]");
   });
 
+  it("does not preserve signed artifact urls with sensitive route tokens", () => {
+    const signedUrl =
+      "https://app.example.com/share/share-token-123/report.pdf?token=signed-token-123&view=1";
+    const event = toolClassified("tool.complete", "s1", {
+      name: "download_file",
+      url: signedUrl,
+    });
+
+    expect(event.artifactLocations).toBeUndefined();
+    expect(JSON.stringify(event.payload)).not.toContain("share-token-123");
+    expect(JSON.stringify(event.payload)).not.toContain("signed-token-123");
+    expect(JSON.stringify(event)).not.toContain("share-token-123");
+    expect(JSON.stringify(event)).not.toContain("signed-token-123");
+
+    const [artifact] = artifactsFromToolEvent(event);
+    expect(artifact.path).not.toContain("share-token-123");
+    expect(artifact.path).not.toContain("signed-token-123");
+    expect(artifact.path).toContain("report.pdf");
+  });
+
   it("does not preserve raw relative share route path tokens", () => {
     const shareRoute = "/share/share-token-123";
     const event = toolClassified("tool.complete", "s1", {

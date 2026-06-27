@@ -312,6 +312,17 @@ describe("sanitizeText", () => {
     expect(out).not.toContain(shareToken);
   });
 
+  it("redacts relative route tokens before query assignment delimiters", () => {
+    const out = sanitizeText(
+      "Request failed: redirect=/reset-password/abc123&state=ok next=/share/def456&view=1",
+    );
+
+    expect(out).toContain("redirect=/reset-password/[redacted]&state=ok");
+    expect(out).toContain("next=/share/[redacted]&view=1");
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("def456");
+  });
+
   it("preserves benign path segments that contain token words", () => {
     const out = sanitizeText(
       "Read /tmp/tokenizer_config.json and /tmp/access_token_notes.md",

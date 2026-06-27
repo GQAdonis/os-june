@@ -134,8 +134,8 @@ function looksLikeFilesystemPath(value: string): boolean {
 
 function shouldPreserveRawArtifactUrl(value: string): boolean {
   const likelyArtifactUrl = isLikelyArtifactUrl(value);
-  if (hasSensitiveUrlParam(value)) return likelyArtifactUrl;
   if (hasSensitiveUrlPathToken(value)) return false;
+  if (hasSensitiveUrlParam(value)) return likelyArtifactUrl;
   return true;
 }
 
