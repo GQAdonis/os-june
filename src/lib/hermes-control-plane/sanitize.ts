@@ -41,7 +41,7 @@ const NAMED_SECRET_FRAGMENT_PATTERN =
   /\b[A-Za-z0-9_-]*(?:token|secret|credential|password|api[_-]?key)[A-Za-z0-9_-]*\b/gi;
 const OPAQUE_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{32,}\b/g;
 const RELATIVE_PATH_CANDIDATE_PATTERN =
-  /(^|[\s"'(=])((?:[A-Z]+\s+)?(?:#\/|\.{0,2}\/)[^\s"'<>),;]+)/g;
+  /(^|[\s"'(=:])((?:[A-Z]+\s+)?(?:#\/|\.{0,2}\/)[^\s"'<>),;]+)/g;
 const SENSITIVE_URL_PATH_SEGMENT_PATTERN =
   /^(?:auth|callback|callbacks|credential|credentials|download|downloads|file|files|invite|invites|oauth|password|passwords|private|reset|secret|secrets|share|shares|signed|token|tokens)$/i;
 const SENSITIVE_URL_HOST_FRAGMENT_PATTERN =
