@@ -159,6 +159,39 @@ describe("artifactsFromToolEvent", () => {
     expect(artifact.path).toContain("reset-password/[redacted]");
   });
 
+  it("does not preserve raw SPA hash route path tokens", () => {
+    const resetUrl =
+      "https://app.example.com/#/reset-password/hash-token-123";
+    const event = toolClassified("tool.complete", "s1", {
+      name: "fetch_url",
+      url: resetUrl,
+    });
+
+    expect(event.artifactLocations).toBeUndefined();
+    expect(JSON.stringify(event.payload)).not.toContain("hash-token-123");
+    expect(JSON.stringify(event)).not.toContain("hash-token-123");
+
+    const [artifact] = artifactsFromToolEvent(event);
+    expect(artifact.path).not.toContain("hash-token-123");
+    expect(artifact.path).toContain("#/reset-password/[redacted]");
+  });
+
+  it("does not preserve raw relative share route path tokens", () => {
+    const shareRoute = "/share/share-token-123";
+    const event = toolClassified("tool.complete", "s1", {
+      name: "fetch_url",
+      path: shareRoute,
+    });
+
+    expect(event.artifactLocations).toBeUndefined();
+    expect(JSON.stringify(event.payload)).not.toContain("share-token-123");
+    expect(JSON.stringify(event)).not.toContain("share-token-123");
+
+    const [artifact] = artifactsFromToolEvent(event);
+    expect(artifact.path).not.toContain("share-token-123");
+    expect(artifact.path).toContain("/share/[redacted]");
+  });
+
   it("does not preserve raw sensitive relative auth routes", () => {
     const callbackRoute = "/oauth/callback?code=oauth-code-123&state=ok";
     const event = toolClassified("tool.complete", "s1", {

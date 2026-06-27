@@ -181,12 +181,10 @@ function isLikelyArtifactUrl(value: string): boolean {
 function hasSensitiveUrlPathToken(value: string): boolean {
   try {
     const url = new URL(value);
-    const parts = url.pathname.split("/").filter(Boolean);
-    const sensitiveIndex = parts.findIndex(isSensitiveAuthRouteSegment);
-    if (sensitiveIndex === -1) return false;
-    return parts
-      .slice(sensitiveIndex + 1)
-      .some((part) => isRouteSecretSegment(part));
+    return (
+      hasSensitiveRoutePathToken(url.pathname) ||
+      hasSensitiveRoutePathToken(hashPathname(url.hash))
+    );
   } catch {
     return false;
   }
@@ -194,6 +192,7 @@ function hasSensitiveUrlPathToken(value: string): boolean {
 
 function shouldPreserveRawFilesystemLocation(value: string): boolean {
   if (!looksLikeFilesystemPath(value)) return false;
+  if (hasSensitiveRoutePathToken(locationPathname(value))) return false;
   if (!hasSensitiveRelativeLocationParam(value)) return true;
   return isLikelyArtifactPathname(locationPathname(value));
 }
@@ -261,9 +260,27 @@ function isLikelyArtifactPathname(pathname: string): boolean {
   );
 }
 
-function isSensitiveAuthRouteSegment(segment: string): boolean {
+function hasSensitiveRoutePathToken(pathname: string): boolean {
+  if (!pathname) return false;
+  const parts = pathname.split("/").filter(Boolean);
+  const sensitiveIndex = parts.findIndex(isSensitiveRawRouteSegment);
+  if (sensitiveIndex === -1) return false;
+  return parts
+    .slice(sensitiveIndex + 1)
+    .some((part) => isRouteSecretSegment(part));
+}
+
+function hashPathname(hash: string): string {
+  const fragment = hash.startsWith("#") ? hash.slice(1) : hash;
+  if (!fragment) return "";
+  const queryIndex = fragment.indexOf("?");
+  if (queryIndex !== -1) return fragment.slice(0, queryIndex);
+  return fragment.includes("=") ? "" : fragment;
+}
+
+function isSensitiveRawRouteSegment(segment: string): boolean {
   const normalized = safeDecodeURIComponent(segment).toLowerCase();
-  return /(?:^|[-_])(?:auth|authorize|callback|login|oauth|password|reset|secret|token)(?:[-_]|$)/.test(
+  return /(?:^|[-_])(?:auth|authorize|callback|callbacks|credential|credentials|invite|invites|login|oauth|password|passwords|reset|secret|secrets|share|shares|signed|token|tokens)(?:[-_]|$)/.test(
     normalized,
   );
 }
