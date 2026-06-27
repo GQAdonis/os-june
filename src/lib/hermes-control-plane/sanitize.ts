@@ -151,8 +151,8 @@ function redactTokenFragments(
     )
     .replace(JWT_PATTERN, REDACTED)
     .replace(KNOWN_SECRET_PATTERN, REDACTED)
-    .replace(NAMED_SECRET_FRAGMENT_PATTERN, (match) =>
-      match.length >= 16 && /[0-9_-]/u.test(match) ? REDACTED : match,
+    .replace(NAMED_SECRET_FRAGMENT_PATTERN, (match, offset, source) =>
+      redactNamedSecretFragment(match, offset, source),
     )
     .replace(OPAQUE_TOKEN_PATTERN, (match, offset, source) =>
       redactLongOpaqueToken(match, offset, source, options),
@@ -172,6 +172,25 @@ function redactSensitiveRelativePathTokens(value: string): string {
       return `${prefix}${redactSensitiveRelativePath(path)}${suffix}`;
     },
   );
+}
+
+function redactNamedSecretFragment(
+  match: string,
+  offset: number,
+  source: string,
+): string {
+  const before = offset > 0 ? source.at(offset - 1) : undefined;
+  const after = source.at(offset + match.length);
+  if (
+    before === "/" ||
+    before === "\\" ||
+    after === "/" ||
+    after === "\\" ||
+    after === "."
+  ) {
+    return match;
+  }
+  return match.length >= 16 && /[0-9_-]/u.test(match) ? REDACTED : match;
 }
 
 function redactSensitiveRelativePath(candidate: string): string {
@@ -200,12 +219,12 @@ function redactSensitiveRelativePath(candidate: string): string {
       seenSensitiveSegment = true;
       return segment;
     }
-    if (seenSensitiveSegment && isOpaquePathToken(segment, 32)) {
+    if (seenSensitiveSegment && isSensitiveRouteSecretSegment(segment)) {
       return REDACTED;
     }
     return segment;
   });
-  return `${methodPrefix}${redacted.join("/")}${suffix}`;
+  return `${methodPrefix}${redacted.join("/")}${redactSensitiveContextParams(suffix)}`;
 }
 
 function firstPathSuffixIndex(path: string): number {
@@ -218,6 +237,23 @@ function firstPathSuffixIndex(path: string): number {
 
 function isOpaquePathToken(segment: string, minLength: number): boolean {
   return segment.length >= minLength && /^[A-Za-z0-9_-]+$/u.test(segment);
+}
+
+function isSensitiveRouteSecretSegment(segment: string): boolean {
+  const normalized = safeDecodeURIComponent(segment);
+  return normalized.length >= 4 && /^[A-Za-z0-9_-]+$/u.test(normalized);
+}
+
+function redactSensitiveContextParams(value: string): string {
+  return value.replace(
+    /([?&#])([^=&#\s]+)=([^&#\s]*)/g,
+    (match, prefix: string, key: string) => {
+      if (isSensitiveUrlQueryKey(key) || isSensitiveUrlContextQueryKey(key)) {
+        return `${prefix}${key}=${REDACTED}`;
+      }
+      return match;
+    },
+  );
 }
 
 function redactLongOpaqueToken(
@@ -351,6 +387,7 @@ function sanitizeUrl(value: string): string | undefined {
       changed = true;
     }
     if (sanitizeUrlFragment(url, sensitiveUrlContext)) changed = true;
+    if (sanitizeUrlRoutePathTokens(url)) changed = true;
 
     return redactTokenFragments(changed ? url.toString() : value, {
       minOpaqueTokenLength: sensitiveUrlContext ? 32 : undefined,
@@ -400,6 +437,46 @@ function sanitizeUrlFragment(url: URL, sensitiveUrlContext: boolean): boolean {
   const prefix = queryStart === -1 ? "" : `${fragmentPath}?`;
   url.hash = `${prefix}${params.toString()}`;
   return true;
+}
+
+function sanitizeUrlRoutePathTokens(url: URL): boolean {
+  let changed = false;
+  const pathname = redactSensitivePathRouteTokens(url.pathname);
+  if (pathname !== url.pathname) {
+    url.pathname = pathname;
+    changed = true;
+  }
+
+  const fragment = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  if (fragment) {
+    const suffixStart = firstPathSuffixIndex(fragment);
+    const fragmentPath =
+      suffixStart === -1 ? fragment : fragment.slice(0, suffixStart);
+    const suffix = suffixStart === -1 ? "" : fragment.slice(suffixStart);
+    const redactedPath = redactSensitivePathRouteTokens(fragmentPath);
+    if (redactedPath !== fragmentPath) {
+      url.hash = `${redactedPath}${suffix}`;
+      changed = true;
+    }
+  }
+
+  return changed;
+}
+
+function redactSensitivePathRouteTokens(pathname: string): string {
+  const segments = pathname.split("/");
+  let seenSensitiveSegment = false;
+  const redacted = segments.map((segment) => {
+    if (isSensitivePathSegment(segment)) {
+      seenSensitiveSegment = true;
+      return segment;
+    }
+    if (seenSensitiveSegment && isSensitiveRouteSecretSegment(segment)) {
+      return REDACTED;
+    }
+    return segment;
+  });
+  return redacted.join("/");
 }
 
 function hasSensitiveUrlPathContext(url: URL): boolean {

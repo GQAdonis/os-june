@@ -220,6 +220,28 @@ describe("sanitizeText", () => {
     expect(out).not.toContain(resetToken);
   });
 
+  it("redacts short route tokens after sensitive URL path segments", () => {
+    const out = sanitizeText(
+      "Reset at https://app.example.com/#/reset-password/abc123 and url=/share/def456",
+    );
+
+    expect(out).toContain("https://app.example.com/#/reset-password/[redacted]");
+    expect(out).toContain("url=/share/[redacted]");
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("def456");
+  });
+
+  it("redacts codes in relative sensitive route query strings", () => {
+    const out = sanitizeText(
+      "Request failed: url=/reset-password?code=abc123&state=ok path=/share?code=def456",
+    );
+
+    expect(out).toContain("url=/reset-password?code=[redacted]&state=ok");
+    expect(out).toContain("path=/share?code=[redacted]");
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("def456");
+  });
+
   it("redacts relative sensitive URL paths inside key-value assignments", () => {
     const resetToken = "h".repeat(40);
     const shareToken = "i".repeat(32);
@@ -231,6 +253,15 @@ describe("sanitizeText", () => {
     expect(out).toContain("path=/share/[redacted]");
     expect(out).not.toContain(resetToken);
     expect(out).not.toContain(shareToken);
+  });
+
+  it("preserves benign path segments that contain token words", () => {
+    const out = sanitizeText(
+      "Read /tmp/tokenizer_config.json and /tmp/access_token_notes.md",
+    );
+
+    expect(out).toContain("/tmp/tokenizer_config.json");
+    expect(out).toContain("/tmp/access_token_notes.md");
   });
 
   it("preserves opaque-looking path segments in ordinary URLs", () => {
