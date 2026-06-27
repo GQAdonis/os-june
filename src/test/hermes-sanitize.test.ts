@@ -413,6 +413,16 @@ describe("sanitizeText", () => {
     expect(out).not.toContain("YWJjZA==");
   });
 
+  it("preserves numeric artifact URL subdirectories while redacting query tokens", () => {
+    const out = sanitizeText(
+      "Download https://files.example.com/download/2024/report.pdf?token=signed-token-123&view=1",
+    );
+
+    expect(out).toContain("/download/2024/report.pdf");
+    expect(out).toContain("token=[redacted]");
+    expect(out).not.toContain("signed-token-123");
+  });
+
   it("redacts short OAuth codes in sensitive callback URLs", () => {
     const out = sanitizeText(
       "Auth failed at https://auth.example.com/oauth/callback?code=abc123&state=ok",

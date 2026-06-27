@@ -290,6 +290,7 @@ function isOpaquePathToken(segment: string, minLength: number): boolean {
 
 function isSensitiveRouteSecretSegment(segment: string): boolean {
   const normalized = safeDecodeURIComponent(segment);
+  if (/^\d+$/u.test(normalized)) return false;
   return (
     normalized.length >= 4 &&
     (/^[A-Za-z0-9_-]+$/u.test(normalized) ||
