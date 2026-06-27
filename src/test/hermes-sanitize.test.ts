@@ -323,6 +323,17 @@ describe("sanitizeText", () => {
     expect(out).not.toContain("def456");
   });
 
+  it("redacts login and authorize route tokens", () => {
+    const out = sanitizeText(
+      "Auth failed at https://app.example.com/login/abc123 and redirect=/authorize/abcd1234",
+    );
+
+    expect(out).toContain("https://app.example.com/login/[redacted]");
+    expect(out).toContain("redirect=/authorize/[redacted]");
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("abcd1234");
+  });
+
   it("preserves benign path segments that contain token words", () => {
     const out = sanitizeText(
       "Read /tmp/tokenizer_config.json and /tmp/access_token_notes.md",
