@@ -205,6 +205,28 @@ describe("sanitizeText", () => {
     expect(out).not.toContain("abc123");
   });
 
+  it("redacts short OAuth codes in sensitive callback URL fragments", () => {
+    const out = sanitizeText(
+      "Auth failed at https://auth.example.com/oauth/callback#code=abc123&state=ok",
+    );
+
+    expect(out).toContain("state=ok");
+    expect(out).toContain("code=");
+    expect(out).not.toContain("abc123");
+  });
+
+  it("redacts sensitive params in SPA callback URL fragments", () => {
+    const out = sanitizeText(
+      "Auth failed at https://app.example.com/#/oauth/callback?code=abc123&id_token=short-id-token&state=ok",
+    );
+
+    expect(out).toContain("state=ok");
+    expect(out).toContain("code=");
+    expect(out).toContain("id_token=");
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("short-id-token");
+  });
+
   it("redacts short OAuth codes in relative callback URLs", () => {
     const out = sanitizeText(
       "Auth failed: GET /oauth/callback?code=abc123&state=ok",

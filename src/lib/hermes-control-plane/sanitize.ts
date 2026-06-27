@@ -18,7 +18,7 @@ const URL_REDACTION_VALUE = "redacted";
 const URL_PATTERN = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"'`]+/gi;
 const BEARER_PATTERN = /\bbearer\s+[^\s"'<>]+/gi;
 const SENSITIVE_ASSIGNMENT_KEY =
-  "token|access[_-]?token|refresh[_-]?token|api[_-]?key|key|secret|password|passphrase|private[_-]?key|credential|authorization|value|pin|otp";
+  "token|access[_-]?token|refresh[_-]?token|id[_-]?token|api[_-]?key|key|secret|password|passphrase|private[_-]?key|credential|authorization|value|pin|otp";
 const SENSITIVE_DOUBLE_QUOTED_ASSIGNMENT_PATTERN = new RegExp(
   `(^|[?#&\\s,;({\\[])(["']?)(${SENSITIVE_ASSIGNMENT_KEY})\\2(\\s*[:=]\\s*)"((?:\\\\.|[^"\\\\\\r\\n])*)"`,
   "gi",
@@ -269,15 +269,10 @@ function sanitizeUrl(value: string): string | undefined {
     }
 
     const sensitiveUrlContext = hasSensitiveUrlPathContext(url);
-    for (const key of Array.from(url.searchParams.keys())) {
-      if (
-        isSensitiveUrlQueryKey(key) ||
-        (sensitiveUrlContext && isSensitiveUrlContextQueryKey(key))
-      ) {
-        url.searchParams.set(key, REDACTED);
-        changed = true;
-      }
+    if (redactSensitiveUrlParams(url.searchParams, sensitiveUrlContext)) {
+      changed = true;
     }
+    if (sanitizeUrlFragment(url, sensitiveUrlContext)) changed = true;
 
     return redactTokenFragments(changed ? url.toString() : value, {
       preservePathSegments: !(
@@ -289,9 +284,52 @@ function sanitizeUrl(value: string): string | undefined {
   }
 }
 
+function redactSensitiveUrlParams(
+  params: URLSearchParams,
+  sensitiveUrlContext: boolean,
+): boolean {
+  let changed = false;
+  for (const key of Array.from(params.keys())) {
+    if (
+      isSensitiveUrlQueryKey(key) ||
+      (sensitiveUrlContext && isSensitiveUrlContextQueryKey(key))
+    ) {
+      params.set(key, REDACTED);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function sanitizeUrlFragment(url: URL, sensitiveUrlContext: boolean): boolean {
+  const fragment = url.hash.startsWith("#") ? url.hash.slice(1) : url.hash;
+  if (!fragment || !fragment.includes("=")) return false;
+
+  const queryStart = fragment.indexOf("?");
+  const fragmentPath = queryStart === -1 ? "" : fragment.slice(0, queryStart);
+  const paramText =
+    queryStart === -1 ? fragment : fragment.slice(queryStart + 1);
+  if (!paramText.includes("=")) return false;
+
+  const fragmentSensitiveContext =
+    sensitiveUrlContext || hasSensitivePathSegments(fragmentPath);
+  const params = new URLSearchParams(paramText);
+  if (!redactSensitiveUrlParams(params, fragmentSensitiveContext)) {
+    return false;
+  }
+
+  const prefix = queryStart === -1 ? "" : `${fragmentPath}?`;
+  url.hash = `${prefix}${params.toString()}`;
+  return true;
+}
+
 function hasSensitiveUrlPathContext(url: URL): boolean {
   if (SENSITIVE_URL_HOST_FRAGMENT_PATTERN.test(url.hostname)) return true;
-  return url.pathname
+  return hasSensitivePathSegments(url.pathname);
+}
+
+function hasSensitivePathSegments(path: string): boolean {
+  return path
     .split("/")
     .some((segment) => SENSITIVE_URL_PATH_SEGMENT_PATTERN.test(segment));
 }
