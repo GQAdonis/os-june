@@ -231,6 +231,17 @@ describe("sanitizeText", () => {
     expect(out).not.toContain("def456");
   });
 
+  it("redacts short route tokens in standalone hash-route strings", () => {
+    const out = sanitizeText(
+      "Request failed: hash=#/reset-password/abc123 next=#/share/def456",
+    );
+
+    expect(out).toContain("hash=#/reset-password/[redacted]");
+    expect(out).toContain("next=#/share/[redacted]");
+    expect(out).not.toContain("abc123");
+    expect(out).not.toContain("def456");
+  });
+
   it("redacts codes in relative sensitive route query strings", () => {
     const out = sanitizeText(
       "Request failed: url=/reset-password?code=abc123&state=ok path=/share?code=def456",

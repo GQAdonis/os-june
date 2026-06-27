@@ -41,7 +41,7 @@ const NAMED_SECRET_FRAGMENT_PATTERN =
   /\b[A-Za-z0-9_-]*(?:token|secret|credential|password|api[_-]?key)[A-Za-z0-9_-]*\b/gi;
 const OPAQUE_TOKEN_PATTERN = /\b[A-Za-z0-9_-]{32,}\b/g;
 const RELATIVE_PATH_CANDIDATE_PATTERN =
-  /(^|[\s"'(=])((?:[A-Z]+\s+)?(?:\.{0,2}\/)[^\s"'<>),;]+)/g;
+  /(^|[\s"'(=])((?:[A-Z]+\s+)?(?:#\/|\.{0,2}\/)[^\s"'<>),;]+)/g;
 const SENSITIVE_URL_PATH_SEGMENT_PATTERN =
   /^(?:auth|callback|callbacks|credential|credentials|download|downloads|file|files|invite|invites|oauth|password|passwords|private|reset|secret|secrets|share|shares|signed|token|tokens)$/i;
 const SENSITIVE_URL_HOST_FRAGMENT_PATTERN =
@@ -196,7 +196,12 @@ function redactNamedSecretFragment(
 function redactSensitiveRelativePath(candidate: string): string {
   const methodMatch = /^([A-Z]+\s+)(.+)$/u.exec(candidate);
   const methodPrefix = methodMatch?.[1] ?? "";
-  const path = methodMatch?.[2] ?? candidate;
+  let path = methodMatch?.[2] ?? candidate;
+  let routePrefix = "";
+  if (path.startsWith("#/")) {
+    routePrefix = "#";
+    path = path.slice(1);
+  }
   const suffixStart = firstPathSuffixIndex(path);
   const pathname = suffixStart === -1 ? path : path.slice(0, suffixStart);
   const suffix = suffixStart === -1 ? "" : path.slice(suffixStart);
@@ -224,7 +229,7 @@ function redactSensitiveRelativePath(candidate: string): string {
     }
     return segment;
   });
-  return `${methodPrefix}${redacted.join("/")}${redactSensitiveContextParams(suffix)}`;
+  return `${methodPrefix}${routePrefix}${redacted.join("/")}${redactSensitiveContextParams(suffix)}`;
 }
 
 function firstPathSuffixIndex(path: string): number {

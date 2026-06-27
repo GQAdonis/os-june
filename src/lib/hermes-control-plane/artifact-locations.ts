@@ -40,7 +40,8 @@ export function artifactLocationsFromPayload(payload: unknown): string[] {
   const out: string[] = [];
   const push = (value: unknown) => {
     const str = nonEmptyString(value);
-    if (str && !out.includes(str)) out.push(str);
+    const location = str ? stripUrlUserinfo(str) : undefined;
+    if (location && !out.includes(location)) out.push(location);
   };
 
   for (const key of SINGULAR_LOCATION_KEYS) push(record[key]);
@@ -58,10 +59,27 @@ export function artifactLocationsFromPayload(payload: unknown): string[] {
   return out;
 }
 
+function stripUrlUserinfo(value: string): string {
+  if (!looksLikeUrl(value)) return value;
+  try {
+    const url = new URL(value);
+    if (!url.username && !url.password) return value;
+    url.username = "";
+    url.password = "";
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
 /** Whether a string carries a filesystem-path or URL shape. */
 function looksLikeLocation(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) return false;
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return true;
+  if (looksLikeUrl(trimmed)) return true;
   return trimmed.includes("/") || trimmed.includes("\\");
+}
+
+function looksLikeUrl(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value);
 }

@@ -106,6 +106,25 @@ describe("artifactsFromToolEvent", () => {
     expect(artifact.displayName).toBe("report.pdf");
   });
 
+  it("strips URL userinfo from artifact navigation locations", () => {
+    const signedUrlWithUserinfo =
+      "https://user:pass@files.example.com/report.pdf?token=signed-token-123&view=1";
+    const safeNavigationUrl =
+      "https://files.example.com/report.pdf?token=signed-token-123&view=1";
+    const event = toolClassified("tool.complete", "s1", {
+      name: "download_file",
+      url: signedUrlWithUserinfo,
+    });
+
+    expect(JSON.stringify(event.payload)).not.toContain("user:pass");
+    expect(JSON.stringify(event)).not.toContain("signed-token-123");
+    expect(event.artifactLocations).toEqual([safeNavigationUrl]);
+
+    const [artifact] = artifactsFromToolEvent(event);
+    expect(artifact.path).toBe(safeNavigationUrl);
+    expect(artifact.path).not.toContain("user:pass");
+  });
+
   it("derives the display name from the path basename", () => {
     const event = toolClassified("tool.complete", "s1", {
       name: "write_file",
