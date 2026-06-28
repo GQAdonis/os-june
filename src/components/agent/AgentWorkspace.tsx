@@ -842,6 +842,7 @@ type AgentWorkspaceProps = {
   initialSession?: HermesSessionInfo;
   initialSessionId?: string;
   origin?: AgentWorkspaceOrigin;
+  onSessionSelected?: (session: HermesSessionInfo | undefined) => void;
 };
 
 // Mid-run continuity across remounts. While June is working, a session has
@@ -1249,6 +1250,7 @@ export function AgentWorkspace({
   initialSession,
   initialSessionId: initialSessionIdProp,
   origin,
+  onSessionSelected,
 }: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id ?? initialSessionIdProp;
   // Read once per mount (lazy initializer): the continuity snapshot the
@@ -1980,6 +1982,10 @@ export function AgentWorkspace({
       ),
     [hermesSessionItems, selectedHermesSessionId],
   );
+  useEffect(() => {
+    if (selectedHermesSessionId && !selectedHermesSession) return;
+    onSessionSelected?.(selectedHermesSession);
+  }, [onSessionSelected, selectedHermesSession, selectedHermesSessionId]);
   const selectedHermesSessionIsProvisional = isProvisionalHermesSessionId(
     selectedHermesSessionId,
   );
@@ -4329,21 +4335,42 @@ export function AgentWorkspace({
       selectedHermesSessionIdRef.current = storedSessionId;
       setSelectedHermesSessionId(storedSessionId);
       setSelectedTaskId(undefined);
+      const optimisticSessionItem: HermesSessionInfo = {
+        id: storedSessionId,
+        title: sessionDisplayTitle,
+        preview: displayContent,
+        started_at: createdAt,
+        last_active: createdAt,
+        message_count: 1,
+        ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
+      };
       setHermesSessionItems((current) => {
-        if (current.some((session) => session.id === storedSessionId))
-          return current;
-        return [
-          {
-            id: storedSessionId,
-            title: sessionDisplayTitle,
-            preview: displayContent,
-            started_at: createdAt,
-            last_active: createdAt,
-            message_count: 1,
-            ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
-          },
-          ...current,
-        ];
+        const existingSession = current.find(
+          (session) => session.id === storedSessionId,
+        );
+        if (existingSession) {
+          const mergedSession: HermesSessionInfo = targetSessionId
+            ? {
+                ...existingSession,
+                title: existingSession.title?.trim()
+                  ? existingSession.title
+                  : sessionDisplayTitle,
+                preview: displayContent,
+                last_active: createdAt,
+                message_count:
+                  typeof existingSession.message_count === "number"
+                    ? existingSession.message_count + 1
+                    : optimisticSessionItem.message_count,
+                ...(targetSessionModelId && !existingSession.model?.trim()
+                  ? { model: targetSessionModelId }
+                  : {}),
+              }
+            : { ...existingSession, ...optimisticSessionItem };
+          return current.map((session) =>
+            session.id === storedSessionId ? mergedSession : session,
+          );
+        }
+        return [optimisticSessionItem, ...current];
       });
     }
     const pendingUserMessage: HermesSessionMessage = {

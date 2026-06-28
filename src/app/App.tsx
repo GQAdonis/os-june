@@ -216,9 +216,26 @@ type RecordingInactivityPrompt = {
   expiresAt: number;
 };
 
+function agentSessionTabTitle(session?: HermesSessionInfo): string | undefined {
+  return session?.title?.trim() || session?.preview?.trim() || undefined;
+}
+
+function refreshedTabNav(current: TabNav, live: TabNav): TabNav | undefined {
+  if (!navEquals(current, live)) return live;
+  if (current.view !== "agent" || live.view !== "agent") return undefined;
+
+  const liveTitle = live.agentSessionTitle?.trim();
+  if (!liveTitle || current.agentSessionTitle?.trim() === liveTitle) {
+    return undefined;
+  }
+
+  return { ...current, agentSessionTitle: liveTitle };
+}
+
 // The icon + label a tab shows for a snapshot. Titles for entity views (note,
 // project, agent session) are looked up live from the loaded data, so a tab's
-// label tracks renames without storing a stale copy.
+// label tracks renames. Agent tabs also carry a fallback title so a newly
+// created session is identifiable before the session list hydrates.
 function tabMeta(
   nav: TabNav,
   notes: NoteListItemDto[],
@@ -249,7 +266,10 @@ function tabMeta(
         ? sessions.find((s) => s.id === nav.agentSessionId)
         : undefined;
       return {
-        title: session?.title?.trim() || "New session",
+        title:
+          agentSessionTabTitle(session) ||
+          nav.agentSessionTitle?.trim() ||
+          "New session",
         icon: <IconBubble3 size={TAB_ICON_SIZE} />,
       };
     }
@@ -582,6 +602,10 @@ export function App() {
       originAllNotes: activeView === "meetings" ? originAllNotes : undefined,
       folderId: activeView === "folders" ? state.selectedFolderId : undefined,
       agentSessionId: activeView === "agent" ? activeAgentSessionId : undefined,
+      agentSessionTitle:
+        activeView === "agent"
+          ? agentSessionTabTitle(activeAgentSessionSeed)
+          : undefined,
       agentOrigin: activeView === "agent" ? agentOrigin : undefined,
     }),
     [
@@ -591,6 +615,8 @@ export function App() {
       originAllNotes,
       state.selectedFolderId,
       activeAgentSessionId,
+      activeAgentSessionSeed?.preview,
+      activeAgentSessionSeed?.title,
       agentOrigin,
     ],
   );
@@ -607,11 +633,11 @@ export function App() {
       return;
     }
     setTabs((prev) =>
-      prev.map((tab) =>
-        tab.id === activeTabId && !navEquals(tab.nav, liveNav)
-          ? { ...tab, nav: liveNav }
-          : tab,
-      ),
+      prev.map((tab) => {
+        if (tab.id !== activeTabId) return tab;
+        const nav = refreshedTabNav(tab.nav, liveNav);
+        return nav ? { ...tab, nav } : tab;
+      }),
     );
   }, [liveNav, activeTabId]);
 
@@ -659,7 +685,10 @@ export function App() {
       }
       if (nav.view === "agent") {
         const session = nav.agentSessionId
-          ? agentSessions.find((s) => s.id === nav.agentSessionId)
+          ? (agentSessions.find((s) => s.id === nav.agentSessionId) ?? {
+              id: nav.agentSessionId,
+              title: nav.agentSessionTitle,
+            })
           : undefined;
         setActiveAgentSessionId(nav.agentSessionId);
         setActiveAgentSessionSeed(session);
@@ -2897,6 +2926,7 @@ export function App() {
                 <AgentWorkspace
                   initialSession={activeAgentSessionSeed}
                   initialSessionId={activeAgentSessionId}
+                  onSessionSelected={setActiveAgentSession}
                   origin={
                     agentOriginFolder
                       ? {
