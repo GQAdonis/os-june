@@ -212,7 +212,8 @@ pub enum Input {
         changed_key_code: u16,
         now_ms: u64,
     },
-    /// The hold-threshold timer elapsed.
+    /// The hold-threshold timer elapsed. `token` identifies which scheduling,
+    /// so a stale timer (cancelled + rescheduled before delivery) is ignored.
     HoldTimerFired { token: u64 },
     /// The capture-debounce timer elapsed for these modifiers.
     CaptureTimerFired { modifiers: ShortcutModifiers },
@@ -230,8 +231,8 @@ pub enum Action {
         label: String,
     },
     ScheduleHoldTimer {
-        token: u64,
         delay_ms: u64,
+        token: u64,
     },
     CancelHoldTimer,
     ScheduleCaptureTimer {
@@ -260,7 +261,7 @@ pub struct ShortcutMonitor {
     shortcuts: HashMap<ShortcutKind, MonitoredShortcut>,
     active_identity: Option<ShortcutIdentity>,
     active_push_identity: Option<ShortcutIdentity>,
-    pending_push: Option<PendingPush>,
+    pending_push: Option<(ShortcutIdentity, MonitoredShortcut, u64)>,
     next_hold_token: u64,
     last_tap_identity: Option<ShortcutIdentity>,
     last_tap_at_ms: Option<u64>,
@@ -268,13 +269,6 @@ pub struct ShortcutMonitor {
     is_capturing: bool,
     capture_press_count: u8,
     pending_capture_modifiers: Option<ShortcutModifiers>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct PendingPush {
-    identity: ShortcutIdentity,
-    shortcut: MonitoredShortcut,
-    token: u64,
 }
 
 impl Default for ShortcutMonitor {
@@ -313,7 +307,7 @@ impl Default for ShortcutMonitor {
             active_identity: None,
             active_push_identity: None,
             pending_push: None,
-            next_hold_token: 1,
+            next_hold_token: 0,
             last_tap_identity: None,
             last_tap_at_ms: None,
             pending_overlap_identity: None,
@@ -562,29 +556,31 @@ impl ShortcutMonitor {
     ) -> Vec<Action> {
         let mut actions = self.cancel_pending_push();
         let token = self.next_hold_token;
-        self.next_hold_token = self.next_hold_token.wrapping_add(1).max(1);
-        self.pending_push = Some(PendingPush {
-            identity,
-            shortcut,
-            token,
-        });
+        self.next_hold_token = self.next_hold_token.wrapping_add(1);
+        self.pending_push = Some((identity, shortcut, token));
         actions.push(Action::ScheduleHoldTimer {
-            token,
             delay_ms: HOLD_THRESHOLD_MS,
+            token,
         });
         actions
     }
 
     fn handle_hold_timer(&mut self, token: u64) -> Vec<Action> {
-        let Some(pending) = self.pending_push.clone() else {
+        let Some((identity, shortcut, pending_token)) = self.pending_push.clone() else {
             return Vec::new();
         };
-        if pending.token != token || self.active_identity.as_ref() != Some(&pending.identity) {
+        // Ignore a stale timer: a cancel + reschedule before this callback was
+        // delivered means a newer hold is pending, and committing here would
+        // start push-to-talk before its 160 ms threshold elapsed.
+        if pending_token != token {
             return Vec::new();
         }
-        self.active_push_identity = Some(pending.identity);
+        if self.active_identity.as_ref() != Some(&identity) {
+            return Vec::new();
+        }
+        self.active_push_identity = Some(identity);
         self.pending_push = None;
-        vec![down(ShortcutKind::PushToTalk, &pending.shortcut.label)]
+        vec![down(ShortcutKind::PushToTalk, &shortcut.label)]
     }
 
     fn cancel_pending_push(&mut self) -> Vec<Action> {
@@ -827,11 +823,11 @@ mod tests {
             label: "Ctrl+Opt+D".to_string(),
         }));
         assert!(down.contains(&Action::ScheduleHoldTimer {
-            token: 1,
-            delay_ms: HOLD_THRESHOLD_MS
+            delay_ms: HOLD_THRESHOLD_MS,
+            token: 0,
         }));
 
-        let fired = monitor.handle(Input::HoldTimerFired { token: 1 });
+        let fired = monitor.handle(Input::HoldTimerFired { token: 0 });
         assert_eq!(
             fired,
             vec![Action::ShortcutDown {
@@ -842,8 +838,10 @@ mod tests {
     }
 
     #[test]
-    fn stale_hold_timer_does_not_commit_new_pending_push() {
+    fn stale_hold_timer_is_ignored() {
         let mut monitor = ShortcutMonitor::new();
+        // Make Ctrl+Opt+D ambiguous (push + toggle share it) so a press
+        // schedules a hold.
         let shortcut = MonitoredShortcut {
             key_code: 0x02,
             code: "KeyD".to_string(),
@@ -851,8 +849,10 @@ mod tests {
             modifiers: ctrl_opt(),
             press_count: 1,
         };
-        let _ = monitor.set_shortcut(shortcut.clone(), ShortcutKind::Toggle);
+        let _ = monitor.set_shortcut(shortcut, ShortcutKind::Toggle);
 
+        // First press schedules hold token 0; release cancels it; second press
+        // schedules hold token 1.
         let _ = monitor.handle(Input::CarbonHotKey {
             identity: ptt_identity(),
             pressed: true,
@@ -861,19 +861,25 @@ mod tests {
         let _ = monitor.handle(Input::CarbonHotKey {
             identity: ptt_identity(),
             pressed: false,
-            now_ms: 20,
+            now_ms: 10,
         });
-        let _ = monitor.handle(Input::CarbonHotKey {
+        let down = monitor.handle(Input::CarbonHotKey {
             identity: ptt_identity(),
             pressed: true,
-            now_ms: 40,
+            now_ms: 20,
         });
+        assert!(down.contains(&Action::ScheduleHoldTimer {
+            delay_ms: HOLD_THRESHOLD_MS,
+            token: 1,
+        }));
 
+        // The stale token-0 timer must NOT commit push-to-talk early.
         assert!(monitor
-            .handle(Input::HoldTimerFired { token: 1 })
+            .handle(Input::HoldTimerFired { token: 0 })
             .is_empty());
+        // The current token-1 timer commits.
         assert_eq!(
-            monitor.handle(Input::HoldTimerFired { token: 2 }),
+            monitor.handle(Input::HoldTimerFired { token: 1 }),
             vec![Action::ShortcutDown {
                 kind: ShortcutKind::PushToTalk,
                 label: "Ctrl+Opt+D".to_string(),
@@ -882,23 +888,32 @@ mod tests {
     }
 
     #[test]
-    fn set_shortcut_releases_active_push_to_talk() {
+    fn set_shortcut_releases_a_held_push() {
         let mut monitor = ShortcutMonitor::new();
-        let _ = monitor.handle(Input::CarbonHotKey {
+        // Default push (Ctrl+Opt+D) is unambiguous, so it commits immediately.
+        let down = monitor.handle(Input::CarbonHotKey {
             identity: ptt_identity(),
             pressed: true,
             now_ms: 0,
         });
+        assert_eq!(
+            down,
+            vec![Action::ShortcutDown {
+                kind: ShortcutKind::PushToTalk,
+                label: "Ctrl+Opt+D".to_string(),
+            }]
+        );
 
-        let replacement = MonitoredShortcut {
-            key_code: 0x0F,
-            code: "KeyR".to_string(),
-            label: "Ctrl+Opt+R".to_string(),
+        // Rebinding push-to-talk while it's held must release it so the
+        // recording finalizes instead of getting stuck down.
+        let new_push = MonitoredShortcut {
+            key_code: 0x09,
+            code: "KeyV".to_string(),
+            label: "Ctrl+Opt+V".to_string(),
             modifiers: ctrl_opt(),
             press_count: 1,
         };
-        let actions = monitor.set_shortcut(replacement, ShortcutKind::PushToTalk);
-
+        let actions = monitor.set_shortcut(new_push, ShortcutKind::PushToTalk);
         assert!(actions.contains(&Action::ShortcutUp {
             kind: ShortcutKind::PushToTalk,
             label: "Ctrl+Opt+D".to_string(),

@@ -152,8 +152,8 @@ impl Driver {
             Action::FnUnavailable { message } => {
                 (self.on_event)(DriverEvent::FnUnavailable(message))
             }
-            Action::ScheduleHoldTimer { token, delay_ms } => {
-                self.schedule_timer(TimerKind::Hold { token }, delay_ms)
+            Action::ScheduleHoldTimer { delay_ms, token } => {
+                self.schedule_hold_timer(delay_ms, token)
             }
             Action::CancelHoldTimer => self.hold_generation += 1,
             Action::ScheduleCaptureTimer {
@@ -166,7 +166,7 @@ impl Driver {
         }
     }
 
-    fn schedule_timer(&mut self, kind: TimerKind, delay_ms: u64) {
+    fn schedule_hold_timer(&mut self, delay_ms: u64, token: u64) {
         self.hold_generation += 1;
         let generation = self.hold_generation;
         let app = self.app.clone();
@@ -174,7 +174,9 @@ impl Driver {
             std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             let _ = app.run_on_main_thread(move || {
                 with_driver(|driver| {
-                    let TimerKind::Hold { token } = kind;
+                    // The generation guards against a cancelled timer firing at
+                    // all; the token (carried into the state machine) guards
+                    // against committing a stale hold if one slips through.
                     if driver.hold_generation == generation {
                         let actions = driver.monitor.handle(Input::HoldTimerFired { token });
                         driver.run(actions);
@@ -295,10 +297,6 @@ impl Driver {
         });
         self.run(actions);
     }
-}
-
-enum TimerKind {
-    Hold { token: u64 },
 }
 
 fn with_driver<R>(f: impl FnOnce(&mut Driver) -> R) -> Option<R> {

@@ -1760,9 +1760,9 @@ fn send_dictation_command(
     #[cfg(target_os = "macos")]
     {
         if starts_recording {
-            crate::macos_input::remember_frontmost_app();
+            crate::macos_input::remember_focus_target();
         } else if matches!(command, DictationCommand::DiscardListening) {
-            crate::macos_input::clear_remembered_frontmost_app();
+            crate::macos_input::clear_focus_target();
         }
     }
 
@@ -1773,7 +1773,7 @@ fn send_dictation_command(
         tauri::async_runtime::spawn(async move {
             if crate::os_accounts::access_token().await.is_err() {
                 #[cfg(target_os = "macos")]
-                crate::macos_input::clear_remembered_frontmost_app();
+                crate::macos_input::clear_focus_target();
                 forward_dictation_command(&app, DictationCommand::DiscardListening, &label);
                 notify_dictation_not_signed_in(&app);
                 reset_shortcut_activation(&app);
