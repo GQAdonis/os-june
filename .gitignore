@@ -23,7 +23,7 @@ Thumbs.db
 .vscode/
 .idea/
 .pnpm-store/
-.pre-flight-reviews/
+.pre-flight-reviews
 keys/
 .tmp/
 coverage

@@ -11,6 +11,7 @@ import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
 import { IconClipboard } from "central-icons/IconClipboard";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconExclamationTriangle } from "central-icons/IconExclamationTriangle";
 import { IconFolder1 } from "central-icons/IconFolder1";
 import { IconFolders } from "central-icons/IconFolders";
 import { IconConsole } from "central-icons/IconConsole";
@@ -202,6 +203,7 @@ import {
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
   dispatchProviderModelSettingsChanged,
   modelPrivacyBadge,
+  modelSupportsImageInput,
   modelSupportsTools,
   type ModelPrivacyBadge,
   type ProviderModelSettingsChangedDetail,
@@ -223,12 +225,8 @@ import {
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
 } from "../../lib/hermes-messaging";
+import { categoryPrompt } from "../../lib/issue-report-prompt";
 import {
-  categoryPrompt,
-  displayedUserMessageText,
-} from "../../lib/issue-report-prompt";
-import {
-  displayedSkillInvocationText,
   explicitSkillInvocationPrompt,
   isPathLikeSlashToken,
   parseSkillSlashCommands,
@@ -274,6 +272,7 @@ import {
 import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
+  displayedComposerUserMessageText,
   repairContractionSpacing,
   textFromHermesContent,
   type AgentApprovalChoice,
@@ -778,7 +777,7 @@ type AgentArtifact = {
 type AgentAttachment = ImportedHermesFile & {
   id: string;
   /** Structured attach status (feature 19). Tracks whether this import has been
-   * sent to the model via image.attach: imported (ready) → attached (acked) →
+   * sent to the model via image.attach_bytes: imported (ready) → attached (acked) →
    * or failed. Carries file refs only, never the image bytes. Files stay
    * `imported` (they only ride along as a path in the prompt). */
   attach: HermesAttachmentState;
@@ -2013,6 +2012,32 @@ export function AgentWorkspace({
   const generationPrivacyBadge = generationModel
     ? modelPrivacyBadge(generationModel)
     : undefined;
+  // The agent can only switch to a model that reads images AND runs tools —
+  // a vision model without function calling would brick the agent the same way
+  // modelSupportsTools guards the picker, so it can't be an escape hatch here.
+  const visionModelOptions = useMemo(
+    () =>
+      generationModels.filter(
+        (model) => modelSupportsImageInput(model) && modelSupportsTools(model),
+      ),
+    [generationModels],
+  );
+  // Mirror the send-time fallback trigger (pendingImageAttachments +
+  // !modelSupportsImageInput) so the banner appears exactly when a submit would
+  // strip the image and downgrade to the text-only prompt. Resolve strictly via
+  // find (not generationModel, which is a zero-capability stub for an unknown
+  // id) so an unresolved/stale model stays silent rather than warning and being
+  // treated as non-vision.
+  const resolvedGenerationModel = activeGenerationModelId
+    ? generationModels.find((model) => model.id === activeGenerationModelId)
+    : undefined;
+  const composerHasPendingImage =
+    pendingImageAttachments(attachments.map((attachment) => attachment.attach))
+      .length > 0;
+  const showImageInputWarning =
+    composerHasPendingImage &&
+    !!resolvedGenerationModel &&
+    !modelSupportsImageInput(resolvedGenerationModel);
   const selectedHermesMessages = useMemo(() => {
     if (!selectedHermesSessionId) return [];
     return [
@@ -3509,7 +3534,7 @@ export function AgentWorkspace({
           ...file,
           id: `${file.path}:${Date.now()}:${Math.random().toString(36)}`,
           // Seed the structured attach status (feature 19). Images become
-          // `kind:"image"`, status `imported` — eligible for image.attach on
+          // `kind:"image"`, status `imported` — eligible for structured attach on
           // the next submit. No bytes are kept here.
           attach: attachmentStateFrom(file),
         })),
@@ -3689,7 +3714,7 @@ export function AgentWorkspace({
   }
 
   /**
-   * Attach this turn's pending images to the live session via image.attach
+   * Attach this turn's pending images to the live session via image.attach_bytes
    * (feature 19), updating each chip's status and feeding the artifact timeline.
    * The base64 is read on demand from the workspace file (hermesBridgeFilePreview
    * returns a data url), passed straight to the typed attachImage, and discarded;
@@ -3711,7 +3736,7 @@ export function AgentWorkspace({
     const deps = {
       attachImage: methods.attachImage,
       readImageData: (path: string) => hermesBridgeFilePreview(path),
-      isSupported: () => isHermesFeatureSupported("image.attach"),
+      isSupported: () => isHermesFeatureSupported("image.attach_bytes"),
     };
     const mode = hermesModeFor(storedSessionId);
     const failures: string[] = [];
@@ -4144,7 +4169,7 @@ export function AgentWorkspace({
       displayContent?: string;
       titleContent?: string;
       /** Imported attachments for this turn. Image attachments are sent to the
-       * session via the structured image.attach flow (feature 19) once the
+       * session via the structured image attach flow (feature 19) once the
        * session id is known and before prompt.submit; a failed attach throws to
        * block the send so the user can retry. */
       attachments?: AgentAttachment[];
@@ -4164,6 +4189,38 @@ export function AgentWorkspace({
           ?.model?.trim() ||
         defaultGenerationModelId
       : defaultGenerationModelId;
+    const turnAttachments = options?.attachments ?? [];
+    const pendingImages = pendingImageAttachments(
+      turnAttachments.map((attachment) => attachment.attach),
+    );
+    // Resolve strictly from the catalog: selectedModelOption synthesizes a
+    // zero-capability stub for an unknown id, which would read as non-vision and
+    // wrongly downgrade a vision-capable (but stale/not-yet-loaded) model. find
+    // returns undefined when unresolved so the guard below skips the fallback.
+    const targetGenerationModel = targetSessionModelId
+      ? generationModelsRef.current.find(
+          (model) => model.id === targetSessionModelId,
+        )
+      : undefined;
+    const imageInputFallbackContent =
+      // Only downgrade to the text-only fallback when the model is KNOWN to lack
+      // image input. An unresolved model id (stale or not-yet-loaded catalog)
+      // must NOT be assumed non-vision, or a vision-capable session would
+      // silently drop the image and never call attachPendingImages. Mirrors the
+      // composer banner's `!!generationModel && !modelSupportsImageInput` guard.
+      pendingImages.length &&
+      targetGenerationModel &&
+      !modelSupportsImageInput(targetGenerationModel)
+        ? unsupportedImageInputPrompt({
+            displayContent,
+            imageNames: pendingImages.map(
+              (attachment) => attachment.displayName,
+            ),
+            modelName: targetGenerationModel?.name ?? targetSessionModelId,
+            runtimeContent: content,
+          })
+        : undefined;
+    const promptSubmitContent = imageInputFallbackContent ?? content;
     // Issue reports skip title suggestion: the content is the wrapped
     // investigation prompt, which would title the session after the wrapper.
     const titlePromise =
@@ -4317,22 +4374,24 @@ export function AgentWorkspace({
         new Error("Hermes did not resume the session."),
       );
     }
-    // Feature 19: send any imported images to the session through the
-    // structured image.attach flow before the prompt, so the model/tools see
-    // them as first-class inputs (not just a path mentioned in prose) and an
-    // image-edit prompt names a concrete source. A failed attach throws here,
-    // which the submit() catch turns into a restored composer the user can
-    // retry — the prompt is NOT sent with a silently-missing image.
-    try {
-      await attachPendingImages(
-        gateway,
-        runtimeSessionId,
-        storedSessionId,
-        options?.attachments ?? [],
-      );
-    } catch (err) {
-      clearQueuedIssueReport();
-      rollbackOptimisticBeforePrompt(err);
+    if (!imageInputFallbackContent) {
+      // Feature 19: send any imported images to the session through the
+      // structured image attach flow before the prompt, so the model/tools see
+      // them as first-class inputs (not just a path mentioned in prose) and an
+      // image-edit prompt names a concrete source. A failed attach throws here,
+      // which the submit() catch turns into a restored composer the user can
+      // retry — the prompt is NOT sent with a silently-missing image.
+      try {
+        await attachPendingImages(
+          gateway,
+          runtimeSessionId,
+          storedSessionId,
+          turnAttachments,
+        );
+      } catch (err) {
+        clearQueuedIssueReport();
+        rollbackOptimisticBeforePrompt(err);
+      }
     }
     const createdAt = optimisticSession?.createdAt ?? new Date().toISOString();
     setRuntimeSessionIds((current) => ({
@@ -4426,11 +4485,11 @@ export function AgentWorkspace({
       hermesTraceBuffer.recordOutbound({
         sessionId: storedSessionId,
         method: "prompt.submit",
-        params: { session_id: runtimeSessionId, text: content },
+        params: { session_id: runtimeSessionId, text: promptSubmitContent },
       });
       await gateway.request("prompt.submit", {
         session_id: runtimeSessionId,
-        text: content,
+        text: promptSubmitContent,
       });
       await loadHermesSessions({
         suppressStartupRequestError: !hermesSessionsHydratedRef.current,
@@ -6239,6 +6298,38 @@ export function AgentWorkspace({
                   </button>
                 </span>
               ))}
+            </div>
+          ) : null}
+          {showImageInputWarning ? (
+            <div className="agent-composer-image-warning" role="status">
+              <IconExclamationTriangle
+                size={14}
+                aria-hidden
+                className="agent-composer-image-warning-icon"
+              />
+              <span className="agent-composer-image-warning-text">
+                {resolvedGenerationModel?.name ?? "This model"} can't read
+                images.
+              </span>
+              {visionModelOptions.length ? (
+                <button
+                  type="button"
+                  className="agent-composer-notice-button agent-composer-image-warning-action"
+                  onClick={() =>
+                    // Switch straight to the first image-capable model. The
+                    // label promises a one-tap fix, and the generic model picker
+                    // isn't vision-scoped — opening it for the multi-candidate
+                    // case would drop the user into an unfiltered list that
+                    // doesn't surface the eligible models. visionModelOptions is
+                    // pre-filtered to image + tool support;
+                    // handleSelectGenerationModel routes the global default vs
+                    // per-chat override.
+                    void handleSelectGenerationModel(visionModelOptions[0].id)
+                  }
+                >
+                  Switch to a vision model
+                </button>
+              ) : null}
             </div>
           ) : null}
           <ComposerEditor
@@ -11295,6 +11386,37 @@ function promptWithAttachments(
   ].join("\n");
 }
 
+function unsupportedImageInputPrompt({
+  displayContent,
+  imageNames,
+  modelName,
+  runtimeContent,
+}: {
+  displayContent: string;
+  imageNames: string[];
+  modelName?: string;
+  runtimeContent: string;
+}) {
+  const modelLabel = modelName?.trim() || "The selected model";
+  return [
+    displayContent,
+    "",
+    "--- Attached Context ---",
+    `${modelLabel} does not support image input in June.`,
+    "The user attached image file(s), but this model cannot read their visual contents.",
+    imageNames.length
+      ? `Attached image file(s): ${imageNames.join(", ")}.`
+      : undefined,
+    "Do not call vision_analyze, image tools, shell, filesystem tools, or any other tool to inspect the image files.",
+    "Reply directly and briefly. Say that you cannot view the attached image with the current model, then ask the user to describe the image or paste the relevant text. If they expected the image to be readable, suggest choosing a model with image support and sending the image again.",
+    runtimeContent !== displayContent
+      ? ["", "Original routed prompt:", runtimeContent].join("\n")
+      : undefined,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
 function attachmentPromptPath(path: string) {
   const workspaceMatch = path.match(/(?:^|[/\\])workspace[/\\](.+)$/);
   if (workspaceMatch?.[1]) return workspaceMatch[1];
@@ -11656,16 +11778,6 @@ function commandTokensForResolutions(
 
 function slashCommandKey(name: string) {
   return name.trim().toLowerCase();
-}
-
-function displayedComposerUserMessageText(content: string): string {
-  let text = content;
-  for (let index = 0; index < 3; index += 1) {
-    const next = displayedUserMessageText(displayedSkillInvocationText(text));
-    if (next === text) return text;
-    text = next;
-  }
-  return text;
 }
 
 function sameVisibleMessageText(left: string, right: string) {
