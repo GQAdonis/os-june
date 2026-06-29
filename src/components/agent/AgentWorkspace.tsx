@@ -224,12 +224,8 @@ import {
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
 } from "../../lib/hermes-messaging";
+import { categoryPrompt } from "../../lib/issue-report-prompt";
 import {
-  categoryPrompt,
-  displayedUserMessageText,
-} from "../../lib/issue-report-prompt";
-import {
-  displayedSkillInvocationText,
   explicitSkillInvocationPrompt,
   isPathLikeSlashToken,
   parseSkillSlashCommands,
@@ -275,6 +271,7 @@ import {
 import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
+  displayedComposerUserMessageText,
   repairContractionSpacing,
   textFromHermesContent,
   type AgentApprovalChoice,
@@ -11711,16 +11708,6 @@ function commandTokensForResolutions(
 
 function slashCommandKey(name: string) {
   return name.trim().toLowerCase();
-}
-
-function displayedComposerUserMessageText(content: string): string {
-  let text = content;
-  for (let index = 0; index < 3; index += 1) {
-    const next = displayedUserMessageText(displayedSkillInvocationText(text));
-    if (next === text) return text;
-    text = next;
-  }
-  return text;
 }
 
 function sameVisibleMessageText(left: string, right: string) {
