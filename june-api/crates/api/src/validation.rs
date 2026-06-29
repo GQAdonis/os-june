@@ -105,14 +105,19 @@ fn validate_json_shape(
             }
         }
         Value::Object(object) => {
+            // The only sanctioned home for a large base64 image is the
+            // `image_url.url` of a real content part, shaped
+            // {"type":"image_url","image_url":{"url":"data:..."}}. Require that
+            // sibling `type` marker before exempting the url, so an oversized
+            // data URL can't be smuggled through an arbitrarily-named `image_url`
+            // field elsewhere (metadata, tool descriptions) to bypass the caps.
+            let is_image_content_part =
+                object.get("type").and_then(Value::as_str) == Some("image_url");
             for (key, child) in object {
-                // The only sanctioned home for a large base64 image is
-                // messages[].content[].image_url.url. Exempt exactly that string
-                // from BOTH the per-string and aggregate guards; every other
-                // string (metadata, tool descriptions, …) stays subject to them,
-                // so an oversized data URL can't be smuggled into an unrelated
-                // field to bypass the cap.
-                if key == "image_url"
+                // Exempt that one url string from BOTH the per-string and
+                // aggregate guards; every other string stays subject to them.
+                if is_image_content_part
+                    && key == "image_url"
                     && let Some(image) = child.as_object()
                     && image
                         .get("url")
@@ -299,6 +304,26 @@ mod tests {
                 "model": "text-model",
                 "messages": [{ "role": "user", "content": "hi" }],
                 "metadata": { "note": image },
+            })),
+            Err(ApiError::BadRequest { message, .. }) if message == "string_too_long"
+        ));
+    }
+
+    #[test]
+    fn agent_body_rejects_image_url_shaped_object_without_content_part_type() {
+        // An image_url-shaped object outside a real content part (no sibling
+        // "type":"image_url") must NOT bypass the guards, or an oversized data
+        // URL could be smuggled through e.g. metadata.image_url.url.
+        let image = format!(
+            "data:image/png;base64,{}",
+            "a".repeat(MAX_AGENT_STRING_CHARS + 1)
+        );
+
+        assert!(matches!(
+            validate_agent_chat_body(&json!({
+                "model": "text-model",
+                "messages": [{ "role": "user", "content": "hi" }],
+                "metadata": { "image_url": { "url": image } },
             })),
             Err(ApiError::BadRequest { message, .. }) if message == "string_too_long"
         ));
