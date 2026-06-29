@@ -1,9 +1,13 @@
-use crate::domain::types::{
-    AgentMessageDto, AgentMessageRole, AgentSafetyProfile, AgentTaskDto, AgentTaskListResponse,
-    AgentTaskStatus, AgentToolEventDto, AgentToolEventStatus, AppError, AudioArtifactDto,
-    DictationHistoryItemDto, DictionaryEntryDto, FolderDto, ListDictationHistoryResponse,
-    ListNotesResponse, NoteDto, NoteListItemDto, ProcessingStatus, RecordingSourceMode,
-    RecordingState, SessionFolderDto, TranscriptDto,
+use crate::{
+    audio::validation::source_audio_passes_validation,
+    domain::types::{
+        AgentMessageDto, AgentMessageRole, AgentSafetyProfile, AgentTaskDto, AgentTaskListResponse,
+        AgentTaskStatus, AgentToolEventDto, AgentToolEventStatus, AppError, AudioArtifactDto,
+        AudioValidationDto, DictationHistoryItemDto, DictionaryEntryDto, FolderDto,
+        ListDictationHistoryResponse, ListNotesResponse, NoteDto, NoteListItemDto,
+        ProcessingStatus, RecordingSource, RecordingSourceMode, RecordingState, SessionFolderDto,
+        TranscriptDto,
+    },
 };
 use chrono::{Duration, SecondsFormat, Utc};
 use sqlx::query::query;
@@ -1690,25 +1694,7 @@ impl Repositories {
         &self,
         note_id: &str,
     ) -> Result<Option<AudioArtifactDto>, sqlx::error::Error> {
-        let row = query(
-            "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
-             FROM audio_artifacts
-             WHERE note_id = ? AND status IN ('valid', 'invalid')
-             ORDER BY created_at DESC
-             LIMIT 1",
-        )
-        .bind(note_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(row.map(|row| AudioArtifactDto {
-            id: row.get("id"),
-            source: row.get("source"),
-            format: row.get("format"),
-            duration_ms: row.get("duration_ms"),
-            size_bytes: row.get("size_bytes"),
-            checksum: row.get("checksum"),
-            created_at: row.get("created_at"),
-        }))
+        Ok(self.latest_audio_sources(note_id).await?.into_iter().next())
     }
 
     pub async fn latest_valid_audio_artifact_paths(
@@ -1804,26 +1790,36 @@ impl Repositories {
         &self,
         note_id: &str,
     ) -> Result<Vec<AudioArtifactDto>, sqlx::error::Error> {
-        let rows = query(
-            "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
+        let session = query(
+            "SELECT recording_session_id
              FROM audio_artifacts
-             WHERE note_id = ? AND status IN ('valid', 'invalid')
-             ORDER BY created_at DESC",
+             WHERE note_id = ?
+               AND status IN ('valid', 'invalid')
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1",
         )
         .bind(note_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(session) = session else {
+            return Ok(Vec::new());
+        };
+        let session_id: String = session.get("recording_session_id");
+        let rows = query(
+            "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at, status, validation_summary
+             FROM audio_artifacts
+             WHERE note_id = ?
+               AND recording_session_id = ?
+               AND status IN ('valid', 'invalid')
+             ORDER BY CASE source WHEN 'microphone' THEN 0 WHEN 'system' THEN 1 ELSE 2 END",
+        )
+        .bind(note_id)
+        .bind(session_id)
         .fetch_all(&self.pool)
         .await?;
         Ok(rows
             .into_iter()
-            .map(|row| AudioArtifactDto {
-                id: row.get("id"),
-                source: row.get("source"),
-                format: row.get("format"),
-                duration_ms: row.get("duration_ms"),
-                size_bytes: row.get("size_bytes"),
-                checksum: row.get("checksum"),
-                created_at: row.get("created_at"),
-            })
+            .filter_map(audio_artifact_from_preserved_row)
             .collect())
     }
 
@@ -2602,6 +2598,38 @@ fn manual_tail_for_append(generated: Option<&str>, edited: Option<&str>) -> Opti
             Some(rest.to_string())
         }
     })
+}
+
+fn audio_artifact_from_preserved_row(row: sqlx_sqlite::SqliteRow) -> Option<AudioArtifactDto> {
+    let status: String = row.get("status");
+    let source: String = row.get("source");
+    if status != "valid"
+        && !invalid_audio_artifact_is_retryable(
+            &source,
+            row.get::<Option<String>, _>("validation_summary"),
+        )
+    {
+        return None;
+    }
+    Some(AudioArtifactDto {
+        id: row.get("id"),
+        source,
+        format: row.get("format"),
+        duration_ms: row.get("duration_ms"),
+        size_bytes: row.get("size_bytes"),
+        checksum: row.get("checksum"),
+        created_at: row.get("created_at"),
+    })
+}
+
+fn invalid_audio_artifact_is_retryable(source: &str, validation_summary: Option<String>) -> bool {
+    let Some(summary) = validation_summary else {
+        return false;
+    };
+    let Ok(validation) = serde_json::from_str::<AudioValidationDto>(&summary) else {
+        return false;
+    };
+    source_audio_passes_validation(RecordingSource::from(source), &validation)
 }
 
 #[derive(Debug, Clone)]
