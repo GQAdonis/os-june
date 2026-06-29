@@ -119,6 +119,7 @@ describe("createHermesMethods — typed command wrappers", () => {
     });
     expect(request).toHaveBeenCalledWith("image.attach_bytes", {
       session_id: "s1",
+      mime_type: "image/png",
       content_base64: "AAAA",
       filename: "diagram.png",
     });

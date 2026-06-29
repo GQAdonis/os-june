@@ -131,6 +131,32 @@ describe("attachImageToSession", () => {
     expect(result.error).toBeUndefined();
   });
 
+  it("uses the preview mime when the filename has no useful extension", async () => {
+    const deps = baseDeps();
+    deps.readImageData.mockResolvedValue("data:image/webp;base64,d2VicA==");
+    const imported: ImportedHermesFile = {
+      name: "screenshot",
+      path: "/ws/uploads/screenshot",
+      rootLabel: "Workspace",
+      size: 456,
+      previewDataUrl: "data:image/webp;base64,d2VicA==",
+    };
+
+    const result = await attachImageToSession(
+      attachmentStateFrom(imported, "ws-1"),
+      "ws-1",
+      deps,
+    );
+
+    expect(deps.attachImage).toHaveBeenCalledWith({
+      sessionId: "ws-1",
+      mimeType: "image/webp",
+      dataBase64: "d2VicA==",
+      fileName: "screenshot",
+    });
+    expect(result.state.status).toBe("attached");
+  });
+
   it("emits an artifact seed with the attached action and no base64", async () => {
     const deps = baseDeps();
     const result = await attachImageToSession(

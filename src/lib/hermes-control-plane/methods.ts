@@ -155,9 +155,10 @@ export function createHermesMethods(client: HermesRequestLike): HermesMethods {
         subagent_id: subagentId,
       });
     },
-    attachImage({ sessionId, dataBase64, fileName }) {
+    attachImage({ sessionId, mimeType, dataBase64, fileName }) {
       return request("image.attach_bytes", {
         session_id: sessionId,
+        mime_type: mimeType,
         content_base64: dataBase64,
         ...defined({ filename: fileName }),
       });

@@ -5667,6 +5667,7 @@ describe("AgentWorkspace", () => {
     await waitFor(() =>
       expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach_bytes", {
         session_id: "runtime-session-1",
+        mime_type: "image/png",
         content_base64: "cHJldmlldw==",
         filename: "screenshot.png",
       }),
