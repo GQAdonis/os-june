@@ -14,6 +14,16 @@ export function hasLiveSubscription(account: AccountStatus): boolean {
   return status === "trialing" || status === "active";
 }
 
+export function depletedBalanceActionLabel(account: AccountStatus) {
+  return shouldOpenPortalForDepletedBalance(account)
+    ? "Top up credits"
+    : "Upgrade";
+}
+
+export function shouldOpenPortalForDepletedBalance(account: AccountStatus) {
+  return account.subscription?.subscribed === true;
+}
+
 function hasKnownNonLiveSubscription(account: AccountStatus): boolean {
   const subscription = account.subscription;
   if (!subscription) return false;

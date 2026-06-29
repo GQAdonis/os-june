@@ -85,6 +85,7 @@ import {
   listSessionFolders,
   openPrivacySettings,
   osAccountsLogout,
+  osAccountsOpenPortal,
   osAccountsUpgrade,
   pauseRecording,
   removeNoteFromFolder,
@@ -164,7 +165,12 @@ import {
   markOnboardingComplete,
   shouldReplayOnboarding,
 } from "../lib/onboarding";
-import { shouldBlockOnFunding, shouldBlockOnSignIn } from "../lib/account-gate";
+import {
+  depletedBalanceActionLabel,
+  shouldOpenPortalForDepletedBalance,
+  shouldBlockOnFunding,
+  shouldBlockOnSignIn,
+} from "../lib/account-gate";
 import {
   checkScribeUpdate,
   relaunchScribe,
@@ -521,6 +527,12 @@ export function App() {
     !devAccountsUnconfigured &&
     !signInRequired &&
     shouldBlockOnFunding(account);
+  const topUpLabel = depletedBalanceActionLabel(account);
+  const topUpOpensPortal = shouldOpenPortalForDepletedBalance(account);
+  const handleTopUp = useCallback(() => {
+    const action = topUpOpensPortal ? osAccountsOpenPortal : osAccountsUpgrade;
+    void action().catch((err: unknown) => setError(messageFromError(err)));
+  }, [topUpOpensPortal]);
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();
@@ -2927,6 +2939,8 @@ export function App() {
                   initialSession={activeAgentSessionSeed}
                   initialSessionId={activeAgentSessionId}
                   onSessionSelected={setActiveAgentSession}
+                  topUpLabel={topUpLabel}
+                  onTopUp={handleTopUp}
                   origin={
                     agentOriginFolder
                       ? {
@@ -3244,11 +3258,8 @@ export function App() {
                           throw err;
                         }
                       }}
-                      onTopUp={() =>
-                        void osAccountsUpgrade().catch((err: unknown) =>
-                          setError(messageFromError(err)),
-                        )
-                      }
+                      onTopUp={handleTopUp}
+                      topUpLabel={topUpLabel}
                       onAssignFolder={(folderId) =>
                         void handleSetNoteFolder(selectedNote.id, folderId)
                       }
