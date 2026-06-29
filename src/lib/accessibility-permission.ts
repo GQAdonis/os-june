@@ -4,20 +4,19 @@ import {
 } from "./tauri";
 
 export async function requestDictationAccessibilityPermission() {
-  // June has moved Accessibility-owned work between the app process and the
-  // dictation helper; prompt both so the visible action is never a no-op.
-  const appPrompt = requestAccessibilityPermission();
-  const helperPrompt = dictationHelperCommand({
-    type: "request_accessibility_permission",
-  });
-  const results = await Promise.allSettled([appPrompt, helperPrompt]);
-  const firstRejected = results.find(
-    (result): result is PromiseRejectedResult => result.status === "rejected",
-  );
-  if (
-    firstRejected &&
-    results.every((result) => result.status === "rejected")
-  ) {
-    throw firstRejected.reason;
+  try {
+    await dictationHelperCommand({
+      type: "request_accessibility_permission",
+    });
+  } catch (error) {
+    // The dictation helper owns the paste event, so helper failure cannot be
+    // treated as success. Prompt the app process as a best-effort fallback, but
+    // still surface the helper failure so callers can offer System Settings.
+    try {
+      await requestAccessibilityPermission();
+    } catch {
+      // Keep the helper error because it points at the required permission owner.
+    }
+    throw error;
   }
 }

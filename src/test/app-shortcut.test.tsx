@@ -709,10 +709,10 @@ describe("App shortcuts", () => {
 
     await user.click(screen.getByRole("button", { name: "Grant access" }));
 
-    expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce();
     expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
       type: "request_accessibility_permission",
     });
+    expect(mocks.requestAccessibilityPermission).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
         type: "get_permission_status",
@@ -749,11 +749,53 @@ describe("App shortcuts", () => {
       }),
     );
 
-    expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce();
     expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
       type: "request_accessibility_permission",
     });
+    expect(mocks.requestAccessibilityPermission).not.toHaveBeenCalled();
     expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith("accessibility");
+  });
+
+  it("opens Accessibility settings when the settings Manage prompt cannot reach the helper", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(mocks.listeners.has(OPEN_SETTINGS_EVENT)).toBe(true),
+    );
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+    await act(async () => {
+      mocks.listeners.get("dictation-event")?.({
+        payload: JSON.stringify({
+          type: "permission_status",
+          payload: { microphone: "granted", accessibility: "missing" },
+        }),
+      });
+    });
+    mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
+
+    mocks.dictationHelperCommand.mockImplementation((command) => {
+      if (command?.type === "request_accessibility_permission") {
+        return Promise.reject(new Error("Helper unavailable"));
+      }
+      return Promise.resolve(undefined);
+    });
+    mocks.requestAccessibilityPermission.mockClear();
+    mocks.openPrivacySettings.mockClear();
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Manage Accessibility permission",
+      }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce(),
+    );
+    await waitFor(() =>
+      expect(mocks.openPrivacySettings).toHaveBeenCalledWith("accessibility"),
+    );
   });
 
   it("starts a session with Ctrl-N and creates a note with Ctrl-Shift-N on Windows", async () => {

@@ -116,7 +116,9 @@ export function PermissionsStep({
   function openAccessibilitySettings() {
     // Ask macOS for the native Accessibility prompt in context. Let macOS own
     // any Settings handoff so the prompt is not hidden behind our own launch.
-    void requestDictationAccessibilityPermission().catch(() => undefined);
+    void requestDictationAccessibilityPermission().catch(() => {
+      void openPrivacySettings("accessibility");
+    });
   }
 
   return (

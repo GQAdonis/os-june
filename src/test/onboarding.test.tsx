@@ -552,12 +552,48 @@ describe("OnboardingFlow", () => {
       mocks.openPrivacySettings.mockClear();
       await user.click(allowAccessibility);
 
-      expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce();
       expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
         type: "request_accessibility_permission",
       });
+      expect(mocks.requestAccessibilityPermission).not.toHaveBeenCalled();
       expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith(
         "accessibility",
+      );
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("falls back to Accessibility settings when the helper prompt cannot be requested", async () => {
+    const user = userEvent.setup();
+    const restoreNavigator = stubMacNavigatorPlatform();
+    try {
+      await renderFlow();
+      emitDictationEvent?.({
+        payload: JSON.stringify({
+          type: "permission_status",
+          payload: { microphone: "granted", accessibility: "missing" },
+        }),
+      });
+      const allowAccessibility = await screen.findByRole("button", {
+        name: "Allow accessibility access",
+      });
+
+      mocks.requestAccessibilityPermission.mockClear();
+      mocks.dictationHelperCommand.mockImplementation((command) => {
+        if (command?.type === "request_accessibility_permission") {
+          return Promise.reject(new Error("Helper unavailable"));
+        }
+        return Promise.resolve(undefined);
+      });
+      mocks.openPrivacySettings.mockClear();
+      await user.click(allowAccessibility);
+
+      await waitFor(() =>
+        expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce(),
+      );
+      await waitFor(() =>
+        expect(mocks.openPrivacySettings).toHaveBeenCalledWith("accessibility"),
       );
     } finally {
       restoreNavigator();

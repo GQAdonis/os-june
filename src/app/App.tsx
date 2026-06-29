@@ -1752,7 +1752,9 @@ export function App() {
 
   function handleEnableAccessibility() {
     setAccessibilityRefreshRequest((request) => request + 1);
-    void requestDictationAccessibilityPermission().catch(() => undefined);
+    void requestDictationAccessibilityPermission().catch(() => {
+      void openPrivacySettings("accessibility");
+    });
   }
 
   useEffect(() => {
