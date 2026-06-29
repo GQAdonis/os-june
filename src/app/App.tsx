@@ -66,6 +66,7 @@ import { IconZap } from "central-icons/IconZap";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconSettingsGear4 } from "central-icons/IconSettingsGear4";
 import { Dialog } from "../components/ui/Dialog";
+import { requestDictationAccessibilityPermission } from "../lib/accessibility-permission";
 import {
   assignNoteToFolder,
   assignSessionToFolder,
@@ -1751,9 +1752,7 @@ export function App() {
 
   function handleEnableAccessibility() {
     setAccessibilityRefreshRequest((request) => request + 1);
-    void dictationHelperCommand({
-      type: "request_accessibility_permission",
-    }).catch(() => undefined);
+    void requestDictationAccessibilityPermission().catch(() => undefined);
   }
 
   useEffect(() => {

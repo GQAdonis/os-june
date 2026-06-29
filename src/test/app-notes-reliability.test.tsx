@@ -43,6 +43,7 @@ const mocks = vi.hoisted(() => ({
   retryProcessing: vi.fn(),
   recoverRecording: vi.fn(),
   dictationHelperCommand: vi.fn(),
+  requestAccessibilityPermission: vi.fn(),
   dictationSettings: vi.fn(),
   listDictationHistory: vi.fn(),
   listDictionaryEntries: vi.fn(),
@@ -98,6 +99,7 @@ vi.mock("../lib/tauri", () => ({
   retryProcessing: mocks.retryProcessing,
   recoverRecording: mocks.recoverRecording,
   dictationHelperCommand: mocks.dictationHelperCommand,
+  requestAccessibilityPermission: mocks.requestAccessibilityPermission,
   dictationSettings: mocks.dictationSettings,
   listDictationHistory: mocks.listDictationHistory,
   listDictionaryEntries: mocks.listDictionaryEntries,
@@ -240,6 +242,9 @@ describe("notes recording reliability", () => {
       bytesWritten: 2048,
     });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
+    mocks.requestAccessibilityPermission.mockResolvedValue({
+      state: "missing",
+    });
     mocks.dictationSettings.mockResolvedValue({
       settings: {
         pushToTalkShortcut: {

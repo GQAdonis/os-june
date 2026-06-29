@@ -4,6 +4,7 @@ import { IconCheckmark1Small } from "central-icons/IconCheckmark1Small";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconTextIndicator } from "central-icons/IconTextIndicator";
 import { IconVolumeFull } from "central-icons/IconVolumeFull";
+import { requestDictationAccessibilityPermission } from "../../../lib/accessibility-permission";
 import {
   dictationHelperCommand,
   openPrivacySettings,
@@ -113,13 +114,9 @@ export function PermissionsStep({
   }, [statuses.checked]);
 
   function openAccessibilitySettings() {
-    // Fire the helper's prompting check first: it registers the dictation
-    // helper in the Accessibility list (so there's a toggle to flip) and
-    // shows the native dialog. Let macOS own the System Settings handoff so
-    // the native prompt is not left open behind a programmatic settings launch.
-    void dictationHelperCommand({
-      type: "request_accessibility_permission",
-    }).catch(() => undefined);
+    // Ask macOS for the native Accessibility prompt in context. Let macOS own
+    // any Settings handoff so the prompt is not hidden behind our own launch.
+    void requestDictationAccessibilityPermission().catch(() => undefined);
   }
 
   return (

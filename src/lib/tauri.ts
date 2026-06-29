@@ -645,6 +645,10 @@ export type RecordingSourceReadinessDto = {
   sources: SourceReadinessDto[];
 };
 
+export type AccessibilityPermissionResponse = {
+  state: string;
+};
+
 export async function bootstrapApp() {
   return invoke<BootstrapResponse>("bootstrap_app");
 }
@@ -1161,6 +1165,12 @@ export async function openPrivacySettings(
   pane: "microphone" | "accessibility" | "systemAudio",
 ) {
   return invoke<void>("open_privacy_settings", { request: { pane } });
+}
+
+export async function requestAccessibilityPermission() {
+  return invoke<AccessibilityPermissionResponse>(
+    "request_accessibility_permission",
+  );
 }
 
 export async function startRecording(

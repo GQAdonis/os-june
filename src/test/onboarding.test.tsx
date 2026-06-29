@@ -18,6 +18,7 @@ import type { AccountStatus, RecordingSourceReadinessDto } from "../lib/tauri";
 const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
   dictationHelperCommand: vi.fn(),
+  requestAccessibilityPermission: vi.fn(),
   checkRecordingSourceReadiness: vi.fn(),
   openPrivacySettings: vi.fn(),
   setDictationLanguage: vi.fn(),
@@ -32,6 +33,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../lib/tauri", () => ({
   dictationSettings: mocks.dictationSettings,
   dictationHelperCommand: mocks.dictationHelperCommand,
+  requestAccessibilityPermission: mocks.requestAccessibilityPermission,
   checkRecordingSourceReadiness: mocks.checkRecordingSourceReadiness,
   openPrivacySettings: mocks.openPrivacySettings,
   setDictationLanguage: mocks.setDictationLanguage,
@@ -124,6 +126,9 @@ describe("OnboardingFlow", () => {
       },
     );
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
+    mocks.requestAccessibilityPermission.mockResolvedValue({
+      state: "missing",
+    });
     mocks.checkRecordingSourceReadiness.mockResolvedValue(
       systemAudioReadiness(true),
     );
@@ -525,6 +530,38 @@ describe("OnboardingFlow", () => {
         type: "request_microphone_permission",
       }),
     );
+  });
+
+  it("requests the native Accessibility prompt from the Allow button", async () => {
+    const user = userEvent.setup();
+    const restoreNavigator = stubMacNavigatorPlatform();
+    try {
+      await renderFlow();
+      emitDictationEvent?.({
+        payload: JSON.stringify({
+          type: "permission_status",
+          payload: { microphone: "granted", accessibility: "missing" },
+        }),
+      });
+      const allowAccessibility = await screen.findByRole("button", {
+        name: "Allow accessibility access",
+      });
+
+      mocks.requestAccessibilityPermission.mockClear();
+      mocks.dictationHelperCommand.mockClear();
+      mocks.openPrivacySettings.mockClear();
+      await user.click(allowAccessibility);
+
+      expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce();
+      expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+        type: "request_accessibility_permission",
+      });
+      expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith(
+        "accessibility",
+      );
+    } finally {
+      restoreNavigator();
+    }
   });
 
   it("only requires microphone access on Windows", async () => {

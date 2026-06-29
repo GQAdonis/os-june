@@ -71,6 +71,7 @@ const mocks = vi.hoisted(() => ({
   retryProcessing: vi.fn(),
   recoverRecording: vi.fn(),
   dictationHelperCommand: vi.fn(),
+  requestAccessibilityPermission: vi.fn(),
   listDictationHistory: vi.fn(),
   osAccountsStatus: vi.fn(),
   osAccountsLogin: vi.fn(),
@@ -167,6 +168,7 @@ vi.mock("../lib/tauri", () => ({
   retryProcessing: mocks.retryProcessing,
   recoverRecording: mocks.recoverRecording,
   dictationHelperCommand: mocks.dictationHelperCommand,
+  requestAccessibilityPermission: mocks.requestAccessibilityPermission,
   listDictationHistory: mocks.listDictationHistory,
   osAccountsStatus: mocks.osAccountsStatus,
   osAccountsLogin: mocks.osAccountsLogin,
@@ -237,6 +239,9 @@ describe("App shortcuts", () => {
       ],
     });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
+    mocks.requestAccessibilityPermission.mockResolvedValue({
+      state: "missing",
+    });
     mocks.listDictationHistory.mockResolvedValue({
       items: [],
       retentionDays: 7,
@@ -684,6 +689,7 @@ describe("App shortcuts", () => {
     await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
 
     mocks.dictationHelperCommand.mockClear();
+    mocks.requestAccessibilityPermission.mockClear();
     mocks.openPrivacySettings.mockClear();
 
     await act(async () => {
@@ -703,6 +709,7 @@ describe("App shortcuts", () => {
 
     await user.click(screen.getByRole("button", { name: "Grant access" }));
 
+    expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce();
     expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
       type: "request_accessibility_permission",
     });
@@ -711,6 +718,41 @@ describe("App shortcuts", () => {
         type: "get_permission_status",
       }),
     );
+    expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith("accessibility");
+  });
+
+  it("requests Accessibility from the settings Manage button", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await waitFor(() =>
+      expect(mocks.listeners.has(OPEN_SETTINGS_EVENT)).toBe(true),
+    );
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+    await act(async () => {
+      mocks.listeners.get("dictation-event")?.({
+        payload: JSON.stringify({
+          type: "permission_status",
+          payload: { microphone: "granted", accessibility: "missing" },
+        }),
+      });
+    });
+    mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
+
+    mocks.dictationHelperCommand.mockClear();
+    mocks.requestAccessibilityPermission.mockClear();
+    mocks.openPrivacySettings.mockClear();
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Manage Accessibility permission",
+      }),
+    );
+
+    expect(mocks.requestAccessibilityPermission).toHaveBeenCalledOnce();
+    expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
+      type: "request_accessibility_permission",
+    });
     expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith("accessibility");
   });
 

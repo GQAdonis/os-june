@@ -40,6 +40,7 @@ use crate::{
     },
 };
 use chrono::{TimeZone, Utc};
+use serde::Serialize;
 use sqlx::query::query;
 use sqlx::row::Row;
 use sqlx_sqlite::SqlitePool;
@@ -53,6 +54,12 @@ use std::{
 };
 use tauri::AppHandle;
 use tokio::sync::OnceCell;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessibilityPermissionResponse {
+    state: String,
+}
 
 #[tauri::command]
 pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError> {
@@ -551,6 +558,27 @@ pub async fn get_microphone_permission_state() -> Result<MicrophonePermissionRes
 }
 
 #[tauri::command]
+pub fn request_accessibility_permission() -> AccessibilityPermissionResponse {
+    AccessibilityPermissionResponse {
+        state: request_accessibility_permission_state(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_accessibility_permission_state() -> String {
+    if macos_accessibility::request_permission_prompt() {
+        "granted".to_string()
+    } else {
+        "missing".to_string()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn request_accessibility_permission_state() -> String {
+    "granted".to_string()
+}
+
+#[tauri::command]
 pub async fn check_recording_source_readiness(
     request: CheckRecordingSourceReadinessRequest,
 ) -> Result<RecordingSourceReadinessDto, AppError> {
@@ -624,6 +652,57 @@ fn open_non_macos_privacy_settings(request: OpenPrivacySettingsRequest) -> Resul
         "settings_open_unsupported",
         "Privacy settings shortcuts are only supported on macOS.",
     ))
+}
+
+#[cfg(target_os = "macos")]
+mod macos_accessibility {
+    use std::ffi::c_void;
+
+    type CFTypeRef = *const c_void;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    #[allow(non_upper_case_globals)]
+    extern "C" {
+        static kAXTrustedCheckOptionPrompt: CFTypeRef;
+        fn AXIsProcessTrustedWithOptions(options: CFTypeRef) -> u8;
+        fn AXIsProcessTrusted() -> u8;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    #[allow(non_upper_case_globals)]
+    extern "C" {
+        static kCFBooleanTrue: CFTypeRef;
+        fn CFDictionaryCreate(
+            allocator: CFTypeRef,
+            keys: *const CFTypeRef,
+            values: *const CFTypeRef,
+            num_values: isize,
+            key_callbacks: CFTypeRef,
+            value_callbacks: CFTypeRef,
+        ) -> CFTypeRef;
+        fn CFRelease(cf: CFTypeRef);
+    }
+
+    pub(super) fn request_permission_prompt() -> bool {
+        unsafe {
+            let keys = [kAXTrustedCheckOptionPrompt];
+            let values = [kCFBooleanTrue];
+            let options = CFDictionaryCreate(
+                std::ptr::null(),
+                keys.as_ptr(),
+                values.as_ptr(),
+                1,
+                std::ptr::null(),
+                std::ptr::null(),
+            );
+            if options.is_null() {
+                return AXIsProcessTrusted() != 0;
+            }
+            let trusted = AXIsProcessTrustedWithOptions(options) != 0;
+            CFRelease(options);
+            trusted
+        }
+    }
 }
 
 #[tauri::command]

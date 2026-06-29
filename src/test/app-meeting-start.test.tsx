@@ -39,6 +39,7 @@ const mocks = vi.hoisted(() => ({
   retryProcessing: vi.fn(),
   recoverRecording: vi.fn(),
   dictationHelperCommand: vi.fn(),
+  requestAccessibilityPermission: vi.fn(),
   listDictationHistory: vi.fn(),
   osAccountsStatus: vi.fn(),
   osAccountsLogin: vi.fn(),
@@ -90,6 +91,7 @@ vi.mock("../lib/tauri", () => ({
   retryProcessing: mocks.retryProcessing,
   recoverRecording: mocks.recoverRecording,
   dictationHelperCommand: mocks.dictationHelperCommand,
+  requestAccessibilityPermission: mocks.requestAccessibilityPermission,
   listDictationHistory: mocks.listDictationHistory,
   osAccountsStatus: mocks.osAccountsStatus,
   osAccountsLogin: mocks.osAccountsLogin,
@@ -196,6 +198,9 @@ describe("meeting start transcription event", () => {
       bytesWritten: 2048,
     });
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
+    mocks.requestAccessibilityPermission.mockResolvedValue({
+      state: "missing",
+    });
     mocks.listDictationHistory.mockResolvedValue({
       items: [],
       retentionDays: 7,
