@@ -1241,6 +1241,9 @@ export type AccountBalance = {
 export type AccountSubscription = {
   subscribed: boolean;
   status?: "trialing" | "active" | "past_due" | "canceled" | (string & {});
+  /** Monthly plan credits returned by OS Accounts. Used as a fallback for
+   * deployments whose balance endpoint does not expose usageRemainingPercent. */
+  planCredits?: number;
   trialEnd?: string;
   currentPeriodEnd?: string;
   /** Trial length from the Stripe price config, available pre-subscription.

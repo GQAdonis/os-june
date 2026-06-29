@@ -11,6 +11,7 @@ import {
 import type { AccountStatus } from "../../lib/tauri";
 
 const FREE_PLAN_NAME = "Free";
+const FREE_PLAN_CREDITS = 5000;
 
 type Props = {
   account: AccountStatus;
@@ -192,7 +193,10 @@ export function BillingSettingsSection({
 
   const subscription = account.subscription;
   const liveSubscription = hasLiveSubscription(account);
-  const usageRemainingPercent = usagePercentFromBalance(account.balance);
+  const usageRemainingPercent = usagePercentFromBalance(
+    account.balance,
+    subscription,
+  );
   const billingRecovery =
     subscription?.subscribed === true &&
     typeof subscription.status === "string" &&
@@ -337,9 +341,27 @@ function clampPercent(percent: number) {
   return Math.max(0, Math.min(100, Math.round(percent)));
 }
 
-function usagePercentFromBalance(balance: AccountStatus["balance"]) {
+function usagePercentFromBalance(
+  balance: AccountStatus["balance"],
+  subscription: AccountStatus["subscription"],
+) {
   if (Number.isFinite(balance?.usageRemainingPercent)) {
     return clampPercent(balance?.usageRemainingPercent ?? 0);
+  }
+  if (
+    Number.isFinite(balance?.credits) &&
+    Number.isFinite(subscription?.planCredits) &&
+    (subscription?.planCredits ?? 0) > 0
+  ) {
+    return clampPercent(
+      ((balance?.credits ?? 0) / (subscription?.planCredits ?? 1)) * 100,
+    );
+  }
+  if (
+    subscription?.subscribed === false &&
+    Number.isFinite(balance?.credits)
+  ) {
+    return clampPercent(((balance?.credits ?? 0) / FREE_PLAN_CREDITS) * 100);
   }
   if (Number.isFinite(balance?.usdMillis)) {
     return (balance?.usdMillis ?? 0) > 0 ? 100 : 0;

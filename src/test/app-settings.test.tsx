@@ -446,6 +446,78 @@ describe("AppSettings", () => {
     expect(screen.queryByText("$1.20")).not.toBeInTheDocument();
   });
 
+  it("falls back to subscription plan credits when balance has no usage percentage", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          balance: {
+            credits: 4676,
+            usdMillis: 4676,
+          },
+          subscription: {
+            subscribed: true,
+            status: "active",
+            planCredits: 20000,
+          },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+
+    expect(screen.getByText("23% remaining")).toBeInTheDocument();
+    expect(
+      screen.getByText("Usage remaining on your subscription"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Usage remaining" }),
+    ).toHaveAttribute("aria-valuenow", "23");
+  });
+
+  it("falls back to the free grant for unsubscribed accounts without usage percentage", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          balance: {
+            credits: 4857,
+            usdMillis: 4857,
+          },
+          subscription: {
+            subscribed: false,
+            status: undefined,
+            planCredits: undefined,
+          },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+
+    expect(screen.getByText("97% remaining")).toBeInTheDocument();
+    expect(screen.getByText("Usage remaining on Free")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Usage remaining" }),
+    ).toHaveAttribute("aria-valuenow", "97");
+  });
+
   it("runs sign-in, cancel, and sign-out actions from account settings", async () => {
     const user = userEvent.setup();
     const onAccountChanged = vi.fn();
