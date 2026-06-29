@@ -186,6 +186,34 @@ const existingSession = {
   last_active: "2026-06-04T12:00:00Z",
 };
 
+function mockGlmCapabilities(capabilities: string[]) {
+  mocks.listVeniceModels.mockResolvedValue({
+    mode: "generation",
+    modelType: "text",
+    selectedModel: "zai-org-glm-5-2",
+    models: [
+      {
+        provider: "venice",
+        id: "zai-org-glm-5-2",
+        name: "GLM 5.2",
+        modelType: "text",
+        privacy: "private",
+        traits: [],
+        capabilities,
+      },
+      {
+        provider: "venice",
+        id: "kimi-k2-6",
+        name: "Kimi K2.6",
+        modelType: "text",
+        privacy: "private",
+        traits: [],
+        capabilities: [],
+      },
+    ],
+  });
+}
+
 describe("AgentWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -5635,11 +5663,66 @@ describe("AgentWorkspace", () => {
     ).toBe(false);
   });
 
+  it("uses a text fallback when the selected model cannot read image attachments", async () => {
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
+        ],
+      },
+    });
+
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "what is in this image?");
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    await waitFor(() =>
+      expect(
+        mocks.gatewayRequest.mock.calls.some(
+          ([method]) => method === "prompt.submit",
+        ),
+      ).toBe(true),
+    );
+    expect(
+      mocks.gatewayRequest.mock.calls.some(
+        ([method]) => method === "image.attach_bytes",
+      ),
+    ).toBe(false);
+
+    const submitted = mocks.gatewayRequest.mock.calls.find(
+      ([method]) => method === "prompt.submit",
+    )?.[1] as { text: string };
+    expect(submitted.text).toContain(
+      "Attached files copied into the June workspace:",
+    );
+    expect(submitted.text).toContain("--- Attached Context ---");
+    expect(submitted.text).toContain(
+      "GLM 5.2 does not support image input in June.",
+    );
+    expect(submitted.text).toContain("Do not call vision_analyze");
+    expect(submitted.text).toContain(
+      "ask the user to describe the image or paste the relevant text",
+    );
+  });
+
   it("attaches a dropped image to the session via image.attach_bytes and marks it attached", async () => {
     // Feature 19: on submit, an imported image is sent to the session through
     // the structured image.attach_bytes RPC, the chip flips to "Attached", and the
     // attachment lands in the artifact timeline — without the base64 ever
     // reaching the sanitized trace export.
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
     const user = userEvent.setup();
     render(<AgentWorkspace />);
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
@@ -5705,6 +5788,7 @@ describe("AgentWorkspace", () => {
     // A failed image.attach_bytes must not silently send the prompt with a missing
     // image: the send is blocked, the chip surfaces the failure, and the
     // composer text is restored for a retry.
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
     const user = userEvent.setup();
     mocks.gatewayRequest.mockImplementation((method: string) => {
       if (method === "session.create") {
