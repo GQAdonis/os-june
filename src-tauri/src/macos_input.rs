@@ -1,17 +1,22 @@
-//! Synthetic paste run in the main June process.
+//! Synthetic paste + paste-target tracking, run in the main June process.
 //!
-//! Phase 1 of moving Accessibility off the dictation helper: the synthetic
-//! Cmd+V that inserts a transcript needs the Accessibility grant, so doing it
-//! here (rather than in the helper) is part of making `June.app` the sole
-//! Accessibility subject. Focus tracking and the shortcut monitor move here too
-//! in later steps; for now the helper still drives recording.
+//! Part of moving Accessibility off the dictation helper: the synthetic Cmd+V
+//! that inserts a transcript needs the Accessibility grant, so doing it here
+//! (rather than in the helper) makes `June.app` the sole Accessibility subject.
+//! [`remember_focus_target`] records the app that was frontmost when dictation
+//! started so the paste lands there even if a June window grabbed focus.
 
 #[cfg(target_os = "macos")]
 mod imp {
     use objc2::rc::Retained;
-    use objc2_app_kit::{NSPasteboard, NSPasteboardType, NSPasteboardTypeString};
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::{
+        NSApplicationActivationOptions, NSPasteboard, NSPasteboardItem, NSPasteboardTypeString,
+        NSPasteboardWriting, NSRunningApplication, NSWorkspace,
+    };
     use objc2_foundation::{NSArray, NSData, NSString};
     use std::ffi::c_void;
+    use std::sync::atomic::{AtomicI32, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -41,6 +46,36 @@ mod imp {
         fn CFRelease(cf: *const c_void);
     }
 
+    /// PID of the app that was frontmost when dictation started. 0 = unset.
+    static FOCUS_TARGET_PID: AtomicI32 = AtomicI32::new(0);
+
+    /// Record the frontmost application as the paste target. Called when
+    /// dictation starts (a shortcut press) — at that point the user's target
+    /// app is frontmost, not June. June itself is never recorded as the target.
+    pub fn remember_focus_target() {
+        let workspace = NSWorkspace::sharedWorkspace();
+        if let Some(app) = workspace.frontmostApplication() {
+            let pid = app.processIdentifier();
+            if pid != std::process::id() as i32 {
+                FOCUS_TARGET_PID.store(pid, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Bring the recorded target app back to the front before pasting, so a
+    /// June window that grabbed focus mid-recording doesn't swallow the Cmd+V.
+    fn activate_focus_target() {
+        let pid = FOCUS_TARGET_PID.load(Ordering::Relaxed);
+        if pid == 0 {
+            return;
+        }
+        if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+            app.activateWithOptions(NSApplicationActivationOptions::empty());
+            // Give the app a beat to come forward before the keystroke lands.
+            thread::sleep(Duration::from_millis(120));
+        }
+    }
+
     /// Post a synthetic Cmd+V to the frontmost app via the HID event tap —
     /// mirrors the helper's `postPasteShortcut`. Requires the Accessibility
     /// grant, which is now held by this process.
@@ -67,43 +102,52 @@ mod imp {
         }
     }
 
-    /// Every (type, data) representation currently on the general pasteboard,
-    /// captured as plain bytes so dictation can restore the user's clipboard
-    /// without permanently clobbering it. Plain Rust data is `Send`, so the
-    /// delayed restore can run on a background thread (as the helper did).
-    fn capture(pasteboard: &NSPasteboard) -> Vec<(String, Vec<u8>)> {
-        let mut entries = Vec::new();
-        if let Some(types) = pasteboard.types() {
-            for ty in types.iter() {
-                if let Some(data) = pasteboard.dataForType(&ty) {
-                    entries.push((ty.to_string(), data.to_vec()));
+    /// The general pasteboard captured as plain bytes, preserving each item
+    /// separately (a clipboard can hold several items, e.g. multiple copied
+    /// files). Plain Rust data is `Send`, so the delayed restore can run on a
+    /// background thread.
+    type Snapshot = Vec<Vec<(String, Vec<u8>)>>;
+
+    fn capture(pasteboard: &NSPasteboard) -> Snapshot {
+        let mut items = Vec::new();
+        if let Some(pasteboard_items) = pasteboard.pasteboardItems() {
+            for item in pasteboard_items.iter() {
+                let mut entries = Vec::new();
+                for ty in item.types().iter() {
+                    if let Some(data) = item.dataForType(&ty) {
+                        entries.push((ty.to_string(), data.to_vec()));
+                    }
                 }
+                items.push(entries);
             }
         }
-        entries
+        items
     }
 
-    fn restore(pasteboard: &NSPasteboard, entries: &[(String, Vec<u8>)]) {
+    fn restore(pasteboard: &NSPasteboard, items: &Snapshot) {
         pasteboard.clearContents();
-        if entries.is_empty() {
+        if items.is_empty() {
             return;
         }
-        let ns_types: Vec<Retained<NSPasteboardType>> =
-            entries.iter().map(|(ty, _)| NSString::from_str(ty)).collect();
-        let types_array = NSArray::from_retained_slice(&ns_types);
-        // SAFETY: re-declaring the captured types and writing back their data.
-        unsafe {
-            pasteboard.declareTypes_owner(&types_array, None);
-            for ((_, bytes), ty) in entries.iter().zip(ns_types.iter()) {
-                let data = NSData::with_bytes(bytes);
-                pasteboard.setData_forType(Some(&data), ty);
-            }
-        }
+        let restored: Vec<Retained<ProtocolObject<dyn NSPasteboardWriting>>> = items
+            .iter()
+            .map(|entries| {
+                let item = NSPasteboardItem::new();
+                for (ty, bytes) in entries {
+                    let data = NSData::with_bytes(bytes);
+                    let ty = NSString::from_str(ty);
+                    item.setData_forType(&data, &ty);
+                }
+                ProtocolObject::from_retained(item)
+            })
+            .collect();
+        let array = NSArray::from_retained_slice(&restored);
+        pasteboard.writeObjects(&array);
     }
 
-    /// Place `text` on the clipboard, paste it into the frontmost app with a
-    /// synthetic Cmd+V, then restore the prior clipboard after the paste lands
-    /// (only if it hasn't changed since). Mirrors the helper's
+    /// Place `text` on the clipboard, bring the recorded target app forward,
+    /// paste with a synthetic Cmd+V, then restore the prior clipboard once the
+    /// paste has landed (only if it hasn't changed since). Mirrors the helper's
     /// `PasteboardInserter.paste`.
     pub fn paste(text: &str) {
         let pasteboard = NSPasteboard::generalPasteboard();
@@ -120,6 +164,7 @@ mod imp {
             return;
         }
 
+        activate_focus_target();
         post_paste_shortcut();
 
         // Restore the user's clipboard once the paste has had time to land,
@@ -141,7 +186,16 @@ mod imp {
     }
 }
 
-/// Paste `text` into the frontmost application. No-op off macOS.
+/// Record the frontmost app as the paste target (call when dictation starts).
+/// No-op off macOS.
+pub fn remember_focus_target() {
+    #[cfg(target_os = "macos")]
+    {
+        imp::remember_focus_target();
+    }
+}
+
+/// Paste `text` into the recorded target application. No-op off macOS.
 pub fn paste(text: &str) {
     #[cfg(target_os = "macos")]
     {

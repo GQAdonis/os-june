@@ -56,12 +56,14 @@ keyring = { version = "3", features = ["apple-native"] }
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
+    "libc",
     "NSApplication",
     "NSEvent",
     "NSImage",
     "NSMenu",
     "NSMenuItem",
     "NSPasteboard",
+    "NSPasteboardItem",
     "NSResponder",
     "NSRunningApplication",
     "NSWorkspace",

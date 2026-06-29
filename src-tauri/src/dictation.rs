@@ -1611,6 +1611,9 @@ fn handle_driver_event(app: &AppHandle, event: crate::macos_shortcuts::DriverEve
     use crate::macos_shortcuts::DriverEvent;
     match event {
         DriverEvent::ShortcutDown(kind) => {
+            // Record the paste target now, while the user's app is still
+            // frontmost (before any June HUD can take focus).
+            crate::macos_input::remember_focus_target();
             drive_shortcut_edge(app, ShortcutKeyEdge::Down, dictation_kind(kind))
         }
         DriverEvent::ShortcutUp(kind) => {
