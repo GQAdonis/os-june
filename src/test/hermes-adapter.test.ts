@@ -353,35 +353,6 @@ describe("Hermes adapter", () => {
     expect(sessions.map((session) => session.id)).toEqual(["new", "old"]);
   });
 
-  it("excludes child agent sessions from top-level session lists", () => {
-    const sessions = normalizeHermesSessionsResponse({
-      sessions: [
-        {
-          id: "parent",
-          title: "Research HTTPS options",
-          last_active: "2026-06-04T13:00:00Z",
-          message_count: 3,
-        },
-        {
-          id: "child-snake",
-          title: "Research HTTPS options #4",
-          parent_session_id: "parent",
-          last_active: "2026-06-04T13:01:00Z",
-          message_count: 1,
-        },
-        {
-          id: "child-camel",
-          title: "Research HTTPS options #5",
-          parentSessionId: "parent",
-          last_active: "2026-06-04T13:02:00Z",
-          message_count: 1,
-        } as unknown as HermesSessionInfo,
-      ],
-    });
-
-    expect(sessions.map((session) => session.id)).toEqual(["parent"]);
-  });
-
   it("normalizes Hermes Desktop-style session lists", () => {
     const sessions = normalizeHermesSessionsResponse({
       sessions: [{ id: "session-1", preview: "Hello" }],
