@@ -400,6 +400,43 @@ describe("Agent chat runtime", () => {
     ).toBe("wdyt?");
   });
 
+  it("keeps attachment paths in turn data but hides them from the rendered user bubble", () => {
+    // The user bubble renders each part through displayedComposerUserMessageText
+    // (AgentWorkspace), so it must show only the user's words. The built turn
+    // data must still retain the attachment-path block, because
+    // assignArtifactsToTurns attributes workspace artifacts by matching those
+    // paths against the turn text. This pins both halves of that contract.
+    const content = [
+      "wdyt?",
+      "",
+      "Attached files copied into the June workspace:",
+      "- screenshot.png (Workspace): uploads/screenshot.png",
+      "",
+      "Use these file paths when inspecting or operating on the files.",
+      "",
+      "--- Attached Context ---",
+      "GLM 5.2 does not support image input in June.",
+      "Reply directly and briefly.",
+    ].join("\n");
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "1",
+        role: "user",
+        content,
+        timestamp: "2026-06-11T12:00:00.000Z",
+      },
+    ]);
+    const part = turns[0]?.parts[0];
+    const turnText = part?.type === "text" ? part.text : "";
+    // Turn data retains the attachment path (artifact attribution reads this)…
+    expect(turnText).toContain("uploads/screenshot.png");
+    // …but the provider/vision scaffolding after the marker is already gone.
+    expect(turnText).not.toContain("--- Attached Context ---");
+    expect(turnText).not.toContain("does not support image input");
+    // The rendered bubble shows only the user's words — no attachment block.
+    expect(displayedComposerUserMessageText(turnText)).toBe("wdyt?");
+  });
+
   it("extracts text from Hermes structured content payloads", () => {
     const turns = buildHermesSessionChatTurns([
       {
