@@ -91,6 +91,74 @@ async fn stores_source_artifacts_independently() {
 }
 
 #[tokio::test]
+async fn latest_retryable_audio_paths_include_invalid_saved_artifacts() {
+    let repos = test_repositories().await;
+    let note = repos.create_note(None).await.expect("note should exist");
+
+    repos
+        .create_recording_session(
+            &note.id,
+            "session-1",
+            RecordingSourceMode::MicrophoneOnly,
+            "/tmp/old.partial.wav",
+            "/tmp/old.wav",
+            None,
+        )
+        .await
+        .expect("old session should be created");
+    repos
+        .create_audio_artifact(&note.id, "session-1", "/tmp/old.wav", 1_000, 100, "old")
+        .await
+        .expect("old artifact should be valid");
+
+    repos
+        .create_recording_session(
+            &note.id,
+            "session-2",
+            RecordingSourceMode::MicrophonePlusSystem,
+            "/tmp/mic.partial.wav",
+            "/tmp/mic.wav",
+            None,
+        )
+        .await
+        .expect("latest session should be created");
+    let artifact = repos
+        .create_pending_source_artifact(
+            &note.id,
+            "session-2",
+            "microphone",
+            "/tmp/mic.partial.wav",
+            "/tmp/mic.wav",
+        )
+        .await
+        .expect("microphone artifact should be created");
+    repos
+        .finalize_source_artifact(
+            &artifact.id,
+            "/tmp/mic.wav",
+            "invalid",
+            2_515_414,
+            4096,
+            "checksum",
+            2_082_511,
+            None,
+            Some("audio duration mismatch".to_string()),
+        )
+        .await
+        .expect("artifact should be finalized as invalid");
+
+    let retryable = repos
+        .latest_retryable_audio_artifact_paths(&note.id)
+        .await
+        .expect("retryable paths should load");
+
+    assert_eq!(retryable.len(), 1);
+    assert_eq!(retryable[0].recording_session_id, "session-2");
+    assert_eq!(retryable[0].status, "invalid");
+    assert_eq!(retryable[0].expected_duration_ms, 2_082_511);
+}
+
+#[tokio::test]
 async fn upserts_source_turn_transcripts_for_retry() {
     let repos = test_repositories().await;
     let note = repos.create_note(None).await.expect("note should exist");

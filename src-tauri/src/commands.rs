@@ -1181,17 +1181,57 @@ async fn retry_audio_sources(
     paths: &AppPaths,
     note_id: &str,
 ) -> Result<Vec<(String, String, PathBuf, String)>, AppError> {
-    let sources = repos
-        .latest_valid_audio_artifact_paths(note_id)
-        .await?
-        .into_iter()
-        .filter_map(|(id, source, path, session_id)| {
-            paths
-                .contained_recording_file(path)
-                .ok()
-                .map(|path| (id, source, path, session_id))
-        })
-        .collect::<Vec<_>>();
+    let mut sources = Vec::new();
+    for artifact in repos.latest_retryable_audio_artifact_paths(note_id).await? {
+        let Ok(path) = paths.contained_recording_file(&artifact.path) else {
+            continue;
+        };
+        if artifact.status == "valid" {
+            sources.push((
+                artifact.id,
+                artifact.source,
+                path,
+                artifact.recording_session_id,
+            ));
+            continue;
+        }
+
+        let source = RecordingSource::from(artifact.source.as_str());
+        let validation = validate_audio_artifact(
+            &path,
+            artifact.expected_duration_ms,
+            validation_config_for_source(source),
+        )
+        .map_err(|error| AppError::new("audio_validation_failed", error.to_string()))?;
+        if !source_audio_passes_validation(source, &validation) {
+            continue;
+        }
+
+        let checksum = checksum_file(&path).unwrap_or_default();
+        let file_size = std::fs::metadata(&path)
+            .map(|metadata| metadata.len() as i64)
+            .unwrap_or_default();
+        let path_string = path.to_string_lossy().into_owned();
+        repos
+            .finalize_source_artifact(
+                &artifact.id,
+                &path_string,
+                "valid",
+                validation.actual_duration_ms,
+                file_size,
+                &checksum,
+                artifact.expected_duration_ms,
+                Some(serde_json::to_string(&validation).unwrap_or_default()),
+                None,
+            )
+            .await?;
+        sources.push((
+            artifact.id,
+            artifact.source,
+            path,
+            artifact.recording_session_id,
+        ));
+    }
     if sources.is_empty() {
         return Err(AppError::new(
             "audio_artifact_missing",
