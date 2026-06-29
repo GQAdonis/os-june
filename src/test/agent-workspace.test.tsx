@@ -5781,9 +5781,10 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("screenshot.png")).toBeInTheDocument();
   });
 
-  it("opens the model picker from the warning when several vision models qualify", async () => {
-    // With more than one image-capable model, the banner action defers to the
-    // existing picker instead of guessing; one candidate switches directly.
+  it("switches to the first eligible vision model when several qualify", async () => {
+    // The banner action is a one-tap fix: with several image-capable models it
+    // switches straight to the first eligible one rather than opening the
+    // generic (non-vision-scoped) picker.
     mocks.listAgentTasks.mockResolvedValue({ items: [] });
     mocks.listHermesSessions.mockResolvedValue([]);
     mocks.listVeniceModels.mockResolvedValue({
@@ -5820,6 +5821,7 @@ describe("AgentWorkspace", () => {
         },
       ],
     });
+    mocks.setVeniceModel.mockResolvedValue(undefined);
     const user = userEvent.setup();
     render(<AgentWorkspace />);
     await waitFor(() =>
@@ -5839,9 +5841,13 @@ describe("AgentWorkspace", () => {
     await user.click(
       screen.getByRole("button", { name: "Switch to a vision model" }),
     );
+    // Lands on the first eligible vision model (Qwen VL), no picker dialog.
+    await waitFor(() =>
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+    );
     expect(
-      await screen.findByRole("dialog", { name: "Choose text model" }),
-    ).toBeInTheDocument();
+      screen.queryByRole("dialog", { name: "Choose text model" }),
+    ).not.toBeInTheDocument();
   });
 
   it("attaches the image when the active model id is unresolved", async () => {

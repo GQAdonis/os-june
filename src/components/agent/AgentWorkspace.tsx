@@ -6315,16 +6315,17 @@ export function AgentWorkspace({
                 <button
                   type="button"
                   className="agent-composer-notice-button agent-composer-image-warning-action"
-                  onClick={() => {
-                    // One vision model: switch straight to it. Several: open the
-                    // picker so the user chooses (handleSelectGenerationModel
-                    // routes the global default vs per-chat override either way).
-                    if (visionModelOptions.length === 1) {
-                      void handleSelectGenerationModel(visionModelOptions[0].id);
-                      return;
-                    }
-                    openComposerModelPicker();
-                  }}
+                  onClick={() =>
+                    // Switch straight to the first image-capable model. The
+                    // label promises a one-tap fix, and the generic model picker
+                    // isn't vision-scoped — opening it for the multi-candidate
+                    // case would drop the user into an unfiltered list that
+                    // doesn't surface the eligible models. visionModelOptions is
+                    // pre-filtered to image + tool support;
+                    // handleSelectGenerationModel routes the global default vs
+                    // per-chat override.
+                    void handleSelectGenerationModel(visionModelOptions[0].id)
+                  }
                 >
                   Switch to a vision model
                 </button>
