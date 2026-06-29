@@ -604,6 +604,17 @@ pub fn setup(app: &mut tauri::App) {
         controller: Mutex::new(ShortcutActivationController::default()),
     });
 
+    // Watch dictation shortcuts in-process (Carbon + the global flagsChanged
+    // monitor) so June.app, not the helper, holds the Accessibility grant. This
+    // also surfaces the Accessibility prompt for June.app.
+    #[cfg(target_os = "macos")]
+    {
+        let driver_app = app.handle().clone();
+        crate::macos_shortcuts::start(app.handle().clone(), move |event| {
+            handle_driver_event(&driver_app, event);
+        });
+    }
+
     let helper = spawn_helper(app.handle()).ok();
     app.manage(HelperState {
         process: Mutex::new(helper),
@@ -619,7 +630,7 @@ pub fn setup(app: &mut tauri::App) {
             .map(|settings| settings.clone());
         if let Some(settings) = settings {
             let _ = apply_microphone_setting(&helper_state, &settings.microphone);
-            let _ = apply_shortcut_settings(&helper_state, &settings);
+            let _ = apply_shortcut_settings(app.handle(), &settings);
         }
     }
 
@@ -673,7 +684,7 @@ pub async fn delete_dictation_history_item(app: AppHandle, id: String) -> Result
 pub fn set_dictation_shortcut(
     app: AppHandle,
     state: State<'_, DictationSettingsState>,
-    helper_state: State<'_, HelperState>,
+    _helper_state: State<'_, HelperState>,
     hotkey_status: State<'_, HotkeyStatus>,
     kind: DictationShortcutKind,
     shortcut: DictationShortcutInput,
@@ -694,7 +705,7 @@ pub fn set_dictation_shortcut(
 
     if current_shortcut == &shortcut {
         set_hotkey_status(&hotkey_status, hotkey_ready_event(&current_settings));
-        apply_shortcut_settings(&helper_state, &current_settings)?;
+        apply_shortcut_settings(&app, &current_settings)?;
         return Ok(current_settings);
     }
 
@@ -703,7 +714,7 @@ pub fn set_dictation_shortcut(
         DictationShortcutKind::Toggle => settings.toggle_shortcut = shortcut,
     })?;
     reset_shortcut_activation(&app);
-    apply_shortcut_settings(&helper_state, &settings)?;
+    apply_shortcut_settings(&app, &settings)?;
 
     set_hotkey_status(&hotkey_status, hotkey_ready_event(&settings));
     Ok(settings)
@@ -774,8 +785,13 @@ pub fn dictation_helper_command(
     command: serde_json::Value,
 ) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
-    if helper_command_resets_shortcut_activation(&command) {
-        reset_shortcut_activation(&app);
+    {
+        if helper_command_resets_shortcut_activation(&command) {
+            reset_shortcut_activation(&app);
+        }
+        if let Some(result) = handle_in_process_command(&app, &state, &command) {
+            return result;
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1362,6 +1378,18 @@ pub(crate) fn dictation_helper_pid(app: &AppHandle) -> Option<u32> {
 }
 
 fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Result<(), AppError> {
+    // Pasting the transcript is an in-process operation now (it needs June.app's
+    // own Accessibility grant), so it never reaches the helper.
+    #[cfg(target_os = "macos")]
+    if command.get("type").and_then(serde_json::Value::as_str) == Some("paste_text") {
+        let text = command
+            .get("text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        crate::macos_input::paste(text);
+        return Ok(());
+    }
+
     let mut guard = state
         .process
         .lock()
@@ -1452,40 +1480,57 @@ fn apply_microphone_setting(
 }
 
 fn apply_shortcut_setting(
-    helper_state: &HelperState,
+    app: &AppHandle,
     kind: DictationShortcutKind,
     shortcut: &DictationShortcutSetting,
 ) -> Result<(), AppError> {
-    send_helper_command(
-        helper_state,
-        serde_json::json!({
-            "type": "set_shortcut",
-            "shortcut": {
-                "keyCode": shortcut.key_code,
-                "code": shortcut.code,
-                "label": shortcut.label,
-                "kind": kind,
-                "pressCount": shortcut.press_count,
-                "modifiers": shortcut.modifiers,
-            },
-        }),
-    )
+    // Shortcuts are watched in-process now (Carbon + the global flagsChanged
+    // monitor under June.app's own Accessibility grant), not in the helper.
+    #[cfg(target_os = "macos")]
+    {
+        crate::macos_shortcuts::set_shortcut(app, monitored_shortcut(shortcut), monitor_kind(kind));
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, kind, shortcut);
+    }
+    Ok(())
 }
 
-fn apply_shortcut_settings(
-    helper_state: &HelperState,
-    settings: &DictationSettings,
-) -> Result<(), AppError> {
+fn apply_shortcut_settings(app: &AppHandle, settings: &DictationSettings) -> Result<(), AppError> {
     apply_shortcut_setting(
-        helper_state,
+        app,
         DictationShortcutKind::PushToTalk,
         &settings.push_to_talk_shortcut,
     )?;
-    apply_shortcut_setting(
-        helper_state,
-        DictationShortcutKind::Toggle,
-        &settings.toggle_shortcut,
-    )
+    apply_shortcut_setting(app, DictationShortcutKind::Toggle, &settings.toggle_shortcut)
+}
+
+#[cfg(target_os = "macos")]
+fn monitored_shortcut(
+    shortcut: &DictationShortcutSetting,
+) -> crate::dictation_shortcuts::MonitoredShortcut {
+    crate::dictation_shortcuts::MonitoredShortcut {
+        key_code: shortcut.key_code as u16,
+        code: shortcut.code.clone(),
+        label: shortcut.label.clone(),
+        modifiers: crate::dictation_shortcuts::ShortcutModifiers {
+            command: shortcut.modifiers.command,
+            control: shortcut.modifiers.control,
+            option: shortcut.modifiers.option,
+            shift: shortcut.modifiers.shift,
+            function: shortcut.modifiers.function,
+        },
+        press_count: shortcut.press_count,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn monitor_kind(kind: DictationShortcutKind) -> crate::dictation_shortcuts::ShortcutKind {
+    match kind {
+        DictationShortcutKind::PushToTalk => crate::dictation_shortcuts::ShortcutKind::PushToTalk,
+        DictationShortcutKind::Toggle => crate::dictation_shortcuts::ShortcutKind::Toggle,
+    }
 }
 
 fn validate_shortcut_update(
@@ -1528,6 +1573,13 @@ fn handle_shortcut_key_event(
         return;
     };
 
+    drive_shortcut_edge(app, edge, kind);
+}
+
+/// Run a push-to-talk / toggle edge through the activation controller and fire
+/// the resulting dictation command. Shared by the legacy helper event path and
+/// the in-process shortcut driver.
+fn drive_shortcut_edge(app: &AppHandle, edge: ShortcutKeyEdge, kind: DictationShortcutKind) {
     let Some(settings) = current_dictation_settings(app) else {
         reset_shortcut_activation(app);
         return;
@@ -1550,6 +1602,103 @@ fn handle_shortcut_key_event(
 
     if let Some(command) = command {
         send_dictation_command(app, command, &shortcut.label);
+    }
+}
+
+/// Bridge the in-process shortcut driver's events into the dictation flow.
+#[cfg(target_os = "macos")]
+fn handle_driver_event(app: &AppHandle, event: crate::macos_shortcuts::DriverEvent) {
+    use crate::macos_shortcuts::DriverEvent;
+    match event {
+        DriverEvent::ShortcutDown(kind) => {
+            drive_shortcut_edge(app, ShortcutKeyEdge::Down, dictation_kind(kind))
+        }
+        DriverEvent::ShortcutUp(kind) => {
+            drive_shortcut_edge(app, ShortcutKeyEdge::Up, dictation_kind(kind))
+        }
+        DriverEvent::Captured(shortcut) => {
+            emit_dictation_event_value(app, captured_event(&shortcut))
+        }
+        DriverEvent::CaptureStarted => emit_dictation_event_value(
+            app,
+            serde_json::json!({ "type": "shortcut_capture_started" }),
+        ),
+        DriverEvent::CaptureCancelled => emit_dictation_event_value(
+            app,
+            serde_json::json!({ "type": "shortcut_capture_cancelled" }),
+        ),
+        DriverEvent::FnUnavailable(message) => emit_dictation_event_value(
+            app,
+            serde_json::json!({
+                "type": "fn_monitor_unavailable",
+                "payload": { "message": message },
+            }),
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dictation_kind(kind: crate::dictation_shortcuts::ShortcutKind) -> DictationShortcutKind {
+    match kind {
+        crate::dictation_shortcuts::ShortcutKind::PushToTalk => DictationShortcutKind::PushToTalk,
+        crate::dictation_shortcuts::ShortcutKind::Toggle => DictationShortcutKind::Toggle,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn captured_event(shortcut: &crate::dictation_shortcuts::MonitoredShortcut) -> serde_json::Value {
+    serde_json::json!({
+        "type": "shortcut_captured",
+        "payload": {
+            "shortcut": {
+                "keyCode": shortcut.key_code,
+                "code": shortcut.code,
+                "label": shortcut.label,
+                "pressCount": shortcut.press_count,
+                "modifiers": {
+                    "command": shortcut.modifiers.command,
+                    "control": shortcut.modifiers.control,
+                    "option": shortcut.modifiers.option,
+                    "shift": shortcut.modifiers.shift,
+                    "function": shortcut.modifiers.function,
+                },
+            },
+        },
+    })
+}
+
+/// Commands that the helper used to handle but are now served in-process
+/// (Accessibility prompt and shortcut capture). Returns `Some` when handled.
+#[cfg(target_os = "macos")]
+fn handle_in_process_command(
+    app: &AppHandle,
+    state: &HelperState,
+    command: &serde_json::Value,
+) -> Option<Result<(), AppError>> {
+    match command.get("type").and_then(serde_json::Value::as_str) {
+        Some("request_accessibility_permission") => {
+            crate::macos_accessibility::prompt_and_check();
+            // Refresh the status card: mic comes back from the helper, and the
+            // accessibility field is injected from this process on the way out.
+            let _ = send_helper_command(
+                state,
+                serde_json::json!({ "type": "get_permission_status" }),
+            );
+            Some(Ok(()))
+        }
+        Some("start_shortcut_capture") => {
+            let press_count = command
+                .get("pressCount")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(1) as u8;
+            crate::macos_shortcuts::start_capture(app, press_count);
+            Some(Ok(()))
+        }
+        Some("cancel_shortcut_capture") => {
+            crate::macos_shortcuts::cancel_capture(app);
+            Some(Ok(()))
+        }
+        _ => None,
     }
 }
 
@@ -1895,7 +2044,26 @@ fn handle_helper_event_line(app: &AppHandle, line: String) {
 
     // Route through emit_dictation_event_value so error events get the
     // `payload.silent` annotation from a single classification site.
-    if let Some(event) = event {
+    if let Some(mut event) = event {
+        // Accessibility status is owned by this process now; the helper only
+        // reports the microphone. Inject the live trust state for the UI.
+        #[cfg(target_os = "macos")]
+        if event.get("type").and_then(serde_json::Value::as_str) == Some("permission_status") {
+            if let Some(payload) = event
+                .get_mut("payload")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                let status = if crate::macos_accessibility::is_trusted() {
+                    "granted"
+                } else {
+                    "missing"
+                };
+                payload.insert(
+                    "accessibility".to_string(),
+                    serde_json::Value::String(status.to_string()),
+                );
+            }
+        }
         emit_dictation_event_value(app, event);
     } else {
         update_latest_event(app, event_type, Some(line.clone()));

@@ -2002,8 +2002,11 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
 emit("ready")
-ShortcutKeyMonitor.shared.start()
-FocusTargetController.shared.start()
+// Accessibility-gated work (the global shortcut monitor, synthetic paste, and
+// focus tracking) now runs in the main June process so June.app — not this
+// helper — is the Accessibility subject. The helper only does audio + the
+// microphone permission. The shortcut/paste/AX command handlers below are never
+// reached: the main process serves those itself and never forwards them here.
 dictation.emitDiagnostics()
 
 Thread.detachNewThread {
