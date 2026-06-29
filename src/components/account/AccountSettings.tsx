@@ -193,6 +193,8 @@ export function BillingSettingsSection({
 
   const subscription = account.subscription;
   const liveSubscription = hasLiveSubscription(account);
+  const usagePlanName =
+    subscription?.subscribed === true ? "your subscription" : FREE_PLAN_NAME;
   const usageRemainingPercent = usagePercentFromBalance(
     account.balance,
     subscription,
@@ -288,8 +290,7 @@ export function BillingSettingsSection({
               </div>
               <div>
                 <p className="settings-row-description">
-                  Usage remaining on{" "}
-                  {liveSubscription ? "your subscription" : FREE_PLAN_NAME}
+                  Usage remaining on {usagePlanName}
                 </p>
               </div>
             </div>

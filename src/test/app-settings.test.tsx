@@ -646,6 +646,9 @@ describe("AppSettings", () => {
     await user.click(screen.getByRole("tab", { name: "Billing" }));
 
     expect(screen.getByText("Billing needs attention")).toBeInTheDocument();
+    expect(
+      screen.getByText("Usage remaining on your subscription"),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Manage billing" }));
     expect(mocks.osAccountsOpenPortal).toHaveBeenCalledOnce();
     expect(
