@@ -48,6 +48,7 @@ export async function deleteHermesSession(sessionId: string) {
 export function normalizeHermesSessionsResponse(response: unknown) {
   return extractList(response, "sessions")
     .filter(isHermesSessionInfo)
+    .filter(isTopLevelHermesSession)
     .map(withScheduledRunDisplay)
     .sort((a, b) => sessionTimestamp(b).localeCompare(sessionTimestamp(a)));
 }
@@ -328,6 +329,13 @@ function isHermesSessionInfo(value: unknown): value is HermesSessionInfo {
     Boolean(value) &&
     typeof value === "object" &&
     typeof (value as { id?: unknown }).id === "string"
+  );
+}
+
+function isTopLevelHermesSession(session: HermesSessionInfo) {
+  return (
+    !stringPresent(session.parent_session_id) &&
+    !stringPresent((session as { parentSessionId?: unknown }).parentSessionId)
   );
 }
 
