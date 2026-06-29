@@ -53,6 +53,52 @@ export function normalizeHermesSessionsResponse(response: unknown) {
     .sort((a, b) => sessionTimestamp(b).localeCompare(sessionTimestamp(a)));
 }
 
+function isTopLevelHermesSession(session: HermesSessionInfo) {
+  return (
+    !isDelegatedSubagentSession(session) && !isHiddenChildAgentSession(session)
+  );
+}
+
+function isDelegatedSubagentSession(session: HermesSessionInfo) {
+  return (
+    sessionSource(session) === "tool" ||
+    sessionKind(session) === "subagent" ||
+    sessionKind(session) === "delegate_task" ||
+    hasSubagentId(session)
+  );
+}
+
+function isHiddenChildAgentSession(session: HermesSessionInfo) {
+  if (!hasParentSessionId(session)) return false;
+  return sessionSource(session) !== "tui";
+}
+
+function hasParentSessionId(session: HermesSessionInfo) {
+  return Boolean(
+    normalizeSessionMarker(session.parent_session_id ?? session.parentSessionId),
+  );
+}
+
+function sessionSource(session: HermesSessionInfo) {
+  return normalizeSessionMarker(session.source);
+}
+
+function sessionKind(session: HermesSessionInfo) {
+  return normalizeSessionMarker(
+    session.session_type ?? session.sessionType ?? session.kind,
+  );
+}
+
+function hasSubagentId(session: HermesSessionInfo) {
+  return Boolean(
+    normalizeSessionMarker(session.subagent_id ?? session.subagentId),
+  );
+}
+
+function normalizeSessionMarker(value: unknown) {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
 /** Hermes tags scheduled-routine runs with source "cron". */
 export const SCHEDULED_RUN_SOURCE = "cron";
 
@@ -329,13 +375,6 @@ function isHermesSessionInfo(value: unknown): value is HermesSessionInfo {
     Boolean(value) &&
     typeof value === "object" &&
     typeof (value as { id?: unknown }).id === "string"
-  );
-}
-
-function isTopLevelHermesSession(session: HermesSessionInfo) {
-  return (
-    !stringPresent(session.parent_session_id) &&
-    !stringPresent((session as { parentSessionId?: unknown }).parentSessionId)
   );
 }
 

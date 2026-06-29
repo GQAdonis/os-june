@@ -375,7 +375,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
 // through import_hermes_bridge_file_bytes means every preview is fetched back
 // through the same Tauri commands and path validation a real agent file uses.
 // Dev builds only — like the gallery, the handle never ships.
-const AGENT_DEV_FILES_EVENT = "scribe:agent:dev-files";
+const AGENT_DEV_FILES_EVENT = "june:agent:dev-files";
 
 if (import.meta.env.DEV && typeof window !== "undefined") {
   (window as unknown as Record<string, unknown>).__agentFiles = (
@@ -661,7 +661,7 @@ export const HERO_GREETINGS = [
   "What can June take off your plate?",
 ] as const;
 
-const HERO_GREETING_INDEX_KEY = "scribe:agent:hero-greeting";
+const HERO_GREETING_INDEX_KEY = "june:agent:hero-greeting";
 
 function advanceHeroGreeting(): string {
   try {
@@ -831,7 +831,7 @@ type HermesRuntimeSessionResponse = {
 };
 
 /** Where the session was opened from — rendered as the leading crumbs in the
- * sticky session bar ("Projects / Scribe" or "Agents") with a back arrow. */
+ * sticky session bar ("Projects / June" or "Agents") with a back arrow. */
 export type AgentWorkspaceOrigin = {
   backLabel: string;
   onBack: () => void;
@@ -843,6 +843,8 @@ type AgentWorkspaceProps = {
   initialSessionId?: string;
   origin?: AgentWorkspaceOrigin;
   onSessionSelected?: (session: HermesSessionInfo | undefined) => void;
+  onTopUp?: () => void | Promise<void>;
+  topUpLabel?: string;
 };
 
 // Mid-run continuity across remounts. While June is working, a session has
@@ -893,7 +895,7 @@ type IssueReportFollowUpSubmitFailedDetail = {
 let sessionContinuity: AgentSessionContinuity | null = null;
 const NEW_SESSION_DRAFT_KEY = "new-session";
 const REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY =
-  "scribe:agent:reviewable-issue-reports";
+  "june:agent:reviewable-issue-reports";
 const ISSUE_REPORT_DELIVERY_SETTLED_EVENT =
   "june-agent-issue-report-delivery-settled";
 const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
@@ -1251,6 +1253,8 @@ export function AgentWorkspace({
   initialSessionId: initialSessionIdProp,
   origin,
   onSessionSelected,
+  onTopUp,
+  topUpLabel = "Upgrade",
 }: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id ?? initialSessionIdProp;
   // Read once per mount (lazy initializer): the continuity snapshot the
@@ -1379,6 +1383,12 @@ export function AgentWorkspace({
     },
     [],
   );
+  const handleTopUp = useCallback(() => {
+    const result = onTopUp ? onTopUp() : osAccountsUpgrade();
+    void Promise.resolve(result).catch((err: unknown) =>
+      setError(messageFromError(err)),
+    );
+  }, [onTopUp, setError]);
   const clearErrorForSession = useCallback((sessionId: string) => {
     setErrorState((current) =>
       current?.sessionId === sessionId ? null : current,
@@ -5847,6 +5857,10 @@ export function AgentWorkspace({
   // history fetch that fills the new conversation in) must land at the bottom
   // instantly; only turns arriving while the user is already reading glide.
   const settledScrollSelectionRef = useRef<string>();
+  const transcriptShouldStickToBottomRef = useRef(true);
+  const transcriptProgrammaticScrollRef = useRef(false);
+  const transcriptProgrammaticScrollTimeoutRef = useRef<number | undefined>();
+  const transcriptLastScrollTopRef = useRef(0);
 
   // History for the selected conversation has landed: a session gets an entry
   // in hermesSessionMessages (even an empty one) once its fetch resolves;
@@ -5864,14 +5878,64 @@ export function AgentWorkspace({
     hermesSessionsLoading && !hermesSessionsHydrated;
 
   useEffect(() => {
+    if (heroMode) return;
+    const scroller = agentScrollRef.current;
+    if (!scroller) return;
+    const clearProgrammaticScroll = () => {
+      transcriptProgrammaticScrollRef.current = false;
+      if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+        window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+        transcriptProgrammaticScrollTimeoutRef.current = undefined;
+      }
+    };
+    const updateStickiness = () => {
+      const previousScrollTop = transcriptLastScrollTopRef.current;
+      transcriptLastScrollTopRef.current = scroller.scrollTop;
+      if (transcriptProgrammaticScrollRef.current) {
+        if (scroller.scrollTop < previousScrollTop) {
+          clearProgrammaticScroll();
+          transcriptShouldStickToBottomRef.current =
+            isAgentTranscriptNearBottom(scroller);
+          return;
+        }
+        transcriptShouldStickToBottomRef.current = true;
+        if (isAgentTranscriptNearBottom(scroller)) clearProgrammaticScroll();
+        return;
+      }
+      transcriptShouldStickToBottomRef.current =
+        isAgentTranscriptNearBottom(scroller);
+    };
+    const updateFromUserScroll = () => {
+      clearProgrammaticScroll();
+      window.requestAnimationFrame(updateStickiness);
+    };
+    updateStickiness();
+    scroller.addEventListener("scroll", updateStickiness, { passive: true });
+    scroller.addEventListener("wheel", updateFromUserScroll, {
+      passive: true,
+    });
+    scroller.addEventListener("touchmove", updateFromUserScroll, {
+      passive: true,
+    });
+    return () => {
+      scroller.removeEventListener("scroll", updateStickiness);
+      scroller.removeEventListener("wheel", updateFromUserScroll);
+      scroller.removeEventListener("touchmove", updateFromUserScroll);
+      clearProgrammaticScroll();
+    };
+  }, [heroMode, selectedHermesSessionId, selectedTaskId]);
+
+  useEffect(() => {
     // The conversation scrolls in .agent-scroll, which sits below the sticky
     // breadcrumb so the scrollbar can't ride up over the bar — drive that
     // scroller to the bottom as turns arrive.
     const scroller = listRef.current?.closest(".agent-scroll");
     if (!(scroller instanceof HTMLElement)) return;
-    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
     const selectionKey = `${selectedHermesSessionId ?? ""}:${selectedTaskId ?? ""}`;
     const settled = settledScrollSelectionRef.current === selectionKey;
+    if (!settled) {
+      transcriptShouldStickToBottomRef.current = true;
+    }
     if (selectedHistoryLoaded || renderedTurnsSignature > 0) {
       // The settling run itself still scrolls with the pre-write snapshot, so
       // the history fill after a switch lands instantly; everything after it
@@ -5882,10 +5946,28 @@ export function AgentWorkspace({
       // before this one settles re-lands instantly instead of gliding.
       settledScrollSelectionRef.current = undefined;
     }
+    if (settled && !transcriptShouldStickToBottomRef.current) return;
+    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
+    if (settled) {
+      transcriptLastScrollTopRef.current = scroller.scrollTop;
+      transcriptProgrammaticScrollRef.current = true;
+      if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+        window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+      }
+      transcriptProgrammaticScrollTimeoutRef.current = window.setTimeout(() => {
+        transcriptProgrammaticScrollRef.current = false;
+        transcriptShouldStickToBottomRef.current =
+          isAgentTranscriptNearBottom(scroller);
+        transcriptProgrammaticScrollTimeoutRef.current = undefined;
+      }, 800);
+    } else {
+      transcriptProgrammaticScrollRef.current = false;
+    }
     scroller.scrollTo({
       top: scroller.scrollHeight,
       behavior: settled ? "smooth" : "auto",
     });
+    transcriptShouldStickToBottomRef.current = true;
   }, [
     renderedTurnsSignature,
     selectedHermesSessionId,
@@ -6507,11 +6589,8 @@ export function AgentWorkspace({
               sessionUnrestricted(selectedHermesSessionId),
             )
           }
-          onTopUp={() =>
-            void osAccountsUpgrade().catch((err: unknown) =>
-              setError(messageFromError(err)),
-            )
-          }
+          onTopUp={handleTopUp}
+          topUpLabel={topUpLabel}
           onClarify={(part, answer) =>
             void respondToClarify(
               selectedHermesSessionId,
@@ -6613,11 +6692,8 @@ export function AgentWorkspace({
             onThinkingOpenChange={setThinkingOpen}
             onDownloadArtifact={downloadArtifact}
             onOpenArtifact={openArtifact}
-            onTopUp={() =>
-              void osAccountsUpgrade().catch((err: unknown) =>
-                setError(messageFromError(err)),
-              )
-            }
+            onTopUp={handleTopUp}
+            topUpLabel={topUpLabel}
             onApproval={(part, choice) => {
               const sessionId = part.sessionId ?? selectedTask.hermesSessionId;
               if (!sessionId) return;
@@ -8688,6 +8764,15 @@ function chatTurnsSignature(turns: AgentChatTurn[]) {
   );
 }
 
+const AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX = 48;
+
+function isAgentTranscriptNearBottom(scroller: HTMLElement) {
+  return (
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
+    AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX
+  );
+}
+
 // Collapse runs of "thinking-only" assistant turns (reasoning/tool, no answer
 // text) into the next answer turn, so a back-to-back chain of thoughts shows as
 // a single "Thought" disclosure rather than several stacked in a row.
@@ -8830,6 +8915,7 @@ function AgentChatTurnRow({
   onOpenArtifact,
   onThinkingOpenChange,
   onTopUp,
+  topUpLabel,
   onBranch,
   onEditUserPrompt,
   branchingMessageId,
@@ -8865,6 +8951,7 @@ function AgentChatTurnRow({
   onOpenArtifact?: (artifact: AgentArtifact) => void;
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
+  topUpLabel?: string;
   onEditUserPrompt?: (text: string) => void;
   /** Fork the conversation from this turn into a new session (feature 07).
    * Optional: only Hermes-session rows pass it — task rows and the dev gallery
@@ -9142,6 +9229,7 @@ function AgentChatTurnRow({
             <CreditsNoticePart
               key={`${turn.id}:notice:${index}`}
               onTopUp={onTopUp}
+              topUpLabel={topUpLabel}
             />
           ) : part.type === "steering" ? (
             <SteeringPart
@@ -9463,7 +9551,13 @@ function visibleAgentWorkspaceError(
 // transcript — the chat runtime folds it into a notice part, and this card is
 // how the user learns the turn stopped and what to do about it. No title —
 // icon + one sentence + the action, Claude-style.
-function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void }) {
+function CreditsNoticePart({
+  onTopUp,
+  topUpLabel = "Upgrade",
+}: {
+  onTopUp?: () => void;
+  topUpLabel?: string;
+}) {
   return (
     <InlineNotice
       className="agent-credits-notice"
@@ -9474,7 +9568,7 @@ function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void }) {
       actions={
         onTopUp ? (
           <button type="button" className="btn btn-secondary" onClick={onTopUp}>
-            Upgrade
+            {topUpLabel}
           </button>
         ) : undefined
       }
@@ -10397,7 +10491,7 @@ type AgentArtifactPreview =
 // roughly half the window), remembered across sessions. The live value is
 // the --agent-files-w custom property on .app-shell, which the panel, the
 // main card's margin, and the composer all share.
-const AGENT_FILES_WIDTH_KEY = "scribe:agent:files-panel-width";
+const AGENT_FILES_WIDTH_KEY = "june:agent:files-panel-width";
 const FILES_PANEL_MIN_W = 300;
 const FILES_PANEL_MAX_W = 600;
 
@@ -11823,7 +11917,7 @@ function moveRecordKey<T>(
 // Survives app restarts (localStorage, not sessionStorage): restoring an
 // existing conversation after a relaunch is always safe, unlike the pending
 // new-session marker, which must NOT outlive its navigation.
-const AGENT_LAST_OPEN_SESSION_KEY = "scribe:agent:last-open-session";
+const AGENT_LAST_OPEN_SESSION_KEY = "june:agent:last-open-session";
 
 // How long a second startNewTask call with the same prompt counts as an echo
 // of the first (marker + window event double-delivery) rather than a new ask.

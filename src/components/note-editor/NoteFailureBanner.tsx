@@ -9,6 +9,7 @@ type Props = {
   audioPreserved: boolean;
   onRetry: () => void | Promise<void>;
   onTopUp: () => void;
+  topUpLabel?: string;
 };
 
 // String match (see isInsufficientCreditsMessage) is intentional and a known
@@ -40,7 +41,7 @@ function friendlyFailureSegment(message: string) {
   if (normalized.includes("no_speech") || normalized.includes("no speech")) {
     friendly =
       "No speech detected. Try speaking louder or moving closer to the microphone.";
-  } else if (isInvalidScribeResponseMessage(body)) {
+  } else if (isInvalidJuneResponseMessage(body)) {
     friendly = "The processing service returned an invalid response.";
   } else if (normalized.includes("upstream_provider_failed")) {
     friendly = "The transcription provider could not process this audio.";
@@ -48,10 +49,10 @@ function friendlyFailureSegment(message: string) {
   return source ? `${source}: ${friendly}` : friendly;
 }
 
-export function isInvalidScribeResponseMessage(message: string) {
+export function isInvalidJuneResponseMessage(message: string) {
   const normalized = message.trim().toLowerCase();
   return (
-    normalized.includes("scribe_api_response_invalid") ||
+    normalized.includes("june_api_response_invalid") ||
     normalized.includes("processing service returned an invalid response") ||
     /^expected value at line \d+ column \d+$/.test(normalized)
   );
@@ -62,10 +63,12 @@ export function NoteFailureBanner({
   audioPreserved,
   onRetry,
   onTopUp,
+  topUpLabel = "Upgrade",
 }: Props) {
   const kind = classifyFailure(errorMessage);
   const isBalanceIssue = kind === "balance_low";
   const displayMessage = userFacingFailureMessage(errorMessage);
+  const topUpAction = topUpLabel.toLowerCase();
   // Local busy flag so a fast double-click can't fire onRetry twice. The
   // banner unmounts when the note transitions out of `failed` status, so we
   // don't need to reset this state ourselves; the catch covers the case
@@ -93,8 +96,8 @@ export function NoteFailureBanner({
       <p className="note-failure-message">
         {isBalanceIssue
           ? audioPreserved
-            ? "Your balance ran out. Your recording is saved locally, so upgrade and retry."
-            : "Your balance is too low. Upgrade to continue."
+            ? `Your balance ran out. Your recording is saved locally, so ${topUpAction} and retry.`
+            : `Your balance is too low. ${topUpLabel} to continue.`
           : (displayMessage ?? "June couldn't finish processing this note.")}
         {!isBalanceIssue && audioPreserved
           ? " Your recording is saved locally, so you can retry."
@@ -108,7 +111,7 @@ export function NoteFailureBanner({
             onClick={onTopUp}
             disabled={retrying}
           >
-            Upgrade
+            {topUpLabel}
           </button>
         ) : null}
         <button

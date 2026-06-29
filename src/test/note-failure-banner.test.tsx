@@ -8,7 +8,7 @@ import {
 } from "../components/note-editor/NoteFailureBanner";
 
 describe("classifyFailure", () => {
-  it("treats Scribe's low-balance message as a balance issue", () => {
+  it("treats June's low-balance message as a balance issue", () => {
     expect(
       classifyFailure("Your balance is too low. Upgrade to continue."),
     ).toBe("balance_low");
@@ -70,6 +70,29 @@ describe("NoteFailureBanner", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /Retry/i }));
     expect(onRetry).toHaveBeenCalledOnce();
+  });
+
+  it("offers Top up credits + Retry with subscribed-user copy", async () => {
+    const onTopUp = vi.fn();
+    render(
+      <NoteFailureBanner
+        errorMessage="insufficient_credits"
+        audioPreserved
+        onRetry={() => undefined}
+        onTopUp={onTopUp}
+        topUpLabel="Top up credits"
+      />,
+    );
+
+    expect(
+      screen.getByText(/so top up credits and retry/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Upgrade/i })).toBeNull();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Top up credits" }),
+    );
+    expect(onTopUp).toHaveBeenCalledOnce();
   });
 
   it("shows only Retry for generic failures and reassures audio is saved", () => {
