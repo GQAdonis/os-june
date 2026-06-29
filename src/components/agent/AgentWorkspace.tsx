@@ -270,6 +270,11 @@ import {
   stripAgentCliAccessRequest,
 } from "../../lib/agent-cli-access";
 import {
+  agentPrivacyGuardNoticeMessage,
+  getAgentPrivacyGuardMode,
+  protectAgentPromptText,
+} from "../../lib/rampart-privacy";
+import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
   displayedComposerUserMessageText,
@@ -803,6 +808,13 @@ type PreparedComposerSubmission = {
   typedMessage: string;
 };
 
+type PreparedAgentPrivacyContent = {
+  promptDisplayContent: string;
+  runtimeContent: string;
+  titleContent: string;
+  notice: { redactedDetails: number } | null;
+};
+
 type ComposerDraftSnapshot = {
   text: string;
   category: ReportCategory | null;
@@ -1287,6 +1299,8 @@ export function AgentWorkspace({
   // Confirmation that a submitted issue report reached the June team; shown
   // in the composer notice slot until dismissed by the next send.
   const [issueReportNotice, setIssueReportNotice] =
+    useState<AgentWorkspaceNotice | null>(null);
+  const [privacyGuardNotice, setPrivacyGuardNotice] =
     useState<AgentWorkspaceNotice | null>(null);
   // Honest result of the last model switch (feature 10): scoped to the session
   // it acted on so it survives background refreshes and disappears when the
@@ -2140,6 +2154,11 @@ export function AgentWorkspace({
   const visibleIssueReportNotice =
     issueReportNotice && issueReportNotice.sessionId === selectedHermesSessionId
       ? issueReportNotice.message
+      : null;
+  const visiblePrivacyGuardNotice =
+    privacyGuardNotice &&
+    privacyGuardNotice.sessionId === selectedHermesSessionId
+      ? privacyGuardNotice.message
       : null;
   // The model-switch notice (feature 10) shows on the session it acted on; a
   // null sessionId is the default-only notice, shown while no session is open.
@@ -3185,6 +3204,62 @@ export function AgentWorkspace({
     };
   }
 
+  async function prepareAgentPrivacyContent(
+    promptDisplayContent: string,
+    runtimeContent: string,
+    titleContent: string,
+  ): Promise<PreparedAgentPrivacyContent> {
+    const mode = getAgentPrivacyGuardMode();
+    if (mode === "off") {
+      return {
+        promptDisplayContent,
+        runtimeContent,
+        titleContent,
+        notice: null,
+      };
+    }
+
+    const runtime = await protectAgentPromptText(runtimeContent, { mode });
+    const display =
+      promptDisplayContent === runtimeContent
+        ? runtime
+        : await protectAgentPromptText(promptDisplayContent, { mode });
+    const title =
+      titleContent === runtimeContent
+        ? runtime
+        : await protectAgentPromptText(titleContent, { mode });
+    const placeholders = new Set([
+      ...runtime.placeholders,
+      ...display.placeholders,
+      ...title.placeholders,
+    ]);
+
+    return {
+      promptDisplayContent: display.text,
+      runtimeContent: runtime.text,
+      titleContent: title.text,
+      notice:
+        runtime.redacted || display.redacted || title.redacted
+          ? { redactedDetails: placeholders.size }
+          : null,
+    };
+  }
+
+  async function prepareAgentPrivacySteer(text: string): Promise<{
+    text: string;
+    notice: { redactedDetails: number } | null;
+  }> {
+    const mode = getAgentPrivacyGuardMode();
+    if (mode === "off") return { text, notice: null };
+    const protectedText = await protectAgentPromptText(text, { mode });
+    return {
+      text: protectedText.text,
+      notice: protectedText.redacted
+        ? { redactedDetails: protectedText.placeholders.length }
+        : null,
+    };
+  }
+
   async function handleBuiltinComposerSlashCommand(commandText: string) {
     if (categoryRef.current) return false;
     const parsed = parseBuiltinComposerSlashCommand(commandText);
@@ -3292,6 +3367,13 @@ export function AgentWorkspace({
       workingSessionIdsRef.current.has(selectedHermesSessionId)
     ) {
       const steerSessionId = selectedHermesSessionId;
+      let protectedSteer: Awaited<ReturnType<typeof prepareAgentPrivacySteer>>;
+      try {
+        protectedSteer = await prepareAgentPrivacySteer(message);
+      } catch (err) {
+        setError(messageFromError(err));
+        return;
+      }
       // Delivery guarantee. Hermes only injects a steer into the next tool
       // result and rejects the RPC during a no-tool phase, so the steer alone
       // is unreliable. Record the text, attempt the steer (best effort — a
@@ -3307,7 +3389,17 @@ export function AgentWorkspace({
           steerEntry,
         ],
       };
-      void steerActiveSession(steerSessionId, message)
+      if (protectedSteer.notice) {
+        setPrivacyGuardNotice({
+          sessionId: steerSessionId,
+          message: agentPrivacyGuardNoticeMessage(
+            protectedSteer.notice.redactedDetails,
+          ),
+        });
+      } else {
+        setPrivacyGuardNotice(null);
+      }
+      void steerActiveSession(steerSessionId, protectedSteer.text)
         .then(() => {
           steerEntry.accepted = true;
         })
@@ -4176,7 +4268,15 @@ export function AgentWorkspace({
     },
   ) {
     const displayContent = options?.displayContent ?? content;
-    const titleContent = options?.titleContent ?? displayContent;
+    const rawTitleContent = options?.titleContent ?? displayContent;
+    setPrivacyGuardNotice(null);
+    const privacyContent = await prepareAgentPrivacyContent(
+      displayContent,
+      content,
+      rawTitleContent,
+    );
+    const runtimeContent = privacyContent.runtimeContent;
+    const titleContent = privacyContent.titleContent;
     const targetSessionId = explicitSession?.id
       ? explicitSession.id
       : newSessionModeRef.current
@@ -4212,15 +4312,15 @@ export function AgentWorkspace({
       targetGenerationModel &&
       !modelSupportsImageInput(targetGenerationModel)
         ? unsupportedImageInputPrompt({
-            displayContent,
+            displayContent: privacyContent.promptDisplayContent,
             imageNames: pendingImages.map(
               (attachment) => attachment.displayName,
             ),
             modelName: targetGenerationModel?.name ?? targetSessionModelId,
-            runtimeContent: content,
+            runtimeContent,
           })
         : undefined;
-    const promptSubmitContent = imageInputFallbackContent ?? content;
+    const promptSubmitContent = imageInputFallbackContent ?? runtimeContent;
     // Issue reports skip title suggestion: the content is the wrapped
     // investigation prompt, which would title the session after the wrapper.
     const titlePromise =
@@ -4491,6 +4591,14 @@ export function AgentWorkspace({
         session_id: runtimeSessionId,
         text: promptSubmitContent,
       });
+      if (privacyContent.notice) {
+        setPrivacyGuardNotice({
+          sessionId: storedSessionId,
+          message: agentPrivacyGuardNoticeMessage(
+            privacyContent.notice.redactedDetails,
+          ),
+        });
+      }
       await loadHermesSessions({
         suppressStartupRequestError: !hermesSessionsHydratedRef.current,
       });
@@ -6244,6 +6352,18 @@ export function AgentWorkspace({
               transition={{ duration: 0.22, ease: "easeOut" }}
             >
               {visibleIssueReportNotice}
+            </motion.p>
+          ) : visiblePrivacyGuardNotice ? (
+            <motion.p
+              key="privacy-guard-notice"
+              className="agent-composer-notice"
+              role="status"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.22, ease: "easeOut" }}
+            >
+              {visiblePrivacyGuardNotice}
             </motion.p>
           ) : visibleModelSwitchNotice ? (
             <motion.p

@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@nationaldesignstudio/rampart':
+        specifier: 0.1.1
+        version: 0.1.1
       '@tauri-apps/api':
         specifier: ^2.11.1
         version: 2.11.1
@@ -587,6 +590,14 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
+
+  '@nationaldesignstudio/rampart@0.1.1':
+    resolution: {integrity: sha512-293kaVfsJOFVt4zl7lfszdyDNM9jwurSkkQEZ3rz5z9aJNd43y1cfbdIxRUoeufmYmAOV7a8ysgWVOpglIivqQ==}
+    peerDependencies:
+      '@huggingface/transformers': '>=3'
+    peerDependenciesMeta:
+      '@huggingface/transformers':
+        optional: true
 
   '@pkgjs/parseargs@0.11.0':
     resolution: {integrity: sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg==}
@@ -2327,6 +2338,8 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  '@nationaldesignstudio/rampart@0.1.1': {}
 
   '@pkgjs/parseargs@0.11.0':
     optional: true

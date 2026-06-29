@@ -24,6 +24,7 @@ import {
   E2EE_MODEL_DESCRIPTION,
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
 } from "../lib/model-privacy";
+import { AGENT_PRIVACY_GUARD_MODE_KEY } from "../lib/rampart-privacy";
 import { HermesGatewayError } from "../lib/hermes-gateway";
 import { classifyHermesEvent } from "../lib/hermes-control-plane";
 import { hermesArtifactStore } from "../lib/hermes-artifact-store";
@@ -620,6 +621,37 @@ describe("AgentWorkspace", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("redacts agent prompts before sending when the privacy guard is enabled", async () => {
+    window.localStorage.setItem(AGENT_PRIVACY_GUARD_MODE_KEY, "structured");
+    render(<AgentWorkspace />);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_NEW_SESSION_EVENT, {
+          detail: {
+            prompt: "Email ada@example.com and note SSN 472-81-0094",
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "Email [EMAIL_1] and note SSN [SSN_1]",
+      }),
+    );
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledWith(
+      "Email [EMAIL_1] and note SSN [SSN_1]",
+    );
+    expect(
+      await screen.findByText(
+        "Privacy guard redacted 2 details before sending.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("never announces the restored session as selected while a New Session is pending", async () => {
@@ -5775,7 +5807,10 @@ describe("AgentWorkspace", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith(
+        "generation",
+        "qwen-vl",
+      ),
     );
     // The switch picks the image-capable model and keeps the dropped image.
     expect(screen.getByText("screenshot.png")).toBeInTheDocument();
@@ -5843,7 +5878,10 @@ describe("AgentWorkspace", () => {
     );
     // Lands on the first eligible vision model (Qwen VL), no picker dialog.
     await waitFor(() =>
-      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith(
+        "generation",
+        "qwen-vl",
+      ),
     );
     expect(
       screen.queryByRole("dialog", { name: "Choose text model" }),
