@@ -651,6 +651,54 @@ async fn discarded_recording_no_longer_exposes_retryable_audio() {
 }
 
 #[tokio::test]
+async fn get_note_exposes_invalid_saved_audio_for_retry() {
+    let repos = repos().await;
+    let note = repos.create_note(None).await.expect("note");
+    let session_id = "session-1";
+    repos
+        .create_recording_session(
+            &note.id,
+            session_id,
+            RecordingSourceMode::MicrophoneOnly,
+            "/tmp/session.partial.wav",
+            "/tmp/session.wav",
+            None,
+        )
+        .await
+        .expect("session");
+    let artifact = repos
+        .create_pending_source_artifact(
+            &note.id,
+            session_id,
+            "microphone",
+            "/tmp/session.partial.wav",
+            "/tmp/session.wav",
+        )
+        .await
+        .expect("artifact");
+    repos
+        .finalize_source_artifact(
+            &artifact.id,
+            "/tmp/session.wav",
+            "invalid",
+            2_515_414,
+            4096,
+            "checksum",
+            2_082_511,
+            None,
+            Some("audio duration mismatch".to_string()),
+        )
+        .await
+        .expect("invalid artifact");
+
+    let loaded = repos.get_note(&note.id).await.expect("loaded note");
+
+    assert_eq!(loaded.audio.expect("audio").id, artifact.id);
+    assert_eq!(loaded.audio_sources.len(), 1);
+    assert_eq!(loaded.audio_sources[0].id, artifact.id);
+}
+
+#[tokio::test]
 async fn get_note_returns_only_timed_source_transcript_rows() {
     let repos = repos().await;
     let note = repos.create_note(None).await.expect("note");

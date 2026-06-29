@@ -1693,7 +1693,7 @@ impl Repositories {
         let row = query(
             "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
              FROM audio_artifacts
-             WHERE note_id = ? AND status = 'valid'
+             WHERE note_id = ? AND status IN ('valid', 'invalid')
              ORDER BY created_at DESC
              LIMIT 1",
         )
@@ -1752,6 +1752,54 @@ impl Repositories {
             .collect())
     }
 
+    pub async fn latest_retryable_audio_artifact_paths(
+        &self,
+        note_id: &str,
+    ) -> Result<Vec<RetryableAudioArtifactPath>, sqlx::error::Error> {
+        let session = query(
+            "SELECT recording_session_id
+             FROM audio_artifacts
+             WHERE note_id = ?
+               AND status IN ('valid', 'invalid')
+               AND path IS NOT NULL
+               AND path != ''
+             ORDER BY created_at DESC, rowid DESC
+             LIMIT 1",
+        )
+        .bind(note_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(session) = session else {
+            return Ok(Vec::new());
+        };
+        let session_id: String = session.get("recording_session_id");
+        let rows = query(
+            "SELECT id, source, path, recording_session_id, status, expected_duration_ms
+             FROM audio_artifacts
+             WHERE note_id = ?
+               AND recording_session_id = ?
+               AND status IN ('valid', 'invalid')
+               AND path IS NOT NULL
+               AND path != ''
+             ORDER BY CASE source WHEN 'microphone' THEN 0 WHEN 'system' THEN 1 ELSE 2 END",
+        )
+        .bind(note_id)
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| RetryableAudioArtifactPath {
+                id: row.get("id"),
+                source: row.get("source"),
+                path: row.get("path"),
+                recording_session_id: row.get("recording_session_id"),
+                status: row.get("status"),
+                expected_duration_ms: row.get("expected_duration_ms"),
+            })
+            .collect())
+    }
+
     async fn latest_audio_sources(
         &self,
         note_id: &str,
@@ -1759,7 +1807,7 @@ impl Repositories {
         let rows = query(
             "SELECT id, source, format, duration_ms, size_bytes, checksum, created_at
              FROM audio_artifacts
-             WHERE note_id = ? AND status = 'valid'
+             WHERE note_id = ? AND status IN ('valid', 'invalid')
              ORDER BY created_at DESC",
         )
         .bind(note_id)
@@ -2573,6 +2621,16 @@ pub struct SourceArtifactPath {
     pub source: String,
     pub partial_path: Option<String>,
     pub final_path: Option<String>,
+    pub expected_duration_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RetryableAudioArtifactPath {
+    pub id: String,
+    pub source: String,
+    pub path: String,
+    pub recording_session_id: String,
+    pub status: String,
     pub expected_duration_ms: i64,
 }
 
