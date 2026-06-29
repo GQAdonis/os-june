@@ -798,6 +798,11 @@ pub fn dictation_helper_command(
 ) -> Result<(), AppError> {
     #[cfg(target_os = "macos")]
     {
+        if direct_helper_command_records_focus_target(&command) {
+            crate::macos_input::remember_focus_target();
+        } else if direct_helper_command_clears_focus_target(&command) {
+            crate::macos_input::clear_focus_target();
+        }
         if helper_command_resets_shortcut_activation(&command) {
             reset_shortcut_activation(&app);
         }
@@ -823,6 +828,20 @@ fn helper_command_resets_shortcut_activation(command: &serde_json::Value) -> boo
     matches!(
         command.get("type").and_then(serde_json::Value::as_str),
         Some("stop_and_paste" | "discard_recording" | "toggle_listening")
+    )
+}
+
+fn direct_helper_command_records_focus_target(command: &serde_json::Value) -> bool {
+    matches!(
+        command.get("type").and_then(serde_json::Value::as_str),
+        Some("start_listening" | "toggle_listening")
+    )
+}
+
+fn direct_helper_command_clears_focus_target(command: &serde_json::Value) -> bool {
+    matches!(
+        command.get("type").and_then(serde_json::Value::as_str),
+        Some("discard_recording")
     )
 }
 
@@ -1398,7 +1417,8 @@ fn send_helper_command(state: &HelperState, command: serde_json::Value) -> Resul
             .get("text")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
-        crate::macos_input::paste(text);
+        let text = normalized_paste_text(text);
+        crate::macos_input::paste(&text);
         return Ok(());
     }
 
@@ -2153,7 +2173,7 @@ async fn transcribe_recording_ready(app: AppHandle, recording: RecordingReadyInf
     .await;
     let outcome = outcome_from_transcription_result(result, recording.observed_audio_level, style);
     let state = app.state::<HelperState>();
-    let pasted_text = paste_text_from_command(&outcome.helper_command).map(str::to_string);
+    let pasted_text = paste_text_from_command(&outcome.helper_command).map(normalized_paste_text);
     if let Err(error) = send_helper_command(&state, outcome.helper_command) {
         emit_dictation_event_value(&app, app_error_event(error));
         return;
@@ -2174,6 +2194,15 @@ fn paste_text_from_command(command: &serde_json::Value) -> Option<&str> {
     (command.get("type").and_then(serde_json::Value::as_str) == Some("paste_text"))
         .then(|| command.get("text").and_then(serde_json::Value::as_str))
         .flatten()
+}
+
+fn normalized_paste_text(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        format!("{trimmed} ")
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -3953,6 +3982,35 @@ mod tests {
     }
 
     #[test]
+    fn direct_helper_start_commands_record_focus_target() {
+        assert!(direct_helper_command_records_focus_target(
+            &serde_json::json!({ "type": "start_listening" })
+        ));
+        assert!(direct_helper_command_records_focus_target(
+            &serde_json::json!({ "type": "toggle_listening" })
+        ));
+        assert!(!direct_helper_command_records_focus_target(
+            &serde_json::json!({ "type": "stop_and_paste" })
+        ));
+        assert!(!direct_helper_command_records_focus_target(
+            &serde_json::json!({ "type": "discard_recording" })
+        ));
+    }
+
+    #[test]
+    fn direct_helper_discard_clears_focus_target() {
+        assert!(direct_helper_command_clears_focus_target(
+            &serde_json::json!({ "type": "discard_recording" })
+        ));
+        assert!(!direct_helper_command_clears_focus_target(
+            &serde_json::json!({ "type": "start_listening" })
+        ));
+        assert!(!direct_helper_command_clears_focus_target(
+            &serde_json::json!({ "type": "toggle_listening" })
+        ));
+    }
+
+    #[test]
     fn successful_transcription_maps_to_paste_command() {
         let outcome = outcome_from_transcription_result(
             Ok(TranscriptionProviderResult {
@@ -3984,16 +4042,29 @@ mod tests {
 
     #[test]
     fn in_process_paste_completion_matches_helper_event_contract() {
-        let events = paste_completion_events("Paste this transcript.");
+        let events = paste_completion_events(&normalized_paste_text(" Paste this transcript. "));
 
         assert_eq!(
             events[0],
             serde_json::json!({
                 "type": "final_transcript",
-                "payload": { "text": "Paste this transcript." },
+                "payload": { "text": "Paste this transcript. " },
             })
         );
         assert_eq!(events[1], serde_json::json!({ "type": "paste_completed" }));
+    }
+
+    #[test]
+    fn in_process_paste_text_matches_helper_normalization() {
+        assert_eq!(
+            normalized_paste_text("Paste this transcript."),
+            "Paste this transcript. "
+        );
+        assert_eq!(
+            normalized_paste_text("  Paste this transcript.\n"),
+            "Paste this transcript. "
+        );
+        assert_eq!(normalized_paste_text(" \n\t"), "");
     }
 
     #[test]
