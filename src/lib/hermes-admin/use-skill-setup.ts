@@ -21,7 +21,7 @@
  * value — only configured/preview booleans and display-safe config values.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { hermesBridgeStatus, type HermesBridgeStatus } from "../tauri";
 import { AdminStateCache, type AdminNotification } from "./cache";
 import { createHermesAdminClient, type HermesAdminClient } from "./client";
@@ -138,6 +138,10 @@ export class SkillSetupController {
   private loadSeq = 0;
   private unsubscribers: Array<() => void> = [];
   private snapshot: SkillSetupState;
+  /** Fired after a successful save/delete so a host that owns a SEPARATE cache
+   * (the Installed skills setup-overview) can refresh; this controller's own
+   * cache already reloads via its `afterMutation` invalidation. */
+  private onSaved?: () => void;
 
   constructor(engine: SkillSetupEngine, skill: string, skillRaw: unknown) {
     this.engine = engine;
@@ -174,6 +178,12 @@ export class SkillSetupController {
 
   getSnapshot(): SkillSetupState {
     return this.snapshot;
+  }
+
+  /** Keeps the host's post-save callback current without rebuilding the
+   * controller (the controller is memoized on engine+skill). */
+  setOnSaved(onSaved?: () => void): void {
+    this.onSaved = onSaved;
   }
 
   subscribe(listener: () => void): () => void {
@@ -252,6 +262,7 @@ export class SkillSetupController {
       this.engine.lifecycle.noteMutation(outcome.mutation);
       this.pending.delete(name);
       await this.load();
+      this.onSaved?.();
     } catch (error) {
       if (this.disposed) return;
       this.pending.delete(name);
@@ -275,6 +286,7 @@ export class SkillSetupController {
       this.engine.lifecycle.noteMutation(outcome.mutation);
       this.pending.delete(name);
       await this.load();
+      this.onSaved?.();
     } catch (error) {
       if (this.disposed) return;
       this.pending.delete(name);
@@ -308,12 +320,18 @@ export class SkillSetupController {
     this.error = undefined;
     this.recompute();
     try {
-      const outcome = await this.engine.client.config.set(path, value);
+      // Write by segments: a skill or config key containing a dot must not be
+      // split into nested config keys (the read side already uses segments).
+      const outcome = await this.engine.client.config.setValueAtSegments(
+        skillConfigPathSegments(this.skill, key),
+        value,
+      );
       if (this.disposed) return;
       this.engine.cache.afterMutation(outcome.mutation, key);
       this.engine.lifecycle.noteMutation(outcome.mutation);
       this.pending.delete(path);
       await this.load();
+      this.onSaved?.();
     } catch (error) {
       if (this.disposed) return;
       this.pending.delete(path);
@@ -330,12 +348,15 @@ export class SkillSetupController {
     this.error = undefined;
     this.recompute();
     try {
-      const outcome = await this.engine.client.config.delete(path);
+      const outcome = await this.engine.client.config.deleteAtSegments(
+        skillConfigPathSegments(this.skill, key),
+      );
       if (this.disposed) return;
       this.engine.cache.afterMutation(outcome.mutation, key);
       this.engine.lifecycle.noteMutation(outcome.mutation);
       this.pending.delete(path);
       await this.load();
+      this.onSaved?.();
     } catch (error) {
       if (this.disposed) return;
       this.pending.delete(path);
@@ -430,6 +451,7 @@ export function useSkillSetupController(
   engine: SkillSetupEngine | null,
   skill: string,
   skillRaw: unknown,
+  onSaved?: () => void,
 ): SkillSetupState {
   const controller = useMemo(
     () => (engine ? new SkillSetupController(engine, skill, skillRaw) : null),
@@ -439,6 +461,11 @@ export function useSkillSetupController(
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [engine, skill],
   );
+
+  // Keep the post-save callback current without rebuilding the controller.
+  useEffect(() => {
+    controller?.setOnSaved(onSaved);
+  }, [controller, onSaved]);
 
   const [snapshot, setSnapshot] = useState<SkillSetupState>(() =>
     controller ? controller.getSnapshot() : unavailableState(skill),
@@ -525,6 +552,7 @@ export function useSkillSetup(
   skillRaw: unknown,
   mode: HermesAdminMode = "sandboxed",
   profile?: string,
+  onSaved?: () => void,
 ): SkillSetupState {
   const [bridge, setBridge] = useState<HermesBridgeStatus>();
 
@@ -544,7 +572,7 @@ export function useSkillSetup(
   }, []);
 
   const engine = useSkillSetupEngine(bridge, mode, profile);
-  return useSkillSetupController(engine, skill, skillRaw);
+  return useSkillSetupController(engine, skill, skillRaw, onSaved);
 }
 
 // ---------------------------------------------------------------------------
@@ -564,6 +592,10 @@ export type SkillsSetupOverview = {
    * no setup at all (so the row shows nothing rather than a misleading "Ready").
    */
   badgeFor: (skill: HermesSkillInfo) => SkillSetupBadge | undefined;
+  /** Re-reads env + config from Hermes. The per-skill setup panel uses a
+   * SEPARATE engine/cache, so an inline save there does not invalidate this
+   * overview's cache; a host calls this after such a save to refresh the badges. */
+  refresh: () => void;
 };
 
 /** Builds the badge resolver from a loaded env index + config tree. Pure; the
@@ -612,6 +644,7 @@ export function useSkillsSetupOverview(
   }, []);
 
   const engine = useSkillSetupEngine(bridge, mode, profile);
+  const [refreshKey, setRefreshKey] = useState(0);
   const [data, setData] = useState<{
     env: Map<string, { configured: boolean; preview?: string }>;
     config: Record<string, unknown>;
@@ -660,12 +693,14 @@ export function useSkillsSetupOverview(
       offEnv();
       offConfig();
     };
-  }, [engine]);
+  }, [engine, refreshKey]);
 
   const badgeFor = useMemo(
     () => makeBadgeResolver(data.env, data.config),
     [data],
   );
 
-  return { loaded: data.loaded, badgeFor };
+  const refresh = useCallback(() => setRefreshKey((key) => key + 1), []);
+
+  return { loaded: data.loaded, badgeFor, refresh };
 }

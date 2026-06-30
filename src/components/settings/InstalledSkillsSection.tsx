@@ -324,6 +324,7 @@ export function InstalledSkillsView({
                       : undefined
                   }
                   setupMode={state.mode ?? mode}
+                  onSetupSaved={setup?.refresh}
                 />
               ))}
             </ul>
@@ -426,6 +427,7 @@ function SkillRow({
   setupOpen,
   onToggleSetup,
   setupMode,
+  onSetupSaved,
 }: {
   skill: HermesSkillInfo;
   pending: boolean;
@@ -442,6 +444,9 @@ function SkillRow({
   onToggleSetup?: () => void;
   /** The mode the setup panel targets (so a write's blast radius is explicit). */
   setupMode?: HermesAdminMode;
+  /** Refreshes the list's setup-status overview after an inline save, since the
+   * setup panel uses a separate cache that does not invalidate the overview. */
+  onSetupSaved?: () => void;
 }) {
   const meta = sourceMeta(skill.source);
   const restrictions = platformRestrictions(skill);
@@ -566,6 +571,7 @@ function SkillRow({
             skillRaw={skill.raw}
             mode={setupMode}
             onClose={onToggleSetup}
+            onSaved={onSetupSaved}
           />
         </div>
       ) : null}

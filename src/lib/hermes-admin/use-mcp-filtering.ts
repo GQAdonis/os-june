@@ -23,10 +23,7 @@
 
 import { useCallback, useState } from "react";
 import { HermesAdminError } from "./errors";
-import {
-  toolsConfigPathString,
-  buildToolPolicyBlock,
-} from "./mcp-filtering-view";
+import { toolsConfigPath, buildToolPolicyBlock } from "./mcp-filtering-view";
 import type { ToolPolicyDraft } from "./mcp-filtering-view";
 import {
   useMcpServersController,
@@ -84,8 +81,8 @@ export function useMcpFilteringController(
         // path, so the jailed dashboard merges ONLY that block into config.yaml
         // and leaves the server's command/url/env/headers and all other config
         // untouched.
-        await engine.client.config.setValue(
-          toolsConfigPathString(serverName),
+        await engine.client.config.setValueAtSegments(
+          toolsConfigPath(serverName),
           block,
         );
         // The write is `config.set` on the wire, but the FILTER only takes

@@ -60,6 +60,10 @@ export type SkillConfigSetupRow = {
   /** The current value as stored, or undefined when unset (using the default).
    * Display-safe: a credential-shaped value is masked. */
   current?: string;
+  /** True when `current` is a masked placeholder (e.g. `[redacted]`) rather than
+   * the real stored value, so the editor must NOT seed its draft from it (saving
+   * the placeholder back would overwrite the real Hermes value with `[redacted]`). */
+  redacted: boolean;
   /** True when the current value differs from the declared default (so the UI
    * can show "modified" vs "default"). */
   modified: boolean;
@@ -155,14 +159,15 @@ export function buildSkillSetupModel(
 
   const config: SkillConfigSetupRow[] = requirements.config.map(
     (requirement) => {
-      const current = configValues.get(requirement.key);
+      const raw = configValues.get(requirement.key);
+      const display = safeConfigDisplay(requirement.key, raw);
       return {
         requirement,
-        current: safeConfigDisplay(requirement.key, current),
+        current: display,
+        // Masked if the display-safe value differs from the raw stored value.
+        redacted: raw !== undefined && display !== raw,
         modified:
-          current !== undefined &&
-          current.length > 0 &&
-          current !== requirement.default,
+          raw !== undefined && raw.length > 0 && raw !== requirement.default,
       };
     },
   );

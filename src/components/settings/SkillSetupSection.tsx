@@ -37,13 +37,17 @@ export function SkillSetupSection({
   skillRaw,
   mode = "sandboxed",
   onClose,
+  onSaved,
 }: {
   skill: string;
   skillRaw: unknown;
   mode?: HermesAdminMode;
   onClose?: () => void;
+  /** Fired after a successful inline secret/config save, so a host showing a
+   * separate setup-status badge (the Installed skills list) can refresh it. */
+  onSaved?: () => void;
 }) {
-  const state = useSkillSetup(skill, skillRaw, mode);
+  const state = useSkillSetup(skill, skillRaw, mode, undefined, onSaved);
   return <SkillSetupView state={state} onClose={onClose} />;
 }
 
@@ -378,7 +382,11 @@ function ConfigSetupRow({
   onDelete: () => void;
 }) {
   const { requirement } = row;
-  const [draft, setDraft] = useState(row.current ?? "");
+  // Never seed the draft from a masked placeholder: the row's `current` may be
+  // `[redacted]`, and saving that back would overwrite the real Hermes value
+  // with the literal placeholder. A redacted field starts empty and requires a
+  // typed replacement.
+  const [draft, setDraft] = useState(row.redacted ? "" : (row.current ?? ""));
   const [validationError, setValidationError] = useState<string>();
   const inputId = useId();
 
@@ -388,11 +396,19 @@ function ConfigSetupRow({
   useEffect(() => {
     if (lastCurrent.current !== row.current) {
       lastCurrent.current = row.current;
-      setDraft(row.current ?? "");
+      setDraft(row.redacted ? "" : (row.current ?? ""));
     }
-  }, [row.current]);
+  }, [row.current, row.redacted]);
 
   const save = () => {
+    if (row.redacted && draft.trim() === "") {
+      // The stored value is hidden; an empty save would clobber it. Require a
+      // new value, or let the user reset to default to clear it explicitly.
+      setValidationError(
+        "Enter a new value to replace the hidden one, or reset to default.",
+      );
+      return;
+    }
     const result = validateConfigValue(requirement, draft);
     if (!result.ok) {
       setValidationError(result.message);
@@ -439,7 +455,11 @@ function ConfigSetupRow({
           className="skill-setup-input"
           type="text"
           value={draft}
-          placeholder={requirement.default ?? "Enter value"}
+          placeholder={
+            row.redacted
+              ? "Hidden; enter a new value to replace it"
+              : (requirement.default ?? "Enter value")
+          }
           autoComplete="off"
           spellCheck={false}
           disabled={pending}

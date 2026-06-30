@@ -2748,36 +2748,47 @@ fn extract_authorization_url(output: &str) -> Option<String> {
     None
 }
 
-/// Redacts secret-shaped query VALUES from a URL before it crosses into the
-/// webview, preserving scheme/host/path and non-sensitive params so the link
-/// still opens. An OAuth authorization *request* URL carries none of these by
-/// contract (tokens live in the callback, not the request), so this is a no-op
-/// for a legitimate URL and only bites an anomalous one the CLI may have echoed.
-/// `redact_cli_word` only inspects the first `=`, so a multi-param URL needs
-/// this dedicated pass.
+/// Redacts secret-shaped VALUES from a URL before it crosses into the webview,
+/// preserving scheme/host/path and non-sensitive params so the link still opens.
+/// Both the query AND the `#fragment` are scrubbed: an OAuth authorization
+/// *request* carries no token by contract, but a callback-style URL the CLI may
+/// echo can carry `#access_token=`/`#id_token=` in the fragment (implicit flow),
+/// so a fragment-only URL must be redacted too. `redact_cli_word` only inspects
+/// the first `=`, so a multi-param URL needs this dedicated pass.
 fn redact_url_query_secrets(url: &str) -> String {
-    let Some((base, rest)) = url.split_once('?') else {
-        return url.to_string();
+    // Peel the fragment first (it can carry tokens), then the query; a URL may
+    // have either, both, or neither.
+    let (without_fragment, fragment) = match url.split_once('#') {
+        Some((head, frag)) => (head, Some(frag)),
+        None => (url, None),
     };
-    // Keep any trailing #fragment intact.
-    let (query, fragment) = match rest.split_once('#') {
-        Some((q, f)) => (q, Some(f)),
-        None => (rest, None),
+    let (base, query) = match without_fragment.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (without_fragment, None),
     };
-    let redacted = query
+    let mut out = base.to_string();
+    if let Some(query) = query {
+        out.push('?');
+        out.push_str(&redact_query_pairs(query));
+    }
+    if let Some(fragment) = fragment {
+        out.push('#');
+        out.push_str(&redact_query_pairs(fragment));
+    }
+    out
+}
+
+/// Redacts secret-shaped `k=v` pairs in an `&`-separated query or fragment
+/// string, leaving non-sensitive pairs and bare (`=`-less) segments untouched.
+fn redact_query_pairs(pairs: &str) -> String {
+    pairs
         .split('&')
         .map(|pair| match pair.split_once('=') {
             Some((key, _)) if query_key_is_sensitive(key) => format!("{key}=[redacted]"),
             _ => pair.to_string(),
         })
         .collect::<Vec<_>>()
-        .join("&");
-    let mut out = format!("{base}?{redacted}");
-    if let Some(fragment) = fragment {
-        out.push('#');
-        out.push_str(fragment);
-    }
-    out
+        .join("&")
 }
 
 /// True for a query-parameter name whose value must never reach the webview.
@@ -8156,8 +8167,8 @@ mod tests {
         // so the manual-open fallback still works.
         let authz = "https://auth.example.com/authorize?client_id=abc&redirect_uri=app%3A%2F%2Fcb&scope=read&state=xyz&code_challenge=h";
         assert_eq!(redact_url_query_secrets(authz), authz);
-        // An anomalous URL carrying a token: only the secret value is masked;
-        // other params and the fragment survive.
+        // An anomalous URL carrying a token in the query: only the secret value
+        // is masked; other params and a plain fragment survive.
         let leaky = "https://x/cb?client_id=abc&access_token=sk-secret&state=xyz#frag";
         let out = redact_url_query_secrets(leaky);
         assert!(out.contains("client_id=abc"));
@@ -8165,6 +8176,16 @@ mod tests {
         assert!(out.contains("access_token=[redacted]"));
         assert!(!out.contains("sk-secret"));
         assert!(out.ends_with("#frag"));
+
+        // OAuth implicit flow puts tokens in the FRAGMENT, often with no query at
+        // all; the fragment must be redacted too.
+        let implicit = "https://x/cb#access_token=sk-frag-secret&id_token=jwt&state=ok";
+        let out = redact_url_query_secrets(implicit);
+        assert!(!out.contains("sk-frag-secret"));
+        assert!(!out.contains("jwt"));
+        assert!(out.contains("access_token=[redacted]"));
+        assert!(out.contains("id_token=[redacted]"));
+        assert!(out.contains("state=ok"));
     }
 
     #[test]

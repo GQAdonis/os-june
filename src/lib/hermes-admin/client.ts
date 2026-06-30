@@ -322,9 +322,21 @@ export type HermesAdminClient = {
       path: string,
       value: unknown,
     ): Promise<MutationOutcome<HermesConfigWriteResult>>;
+    /** Segment-aware variant of {@link set}/{@link setValue}: writes `value` at
+     * the exact path SEGMENTS, so a dynamic segment (a skill or MCP server name)
+     * that itself contains a dot is written as ONE key, not mis-split into nested
+     * keys. Use with `skillConfigPathSegments` / `toolsConfigPath`. */
+    setValueAtSegments(
+      segments: string[],
+      value: unknown,
+    ): Promise<MutationOutcome<HermesConfigWriteResult>>;
     /** Clears a single dotted config path back to its default. `DELETE
      * /api/config` with `{ path, profile? }` (the path is in the BODY). */
     delete(path: string): Promise<MutationOutcome<HermesConfigWriteResult>>;
+    /** Segment-aware variant of {@link delete} (see {@link setValueAtSegments}). */
+    deleteAtSegments(
+      segments: string[],
+    ): Promise<MutationOutcome<HermesConfigWriteResult>>;
   };
 
   /**
@@ -742,38 +754,42 @@ function makeEnv(send: AdminTransport): HermesAdminClient["env"] {
   };
 }
 
-/** Sets a dotted path (`a.b.c`) on a config tree in place, creating
- * intermediate objects as needed. Replaces any non-object node in the way. */
+/** Sets a value at the given path SEGMENTS on a config tree in place, creating
+ * intermediate objects as needed. Replaces any non-object node in the way.
+ * Segments (not a dotted string) so a dynamic key that itself contains a dot —
+ * a skill or MCP server name — is written as ONE key, never split. */
 function setConfigAtPath(
   tree: Record<string, unknown>,
-  path: string,
+  segments: string[],
   value: unknown,
 ): void {
-  const keys = path.split(".");
   let node = tree;
-  for (let i = 0; i < keys.length - 1; i += 1) {
-    const key = keys[i]!;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const key = segments[i]!;
     const next = node[key];
     if (typeof next !== "object" || next === null || Array.isArray(next)) {
       node[key] = {};
     }
     node = node[key] as Record<string, unknown>;
   }
-  node[keys[keys.length - 1]!] = value;
+  node[segments[segments.length - 1]!] = value;
 }
 
-/** Deletes a dotted path (`a.b.c`) from a config tree in place. No-op if any
- * segment is missing. */
-function deleteConfigAtPath(tree: Record<string, unknown>, path: string): void {
-  const keys = path.split(".");
+/** Deletes a value at the given path SEGMENTS from a config tree in place. No-op
+ * if any segment is missing. Segment-based for the same dotted-name reason as
+ * {@link setConfigAtPath}. */
+function deleteConfigAtPath(
+  tree: Record<string, unknown>,
+  segments: string[],
+): void {
   let node = tree;
-  for (let i = 0; i < keys.length - 1; i += 1) {
-    const next = node[keys[i]!];
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    const next = node[segments[i]!];
     if (typeof next !== "object" || next === null || Array.isArray(next))
       return;
     node = next as Record<string, unknown>;
   }
-  delete node[keys[keys.length - 1]!];
+  delete node[segments[segments.length - 1]!];
 }
 
 function makeConfig(send: AdminTransport): HermesAdminClient["config"] {
@@ -808,24 +824,44 @@ function makeConfig(send: AdminTransport): HermesAdminClient["config"] {
     async set(path, value) {
       // Read-modify-write a single dotted path. Skill config is non-secret, but
       // the value is still not logged — the structural sanitizer masks any
-      // credential-shaped value defensively.
+      // credential-shaped value defensively. A dotted string is safe here only
+      // because every caller of `set` uses a STATIC path (no dynamic name);
+      // dynamic-name writers must use `setValueAtSegments` instead.
+      const segments = path.split(".");
       return writePath("config.set", path, (tree) =>
-        setConfigAtPath(tree, path, value),
+        setConfigAtPath(tree, segments, value),
       );
     },
     async setValue(path, value) {
       // Same read-modify-write as `set`, but `value` is an arbitrary structure
       // (array/object) rather than a string. Used by the external directories
-      // manager to write the whole `skills.external_dirs` list.
+      // manager to write the whole `skills.external_dirs` list (a static path).
+      const segments = path.split(".");
       return writePath("config.set", path, (tree) =>
-        setConfigAtPath(tree, path, value),
+        setConfigAtPath(tree, segments, value),
+      );
+    },
+    async setValueAtSegments(segments, value) {
+      // Segment-aware write: a skill or MCP server name may contain a dot, so a
+      // dotted path would mis-nest it. Callers pass discrete segments
+      // (skillConfigPathSegments / toolsConfigPath) so the value lands under the
+      // exact key Hermes reads it from.
+      return writePath("config.set", segments.join("."), (tree) =>
+        setConfigAtPath(tree, segments, value),
       );
     },
     async delete(path) {
       // Clears a dotted path. Hermes has no DELETE /api/config, so this is a
       // read-modify-write that removes the key and PUTs the tree back.
+      const segments = path.split(".");
       return writePath("config.delete", path, (tree) =>
-        deleteConfigAtPath(tree, path),
+        deleteConfigAtPath(tree, segments),
+      );
+    },
+    async deleteAtSegments(segments) {
+      // Segment-aware variant of `delete` (see `setValueAtSegments`).
+      return writePath("config.delete", segments.join("."), (tree) =>
+        deleteConfigAtPath(tree, segments),
       );
     },
   };

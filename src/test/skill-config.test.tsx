@@ -207,6 +207,8 @@ describe("skill setup — secret safety in display", () => {
       new Map([["token_field", FAKE_SECRET]]),
     );
     expect(model.config[0].current).toBe("[redacted]");
+    // Flagged redacted so the editor never seeds its draft from the placeholder.
+    expect(model.config[0].redacted).toBe(true);
   });
 
   it("shows a normal config value (a path) verbatim", () => {
@@ -216,6 +218,7 @@ describe("skill setup — secret safety in display", () => {
       new Map([["output_dir", "~/exports"]]),
     );
     expect(model.config[0].current).toBe("~/exports");
+    expect(model.config[0].redacted).toBe(false);
   });
 });
 
@@ -340,7 +343,9 @@ describe("skill setup — controller", () => {
 
   it("writes non-secret config through config.set under the right path", async () => {
     const { engine } = engineFromHarness();
-    const setSpy = vi.spyOn(engine.client.config, "set");
+    // The write goes through the segment-aware method so a dotted skill/key is
+    // never split into nested config keys.
+    const setSpy = vi.spyOn(engine.client.config, "setValueAtSegments");
     const controller = new SkillSetupController(
       engine,
       "exporter",
@@ -355,7 +360,7 @@ describe("skill setup — controller", () => {
 
     await controller.setConfig("format", "json");
     expect(setSpy).toHaveBeenCalledWith(
-      "skills.config.exporter.format",
+      ["skills", "config", "exporter", "format"],
       "json",
     );
     const after = controller
@@ -365,9 +370,24 @@ describe("skill setup — controller", () => {
     controller.dispose();
   });
 
+  it("fires onSaved after a successful config write so the list overview can refresh", async () => {
+    const { engine } = engineFromHarness();
+    const controller = new SkillSetupController(
+      engine,
+      "exporter",
+      skillSetupScenario().skills?.find((s) => s.name === "exporter"),
+    );
+    const onSaved = vi.fn();
+    controller.setOnSaved(onSaved);
+    await controller.load();
+    await controller.setConfig("format", "json");
+    expect(onSaved).toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it("clears config back to default through config.delete", async () => {
     const { engine } = engineFromHarness();
-    const delSpy = vi.spyOn(engine.client.config, "delete");
+    const delSpy = vi.spyOn(engine.client.config, "deleteAtSegments");
     const controller = new SkillSetupController(
       engine,
       "exporter",
@@ -375,7 +395,12 @@ describe("skill setup — controller", () => {
     );
     await controller.load();
     await controller.deleteConfig("output_dir");
-    expect(delSpy).toHaveBeenCalledWith("skills.config.exporter.output_dir");
+    expect(delSpy).toHaveBeenCalledWith([
+      "skills",
+      "config",
+      "exporter",
+      "output_dir",
+    ]);
     const after = controller
       .getSnapshot()
       .model.config.find((c) => c.requirement.key === "output_dir");
@@ -469,6 +494,28 @@ describe("skill setup — view", () => {
     );
     // After save the field is cleared (value lives in Hermes now).
     await waitFor(() => expect((field as HTMLInputElement).value).toBe(""));
+  });
+
+  it("does not prefill a redacted config value and refuses to save the placeholder", async () => {
+    const setConfig = vi.fn();
+    // A sensitive key whose stored value is masked to [redacted] for display.
+    const model = buildSkillSetupModel(
+      {
+        env: [],
+        config: [{ key: "api_token", prompt: "API token", required: true }],
+      },
+      new Map(),
+      new Map([["api_token", FAKE_SECRET]]),
+    );
+    render(<SkillSetupView state={stateWith({ model, setConfig })} />);
+    // The field starts empty, NOT seeded with the [redacted] placeholder.
+    const field = screen.getByLabelText("api_token value") as HTMLInputElement;
+    expect(field.value).toBe("");
+    // Saving without typing a replacement is refused, so the real value is never
+    // overwritten with [redacted].
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(setConfig).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert")).toHaveTextContent(/enter a new value/i);
   });
 
   it("never renders a secret value in the DOM for a configured key", () => {
