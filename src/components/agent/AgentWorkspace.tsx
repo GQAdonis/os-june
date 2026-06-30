@@ -91,6 +91,7 @@ import {
   hermesBridgeFileText,
   hermesAgentCliAccess,
   hermesBridgeSkills,
+  generateImage,
   hermesBridgeStatus,
   hermesBridgeToolsets,
   importHermesBridgeFile,
@@ -246,6 +247,7 @@ import {
   resolveSlashModel,
   slashModelResolutionError,
 } from "../../lib/agent-composer-slash-commands";
+import { generateChatImage } from "../../lib/chat-image-generation";
 import {
   ComposerEditor,
   type ComposerEditorHandle,
@@ -1278,6 +1280,9 @@ export function AgentWorkspace({
   const attachmentsRef = useRef<AgentAttachment[]>([]);
   const [dropActive, setDropActive] = useState(false);
   const [importingFiles, setImportingFiles] = useState(false);
+  // Reuses the importingFiles busy-gating (set alongside it); this flag only
+  // tailors the composer placeholder copy while an image is generating.
+  const [generatingImage, setGeneratingImage] = useState(false);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [errorState, setErrorState] = useState<AgentWorkspaceError | null>(
@@ -3195,8 +3200,54 @@ export function AgentWorkspace({
       return true;
     }
 
+    if (parsed.name === "image") {
+      await runImageSlashCommand(parsed.argument, commandText);
+      return true;
+    }
+
     await runFileSlashCommand(parsed.argument, commandText);
     return true;
+  }
+
+  // `/image <prompt>` generates an image from the prompt and drops it into the
+  // composer as an attachment, the same shape a pasted/dropped image produces,
+  // so it renders inline through the existing attachment path. The model is
+  // resolved server-side from the saved default image model.
+  async function runImageSlashCommand(argument: string, commandText: string) {
+    const prompt = argument.trim();
+    if (!prompt) {
+      setError("Type a description after /image to generate an image.");
+      return;
+    }
+    setGeneratingImage(true);
+    setImportingFiles(true);
+    try {
+      const result = await generateChatImage(prompt, {
+        generate: (text, model) => generateImage(text, model),
+        importImageBytes: importHermesBridgeFileBytes,
+      });
+      if (result.status !== "ok") {
+        setError(result.message);
+        return;
+      }
+      const file = result.file;
+      setComposerAttachments((current) => [
+        ...current,
+        {
+          ...file,
+          id: `${file.path}:${Date.now()}:${Math.random().toString(36)}`,
+          attach: result.attachment,
+        },
+      ]);
+      setError(null);
+      void loadFilesystemSnapshot();
+      clearComposerCommandDraft(commandText);
+    } catch (err) {
+      setError(messageFromError(err));
+    } finally {
+      setGeneratingImage(false);
+      setImportingFiles(false);
+    }
   }
 
   async function runModelSlashCommand(argument: string, commandText: string) {
@@ -6336,11 +6387,13 @@ export function AgentWorkspace({
             ref={composerEditorRef}
             skills={skills}
             placeholder={
-              importingFiles
-                ? "Attaching file…"
-                : heroMode
-                  ? "Ask June anything, run / commands"
-                  : "Send a message"
+              generatingImage
+                ? "Generating image…"
+                : importingFiles
+                  ? "Attaching file…"
+                  : heroMode
+                    ? "Ask June anything, run / commands"
+                    : "Send a message"
             }
             onChange={(text, nextCategory) => {
               draftRef.current = text;
