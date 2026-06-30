@@ -1,11 +1,11 @@
 //! Identity-only integration with OS Accounts (Login with Open Software).
 //!
 //! Tokens live in the OS keychain (never the webview). Debug builds use a
-//! separate keychain service by default. Metering goes through Scribe API,
+//! separate keychain service by default. Metering goes through June API,
 //! which holds the App API key — never this binary.
 //!
 //! Debug builds can opt into a plaintext token file for local development via
-//! `OS_SCRIBE_DEV_PLAINTEXT_TOKEN_STORE=1`; release builds always use Keychain.
+//! `OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE=1`; release builds always use Keychain.
 
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
@@ -29,26 +29,26 @@ use tokio::{
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const DEFAULT_LOOPBACK_PORT: u16 = 8765;
-// Scopes Scribe needs. profile:read for /me, billing:read for /billing/balance,
-// billing:write for subscription checkout, and credits:spend so Scribe API can
+// Scopes June needs. profile:read for /me, billing:read for /billing/balance,
+// billing:write for subscription checkout, and credits:spend so June API can
 // authorize-and-charge against the user's credits for transcription /
 // generation / dictation work.
 const OAUTH_SCOPES: &str = "profile:read billing:read billing:write credits:spend";
-// Scribe's OS Accounts token store. Keep this app-scoped so Scribe does not
+// June's OS Accounts token store. Keep this app-scoped so June does not
 // touch credentials written by other Open Software apps on startup.
-const KEYCHAIN_SERVICE: &str = "co.opensoftware.scribe.accounts";
-const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.scribe-dev.accounts";
+const KEYCHAIN_SERVICE: &str = "co.opensoftware.june.accounts";
+const DEV_KEYCHAIN_SERVICE: &str = "co.opensoftware.june-dev.accounts";
 const KEYCHAIN_USER: &str = "tokens";
-const LOCAL_DEV_ENV: &str = "OS_SCRIBE_LOCAL_DEV";
-const LOCAL_DEV_BEARER_TOKEN_ENV: &str = "OS_SCRIBE_LOCAL_DEV_BEARER_TOKEN";
-const LOCAL_DEV_USER_ID_ENV: &str = "OS_SCRIBE_LOCAL_DEV_USER_ID";
+const LOCAL_DEV_ENV: &str = "OS_JUNE_LOCAL_DEV";
+const LOCAL_DEV_BEARER_TOKEN_ENV: &str = "OS_JUNE_LOCAL_DEV_BEARER_TOKEN";
+const LOCAL_DEV_USER_ID_ENV: &str = "OS_JUNE_LOCAL_DEV_USER_ID";
 const DEFAULT_LOCAL_DEV_BEARER_TOKEN: &str = "local-dev-token";
 const DEFAULT_LOCAL_DEV_USER_ID: &str = "usr_local_dev";
 #[cfg(debug_assertions)]
-const DEV_PLAINTEXT_TOKEN_STORE_ENV: &str = "OS_SCRIBE_DEV_PLAINTEXT_TOKEN_STORE";
+const DEV_PLAINTEXT_TOKEN_STORE_ENV: &str = "OS_JUNE_DEV_PLAINTEXT_TOKEN_STORE";
 #[cfg(debug_assertions)]
 const DEV_PLAINTEXT_TOKEN_FILE: &str = "dev-os-accounts-tokens.json";
-const USE_PROD_ACCOUNTS_TOKENS_ENV: &str = "OS_SCRIBE_USE_PROD_ACCOUNTS_TOKENS";
+const USE_PROD_ACCOUNTS_TOKENS_ENV: &str = "OS_JUNE_USE_PROD_ACCOUNTS_TOKENS";
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 #[cfg(debug_assertions)]
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -89,6 +89,8 @@ struct MeWire {
 struct BalanceWire {
     credits: i64,
     usd_millis: i64,
+    #[serde(default)]
+    usage_remaining_percent: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +102,7 @@ struct CheckoutSessionWire {
 struct SubscriptionWire {
     subscribed: bool,
     status: Option<String>,
+    plan_credits: Option<i64>,
     trial_end: Option<String>,
     current_period_end: Option<String>,
     /// Trial length from the Stripe price config, available pre-subscription.
@@ -151,6 +154,8 @@ pub struct AccountUser {
 pub struct AccountBalance {
     pub credits: i64,
     pub usd_millis: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_remaining_percent: Option<i64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -159,6 +164,8 @@ pub struct AccountSubscription {
     pub subscribed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_credits: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trial_end: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -223,6 +230,7 @@ impl From<BalanceWire> for AccountBalance {
         Self {
             credits: w.credits,
             usd_millis: w.usd_millis,
+            usage_remaining_percent: w.usage_remaining_percent,
         }
     }
 }
@@ -271,7 +279,7 @@ impl Config {
 
     /// Where OS Accounts redirects after the user signs in. Dev builds use a
     /// loopback HTTP listener (works in `pnpm tauri:dev`, no installed bundle
-    /// required). Release builds use the `osscribe://` custom URI scheme,
+    /// required). Release builds use the `osjune://` custom URI scheme,
     /// registered by `tauri-plugin-deep-link` against the signed `.app`
     /// bundle — no temp HTTP listener, no macOS firewall prompt, cleaner UX.
     fn redirect_uri(&self) -> String {
@@ -282,7 +290,7 @@ impl Config {
         #[cfg(not(debug_assertions))]
         {
             let _ = self.loopback_port; // suppress dead_code lint in release builds
-            "osscribe://auth/callback".to_string()
+            "osjune://auth/callback".to_string()
         }
     }
 }
@@ -353,10 +361,12 @@ fn local_dev_account_status() -> AccountStatus {
         balance: Some(AccountBalance {
             credits: 0,
             usd_millis: 0,
+            usage_remaining_percent: Some(100),
         }),
         subscription: Some(AccountSubscription {
             subscribed: true,
             status: Some("active".to_string()),
+            plan_credits: Some(0),
             trial_end: None,
             current_period_end: None,
             trial_period_days: None,
@@ -591,7 +601,7 @@ pub async fn os_accounts_referral_summary() -> Result<ReferralSummary, AppError>
 }
 
 /// Register the deep-link handler at app setup. Forwards every exact
-/// `osscribe://auth/callback?...` URL to any in-flight login so the login
+/// `osjune://auth/callback?...` URL to any in-flight login so the login
 /// flow can validate `state` before accepting it. Works in both cold-launch
 /// (OS starts the app with the URL) and warm-launch (app already running, OS
 /// hands the URL to the existing instance via tauri-plugin-single-instance's
@@ -608,11 +618,11 @@ pub fn setup_deep_link(app: &tauri::App) {
         let Some(url) = event.urls().first().cloned() else {
             return;
         };
-        if url.scheme() != "osscribe" {
+        if url.scheme() != "osjune" {
             return;
         }
         // Match on the parsed URL components — `starts_with` would also
-        // accept `osscribe://auth/callback-extra?...` and similar, letting
+        // accept `osjune://auth/callback-extra?...` and similar, letting
         // an unrelated webpage drain the one-shot. CSRF would still reject
         // downstream, but tightening the gate here keeps the in-flight
         // login intact when a stray URL fires the handler.
@@ -728,7 +738,7 @@ async fn await_authorization_code(
 }
 
 // Branded loopback success page. Self-contained (the loopback origin can't
-// reach the app's bundled fonts/assets), but mirrors the OS Accounts / Scribe
+// reach the app's bundled fonts/assets), but mirrors the OS Accounts / June
 // look: warm-grey surface, inset card, OS mark, calm hierarchy — and follows
 // the system light/dark preference.
 #[cfg(debug_assertions)]
@@ -883,7 +893,7 @@ fn http_client() -> &'static reqwest::Client {
             .timeout(HTTP_TIMEOUT)
             .pool_idle_timeout(Duration::from_secs(90))
             .tcp_keepalive(Some(Duration::from_secs(30)))
-            .user_agent("os-scribe/0.1")
+            .user_agent("os-june/0.1")
             .build()
             .unwrap_or_else(|_| reqwest::Client::new())
     })
@@ -1144,6 +1154,7 @@ async fn fetch_snapshot(
         .map(|w| AccountSubscription {
             subscribed: w.subscribed,
             status: w.status,
+            plan_credits: w.plan_credits,
             trial_end: w.trial_end,
             current_period_end: w.current_period_end,
             trial_period_days: w.trial_period_days,
@@ -1380,7 +1391,7 @@ mod tests {
     #[test]
     fn callback_validation_ignores_wrong_state() {
         assert!(matches!(
-            validate_callback_code("osscribe://auth/callback?code=bad&state=wrong", "expected"),
+            validate_callback_code("osjune://auth/callback?code=bad&state=wrong", "expected"),
             CallbackCode::Ignore
         ));
     }
@@ -1389,7 +1400,7 @@ mod tests {
     fn callback_validation_accepts_matching_state() {
         assert!(matches!(
             validate_callback_code(
-                "osscribe://auth/callback?code=good&state=expected",
+                "osjune://auth/callback?code=good&state=expected",
                 "expected"
             ),
             CallbackCode::Code(code) if code == "good"
@@ -1410,9 +1421,9 @@ mod tests {
     #[tokio::test]
     async fn callback_receiver_waits_through_spoofed_state() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        tx.send("osscribe://auth/callback?code=bad&state=wrong".to_string())
+        tx.send("osjune://auth/callback?code=bad&state=wrong".to_string())
             .expect("send spoofed callback");
-        tx.send("osscribe://auth/callback?code=good&state=expected".to_string())
+        tx.send("osjune://auth/callback?code=good&state=expected".to_string())
             .expect("send valid callback");
 
         let code = await_valid_callback_url(&mut rx, "expected")

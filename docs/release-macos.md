@@ -35,7 +35,7 @@ Create or confirm these before cutting the first updater release:
   password-protected, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`.
 - Production runtime secrets: `PRODUCTION_OS_ACCOUNTS_URL`,
   `PRODUCTION_OS_ACCOUNTS_API_URL`, `PRODUCTION_OS_ACCOUNTS_CLIENT_ID`, and
-  `PRODUCTION_SCRIBE_API_URL`.
+  `PRODUCTION_JUNE_API_URL`.
 
 The updater keypair is separate from the Apple Developer ID certificate. The
 public key is embedded in `src-tauri/tauri.conf.json`; the private key must live
@@ -45,7 +45,7 @@ permanently breaks auto-update for all builds signed with its public key.
 Generate a keypair with:
 
 ```sh
-pnpm tauri signer generate --write-keys keys/os-scribe-updater.key
+pnpm tauri signer generate --write-keys keys/os-june-updater.key
 ```
 
 Do not commit `keys/`. Copy the private key contents into
@@ -77,9 +77,11 @@ The workflow performs the release steps in order:
    shipped under `Resources/native/hermes` so first launch needs no network
    install. Adds roughly 110 MB compressed to the DMG.
 7. Builds the `universal-apple-darwin` app and DMG with `tauri-action`.
-8. Signs with the Apple Developer ID cert, notarizes with Apple API key
-   credentials, signs updater artifacts with the Ed25519 updater key, and
-   publishes the release assets plus `latest.json` to
+8. Signs with the Apple Developer ID cert, notarizes the app with Apple API key
+   credentials, and signs updater artifacts with the Ed25519 updater key.
+9. Submits the generated DMG itself to Apple notarization, staples the DMG
+   ticket, verifies Gatekeeper install assessment, then overwrites the
+   versioned DMG asset plus the stable download aliases in
    `open-software-network/os-june-releases`.
 
 The app polls:
@@ -120,12 +122,12 @@ spctl --assess --type install --verbose "$DMG"
 xcrun stapler validate "$APP"
 xcrun stapler validate "$DMG"
 plutil -extract CFBundleURLTypes xml1 -o - "$APP/Contents/Info.plist"
-lipo -archs "$APP/Contents/MacOS/os-scribe"
+lipo -archs "$APP/Contents/MacOS/os-june"
 lipo -archs "$APP/Contents/Resources/native/bin/June Dictation Helper.app/Contents/MacOS/june-dictation-helper"
 lipo -archs "$APP/Contents/Resources/native/bin/June.app/Contents/MacOS/june-system-audio-recorder"
 ```
 
-Confirm `osscribe` appears in `CFBundleURLSchemes` and each `lipo` command
+Confirm `osjune` appears in `CFBundleURLSchemes` and each `lipo` command
 prints both `x86_64` and `arm64`.
 
 For the first updater-to-updater validation, install an older updater-capable

@@ -29,7 +29,7 @@ import { RecorderBar } from "../recorder/RecorderBar";
 import { NoteRecoveryPrompt } from "../recorder/NoteRecoveryPrompt";
 import { isMacLikePlatform } from "../../lib/platform";
 import {
-  isInvalidScribeResponseMessage,
+  isInvalidJuneResponseMessage,
   NoteFailureBanner,
   userFacingFailureMessage,
 } from "./NoteFailureBanner";
@@ -56,6 +56,7 @@ type NoteEditorProps = {
   onFinishRecording: (sessionId: string) => void;
   onRetry: () => void | Promise<void>;
   onTopUp: () => void;
+  topUpLabel?: string;
   onRecoverRecording: (sessionId: string) => void;
   onDiscardRecording: (sessionId: string) => void;
   onAssignFolder: (folderId: string) => void;
@@ -143,6 +144,7 @@ export function NoteEditor({
   onFinishRecording,
   onRetry,
   onTopUp,
+  topUpLabel,
   onRecoverRecording,
   onDiscardRecording,
   onAssignFolder,
@@ -327,6 +329,7 @@ export function NoteEditor({
             audioPreserved={!!(note.audio || note.audioSources?.length)}
             onRetry={onRetry}
             onTopUp={onTopUp}
+            topUpLabel={topUpLabel}
           />
         ) : null}
         {activeTab === "transcription" ? (
@@ -1110,7 +1113,7 @@ function TranscriptTurn({
 }
 
 function sourceTurnFailureMessage(message?: string) {
-  if (message && isInvalidScribeResponseMessage(message)) {
+  if (message && isInvalidJuneResponseMessage(message)) {
     return "Audio for this part could not be transcribed.";
   }
   return userFacingFailureMessage(message) ?? "";

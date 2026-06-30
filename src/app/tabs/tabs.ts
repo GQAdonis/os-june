@@ -20,6 +20,7 @@ export type TabNav = {
   folderId?: string;
   // view === "agent"
   agentSessionId?: string;
+  agentSessionTitle?: string;
   agentOrigin?: AgentOrigin;
 };
 

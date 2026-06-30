@@ -46,7 +46,7 @@ const mocks = vi.hoisted(() => ({
   createDictionaryEntry: vi.fn(),
   updateDictionaryEntry: vi.fn(),
   deleteDictionaryEntry: vi.fn(),
-  scribeOpenVerifyPage: vi.fn(),
+  juneOpenVerifyPage: vi.fn(),
   listen: vi.fn(),
   eventHandler: undefined as ((event: { payload: string }) => void) | undefined,
 }));
@@ -83,7 +83,7 @@ vi.mock("../lib/tauri", () => ({
   createDictionaryEntry: mocks.createDictionaryEntry,
   updateDictionaryEntry: mocks.updateDictionaryEntry,
   deleteDictionaryEntry: mocks.deleteDictionaryEntry,
-  scribeOpenVerifyPage: mocks.scribeOpenVerifyPage,
+  juneOpenVerifyPage: mocks.juneOpenVerifyPage,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -131,7 +131,7 @@ const signedInAccount = {
     email: "alex@example.com",
     displayName: "Alex",
   },
-  balance: { usdMillis: 1200 },
+  balance: { usdMillis: 1200, usageRemainingPercent: 100 },
 };
 
 function stubNavigatorPlatform(platform: string, userAgent: string) {
@@ -171,7 +171,7 @@ describe("AppSettings", () => {
       language,
     }));
     mocks.listDictionaryEntries.mockResolvedValue([]);
-    mocks.scribeOpenVerifyPage.mockResolvedValue(undefined);
+    mocks.juneOpenVerifyPage.mockResolvedValue(undefined);
     mocks.providerModelSettings.mockResolvedValue({
       settings: {
         transcriptionProvider: "venice",
@@ -349,12 +349,12 @@ describe("AppSettings", () => {
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
               name: "sample.pdf",
-              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/sample.pdf",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/sample.pdf",
               kind: "file",
               size: 1700,
               modifiedAt: "2026-06-04T18:39:00Z",
@@ -364,12 +364,12 @@ describe("AppSettings", () => {
         {
           id: "memory",
           label: "Memory",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/memory",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/memory",
           description: "Persistent Hermes memory files and stores.",
           entries: [
             {
               name: "USER.md",
-              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/memory/USER.md",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/memory/USER.md",
               kind: "file",
               size: 39,
               modifiedAt: "2026-06-04T18:47:00Z",
@@ -409,6 +409,118 @@ describe("AppSettings", () => {
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Upgrade" }));
     expect(mocks.osAccountsUpgrade).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows usage remaining as a percentage instead of dollars", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          balance: {
+            credits: 1200,
+            usdMillis: 1200,
+            usageRemainingPercent: 64,
+          },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Billing" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("64%")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Free plan" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Usage remaining")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Usage remaining" }),
+    ).toHaveAttribute("aria-valuenow", "64");
+    expect(screen.queryByText("$1.20")).not.toBeInTheDocument();
+  });
+
+  it("falls back to subscription plan credits when balance has no usage percentage", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          balance: {
+            credits: 4676,
+            usdMillis: 4676,
+          },
+          subscription: {
+            subscribed: true,
+            status: "active",
+            planCredits: 20000,
+          },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+
+    expect(screen.getByText("23%")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Pro plan" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Usage remaining" }),
+    ).toHaveAttribute("aria-valuenow", "23");
+  });
+
+  it("falls back to the free grant for unsubscribed accounts without usage percentage", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          balance: {
+            credits: 4857,
+            usdMillis: 4857,
+          },
+          subscription: {
+            subscribed: false,
+            status: undefined,
+            planCredits: undefined,
+          },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+
+    expect(screen.getByText("97%")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Free plan" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Usage remaining" }),
+    ).toHaveAttribute("aria-valuenow", "97");
   });
 
   it("runs sign-in, cancel, and sign-out actions from account settings", async () => {
@@ -506,7 +618,7 @@ describe("AppSettings", () => {
       await screen.findByText("Opened your account portal in the browser."),
     ).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Refresh balance" }));
+    await user.click(screen.getByRole("button", { name: "Refresh usage" }));
     await waitFor(() => expect(onAccountRefresh).toHaveBeenCalledOnce());
   });
 
@@ -516,7 +628,11 @@ describe("AppSettings", () => {
       <AppSettings
         account={{
           ...signedInAccount,
-          balance: { credits: 1200, usdMillis: 1200 },
+          balance: {
+            credits: 1200,
+            usdMillis: 1200,
+            usageRemainingPercent: 100,
+          },
           subscription: {
             subscribed: true,
             status: "past_due",
@@ -534,12 +650,53 @@ describe("AppSettings", () => {
 
     await user.click(screen.getByRole("tab", { name: "Billing" }));
 
-    expect(screen.getByText("Billing needs attention")).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Pro plan" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Update billing in your account portal."),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Manage billing" }));
     expect(mocks.osAccountsOpenPortal).toHaveBeenCalledOnce();
     expect(
       await screen.findByText("Opened your account portal in the browser."),
     ).toBeInTheDocument();
+  });
+
+  it("treats subscribed accounts as paid when status is absent", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={{
+          ...signedInAccount,
+          balance: {
+            credits: 1200,
+            usdMillis: 1200,
+            usageRemainingPercent: 100,
+          },
+          subscription: { subscribed: true },
+        }}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+
+    expect(
+      screen.getByRole("heading", { name: "Pro plan" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Manage billing" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Upgrade" }),
+    ).not.toBeInTheDocument();
   });
 
   it("hides billing and sign-out controls in local mode", () => {
@@ -562,7 +719,7 @@ describe("AppSettings", () => {
 
     expect(
       screen.getByText(
-        "Requests use your local Scribe API. No OpenSoftware account is used.",
+        "Requests use your local June API. No OpenSoftware account is used.",
       ),
     ).toBeInTheDocument();
     expect(
@@ -666,7 +823,7 @@ describe("AppSettings", () => {
       payload: JSON.stringify({
         type: "mic_test_ready",
         payload: {
-          path: "/tmp/os-scribe-mic-test.m4a",
+          path: "/tmp/os-june-mic-test.m4a",
           durationMs: 5000,
           observedAudioLevel: "0.72",
         },
@@ -725,7 +882,7 @@ describe("AppSettings", () => {
       payload: JSON.stringify({
         type: "mic_test_ready",
         payload: {
-          path: "/tmp/os-scribe-mic-test.m4a",
+          path: "/tmp/os-june-mic-test.m4a",
           durationMs: 5000,
           observedAudioLevel: "0.72",
         },
@@ -769,7 +926,7 @@ describe("AppSettings", () => {
       payload: JSON.stringify({
         type: "mic_test_ready",
         payload: {
-          path: "/tmp/os-scribe-mic-test.m4a",
+          path: "/tmp/os-june-mic-test.m4a",
           durationMs: 5000,
           observedAudioLevel: "0.72",
         },
@@ -819,7 +976,7 @@ describe("AppSettings", () => {
       payload: JSON.stringify({
         type: "mic_test_ready",
         payload: {
-          path: "/tmp/os-scribe-mic-test.m4a",
+          path: "/tmp/os-june-mic-test.m4a",
           durationMs: 5000,
           observedAudioLevel: "0.72",
         },
@@ -1639,7 +1796,7 @@ describe("AppSettings", () => {
 
   it("opens the server attestation page from About through Rust", async () => {
     // Not an anchor: the webview drops target="_blank" navigations, so the
-    // button must invoke the scribe_open_verify_page command instead.
+    // button must invoke the june_open_verify_page command instead.
     render(
       <AppSettings
         account={signedInAccount}
@@ -1658,7 +1815,7 @@ describe("AppSettings", () => {
     await user.click(
       await screen.findByRole("button", { name: "Verify server" }),
     );
-    expect(mocks.scribeOpenVerifyPage).toHaveBeenCalledOnce();
+    expect(mocks.juneOpenVerifyPage).toHaveBeenCalledOnce();
   });
 
   it("replays onboarding from About in dev builds", async () => {

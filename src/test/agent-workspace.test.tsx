@@ -189,6 +189,34 @@ const existingSession = {
   last_active: "2026-06-04T12:00:00Z",
 };
 
+function mockGlmCapabilities(capabilities: string[]) {
+  mocks.listVeniceModels.mockResolvedValue({
+    mode: "generation",
+    modelType: "text",
+    selectedModel: "zai-org-glm-5-2",
+    models: [
+      {
+        provider: "venice",
+        id: "zai-org-glm-5-2",
+        name: "GLM 5.2",
+        modelType: "text",
+        privacy: "private",
+        traits: [],
+        capabilities,
+      },
+      {
+        provider: "venice",
+        id: "kimi-k2-6",
+        name: "Kimi K2.6",
+        modelType: "text",
+        privacy: "private",
+        traits: [],
+        capabilities: [],
+      },
+    ],
+  });
+}
+
 describe("AgentWorkspace", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -273,7 +301,7 @@ describe("AgentWorkspace", () => {
     }));
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({ roots: [] });
     // Mirrors the Rust image_preview_data_url: an image path yields a
-    // data url, anything else null. Feature 19's structured image.attach reads
+    // data url, anything else null. Feature 19's structured image attach reads
     // the bytes through this command at attach time.
     mocks.hermesBridgeFilePreview.mockImplementation(async (path: string) =>
       /\.(png|jpe?g|gif|webp|tiff?)$/i.test(path)
@@ -283,7 +311,7 @@ describe("AgentWorkspace", () => {
     mocks.hermesBridgeFileText.mockResolvedValue(null);
     mocks.importHermesBridgeFile.mockImplementation(async (path: string) => ({
       name: path.split("/").pop() ?? "attachment",
-      path: `/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/${path.split("/").pop() ?? "attachment"}`,
+      path: `/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/${path.split("/").pop() ?? "attachment"}`,
       rootLabel: "Workspace",
       size: 1234,
       previewDataUrl: path.endsWith(".png")
@@ -293,7 +321,7 @@ describe("AgentWorkspace", () => {
     mocks.importHermesBridgeFileBytes.mockImplementation(
       async (name: string) => ({
         name,
-        path: `/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/${name}`,
+        path: `/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/${name}`,
         rootLabel: "Workspace",
         size: 5,
         previewDataUrl: null,
@@ -609,7 +637,7 @@ describe("AgentWorkspace", () => {
     // to dispatch a mount-time sessions-changed event selecting the old
     // session, which App reads as "switched to existing work" — dropping the
     // pending project assignment before the new session exists.
-    window.localStorage.setItem("scribe:agent:last-open-session", "session-1");
+    window.localStorage.setItem("june:agent:last-open-session", "session-1");
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
       JSON.stringify({ createdAt: Date.now() }),
@@ -753,7 +781,7 @@ describe("AgentWorkspace", () => {
     expect(submitted.text).toContain(
       "Use these file paths when inspecting or operating on the files.",
     );
-    expect(submitted.text).not.toContain("Scribe Hermes");
+    expect(submitted.text).not.toContain("June Hermes");
     // The transcript shows the user's words only — the investigation
     // framing is plumbing between June and the runtime, never UI.
     expect(
@@ -798,7 +826,7 @@ describe("AgentWorkspace", () => {
         agentDiagnosis: "The screenshot shows the recorder stuck on saving.",
         attachmentNames: ["screenshot.png"],
         attachmentPaths: [
-          "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/screenshot.png",
+          "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/screenshot.png",
         ],
         sessionId: "session-2",
       }),
@@ -1337,7 +1365,7 @@ describe("AgentWorkspace", () => {
         agentDiagnosis: "The recorder failed while saving.",
         attachmentNames: ["screenshot.png"],
         attachmentPaths: [
-          "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/screenshot.png",
+          "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/screenshot.png",
         ],
         sessionId: "session-2",
       }),
@@ -2356,7 +2384,7 @@ describe("AgentWorkspace", () => {
         resolveImport = resolve;
       }).then(() => ({
         name,
-        path: `/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/${name}`,
+        path: `/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/${name}`,
         rootLabel: "Workspace",
         size: 5,
         previewDataUrl: null,
@@ -2410,7 +2438,7 @@ describe("AgentWorkspace", () => {
     await act(async () => {
       resolveImport?.({
         name: "logs.txt",
-        path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/logs.txt",
+        path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/logs.txt",
         rootLabel: "Workspace",
         size: 5,
         previewDataUrl: null,
@@ -3019,7 +3047,7 @@ describe("AgentWorkspace", () => {
   });
 
   it("restores the last open session after a reload", async () => {
-    window.localStorage.setItem("scribe:agent:last-open-session", "session-1");
+    window.localStorage.setItem("june:agent:last-open-session", "session-1");
     mocks.listHermesSessions.mockResolvedValue([
       {
         id: "session-2",
@@ -3427,9 +3455,9 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
     await waitFor(() =>
-      expect(
-        window.localStorage.getItem("scribe:agent:last-open-session"),
-      ).toBe("session-1"),
+      expect(window.localStorage.getItem("june:agent:last-open-session")).toBe(
+        "session-1",
+      ),
     );
 
     act(() => {
@@ -3442,7 +3470,7 @@ describe("AgentWorkspace", () => {
 
     await waitFor(() =>
       expect(
-        window.localStorage.getItem("scribe:agent:last-open-session"),
+        window.localStorage.getItem("june:agent:last-open-session"),
       ).toBeNull(),
     );
     expect(
@@ -3952,6 +3980,224 @@ describe("AgentWorkspace", () => {
     expect(thoughtDetails).toHaveClass("agent-reasoning");
     expect(thoughtDetails).not.toContainElement(toolLabel);
     expect(await screen.findByText("Done.")).toBeInTheDocument();
+  });
+
+  it("does not force the transcript to the bottom while subagent progress streams", async () => {
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "browse the web for recent launch details",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "browse the web for recent launch details",
+      }),
+    );
+    expect(
+      await screen.findByText("browse the web for recent launch details"),
+    ).toBeInTheDocument();
+
+    const scroller = document.querySelector(".agent-scroll") as HTMLElement;
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1600,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 240,
+      writable: true,
+    });
+    Object.defineProperty(scroller, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+    fireEvent.scroll(scroller);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "subagent.progress",
+          session_id: "runtime-session-2",
+          payload: {
+            subagent_id: "worker-1",
+            goal: "Browse source pages",
+            text: "Reading search results",
+          },
+        });
+      }
+    });
+
+    expect(
+      await screen.findByText("Subagent: Browse source pages"),
+    ).toBeInTheDocument();
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it("keeps following new output during programmatic smooth scrolling", async () => {
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "browse the web for release notes",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "browse the web for release notes",
+      }),
+    );
+
+    const scroller = document.querySelector(".agent-scroll") as HTMLElement;
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1600,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 1280,
+      writable: true,
+    });
+    Object.defineProperty(scroller, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+    fireEvent.scroll(scroller);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "subagent.progress",
+          session_id: "runtime-session-2",
+          payload: {
+            subagent_id: "worker-1",
+            goal: "Browse release notes",
+            text: "Reading first source",
+          },
+        });
+      }
+    });
+    await screen.findByText("Reading first source");
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 2000,
+    });
+    scroller.scrollTop = 1460;
+    fireEvent.scroll(scroller);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "subagent.progress",
+          session_id: "runtime-session-2",
+          payload: {
+            subagent_id: "worker-1",
+            goal: "Browse release notes",
+            text: "Reading another source",
+          },
+        });
+      }
+    });
+
+    await screen.findByText(/Reading another source/);
+    expect(scrollTo).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not pull the transcript back down after scrollbar scrolling", async () => {
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "browse the web for release notes",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "browse the web for release notes",
+      }),
+    );
+
+    const scroller = document.querySelector(".agent-scroll") as HTMLElement;
+    const scrollTo = vi.fn();
+    Object.defineProperty(scroller, "clientHeight", {
+      configurable: true,
+      value: 320,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      configurable: true,
+      value: 1600,
+    });
+    Object.defineProperty(scroller, "scrollTop", {
+      configurable: true,
+      value: 1280,
+      writable: true,
+    });
+    Object.defineProperty(scroller, "scrollTo", {
+      configurable: true,
+      value: scrollTo,
+    });
+    fireEvent.scroll(scroller);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "subagent.progress",
+          session_id: "runtime-session-2",
+          payload: {
+            subagent_id: "worker-1",
+            goal: "Browse release notes",
+            text: "Reading first source",
+          },
+        });
+      }
+    });
+    await screen.findByText("Reading first source");
+    expect(scrollTo).toHaveBeenCalledTimes(1);
+
+    scroller.scrollTop = 900;
+    fireEvent.scroll(scroller);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "subagent.progress",
+          session_id: "runtime-session-2",
+          payload: {
+            subagent_id: "worker-1",
+            goal: "Browse release notes",
+            text: "Reading while the user reviews earlier output",
+          },
+        });
+      }
+    });
+
+    await screen.findByText(/Reading while the user reviews earlier output/);
+    expect(scrollTo).toHaveBeenCalledTimes(1);
   });
 
   it("explains a pending approval before the user chooses", async () => {
@@ -4794,13 +5040,13 @@ describe("AgentWorkspace", () => {
   it("renders generated workspace files mentioned by Hermes as downloadable artifacts", async () => {
     const user = userEvent.setup();
     const samplePath =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/sample.pdf";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/sample.pdf";
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
@@ -4841,12 +5087,12 @@ describe("AgentWorkspace", () => {
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
               name: "report.md",
-              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/report.md",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/report.md",
               kind: "file",
               size: 1768,
               modifiedAt: "2026-06-04T18:39:00Z",
@@ -4888,13 +5134,13 @@ describe("AgentWorkspace", () => {
   it("opens a markdown artifact in the viewer panel with rendered content", async () => {
     const user = userEvent.setup();
     const reportPath =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/report.md";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/report.md";
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
@@ -4967,7 +5213,7 @@ describe("AgentWorkspace", () => {
   it.skip("shows a tool-touched file in the activity drawer's artifacts timeline and opens it in the preview flow", async () => {
     const user = userEvent.setup();
     const reportPath =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/timeline.md";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/timeline.md";
     mocks.hermesBridgeFileText.mockResolvedValue("# Timeline\n\nBody.");
 
     render(<AgentWorkspace />);
@@ -5038,7 +5284,7 @@ describe("AgentWorkspace", () => {
   it("lists every surfaced file behind the session bar files button", async () => {
     const user = userEvent.setup();
     const workspaceRoot =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace";
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
@@ -5120,7 +5366,7 @@ describe("AgentWorkspace", () => {
   it("does not surface files only mentioned inside tool output", async () => {
     const user = userEvent.setup();
     const workspaceRoot =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace";
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
@@ -5207,13 +5453,13 @@ describe("AgentWorkspace", () => {
 
   it("does not render download cards for files the user attached", async () => {
     const attachedPath =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/june-context.md";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/june-context.md";
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
@@ -5261,24 +5507,24 @@ describe("AgentWorkspace", () => {
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
               name: "notes.md",
-              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/notes.md",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/notes.md",
               kind: "file",
               size: 512,
               modifiedAt: "2026-06-04T18:39:00Z",
             },
             {
               name: "archive",
-              path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/archive",
+              path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/archive",
               kind: "directory",
               children: [
                 {
                   name: "notes.md",
-                  path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/archive/notes.md",
+                  path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/archive/notes.md",
                   kind: "file",
                   size: 512,
                   modifiedAt: "2026-06-04T18:39:00Z",
@@ -5308,13 +5554,13 @@ describe("AgentWorkspace", () => {
 
   it("renders generated workspace images as file cards without previews", async () => {
     const screenshotPath =
-      "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/screenshot.png";
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/screenshot.png";
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({
       roots: [
         {
           id: "workspace",
           label: "Workspace",
-          path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace",
+          path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace",
           description: "Hermes scratch files and generated outputs.",
           entries: [
             {
@@ -5396,8 +5642,8 @@ describe("AgentWorkspace", () => {
     expect(submitted.text).toContain(
       "Use these file paths when inspecting or operating on the files.",
     );
-    expect(submitted.text).not.toContain("co.opensoftware.scribe");
-    expect(submitted.text).not.toContain("Scribe Hermes");
+    expect(submitted.text).not.toContain("co.opensoftware.june");
+    expect(submitted.text).not.toContain("June Hermes");
     expect(mocks.importHermesBridgeFile).toHaveBeenCalledWith(
       "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
     );
@@ -5426,11 +5672,7 @@ describe("AgentWorkspace", () => {
     ).toBe(false);
   });
 
-  it("attaches a dropped image to the session via image.attach and marks it attached", async () => {
-    // Feature 19: on submit, an imported image is sent to the session through
-    // the structured image.attach RPC, the chip flips to "Attached", and the
-    // attachment lands in the artifact timeline — without the base64 ever
-    // reaching the sanitized trace export.
+  it("uses a text fallback when the selected model cannot read image attachments", async () => {
     const user = userEvent.setup();
     render(<AgentWorkspace />);
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
@@ -5456,15 +5698,290 @@ describe("AgentWorkspace", () => {
     await user.click(sendButton);
 
     await waitFor(() =>
-      expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach", {
+      expect(
+        mocks.gatewayRequest.mock.calls.some(
+          ([method]) => method === "prompt.submit",
+        ),
+      ).toBe(true),
+    );
+    expect(
+      mocks.gatewayRequest.mock.calls.some(
+        ([method]) => method === "image.attach_bytes",
+      ),
+    ).toBe(false);
+
+    const submitted = mocks.gatewayRequest.mock.calls.find(
+      ([method]) => method === "prompt.submit",
+    )?.[1] as { text: string };
+    expect(submitted.text).toContain(
+      "Attached files copied into the June workspace:",
+    );
+    expect(submitted.text).toContain("--- Attached Context ---");
+    expect(submitted.text).toContain(
+      "GLM 5.2 does not support image input in June.",
+    );
+    expect(submitted.text).toContain("Do not call vision_analyze");
+    expect(submitted.text).toContain(
+      "ask the user to describe the image or paste the relevant text",
+    );
+  });
+
+  it("warns and offers a one-tap switch when an image is attached to a non-vision model", async () => {
+    // Hero mode (no open session) so the switch writes the global text-model
+    // default through setVeniceModel rather than a per-chat gateway dispatch.
+    mocks.listAgentTasks.mockResolvedValue({ items: [] });
+    mocks.listHermesSessions.mockResolvedValue([]);
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "zai-org-glm-5-2",
+      models: [
+        {
+          provider: "venice",
+          id: "zai-org-glm-5-2",
+          name: "GLM 5.2",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling"],
+        },
+        {
+          provider: "venice",
+          id: "qwen-vl",
+          name: "Qwen VL",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling", "supportsVision"],
+        },
+      ],
+    });
+    mocks.setVeniceModel.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
+        ],
+      },
+    });
+
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+    expect(
+      await screen.findByText("GLM 5.2 can't read images."),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Switch to a vision model" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+    );
+    // The switch picks the image-capable model and keeps the dropped image.
+    expect(screen.getByText("screenshot.png")).toBeInTheDocument();
+  });
+
+  it("switches to the first eligible vision model when several qualify", async () => {
+    // The banner action is a one-tap fix: with several image-capable models it
+    // switches straight to the first eligible one rather than opening the
+    // generic (non-vision-scoped) picker.
+    mocks.listAgentTasks.mockResolvedValue({ items: [] });
+    mocks.listHermesSessions.mockResolvedValue([]);
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "zai-org-glm-5-2",
+      models: [
+        {
+          provider: "venice",
+          id: "zai-org-glm-5-2",
+          name: "GLM 5.2",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling"],
+        },
+        {
+          provider: "venice",
+          id: "qwen-vl",
+          name: "Qwen VL",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling", "supportsVision"],
+        },
+        {
+          provider: "venice",
+          id: "gpt-vision",
+          name: "GPT Vision",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling", "supportsVision"],
+        },
+      ],
+    });
+    mocks.setVeniceModel.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
+        ],
+      },
+    });
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Switch to a vision model" }),
+    );
+    // Lands on the first eligible vision model (Qwen VL), no picker dialog.
+    await waitFor(() =>
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "qwen-vl"),
+    );
+    expect(
+      screen.queryByRole("dialog", { name: "Choose text model" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("attaches the image when the active model id is unresolved", async () => {
+    // Regression: a stale or not-yet-loaded model id must not be assumed
+    // non-vision. The image still attaches via image.attach_bytes rather than
+    // silently downgrading to the text-only fallback.
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "model-not-in-catalog",
+      models: [
+        {
+          provider: "venice",
+          id: "kimi-k2-6",
+          name: "Kimi K2.6",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling"],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
+        ],
+      },
+    });
+
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "what is in this image?");
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    await waitFor(() =>
+      expect(
+        mocks.gatewayRequest.mock.calls.some(
+          ([method]) => method === "image.attach_bytes",
+        ),
+      ).toBe(true),
+    );
+    const submitted = mocks.gatewayRequest.mock.calls.find(
+      ([method]) => method === "prompt.submit",
+    )?.[1] as { text: string };
+    expect(submitted.text).not.toContain("does not support image input");
+  });
+
+  it("shows no image-input warning when the selected model reads images", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
+        ],
+      },
+    });
+
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Switch to a vision model" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("attaches a dropped image to the session via image.attach_bytes and marks it attached", async () => {
+    // Feature 19: on submit, an imported image is sent to the session through
+    // the structured image.attach_bytes RPC, the chip flips to "Attached", and the
+    // attachment lands in the artifact timeline — without the base64 ever
+    // reaching the sanitized trace export.
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/screenshot.png",
+        ],
+      },
+    });
+
+    expect(await screen.findByText("screenshot.png")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "what is in this image?");
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach_bytes", {
         session_id: "runtime-session-1",
         mime_type: "image/png",
-        data_base64: "cHJldmlldw==",
+        content_base64: "cHJldmlldw==",
+        filename: "screenshot.png",
       }),
     );
-    // image.attach precedes prompt.submit for the same turn.
+    // image.attach_bytes precedes prompt.submit for the same turn.
     const attachIndex = mocks.gatewayRequest.mock.calls.findIndex(
-      ([method]) => method === "image.attach",
+      ([method]) => method === "image.attach_bytes",
     );
     const submitIndex = mocks.gatewayRequest.mock.calls.findIndex(
       ([method]) => method === "prompt.submit",
@@ -5486,15 +6003,16 @@ describe("AgentWorkspace", () => {
     const trace = JSON.stringify(
       hermesTraceBuffer.exportSanitizedTrace("session-1"),
     );
-    expect(trace).toContain("image.attach");
+    expect(trace).toContain("image.attach_bytes");
     expect(trace).not.toContain("cHJldmlldw==");
-    expect(trace).not.toContain("data_base64");
+    expect(trace).not.toContain("content_base64");
   });
 
   it("blocks the prompt and warns when an image attach fails", async () => {
-    // A failed image.attach must not silently send the prompt with a missing
+    // A failed image.attach_bytes must not silently send the prompt with a missing
     // image: the send is blocked, the chip surfaces the failure, and the
     // composer text is restored for a retry.
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
     const user = userEvent.setup();
     mocks.gatewayRequest.mockImplementation((method: string) => {
       if (method === "session.create") {
@@ -5506,7 +6024,7 @@ describe("AgentWorkspace", () => {
       if (method === "session.resume") {
         return Promise.resolve({ session_id: "runtime-session-1" });
       }
-      if (method === "image.attach") {
+      if (method === "image.attach_bytes") {
         return Promise.reject(new Error("attach exploded"));
       }
       return Promise.resolve({});
@@ -5538,7 +6056,7 @@ describe("AgentWorkspace", () => {
     await waitFor(() =>
       expect(
         mocks.gatewayRequest.mock.calls.some(
-          ([method]) => method === "image.attach",
+          ([method]) => method === "image.attach_bytes",
         ),
       ).toBe(true),
     );
@@ -5579,7 +6097,7 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
     mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
       name: "pasted-image.png",
-      path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/pasted-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/pasted-image.png",
       rootLabel: "Workspace",
       size: 5,
       previewDataUrl: "data:image/png;base64,preview",
@@ -5617,7 +6135,7 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
     mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
       name: "image.png",
-      path: "/Users/alex/Library/Application Support/co.opensoftware.scribe/hermes/workspace/uploads/image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/image.png",
       rootLabel: "Workspace",
       size: 3,
       previewDataUrl: "data:image/png;base64,preview",
@@ -6554,6 +7072,37 @@ describe("AgentWorkspace", () => {
     expect(mocks.osAccountsUpgrade).toHaveBeenCalledOnce();
   });
 
+  it("renders an out-of-credits notice with a top-up action for subscribed users", async () => {
+    const user = userEvent.setup();
+    const onTopUp = vi.fn();
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m1",
+        role: "user",
+        content: "How are the subagents doing",
+        timestamp: "2026-06-10T10:00:00Z",
+      },
+      {
+        id: "m2",
+        role: "assistant",
+        content:
+          "Error: Error code: 402 - {'data': None, 'success': False, 'error_code': 4301, 'message': 'insufficient_credits'}",
+        timestamp: "2026-06-10T10:00:01Z",
+      },
+    ]);
+
+    render(<AgentWorkspace onTopUp={onTopUp} topUpLabel="Top up credits" />);
+
+    expect(
+      await screen.findByText(/June stopped because your balance ran out/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upgrade" })).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Top up credits" }));
+    expect(onTopUp).toHaveBeenCalledOnce();
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
+  });
+
   it("shows every error surface via the __agentErrors() dev handle", async () => {
     const agentErrors = (
       window as unknown as { __agentErrors: (show?: boolean) => string }
@@ -6703,11 +7252,11 @@ describe("AgentWorkspace", () => {
       <AgentWorkspace
         initialSession={existingSession}
         origin={{
-          backLabel: "Back to Scribe",
+          backLabel: "Back to June",
           onBack,
           crumbs: [
             { label: "Projects", onClick: onOpenProjects },
-            { label: "Scribe", onClick: onBack },
+            { label: "June", onClick: onBack },
           ],
         }}
       />,
@@ -6715,8 +7264,8 @@ describe("AgentWorkspace", () => {
 
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
     expect(screen.getByText("Projects")).toBeInTheDocument();
-    expect(screen.getByText("Scribe")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Back to Scribe" }));
+    expect(screen.getByText("June")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to June" }));
     expect(onBack).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Projects" }));
     expect(onOpenProjects).toHaveBeenCalled();

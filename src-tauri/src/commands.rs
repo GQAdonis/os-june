@@ -51,7 +51,7 @@ use std::{
     path::{Path, PathBuf},
     time::Instant,
 };
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 use tokio::sync::OnceCell;
 
 #[tauri::command]
@@ -425,7 +425,7 @@ pub async fn save_agent_hermes_session(
 pub async fn suggest_agent_session_title(
     request: SuggestAgentSessionTitleRequest,
 ) -> Result<SuggestAgentSessionTitleResponse, AppError> {
-    let title = crate::scribe_api::suggest_agent_session_title(&request.prompt).await?;
+    let title = crate::june_api::suggest_agent_session_title(&request.prompt).await?;
     Ok(SuggestAgentSessionTitleResponse { title })
 }
 
@@ -435,7 +435,7 @@ pub async fn submit_issue_report(
     request: SubmitIssueReportRequest,
 ) -> Result<SubmitIssueReportResponse, AppError> {
     let app_version = app.package_info().version.to_string();
-    crate::scribe_api::submit_issue_report(&request, &app_version).await
+    crate::june_api::submit_issue_report(&request, &app_version).await
 }
 
 #[tauri::command]
@@ -443,7 +443,7 @@ pub async fn explain_agent_approval(
     request: ExplainAgentApprovalRequest,
 ) -> Result<ExplainAgentApprovalResponse, AppError> {
     let explanation =
-        crate::scribe_api::explain_agent_approval(&request.description, request.command.as_deref())
+        crate::june_api::explain_agent_approval(&request.description, request.command.as_deref())
             .await?;
     Ok(ExplainAgentApprovalResponse { explanation })
 }
@@ -562,13 +562,13 @@ pub async fn check_recording_source_readiness(
         .map_err(|error| AppError::new("readiness_check_failed", error.to_string()))
 }
 
-/// Opens the scribe-api `/verify` page (enclave attestation, routing,
+/// Opens the june-api `/verify` page (enclave attestation, routing,
 /// retention) in the default browser. Must route through Rust: the webview
 /// installs no new-window handler, so `target="_blank"` anchors are silently
 /// dropped — same reason the accounts portal links go through a command.
 #[tauri::command]
-pub fn scribe_open_verify_page() -> Result<(), AppError> {
-    crate::os_accounts::open_in_browser(&crate::scribe_api::verify_url())
+pub fn june_open_verify_page() -> Result<(), AppError> {
+    crate::os_accounts::open_in_browser(&crate::june_api::verify_url())
 }
 
 #[tauri::command]
@@ -906,6 +906,7 @@ async fn finish_recording_session(
             rms_amplitude: 0.0,
             warnings: vec!["No microphone validation was available.".to_string()],
         });
+    let primary_valid = source_audio_passes_validation(RecordingSource::Microphone, &validation);
     repos
         .update_recording_session(
             &finished.session_id,
@@ -921,7 +922,7 @@ async fn finish_recording_session(
             Some(validation.peak_amplitude),
             Some(validation.rms_amplitude),
             Some(serde_json::to_string(&validation).unwrap_or_default()),
-            if validation.duration_within_tolerance {
+            if primary_valid {
                 None
             } else {
                 Some(validation.warnings.join("; "))
@@ -1072,12 +1073,10 @@ fn recording_source_readiness(source_mode: RecordingSourceMode) -> RecordingSour
     if source_mode == RecordingSourceMode::MicrophonePlusSystem {
         let mut system = crate::audio::system_macos::system_audio_readiness();
         if should_probe_system_audio_permission(system.ready, is_capture_active()) {
-            if let Err(error) = crate::audio::system_macos::helper_permission_check() {
-                system.ready = false;
-                system.permission_state = "denied".to_string();
-                system.capture_available = false;
-                system.message = Some(error.message);
-            }
+            system = apply_system_audio_permission_probe_result(
+                system,
+                crate::audio::system_macos::helper_permission_check(),
+            );
         }
         sources.push(system);
     }
@@ -1094,6 +1093,37 @@ fn recording_source_readiness(source_mode: RecordingSourceMode) -> RecordingSour
 
 fn should_probe_system_audio_permission(system_ready: bool, capture_active: bool) -> bool {
     system_ready && !capture_active
+}
+
+fn apply_system_audio_permission_probe_result(
+    mut system: SourceReadinessDto,
+    result: Result<(), AppError>,
+) -> SourceReadinessDto {
+    match result {
+        Ok(()) => {
+            system.permission_state = "granted".to_string();
+        }
+        Err(error) => {
+            system.ready = false;
+            system.capture_available = false;
+            match error.code.as_str() {
+                "system_audio_permission_denied" => {
+                    system.permission_state = "denied".to_string();
+                    system.recovery_action = Some("openSystemAudioSettings".to_string());
+                }
+                "system_audio_capture_unavailable" => {
+                    system.permission_state = "granted".to_string();
+                    system.recovery_action = Some("restartApp".to_string());
+                }
+                _ => {
+                    system.permission_state = "unknown".to_string();
+                    system.recovery_action = Some("restartApp".to_string());
+                }
+            }
+            system.message = Some(error.message);
+        }
+    }
+    system
 }
 
 #[tauri::command]
@@ -1342,17 +1372,14 @@ pub async fn recover_recording(
             Some(validation.peak_amplitude),
             Some(validation.rms_amplitude),
             Some(serde_json::to_string(&validation).unwrap_or_default()),
-            if validation.duration_within_tolerance {
+            if source_audio_passes_validation(RecordingSource::Microphone, &validation) {
                 None
             } else {
                 Some(validation.warnings.join("; "))
             },
         )
         .await?;
-    if !(validation.non_zero_size
-        && validation.readable_audio
-        && validation.duration_within_tolerance)
-    {
+    if !source_audio_passes_validation(RecordingSource::Microphone, &validation) {
         repos
             .set_note_status(
                 &info.note_id,
@@ -1733,7 +1760,11 @@ fn app_paths(app: &AppHandle) -> Result<AppPaths, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{recovery_validation_expected_duration_ms, should_probe_system_audio_permission};
+    use super::{
+        apply_system_audio_permission_probe_result, recovery_validation_expected_duration_ms,
+        should_probe_system_audio_permission,
+    };
+    use crate::domain::types::{AppError, RecordingSource, SourceReadinessDto};
 
     #[test]
     fn skips_system_audio_permission_probe_while_capture_is_active() {
@@ -1747,11 +1778,69 @@ mod tests {
     }
 
     #[test]
+    fn successful_system_audio_permission_probe_reports_granted() {
+        let readiness = apply_system_audio_permission_probe_result(system_readiness(), Ok(()));
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.permission_state, "granted");
+        assert!(readiness.capture_available);
+    }
+
+    #[test]
+    fn failed_system_audio_permission_probe_blocks_capture() {
+        let readiness = apply_system_audio_permission_probe_result(
+            system_readiness(),
+            Err(AppError::new(
+                "system_audio_permission_denied",
+                "Grant access.",
+            )),
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.permission_state, "denied");
+        assert!(!readiness.capture_available);
+        assert_eq!(readiness.message.as_deref(), Some("Grant access."));
+    }
+
+    #[test]
+    fn failed_system_audio_capture_probe_keeps_permission_granted() {
+        let readiness = apply_system_audio_permission_probe_result(
+            system_readiness(),
+            Err(AppError::new(
+                "system_audio_capture_unavailable",
+                "Failed to create audio format for system tap.",
+            )),
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.permission_state, "granted");
+        assert!(!readiness.capture_available);
+        assert_eq!(readiness.recovery_action.as_deref(), Some("restartApp"));
+        assert_eq!(
+            readiness.message.as_deref(),
+            Some("Failed to create audio format for system tap.")
+        );
+    }
+
+    #[test]
     fn recovered_wav_duration_overrides_stale_stored_duration() {
         let (_dir, path) = write_one_second_wav();
 
         assert_eq!(recovery_validation_expected_duration_ms(&path, 0), 1_000);
         assert_eq!(recovery_validation_expected_duration_ms(&path, 1), 1_000);
+    }
+
+    fn system_readiness() -> SourceReadinessDto {
+        SourceReadinessDto {
+            source: RecordingSource::System,
+            required: true,
+            ready: true,
+            permission_state: "unknown".to_string(),
+            device_available: true,
+            capture_available: true,
+            recovery_action: Some("openSystemAudioSettings".to_string()),
+            message: None,
+        }
     }
 
     #[test]

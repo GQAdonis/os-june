@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { shouldBlockOnFunding, shouldBlockOnSignIn } from "../lib/account-gate";
+import {
+  depletedBalanceActionLabel,
+  shouldOpenPortalForDepletedBalance,
+  shouldBlockOnFunding,
+  shouldBlockOnSignIn,
+} from "../lib/account-gate";
 import type { AccountStatus } from "../lib/tauri";
 
 describe("shouldBlockOnSignIn", () => {
@@ -137,5 +142,49 @@ describe("shouldBlockOnFunding", () => {
       false,
     );
     expect(shouldBlockOnFunding(signedIn())).toBe(false);
+  });
+});
+
+describe("depletedBalanceActionLabel", () => {
+  it("asks unsubscribed users to upgrade", () => {
+    expect(
+      depletedBalanceActionLabel({
+        signedIn: true,
+        configured: true,
+        subscription: { subscribed: false },
+      }),
+    ).toBe("Upgrade");
+  });
+
+  it("asks subscribed users to top up credits", () => {
+    expect(
+      depletedBalanceActionLabel({
+        signedIn: true,
+        configured: true,
+        subscription: { subscribed: true, status: "active" },
+      }),
+    ).toBe("Top up credits");
+  });
+});
+
+describe("shouldOpenPortalForDepletedBalance", () => {
+  it("keeps unsubscribed users on checkout", () => {
+    expect(
+      shouldOpenPortalForDepletedBalance({
+        signedIn: true,
+        configured: true,
+        subscription: { subscribed: false },
+      }),
+    ).toBe(false);
+  });
+
+  it("routes subscribed users to the account portal", () => {
+    expect(
+      shouldOpenPortalForDepletedBalance({
+        signedIn: true,
+        configured: true,
+        subscription: { subscribed: true, status: "active" },
+      }),
+    ).toBe(true);
   });
 });

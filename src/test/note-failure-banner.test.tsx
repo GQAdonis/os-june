@@ -8,7 +8,7 @@ import {
 } from "../components/note-editor/NoteFailureBanner";
 
 describe("classifyFailure", () => {
-  it("treats Scribe's low-balance message as a balance issue", () => {
+  it("treats June's low-balance message as a balance issue", () => {
     expect(
       classifyFailure("Your balance is too low. Upgrade to continue."),
     ).toBe("balance_low");
@@ -72,6 +72,29 @@ describe("NoteFailureBanner", () => {
     expect(onRetry).toHaveBeenCalledOnce();
   });
 
+  it("offers Top up credits + Retry with subscribed-user copy", async () => {
+    const onTopUp = vi.fn();
+    render(
+      <NoteFailureBanner
+        errorMessage="insufficient_credits"
+        audioPreserved
+        onRetry={() => undefined}
+        onTopUp={onTopUp}
+        topUpLabel="Top up credits"
+      />,
+    );
+
+    expect(
+      screen.getByText(/so top up credits and retry/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Upgrade/i })).toBeNull();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Top up credits" }),
+    );
+    expect(onTopUp).toHaveBeenCalledOnce();
+  });
+
   it("shows only Retry for generic failures and reassures audio is saved", () => {
     render(
       <NoteFailureBanner
@@ -104,6 +127,24 @@ describe("NoteFailureBanner", () => {
     expect(screen.getByText(/No speech detected/i)).toBeInTheDocument();
     expect(
       screen.queryByText(/upstream_provider_failed/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows a billing message for metering provider failures", () => {
+    render(
+      <NoteFailureBanner
+        errorMessage="Microphone: metering_provider_failed"
+        audioPreserved
+        onRetry={() => undefined}
+        onTopUp={() => undefined}
+      />,
+    );
+
+    expect(
+      screen.getByText(/Billing is temporarily unavailable/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/metering_provider_failed/i),
     ).not.toBeInTheDocument();
   });
 

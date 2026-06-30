@@ -16,7 +16,7 @@ export type ModelPrivacyFlags = {
 };
 
 export const PROVIDER_MODEL_SETTINGS_CHANGED_EVENT =
-  "scribe:provider-model-settings-changed";
+  "june:provider-model-settings-changed";
 
 export type ProviderModelSettingsChangedDetail = {
   mode: ProviderModelMode;
@@ -60,6 +60,23 @@ export function modelSupportsTools(
       normalized.includes("toolcalling")
     );
   });
+}
+
+export function modelSupportsImageInput(
+  model: Partial<Pick<VeniceModelDto, "capabilities" | "traits">>,
+) {
+  return [...(model.capabilities ?? []), ...(model.traits ?? [])].some(
+    (capability) => {
+      const normalized = capability.toLowerCase().replace(/[^a-z]/g, "");
+      return (
+        normalized.includes("supportsvision") ||
+        normalized.includes("vision") ||
+        normalized.includes("imageinput") ||
+        normalized.includes("imageunderstanding") ||
+        normalized.includes("multimodal")
+      );
+    },
+  );
 }
 
 // Strongest claim wins: E2EE models are also private, but "encrypted into the

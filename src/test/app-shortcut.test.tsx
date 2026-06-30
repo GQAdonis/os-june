@@ -4,17 +4,25 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { HERO_GREETINGS } from "../components/agent/AgentWorkspace";
+import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
 import {
   AGENT_NEW_SESSION_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
 } from "../lib/agent-events";
 import { CLOSE_TAB_EVENT, OPEN_SETTINGS_EVENT } from "../lib/menu-bar";
-import type { AccountStatus, BootstrapResponse, NoteDto } from "../lib/tauri";
+import type {
+  AccountStatus,
+  BootstrapResponse,
+  NoteDto,
+  RecordingSessionDto,
+  RecordingSourceReadinessDto,
+} from "../lib/tauri";
 
 // The hero greeting cycles per visit, so tests match any entry in the pool.
 const HERO_GREETING = new RegExp(
@@ -79,9 +87,22 @@ const mocks = vi.hoisted(() => ({
   osAccountsUpgrade: vi.fn(),
   agentHudShow: vi.fn(),
   agentHudHide: vi.fn(),
+  ensureHermesBridgeSession: vi.fn(),
+  hermesAgentCliAccess: vi.fn(),
+  hermesBridgeFilesystemSnapshot: vi.fn(),
+  hermesBridgeStatus: vi.fn(),
+  listAgentTasks: vi.fn(),
+  listHermesSessionMessages: vi.fn(),
+  listHermesSessions: vi.fn(),
+  listVeniceModels: vi.fn(),
   playRecordingSound: vi.fn(),
   preloadRecordingSounds: vi.fn(),
-  startPeriodicScribeUpdateChecks: vi.fn(),
+  providerModelSettings: vi.fn(),
+  startHermesBridge: vi.fn(),
+  startPeriodicJuneUpdateChecks: vi.fn(),
+  suggestAgentSessionTitle: vi.fn(),
+  gatewayRequest: vi.fn(),
+  gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -97,13 +118,34 @@ vi.mock("../lib/recording-sounds", () => ({
   preloadRecordingSounds: mocks.preloadRecordingSounds,
 }));
 
+vi.mock("../lib/hermes-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/hermes-adapter")>()),
+  listHermesSessionMessages: mocks.listHermesSessionMessages,
+  listHermesSessions: mocks.listHermesSessions,
+  titleFromPrompt: (prompt: string) => prompt.trim() || "Untitled session",
+}));
+
+vi.mock("../lib/hermes-gateway", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/hermes-gateway")>()),
+  HermesGatewayClient: class {
+    connect = vi.fn();
+    close = vi.fn();
+    onEvent = vi.fn((handler: (event: Record<string, unknown>) => void) => {
+      mocks.gatewayEventHandlers.add(handler);
+      return () => mocks.gatewayEventHandlers.delete(handler);
+    });
+    onClose = vi.fn(() => vi.fn());
+    request = mocks.gatewayRequest;
+  },
+}));
+
 vi.mock("../app/update-decision", async () => {
   const actual = await vi.importActual<typeof import("../app/update-decision")>(
     "../app/update-decision",
   );
   return {
     ...actual,
-    startPeriodicScribeUpdateChecks: mocks.startPeriodicScribeUpdateChecks,
+    startPeriodicJuneUpdateChecks: mocks.startPeriodicJuneUpdateChecks,
   };
 });
 
@@ -145,21 +187,16 @@ vi.mock("../lib/tauri", () => ({
   osAccountsUpgrade: mocks.osAccountsUpgrade,
   agentHudShow: mocks.agentHudShow,
   agentHudHide: mocks.agentHudHide,
-  // The agent workspace mounts at launch; a quiet, not-running bridge keeps
-  // these tests focused on the meetings surfaces.
-  hermesBridgeStatus: vi.fn(async () => ({ running: false })),
-  listAgentTasks: vi.fn(async () => ({ items: [] })),
-  scribeVerifyUrl: vi.fn(async () => ""),
-  providerModelSettings: vi.fn(async () => ({
-    settings: { generationModel: "" },
-  })),
-  hermesAgentCliAccess: vi.fn(async () => ({ enabled: false })),
-  listVeniceModels: vi.fn(async () => ({
-    mode: "generation",
-    modelType: "text",
-    selectedModel: "",
-    models: [],
-  })),
+  ensureHermesBridgeSession: mocks.ensureHermesBridgeSession,
+  hermesAgentCliAccess: mocks.hermesAgentCliAccess,
+  hermesBridgeFilesystemSnapshot: mocks.hermesBridgeFilesystemSnapshot,
+  hermesBridgeStatus: mocks.hermesBridgeStatus,
+  listAgentTasks: mocks.listAgentTasks,
+  juneVerifyUrl: vi.fn(async () => ""),
+  providerModelSettings: mocks.providerModelSettings,
+  listVeniceModels: mocks.listVeniceModels,
+  startHermesBridge: mocks.startHermesBridge,
+  suggestAgentSessionTitle: mocks.suggestAgentSessionTitle,
 }));
 
 const now = "2026-05-19T10:00:00Z";
@@ -175,6 +212,64 @@ function note(overrides: Partial<NoteDto> = {}): NoteDto {
     updatedAt: now,
     generatedContent: "Existing note",
     activeTab: "notes",
+    ...overrides,
+  };
+}
+
+function recordingReadiness(systemReady: boolean): RecordingSourceReadinessDto {
+  return {
+    sourceMode: "microphonePlusSystem",
+    ready: systemReady,
+    sources: [
+      {
+        source: "microphone",
+        required: true,
+        ready: true,
+        permissionState: "granted",
+        deviceAvailable: true,
+        captureAvailable: true,
+      },
+      {
+        source: "system",
+        required: true,
+        ready: systemReady,
+        permissionState: systemReady ? "granted" : "denied",
+        deviceAvailable: true,
+        captureAvailable: systemReady,
+        recoveryAction: "openSystemAudioSettings",
+      },
+    ],
+  };
+}
+
+function microphoneOnlyReadiness(): RecordingSourceReadinessDto {
+  return {
+    sourceMode: "microphoneOnly",
+    ready: true,
+    sources: [
+      {
+        source: "microphone",
+        required: true,
+        ready: true,
+        permissionState: "granted",
+        deviceAvailable: true,
+        captureAvailable: true,
+      },
+    ],
+  };
+}
+
+function recordingSession(
+  overrides: Partial<RecordingSessionDto> = {},
+): RecordingSessionDto {
+  return {
+    id: "rec-1",
+    noteId: "note-1",
+    sourceMode: "microphoneOnly",
+    state: "recording",
+    startedAt: now,
+    elapsedMs: 0,
+    level: { peak: 0, rms: 0, recentPeaks: [] },
     ...overrides,
   };
 }
@@ -233,7 +328,46 @@ describe("App shortcuts", () => {
     mocks.osAccountsLogout.mockResolvedValue(undefined);
     mocks.osAccountsCancelLogin.mockResolvedValue(undefined);
     mocks.osAccountsUpgrade.mockResolvedValue(undefined);
-    mocks.startPeriodicScribeUpdateChecks.mockReturnValue(vi.fn());
+    mocks.ensureHermesBridgeSession.mockResolvedValue({});
+    mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
+    mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({ roots: [] });
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: false,
+    });
+    mocks.listAgentTasks.mockResolvedValue({ items: [] });
+    mocks.listHermesSessionMessages.mockResolvedValue([]);
+    mocks.listHermesSessions.mockResolvedValue([]);
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "",
+      models: [],
+    });
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: { generationModel: "" },
+    });
+    mocks.startHermesBridge.mockResolvedValue({
+      running: false,
+    });
+    mocks.startPeriodicJuneUpdateChecks.mockReturnValue(vi.fn());
+    mocks.suggestAgentSessionTitle.mockImplementation(
+      async (prompt: string) => ({
+        title: prompt,
+      }),
+    );
+    mocks.gatewayEventHandlers.clear();
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.create") {
+        return Promise.resolve({
+          session_id: "runtime-session-2",
+          stored_session_id: "session-2",
+        });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-2" });
+      }
+      return Promise.resolve({});
+    });
     mocks.listeners.clear();
     mocks.listen.mockImplementation(
       async (
@@ -258,9 +392,9 @@ describe("App shortcuts", () => {
 
       await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
       await waitFor(() =>
-        expect(mocks.startPeriodicScribeUpdateChecks).toHaveBeenCalledOnce(),
+        expect(mocks.startPeriodicJuneUpdateChecks).toHaveBeenCalledOnce(),
       );
-      expect(mocks.startPeriodicScribeUpdateChecks.mock.calls[0]?.[0]).toEqual(
+      expect(mocks.startPeriodicJuneUpdateChecks.mock.calls[0]?.[0]).toEqual(
         expect.any(Function),
       );
     } finally {
@@ -283,6 +417,146 @@ describe("App shortcuts", () => {
       expect(mocks.createNote).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener(AGENT_NEW_SESSION_EVENT, onNewSession);
+    }
+  });
+
+  it("keeps a newly started chat attached to its tab before sessions hydrate", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    const user = userEvent.setup();
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: true,
+      connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
+    });
+    mocks.startHermesBridge.mockResolvedValue({
+      running: true,
+      connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
+    });
+    mocks.listHermesSessions.mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    try {
+      render(<App />);
+
+      expect(
+        await screen.findByRole("heading", { name: HERO_GREETING }),
+      ).toBeInTheDocument();
+
+      window.dispatchEvent(
+        new CustomEvent(AGENT_NEW_SESSION_EVENT, {
+          detail: { prompt: "plan the release" },
+        }),
+      );
+
+      await waitFor(() =>
+        expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+          session_id: "runtime-session-2",
+          text: "plan the release",
+        }),
+      );
+      await waitFor(() =>
+        expect(screen.getAllByText("plan the release").length).toBeGreaterThan(
+          0,
+        ),
+      );
+
+      const chatTab = await screen.findByRole("tab", {
+        name: "plan the release",
+      });
+      expect(chatTab).toHaveAttribute("data-active", "true");
+
+      await user.click(screen.getByRole("button", { name: "New tab" }));
+      expect(
+        await screen.findByRole("heading", { name: HERO_GREETING }),
+      ).toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "1", metaKey: true });
+
+      await waitFor(() =>
+        expect(screen.getAllByText("plan the release").length).toBeGreaterThan(
+          0,
+        ),
+      );
+      expect(
+        screen.queryByRole("heading", { name: HERO_GREETING }),
+      ).not.toBeInTheDocument();
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("fills restored session tab metadata from a follow-up before sessions hydrate", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    const user = userEvent.setup();
+    mocks.hermesBridgeStatus.mockResolvedValue({
+      running: true,
+      connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
+    });
+    mocks.startHermesBridge.mockResolvedValue({
+      running: true,
+      connection: { port: 61234, wsUrl: "ws://127.0.0.1:61234" },
+    });
+    mocks.listHermesSessions.mockImplementation(
+      () => new Promise(() => undefined),
+    );
+
+    try {
+      render(<App />);
+
+      expect(
+        await screen.findByRole("heading", { name: HERO_GREETING }),
+      ).toBeInTheDocument();
+
+      act(() => {
+        window.dispatchEvent(
+          new CustomEvent(AGENT_SESSIONS_CHANGED_EVENT, {
+            detail: {
+              sessions: [],
+              selectedSessionId: "session-1",
+              workingSessionIds: [],
+            },
+          }),
+        );
+      });
+
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("heading", { name: HERO_GREETING }),
+        ).not.toBeInTheDocument(),
+      );
+
+      await user.click(screen.getByRole("button", { name: "New tab" }));
+      expect(
+        await screen.findByRole("heading", { name: HERO_GREETING }),
+      ).toBeInTheDocument();
+
+      fireEvent.keyDown(window, { key: "1", metaKey: true });
+
+      const composer = await screen.findByRole("textbox");
+      await user.type(composer, "triage the launch checklist");
+      const send = screen.getByRole("button", { name: "Send message" });
+      await waitFor(() => expect(send).not.toBeDisabled());
+      await user.click(send);
+
+      await waitFor(() =>
+        expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+          session_id: "runtime-session-2",
+          text: "triage the launch checklist",
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole("tab", { name: "triage the launch checklist" }),
+        ).toHaveAttribute("data-active", "true"),
+      );
+    } finally {
+      restoreNavigator();
     }
   });
 
@@ -508,6 +782,227 @@ describe("App shortcuts", () => {
       }),
     );
     expect(mocks.openPrivacySettings).not.toHaveBeenCalledWith("accessibility");
+  });
+
+  it("polls system audio readiness after opening the macOS permission pane", async () => {
+    const user = userEvent.setup();
+    const restoreNavigator = stubNavigatorPlatform(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    const deniedReadiness = recordingReadiness(false);
+    const grantedReadiness = recordingReadiness(true);
+    mocks.checkRecordingSourceReadiness
+      .mockResolvedValueOnce(deniedReadiness)
+      .mockResolvedValue(grantedReadiness);
+
+    try {
+      render(<App />);
+
+      await waitFor(() =>
+        expect(mocks.listeners.has(OPEN_SETTINGS_EVENT)).toBe(true),
+      );
+      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+      act(() => {
+        mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
+      });
+
+      expect(
+        await screen.findByRole("heading", { name: "Appearance" }),
+      ).toBeInTheDocument();
+      const blockedRow = screen
+        .getByText("System audio")
+        .closest(".settings-row");
+      expect(blockedRow).not.toBeNull();
+      expect(
+        within(blockedRow as HTMLElement).getByLabelText("Blocked"),
+      ).toBeInTheDocument();
+
+      await user.click(
+        within(blockedRow as HTMLElement).getByRole("button", {
+          name: "Manage System audio permission",
+        }),
+      );
+
+      expect(mocks.openPrivacySettings).toHaveBeenCalledWith("systemAudio");
+      await waitFor(() =>
+        expect(mocks.checkRecordingSourceReadiness).toHaveBeenCalledTimes(2),
+      );
+      await waitFor(() => {
+        const allowedRow = screen
+          .getByText("System audio")
+          .closest(".settings-row");
+        expect(allowedRow).not.toBeNull();
+        expect(
+          within(allowedRow as HTMLElement).getByLabelText("Allowed"),
+        ).toBeInTheDocument();
+      });
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("does not overlap system audio readiness polls while a probe is pending", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    let resolveProbe: (value: RecordingSourceReadinessDto) => void = () => {};
+    const pendingProbe = new Promise<RecordingSourceReadinessDto>((resolve) => {
+      resolveProbe = resolve;
+    });
+    mocks.checkRecordingSourceReadiness
+      .mockResolvedValueOnce(recordingReadiness(false))
+      .mockReturnValue(pendingProbe);
+
+    try {
+      render(<App />);
+
+      await waitFor(() =>
+        expect(mocks.listeners.has(OPEN_SETTINGS_EVENT)).toBe(true),
+      );
+      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+      act(() => {
+        mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
+      });
+
+      expect(
+        await screen.findByRole("heading", { name: "Appearance" }),
+      ).toBeInTheDocument();
+      const blockedRow = screen
+        .getByText("System audio")
+        .closest(".settings-row");
+      expect(blockedRow).not.toBeNull();
+
+      fireEvent.click(
+        within(blockedRow as HTMLElement).getByRole("button", {
+          name: "Manage System audio permission",
+        }),
+      );
+
+      await waitFor(() =>
+        expect(mocks.checkRecordingSourceReadiness).toHaveBeenCalledTimes(2),
+      );
+
+      await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+
+      expect(mocks.checkRecordingSourceReadiness).toHaveBeenCalledTimes(2);
+
+      await act(async () => {
+        resolveProbe(recordingReadiness(true));
+        await pendingProbe;
+      });
+      await waitFor(() => {
+        const allowedRow = screen
+          .getByText("System audio")
+          .closest(".settings-row");
+        expect(allowedRow).not.toBeNull();
+        expect(
+          within(allowedRow as HTMLElement).getByLabelText("Allowed"),
+        ).toBeInTheDocument();
+      });
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("pauses system audio readiness polling while recording is active", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "MacIntel",
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    );
+    let resolveProbe: (value: RecordingSourceReadinessDto) => void = () => {};
+    const pendingProbe = new Promise<RecordingSourceReadinessDto>((resolve) => {
+      resolveProbe = resolve;
+    });
+    let systemReadinessCalls = 0;
+    mocks.checkRecordingSourceReadiness.mockImplementation(
+      async (mode: string) => {
+        if (mode === "microphoneOnly") return microphoneOnlyReadiness();
+        systemReadinessCalls += 1;
+        if (systemReadinessCalls === 1) return recordingReadiness(false);
+        return pendingProbe;
+      },
+    );
+    mocks.startRecording.mockImplementation(
+      async (noteId: string, sourceMode: string) =>
+        recordingSession({
+          noteId,
+          sourceMode: sourceMode as RecordingSessionDto["sourceMode"],
+        }),
+    );
+    mocks.getRecordingStatus.mockResolvedValue({
+      sessionId: "rec-1",
+      noteId: "note-1",
+      sourceMode: "microphoneOnly",
+      state: "recording",
+      elapsedMs: 0,
+      level: { peak: 0, rms: 0, recentPeaks: [] },
+      silenceWarning: false,
+      bytesWritten: 0,
+    });
+
+    try {
+      render(<App />);
+
+      await waitFor(() =>
+        expect(mocks.listeners.has(OPEN_SETTINGS_EVENT)).toBe(true),
+      );
+      await waitFor(() =>
+        expect(mocks.listeners.has(MEETING_START_TRANSCRIPTION_EVENT)).toBe(
+          true,
+        ),
+      );
+      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+      act(() => {
+        mocks.listeners.get(OPEN_SETTINGS_EVENT)?.({});
+      });
+
+      expect(
+        await screen.findByRole("heading", { name: "Appearance" }),
+      ).toBeInTheDocument();
+      const blockedRow = screen
+        .getByText("System audio")
+        .closest(".settings-row");
+      expect(blockedRow).not.toBeNull();
+
+      fireEvent.click(
+        within(blockedRow as HTMLElement).getByRole("button", {
+          name: "Manage System audio permission",
+        }),
+      );
+
+      await waitFor(() => expect(systemReadinessCalls).toBe(2));
+
+      await waitFor(async () => {
+        if (mocks.startRecording.mock.calls.length === 0) {
+          await act(async () => {
+            await mocks.listeners.get(MEETING_START_TRANSCRIPTION_EVENT)?.({
+              payload: undefined,
+            });
+          });
+        }
+        expect(mocks.startRecording).toHaveBeenCalled();
+      });
+      expect(mocks.startRecording).toHaveBeenCalledWith(
+        expect.any(String),
+        "microphoneOnly",
+      );
+
+      await new Promise((resolve) => window.setTimeout(resolve, 1_200));
+
+      expect(systemReadinessCalls).toBe(2);
+
+      await act(async () => {
+        resolveProbe(recordingReadiness(false));
+        await pendingProbe;
+      });
+    } finally {
+      restoreNavigator();
+    }
   });
 
   it("starts a session with Ctrl-N and creates a note with Ctrl-Shift-N on Windows", async () => {

@@ -11,6 +11,7 @@ import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
 import { IconClipboard } from "central-icons/IconClipboard";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
+import { IconExclamationTriangle } from "central-icons/IconExclamationTriangle";
 import { IconFolder1 } from "central-icons/IconFolder1";
 import { IconFolders } from "central-icons/IconFolders";
 import { IconConsole } from "central-icons/IconConsole";
@@ -24,7 +25,6 @@ import { createPortal } from "react-dom";
 import { IconAnonymous } from "central-icons/IconAnonymous";
 import { IconArrowCornerDownRight } from "central-icons/IconArrowCornerDownRight";
 import { IconArrowUp } from "central-icons/IconArrowUp";
-import { IconCameraSparkle } from "central-icons/IconCameraSparkle";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
@@ -203,6 +203,7 @@ import {
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
   dispatchProviderModelSettingsChanged,
   modelPrivacyBadge,
+  modelSupportsImageInput,
   modelSupportsTools,
   type ModelPrivacyBadge,
   type ProviderModelSettingsChangedDetail,
@@ -224,12 +225,8 @@ import {
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
 } from "../../lib/hermes-messaging";
+import { categoryPrompt } from "../../lib/issue-report-prompt";
 import {
-  categoryPrompt,
-  displayedUserMessageText,
-} from "../../lib/issue-report-prompt";
-import {
-  displayedSkillInvocationText,
   explicitSkillInvocationPrompt,
   isPathLikeSlashToken,
   parseSkillSlashCommands,
@@ -275,6 +272,7 @@ import {
 import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
+  displayedComposerUserMessageText,
   repairContractionSpacing,
   textFromHermesContent,
   type AgentApprovalChoice,
@@ -376,7 +374,7 @@ if (import.meta.env.DEV && typeof window !== "undefined") {
 // through import_hermes_bridge_file_bytes means every preview is fetched back
 // through the same Tauri commands and path validation a real agent file uses.
 // Dev builds only — like the gallery, the handle never ships.
-const AGENT_DEV_FILES_EVENT = "scribe:agent:dev-files";
+const AGENT_DEV_FILES_EVENT = "june:agent:dev-files";
 
 if (import.meta.env.DEV && typeof window !== "undefined") {
   (window as unknown as Record<string, unknown>).__agentFiles = (
@@ -622,24 +620,6 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     action: "prefill",
   },
   {
-    key: "describe-screenshots",
-    icon: <IconCameraSparkle size={18} />,
-    title: "Find the right screenshot",
-    description: "June looks through them so you don't have to.",
-    prompt:
-      "Look through the recent screenshots on my Desktop and in my Downloads folder, open each one, and tell me what it shows so I can find the one I'm looking for. Don't rename, move, or change anything.",
-    action: "run",
-  },
-  {
-    key: "draft-document",
-    icon: <IconPencilLine size={18} />,
-    title: "Draft a document",
-    description: "Start a write-up and get it as a downloadable file.",
-    prompt:
-      "Draft a <kind of document> about <topic>, then save it as a Markdown file in your workspace so I can download it.",
-    action: "prefill",
-  },
-  {
     key: "analyze-spreadsheet",
     icon: <IconPieChart1 size={18} />,
     title: "Analyze a spreadsheet",
@@ -680,7 +660,7 @@ export const HERO_GREETINGS = [
   "What can June take off your plate?",
 ] as const;
 
-const HERO_GREETING_INDEX_KEY = "scribe:agent:hero-greeting";
+const HERO_GREETING_INDEX_KEY = "june:agent:hero-greeting";
 
 function advanceHeroGreeting(): string {
   try {
@@ -797,7 +777,7 @@ type AgentArtifact = {
 type AgentAttachment = ImportedHermesFile & {
   id: string;
   /** Structured attach status (feature 19). Tracks whether this import has been
-   * sent to the model via image.attach: imported (ready) → attached (acked) →
+   * sent to the model via image.attach_bytes: imported (ready) → attached (acked) →
    * or failed. Carries file refs only, never the image bytes. Files stay
    * `imported` (they only ride along as a path in the prompt). */
   attach: HermesAttachmentState;
@@ -850,7 +830,7 @@ type HermesRuntimeSessionResponse = {
 };
 
 /** Where the session was opened from — rendered as the leading crumbs in the
- * sticky session bar ("Projects / Scribe" or "Agents") with a back arrow. */
+ * sticky session bar ("Projects / June" or "Agents") with a back arrow. */
 export type AgentWorkspaceOrigin = {
   backLabel: string;
   onBack: () => void;
@@ -861,6 +841,9 @@ type AgentWorkspaceProps = {
   initialSession?: HermesSessionInfo;
   initialSessionId?: string;
   origin?: AgentWorkspaceOrigin;
+  onSessionSelected?: (session: HermesSessionInfo | undefined) => void;
+  onTopUp?: () => void | Promise<void>;
+  topUpLabel?: string;
 };
 
 // Mid-run continuity across remounts. While June is working, a session has
@@ -911,7 +894,7 @@ type IssueReportFollowUpSubmitFailedDetail = {
 let sessionContinuity: AgentSessionContinuity | null = null;
 const NEW_SESSION_DRAFT_KEY = "new-session";
 const REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY =
-  "scribe:agent:reviewable-issue-reports";
+  "june:agent:reviewable-issue-reports";
 const ISSUE_REPORT_DELIVERY_SETTLED_EVENT =
   "june-agent-issue-report-delivery-settled";
 const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
@@ -1268,6 +1251,9 @@ export function AgentWorkspace({
   initialSession,
   initialSessionId: initialSessionIdProp,
   origin,
+  onSessionSelected,
+  onTopUp,
+  topUpLabel = "Upgrade",
 }: AgentWorkspaceProps = {}) {
   const initialSessionId = initialSession?.id ?? initialSessionIdProp;
   // Read once per mount (lazy initializer): the continuity snapshot the
@@ -1396,6 +1382,12 @@ export function AgentWorkspace({
     },
     [],
   );
+  const handleTopUp = useCallback(() => {
+    const result = onTopUp ? onTopUp() : osAccountsUpgrade();
+    void Promise.resolve(result).catch((err: unknown) =>
+      setError(messageFromError(err)),
+    );
+  }, [onTopUp, setError]);
   const clearErrorForSession = useCallback((sessionId: string) => {
     setErrorState((current) =>
       current?.sessionId === sessionId ? null : current,
@@ -1999,6 +1991,10 @@ export function AgentWorkspace({
       ),
     [hermesSessionItems, selectedHermesSessionId],
   );
+  useEffect(() => {
+    if (selectedHermesSessionId && !selectedHermesSession) return;
+    onSessionSelected?.(selectedHermesSession);
+  }, [onSessionSelected, selectedHermesSession, selectedHermesSessionId]);
   const selectedHermesSessionIsProvisional = isProvisionalHermesSessionId(
     selectedHermesSessionId,
   );
@@ -2016,6 +2012,32 @@ export function AgentWorkspace({
   const generationPrivacyBadge = generationModel
     ? modelPrivacyBadge(generationModel)
     : undefined;
+  // The agent can only switch to a model that reads images AND runs tools —
+  // a vision model without function calling would brick the agent the same way
+  // modelSupportsTools guards the picker, so it can't be an escape hatch here.
+  const visionModelOptions = useMemo(
+    () =>
+      generationModels.filter(
+        (model) => modelSupportsImageInput(model) && modelSupportsTools(model),
+      ),
+    [generationModels],
+  );
+  // Mirror the send-time fallback trigger (pendingImageAttachments +
+  // !modelSupportsImageInput) so the banner appears exactly when a submit would
+  // strip the image and downgrade to the text-only prompt. Resolve strictly via
+  // find (not generationModel, which is a zero-capability stub for an unknown
+  // id) so an unresolved/stale model stays silent rather than warning and being
+  // treated as non-vision.
+  const resolvedGenerationModel = activeGenerationModelId
+    ? generationModels.find((model) => model.id === activeGenerationModelId)
+    : undefined;
+  const composerHasPendingImage =
+    pendingImageAttachments(attachments.map((attachment) => attachment.attach))
+      .length > 0;
+  const showImageInputWarning =
+    composerHasPendingImage &&
+    !!resolvedGenerationModel &&
+    !modelSupportsImageInput(resolvedGenerationModel);
   const selectedHermesMessages = useMemo(() => {
     if (!selectedHermesSessionId) return [];
     return [
@@ -3512,7 +3534,7 @@ export function AgentWorkspace({
           ...file,
           id: `${file.path}:${Date.now()}:${Math.random().toString(36)}`,
           // Seed the structured attach status (feature 19). Images become
-          // `kind:"image"`, status `imported` — eligible for image.attach on
+          // `kind:"image"`, status `imported` — eligible for structured attach on
           // the next submit. No bytes are kept here.
           attach: attachmentStateFrom(file),
         })),
@@ -3692,7 +3714,7 @@ export function AgentWorkspace({
   }
 
   /**
-   * Attach this turn's pending images to the live session via image.attach
+   * Attach this turn's pending images to the live session via image.attach_bytes
    * (feature 19), updating each chip's status and feeding the artifact timeline.
    * The base64 is read on demand from the workspace file (hermesBridgeFilePreview
    * returns a data url), passed straight to the typed attachImage, and discarded;
@@ -3714,7 +3736,7 @@ export function AgentWorkspace({
     const deps = {
       attachImage: methods.attachImage,
       readImageData: (path: string) => hermesBridgeFilePreview(path),
-      isSupported: () => isHermesFeatureSupported("image.attach"),
+      isSupported: () => isHermesFeatureSupported("image.attach_bytes"),
     };
     const mode = hermesModeFor(storedSessionId);
     const failures: string[] = [];
@@ -4147,7 +4169,7 @@ export function AgentWorkspace({
       displayContent?: string;
       titleContent?: string;
       /** Imported attachments for this turn. Image attachments are sent to the
-       * session via the structured image.attach flow (feature 19) once the
+       * session via the structured image attach flow (feature 19) once the
        * session id is known and before prompt.submit; a failed attach throws to
        * block the send so the user can retry. */
       attachments?: AgentAttachment[];
@@ -4167,6 +4189,38 @@ export function AgentWorkspace({
           ?.model?.trim() ||
         defaultGenerationModelId
       : defaultGenerationModelId;
+    const turnAttachments = options?.attachments ?? [];
+    const pendingImages = pendingImageAttachments(
+      turnAttachments.map((attachment) => attachment.attach),
+    );
+    // Resolve strictly from the catalog: selectedModelOption synthesizes a
+    // zero-capability stub for an unknown id, which would read as non-vision and
+    // wrongly downgrade a vision-capable (but stale/not-yet-loaded) model. find
+    // returns undefined when unresolved so the guard below skips the fallback.
+    const targetGenerationModel = targetSessionModelId
+      ? generationModelsRef.current.find(
+          (model) => model.id === targetSessionModelId,
+        )
+      : undefined;
+    const imageInputFallbackContent =
+      // Only downgrade to the text-only fallback when the model is KNOWN to lack
+      // image input. An unresolved model id (stale or not-yet-loaded catalog)
+      // must NOT be assumed non-vision, or a vision-capable session would
+      // silently drop the image and never call attachPendingImages. Mirrors the
+      // composer banner's `!!generationModel && !modelSupportsImageInput` guard.
+      pendingImages.length &&
+      targetGenerationModel &&
+      !modelSupportsImageInput(targetGenerationModel)
+        ? unsupportedImageInputPrompt({
+            displayContent,
+            imageNames: pendingImages.map(
+              (attachment) => attachment.displayName,
+            ),
+            modelName: targetGenerationModel?.name ?? targetSessionModelId,
+            runtimeContent: content,
+          })
+        : undefined;
+    const promptSubmitContent = imageInputFallbackContent ?? content;
     // Issue reports skip title suggestion: the content is the wrapped
     // investigation prompt, which would title the session after the wrapper.
     const titlePromise =
@@ -4320,22 +4374,24 @@ export function AgentWorkspace({
         new Error("Hermes did not resume the session."),
       );
     }
-    // Feature 19: send any imported images to the session through the
-    // structured image.attach flow before the prompt, so the model/tools see
-    // them as first-class inputs (not just a path mentioned in prose) and an
-    // image-edit prompt names a concrete source. A failed attach throws here,
-    // which the submit() catch turns into a restored composer the user can
-    // retry — the prompt is NOT sent with a silently-missing image.
-    try {
-      await attachPendingImages(
-        gateway,
-        runtimeSessionId,
-        storedSessionId,
-        options?.attachments ?? [],
-      );
-    } catch (err) {
-      clearQueuedIssueReport();
-      rollbackOptimisticBeforePrompt(err);
+    if (!imageInputFallbackContent) {
+      // Feature 19: send any imported images to the session through the
+      // structured image attach flow before the prompt, so the model/tools see
+      // them as first-class inputs (not just a path mentioned in prose) and an
+      // image-edit prompt names a concrete source. A failed attach throws here,
+      // which the submit() catch turns into a restored composer the user can
+      // retry — the prompt is NOT sent with a silently-missing image.
+      try {
+        await attachPendingImages(
+          gateway,
+          runtimeSessionId,
+          storedSessionId,
+          turnAttachments,
+        );
+      } catch (err) {
+        clearQueuedIssueReport();
+        rollbackOptimisticBeforePrompt(err);
+      }
     }
     const createdAt = optimisticSession?.createdAt ?? new Date().toISOString();
     setRuntimeSessionIds((current) => ({
@@ -4348,21 +4404,42 @@ export function AgentWorkspace({
       selectedHermesSessionIdRef.current = storedSessionId;
       setSelectedHermesSessionId(storedSessionId);
       setSelectedTaskId(undefined);
+      const optimisticSessionItem: HermesSessionInfo = {
+        id: storedSessionId,
+        title: sessionDisplayTitle,
+        preview: displayContent,
+        started_at: createdAt,
+        last_active: createdAt,
+        message_count: 1,
+        ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
+      };
       setHermesSessionItems((current) => {
-        if (current.some((session) => session.id === storedSessionId))
-          return current;
-        return [
-          {
-            id: storedSessionId,
-            title: sessionDisplayTitle,
-            preview: displayContent,
-            started_at: createdAt,
-            last_active: createdAt,
-            message_count: 1,
-            ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
-          },
-          ...current,
-        ];
+        const existingSession = current.find(
+          (session) => session.id === storedSessionId,
+        );
+        if (existingSession) {
+          const mergedSession: HermesSessionInfo = targetSessionId
+            ? {
+                ...existingSession,
+                title: existingSession.title?.trim()
+                  ? existingSession.title
+                  : sessionDisplayTitle,
+                preview: displayContent,
+                last_active: createdAt,
+                message_count:
+                  typeof existingSession.message_count === "number"
+                    ? existingSession.message_count + 1
+                    : optimisticSessionItem.message_count,
+                ...(targetSessionModelId && !existingSession.model?.trim()
+                  ? { model: targetSessionModelId }
+                  : {}),
+              }
+            : { ...existingSession, ...optimisticSessionItem };
+          return current.map((session) =>
+            session.id === storedSessionId ? mergedSession : session,
+          );
+        }
+        return [optimisticSessionItem, ...current];
       });
     }
     const pendingUserMessage: HermesSessionMessage = {
@@ -4408,11 +4485,11 @@ export function AgentWorkspace({
       hermesTraceBuffer.recordOutbound({
         sessionId: storedSessionId,
         method: "prompt.submit",
-        params: { session_id: runtimeSessionId, text: content },
+        params: { session_id: runtimeSessionId, text: promptSubmitContent },
       });
       await gateway.request("prompt.submit", {
         session_id: runtimeSessionId,
-        text: content,
+        text: promptSubmitContent,
       });
       await loadHermesSessions({
         suppressStartupRequestError: !hermesSessionsHydratedRef.current,
@@ -5839,6 +5916,10 @@ export function AgentWorkspace({
   // history fetch that fills the new conversation in) must land at the bottom
   // instantly; only turns arriving while the user is already reading glide.
   const settledScrollSelectionRef = useRef<string>();
+  const transcriptShouldStickToBottomRef = useRef(true);
+  const transcriptProgrammaticScrollRef = useRef(false);
+  const transcriptProgrammaticScrollTimeoutRef = useRef<number | undefined>();
+  const transcriptLastScrollTopRef = useRef(0);
 
   // History for the selected conversation has landed: a session gets an entry
   // in hermesSessionMessages (even an empty one) once its fetch resolves;
@@ -5856,14 +5937,64 @@ export function AgentWorkspace({
     hermesSessionsLoading && !hermesSessionsHydrated;
 
   useEffect(() => {
+    if (heroMode) return;
+    const scroller = agentScrollRef.current;
+    if (!scroller) return;
+    const clearProgrammaticScroll = () => {
+      transcriptProgrammaticScrollRef.current = false;
+      if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+        window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+        transcriptProgrammaticScrollTimeoutRef.current = undefined;
+      }
+    };
+    const updateStickiness = () => {
+      const previousScrollTop = transcriptLastScrollTopRef.current;
+      transcriptLastScrollTopRef.current = scroller.scrollTop;
+      if (transcriptProgrammaticScrollRef.current) {
+        if (scroller.scrollTop < previousScrollTop) {
+          clearProgrammaticScroll();
+          transcriptShouldStickToBottomRef.current =
+            isAgentTranscriptNearBottom(scroller);
+          return;
+        }
+        transcriptShouldStickToBottomRef.current = true;
+        if (isAgentTranscriptNearBottom(scroller)) clearProgrammaticScroll();
+        return;
+      }
+      transcriptShouldStickToBottomRef.current =
+        isAgentTranscriptNearBottom(scroller);
+    };
+    const updateFromUserScroll = () => {
+      clearProgrammaticScroll();
+      window.requestAnimationFrame(updateStickiness);
+    };
+    updateStickiness();
+    scroller.addEventListener("scroll", updateStickiness, { passive: true });
+    scroller.addEventListener("wheel", updateFromUserScroll, {
+      passive: true,
+    });
+    scroller.addEventListener("touchmove", updateFromUserScroll, {
+      passive: true,
+    });
+    return () => {
+      scroller.removeEventListener("scroll", updateStickiness);
+      scroller.removeEventListener("wheel", updateFromUserScroll);
+      scroller.removeEventListener("touchmove", updateFromUserScroll);
+      clearProgrammaticScroll();
+    };
+  }, [heroMode, selectedHermesSessionId, selectedTaskId]);
+
+  useEffect(() => {
     // The conversation scrolls in .agent-scroll, which sits below the sticky
     // breadcrumb so the scrollbar can't ride up over the bar — drive that
     // scroller to the bottom as turns arrive.
     const scroller = listRef.current?.closest(".agent-scroll");
     if (!(scroller instanceof HTMLElement)) return;
-    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
     const selectionKey = `${selectedHermesSessionId ?? ""}:${selectedTaskId ?? ""}`;
     const settled = settledScrollSelectionRef.current === selectionKey;
+    if (!settled) {
+      transcriptShouldStickToBottomRef.current = true;
+    }
     if (selectedHistoryLoaded || renderedTurnsSignature > 0) {
       // The settling run itself still scrolls with the pre-write snapshot, so
       // the history fill after a switch lands instantly; everything after it
@@ -5874,10 +6005,28 @@ export function AgentWorkspace({
       // before this one settles re-lands instantly instead of gliding.
       settledScrollSelectionRef.current = undefined;
     }
+    if (settled && !transcriptShouldStickToBottomRef.current) return;
+    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
+    if (settled) {
+      transcriptLastScrollTopRef.current = scroller.scrollTop;
+      transcriptProgrammaticScrollRef.current = true;
+      if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+        window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+      }
+      transcriptProgrammaticScrollTimeoutRef.current = window.setTimeout(() => {
+        transcriptProgrammaticScrollRef.current = false;
+        transcriptShouldStickToBottomRef.current =
+          isAgentTranscriptNearBottom(scroller);
+        transcriptProgrammaticScrollTimeoutRef.current = undefined;
+      }, 800);
+    } else {
+      transcriptProgrammaticScrollRef.current = false;
+    }
     scroller.scrollTo({
       top: scroller.scrollHeight,
       behavior: settled ? "smooth" : "auto",
     });
+    transcriptShouldStickToBottomRef.current = true;
   }, [
     renderedTurnsSignature,
     selectedHermesSessionId,
@@ -6149,6 +6298,38 @@ export function AgentWorkspace({
                   </button>
                 </span>
               ))}
+            </div>
+          ) : null}
+          {showImageInputWarning ? (
+            <div className="agent-composer-image-warning" role="status">
+              <IconExclamationTriangle
+                size={14}
+                aria-hidden
+                className="agent-composer-image-warning-icon"
+              />
+              <span className="agent-composer-image-warning-text">
+                {resolvedGenerationModel?.name ?? "This model"} can't read
+                images.
+              </span>
+              {visionModelOptions.length ? (
+                <button
+                  type="button"
+                  className="agent-composer-notice-button agent-composer-image-warning-action"
+                  onClick={() =>
+                    // Switch straight to the first image-capable model. The
+                    // label promises a one-tap fix, and the generic model picker
+                    // isn't vision-scoped — opening it for the multi-candidate
+                    // case would drop the user into an unfiltered list that
+                    // doesn't surface the eligible models. visionModelOptions is
+                    // pre-filtered to image + tool support;
+                    // handleSelectGenerationModel routes the global default vs
+                    // per-chat override.
+                    void handleSelectGenerationModel(visionModelOptions[0].id)
+                  }
+                >
+                  Switch to a vision model
+                </button>
+              ) : null}
             </div>
           ) : null}
           <ComposerEditor
@@ -6499,11 +6680,8 @@ export function AgentWorkspace({
               sessionUnrestricted(selectedHermesSessionId),
             )
           }
-          onTopUp={() =>
-            void osAccountsUpgrade().catch((err: unknown) =>
-              setError(messageFromError(err)),
-            )
-          }
+          onTopUp={handleTopUp}
+          topUpLabel={topUpLabel}
           onClarify={(part, answer) =>
             void respondToClarify(
               selectedHermesSessionId,
@@ -6605,11 +6783,8 @@ export function AgentWorkspace({
             onThinkingOpenChange={setThinkingOpen}
             onDownloadArtifact={downloadArtifact}
             onOpenArtifact={openArtifact}
-            onTopUp={() =>
-              void osAccountsUpgrade().catch((err: unknown) =>
-                setError(messageFromError(err)),
-              )
-            }
+            onTopUp={handleTopUp}
+            topUpLabel={topUpLabel}
             onApproval={(part, choice) => {
               const sessionId = part.sessionId ?? selectedTask.hermesSessionId;
               if (!sessionId) return;
@@ -8680,6 +8855,15 @@ function chatTurnsSignature(turns: AgentChatTurn[]) {
   );
 }
 
+const AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX = 48;
+
+function isAgentTranscriptNearBottom(scroller: HTMLElement) {
+  return (
+    scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
+    AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX
+  );
+}
+
 // Collapse runs of "thinking-only" assistant turns (reasoning/tool, no answer
 // text) into the next answer turn, so a back-to-back chain of thoughts shows as
 // a single "Thought" disclosure rather than several stacked in a row.
@@ -8822,6 +9006,7 @@ function AgentChatTurnRow({
   onOpenArtifact,
   onThinkingOpenChange,
   onTopUp,
+  topUpLabel,
   onBranch,
   onEditUserPrompt,
   branchingMessageId,
@@ -8857,6 +9042,7 @@ function AgentChatTurnRow({
   onOpenArtifact?: (artifact: AgentArtifact) => void;
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
+  topUpLabel?: string;
   onEditUserPrompt?: (text: string) => void;
   /** Fork the conversation from this turn into a new session (feature 07).
    * Optional: only Hermes-session rows pass it — task rows and the dev gallery
@@ -9134,6 +9320,7 @@ function AgentChatTurnRow({
             <CreditsNoticePart
               key={`${turn.id}:notice:${index}`}
               onTopUp={onTopUp}
+              topUpLabel={topUpLabel}
             />
           ) : part.type === "steering" ? (
             <SteeringPart
@@ -9455,7 +9642,13 @@ function visibleAgentWorkspaceError(
 // transcript — the chat runtime folds it into a notice part, and this card is
 // how the user learns the turn stopped and what to do about it. No title —
 // icon + one sentence + the action, Claude-style.
-function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void }) {
+function CreditsNoticePart({
+  onTopUp,
+  topUpLabel = "Upgrade",
+}: {
+  onTopUp?: () => void;
+  topUpLabel?: string;
+}) {
   return (
     <InlineNotice
       className="agent-credits-notice"
@@ -9466,7 +9659,7 @@ function CreditsNoticePart({ onTopUp }: { onTopUp?: () => void }) {
       actions={
         onTopUp ? (
           <button type="button" className="btn btn-secondary" onClick={onTopUp}>
-            Upgrade
+            {topUpLabel}
           </button>
         ) : undefined
       }
@@ -10389,7 +10582,7 @@ type AgentArtifactPreview =
 // roughly half the window), remembered across sessions. The live value is
 // the --agent-files-w custom property on .app-shell, which the panel, the
 // main card's margin, and the composer all share.
-const AGENT_FILES_WIDTH_KEY = "scribe:agent:files-panel-width";
+const AGENT_FILES_WIDTH_KEY = "june:agent:files-panel-width";
 const FILES_PANEL_MIN_W = 300;
 const FILES_PANEL_MAX_W = 600;
 
@@ -11193,6 +11386,37 @@ function promptWithAttachments(
   ].join("\n");
 }
 
+function unsupportedImageInputPrompt({
+  displayContent,
+  imageNames,
+  modelName,
+  runtimeContent,
+}: {
+  displayContent: string;
+  imageNames: string[];
+  modelName?: string;
+  runtimeContent: string;
+}) {
+  const modelLabel = modelName?.trim() || "The selected model";
+  return [
+    displayContent,
+    "",
+    "--- Attached Context ---",
+    `${modelLabel} does not support image input in June.`,
+    "The user attached image file(s), but this model cannot read their visual contents.",
+    imageNames.length
+      ? `Attached image file(s): ${imageNames.join(", ")}.`
+      : undefined,
+    "Do not call vision_analyze, image tools, shell, filesystem tools, or any other tool to inspect the image files.",
+    "Reply directly and briefly. Say that you cannot view the attached image with the current model, then ask the user to describe the image or paste the relevant text. If they expected the image to be readable, suggest choosing a model with image support and sending the image again.",
+    runtimeContent !== displayContent
+      ? ["", "Original routed prompt:", runtimeContent].join("\n")
+      : undefined,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n");
+}
+
 function attachmentPromptPath(path: string) {
   const workspaceMatch = path.match(/(?:^|[/\\])workspace[/\\](.+)$/);
   if (workspaceMatch?.[1]) return workspaceMatch[1];
@@ -11556,16 +11780,6 @@ function slashCommandKey(name: string) {
   return name.trim().toLowerCase();
 }
 
-function displayedComposerUserMessageText(content: string): string {
-  let text = content;
-  for (let index = 0; index < 3; index += 1) {
-    const next = displayedUserMessageText(displayedSkillInvocationText(text));
-    if (next === text) return text;
-    text = next;
-  }
-  return text;
-}
-
 function sameVisibleMessageText(left: string, right: string) {
   return left.replace(/\s+/g, " ").trim() === right.replace(/\s+/g, " ").trim();
 }
@@ -11815,7 +12029,7 @@ function moveRecordKey<T>(
 // Survives app restarts (localStorage, not sessionStorage): restoring an
 // existing conversation after a relaunch is always safe, unlike the pending
 // new-session marker, which must NOT outlive its navigation.
-const AGENT_LAST_OPEN_SESSION_KEY = "scribe:agent:last-open-session";
+const AGENT_LAST_OPEN_SESSION_KEY = "june:agent:last-open-session";
 
 // How long a second startNewTask call with the same prompt counts as an echo
 // of the first (marker + window event double-delivery) rather than a new ask.

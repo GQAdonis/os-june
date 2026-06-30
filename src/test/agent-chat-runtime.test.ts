@@ -3,6 +3,7 @@ import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
   completedHermesMessageText,
+  displayedComposerUserMessageText,
   repairContractionSpacing,
   toolEventKey,
 } from "../lib/agent-chat-runtime";
@@ -341,6 +342,99 @@ describe("Agent chat runtime", () => {
         status: "complete",
       },
     ]);
+  });
+
+  it("strips image-analysis failure scaffolding from persisted Hermes user messages", () => {
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "1",
+        role: "user",
+        content: [
+          "[The user attached an image but analysis failed.]",
+          "[You can examine it with vision_analyze using image_url:",
+          "/Users/alex/Library/Application Support/co.opensoftware.june-dev/hermes/images/upload_20260629_144756_1.png]",
+          "",
+          "wdyt?",
+          "",
+          "Attached files copied into the June workspace:",
+          "- CleanShot.png (Workspace): uploads/CleanShot.png",
+          "",
+          "Use these file paths when inspecting or operating on the files.",
+        ].join("\n"),
+        timestamp: "2026-06-11T12:00:00.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "text",
+        text: [
+          "wdyt?",
+          "",
+          "Attached files copied into the June workspace:",
+          "- CleanShot.png (Workspace): uploads/CleanShot.png",
+          "",
+          "Use these file paths when inspecting or operating on the files.",
+        ].join("\n"),
+        status: "complete",
+      },
+    ]);
+  });
+
+  it("hides attachment and image-analysis scaffolding from composer user display text", () => {
+    expect(
+      displayedComposerUserMessageText(
+        [
+          "[The user attached an image but analysis failed.]",
+          "[You can examine it with vision_analyze using image_url:",
+          "/Users/alex/Library/Application Support/co.opensoftware.june-dev/hermes/images/upload_20260629_144756_1.png]",
+          "",
+          "wdyt?",
+          "",
+          "Attached files copied into the June workspace:",
+          "- CleanShot.png (Workspace): uploads/CleanShot.png",
+          "",
+          "Use these file paths when inspecting or operating on the files.",
+        ].join("\n"),
+      ),
+    ).toBe("wdyt?");
+  });
+
+  it("keeps attachment paths in turn data but hides them from the rendered user bubble", () => {
+    // The user bubble renders each part through displayedComposerUserMessageText
+    // (AgentWorkspace), so it must show only the user's words. The built turn
+    // data must still retain the attachment-path block, because
+    // assignArtifactsToTurns attributes workspace artifacts by matching those
+    // paths against the turn text. This pins both halves of that contract.
+    const content = [
+      "wdyt?",
+      "",
+      "Attached files copied into the June workspace:",
+      "- screenshot.png (Workspace): uploads/screenshot.png",
+      "",
+      "Use these file paths when inspecting or operating on the files.",
+      "",
+      "--- Attached Context ---",
+      "GLM 5.2 does not support image input in June.",
+      "Reply directly and briefly.",
+    ].join("\n");
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "1",
+        role: "user",
+        content,
+        timestamp: "2026-06-11T12:00:00.000Z",
+      },
+    ]);
+    const part = turns[0]?.parts[0];
+    const turnText = part?.type === "text" ? part.text : "";
+    // Turn data retains the attachment path (artifact attribution reads this)…
+    expect(turnText).toContain("uploads/screenshot.png");
+    // …but the provider/vision scaffolding after the marker is already gone.
+    expect(turnText).not.toContain("--- Attached Context ---");
+    expect(turnText).not.toContain("does not support image input");
+    // The rendered bubble shows only the user's words — no attachment block.
+    expect(displayedComposerUserMessageText(turnText)).toBe("wdyt?");
   });
 
   it("extracts text from Hermes structured content payloads", () => {

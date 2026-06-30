@@ -85,6 +85,7 @@ import {
   listSessionFolders,
   openPrivacySettings,
   osAccountsLogout,
+  osAccountsOpenPortal,
   osAccountsUpgrade,
   pauseRecording,
   removeNoteFromFolder,
@@ -164,20 +165,21 @@ import {
   markOnboardingComplete,
   shouldReplayOnboarding,
 } from "../lib/onboarding";
-import { shouldBlockOnFunding, shouldBlockOnSignIn } from "../lib/account-gate";
 import {
-  checkScribeUpdate,
-  relaunchScribe,
-  type ScribeUpdate,
-} from "../lib/updater";
+  depletedBalanceActionLabel,
+  shouldOpenPortalForDepletedBalance,
+  shouldBlockOnFunding,
+  shouldBlockOnSignIn,
+} from "../lib/account-gate";
+import { checkJuneUpdate, relaunchJune, type JuneUpdate } from "../lib/updater";
 import { shouldPollProcessingStatus } from "./processing-polling";
 import { attachScrollThumbFade } from "../lib/scroll-thumb-fade";
 import { createInitialState, notesReducer } from "./state/app-state";
 import { handleSidebarResizeStart } from "./sidebar-resize";
 import {
-  checkForScribeUpdate,
-  prepareScribeUpdate,
-  startPeriodicScribeUpdateChecks,
+  checkForJuneUpdate,
+  prepareJuneUpdate,
+  startPeriodicJuneUpdateChecks,
   type UpdateCheckMode,
   type UpdateInstallProgress,
   type UpdatePromptPayload,
@@ -187,7 +189,7 @@ const SIDEBAR_DEFAULT_WIDTH = 240;
 const SIDEBAR_MIN_WIDTH = 188;
 const SIDEBAR_MAX_WIDTH = 320;
 const SIDEBAR_COLLAPSE_WIDTH = 160;
-const CHECK_FOR_UPDATES_EVENT = "scribe://check-for-updates";
+const CHECK_FOR_UPDATES_EVENT = "june://check-for-updates";
 const AGENT_MENU_BAR_SESSION_FETCH_LIMIT = 100;
 const AGENT_MENU_BAR_SESSION_LIMIT = 6;
 const AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS = [
@@ -195,6 +197,8 @@ const AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS = [
 ];
 const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const ACCESSIBILITY_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
+const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
+const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
 // Floor for the note card so the sidebar can't be dragged wide enough to
 // crush it into a sliver — it always keeps a usable width plus its gutters.
 const MAIN_PANEL_MIN_WIDTH = 420;
@@ -216,9 +220,26 @@ type RecordingInactivityPrompt = {
   expiresAt: number;
 };
 
+function agentSessionTabTitle(session?: HermesSessionInfo): string | undefined {
+  return session?.title?.trim() || session?.preview?.trim() || undefined;
+}
+
+function refreshedTabNav(current: TabNav, live: TabNav): TabNav | undefined {
+  if (!navEquals(current, live)) return live;
+  if (current.view !== "agent" || live.view !== "agent") return undefined;
+
+  const liveTitle = live.agentSessionTitle?.trim();
+  if (!liveTitle || current.agentSessionTitle?.trim() === liveTitle) {
+    return undefined;
+  }
+
+  return { ...current, agentSessionTitle: liveTitle };
+}
+
 // The icon + label a tab shows for a snapshot. Titles for entity views (note,
 // project, agent session) are looked up live from the loaded data, so a tab's
-// label tracks renames without storing a stale copy.
+// label tracks renames. Agent tabs also carry a fallback title so a newly
+// created session is identifiable before the session list hydrates.
 function tabMeta(
   nav: TabNav,
   notes: NoteListItemDto[],
@@ -249,7 +270,10 @@ function tabMeta(
         ? sessions.find((s) => s.id === nav.agentSessionId)
         : undefined;
       return {
-        title: session?.title?.trim() || "New session",
+        title:
+          agentSessionTabTitle(session) ||
+          nav.agentSessionTitle?.trim() ||
+          "New session",
         icon: <IconBubble3 size={TAB_ICON_SIZE} />,
       };
     }
@@ -408,9 +432,10 @@ export function App() {
   const [accessibilityStatus, setAccessibilityStatus] = useState<string>();
   const [accessibilityRefreshRequest, setAccessibilityRefreshRequest] =
     useState(0);
+  const [systemAudioRefreshRequest, setSystemAudioRefreshRequest] = useState(0);
   const [microphoneStatus, setMicrophoneStatus] = useState<string>();
   const [readyUpdate, setReadyUpdate] =
-    useState<UpdatePromptPayload<ScribeUpdate> | null>(null);
+    useState<UpdatePromptPayload<JuneUpdate> | null>(null);
   const [updateStatus, setUpdateStatus] = useState<string | null>(null);
   const [preparingUpdate, setPreparingUpdate] = useState(false);
   const [relaunchingUpdate, setRelaunchingUpdate] = useState(false);
@@ -419,6 +444,12 @@ export function App() {
   const systemGranted = !!sourceReadiness?.sources.find(
     (source) => source.source === "system",
   )?.ready;
+  const recordingState = state.recordingStatus?.state;
+  const captureActive =
+    recordingState === "recording" ||
+    recordingState === "paused" ||
+    recordingState === "finalizing" ||
+    recordingState === "validating";
   const sourceMode: RecordingSourceMode =
     userWantsSystemAudio && systemGranted
       ? "microphonePlusSystem"
@@ -501,6 +532,12 @@ export function App() {
     !devAccountsUnconfigured &&
     !signInRequired &&
     shouldBlockOnFunding(account);
+  const topUpLabel = depletedBalanceActionLabel(account);
+  const topUpOpensPortal = shouldOpenPortalForDepletedBalance(account);
+  const handleTopUp = useCallback(() => {
+    const action = topUpOpensPortal ? osAccountsOpenPortal : osAccountsUpgrade;
+    void action().catch((err: unknown) => setError(messageFromError(err)));
+  }, [topUpOpensPortal]);
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();
@@ -582,6 +619,10 @@ export function App() {
       originAllNotes: activeView === "meetings" ? originAllNotes : undefined,
       folderId: activeView === "folders" ? state.selectedFolderId : undefined,
       agentSessionId: activeView === "agent" ? activeAgentSessionId : undefined,
+      agentSessionTitle:
+        activeView === "agent"
+          ? agentSessionTabTitle(activeAgentSessionSeed)
+          : undefined,
       agentOrigin: activeView === "agent" ? agentOrigin : undefined,
     }),
     [
@@ -591,6 +632,8 @@ export function App() {
       originAllNotes,
       state.selectedFolderId,
       activeAgentSessionId,
+      activeAgentSessionSeed?.preview,
+      activeAgentSessionSeed?.title,
       agentOrigin,
     ],
   );
@@ -607,11 +650,11 @@ export function App() {
       return;
     }
     setTabs((prev) =>
-      prev.map((tab) =>
-        tab.id === activeTabId && !navEquals(tab.nav, liveNav)
-          ? { ...tab, nav: liveNav }
-          : tab,
-      ),
+      prev.map((tab) => {
+        if (tab.id !== activeTabId) return tab;
+        const nav = refreshedTabNav(tab.nav, liveNav);
+        return nav ? { ...tab, nav } : tab;
+      }),
     );
   }, [liveNav, activeTabId]);
 
@@ -659,7 +702,10 @@ export function App() {
       }
       if (nav.view === "agent") {
         const session = nav.agentSessionId
-          ? agentSessions.find((s) => s.id === nav.agentSessionId)
+          ? (agentSessions.find((s) => s.id === nav.agentSessionId) ?? {
+              id: nav.agentSessionId,
+              title: nav.agentSessionTitle,
+            })
           : undefined;
         setActiveAgentSessionId(nav.agentSessionId);
         setActiveAgentSessionSeed(session);
@@ -987,7 +1033,7 @@ export function App() {
   // down and re-fire every time a download or relaunch toggles state.
   const preparingUpdateRef = useRef(false);
   const checkingUpdateRef = useRef(false);
-  const readyUpdateRef = useRef<UpdatePromptPayload<ScribeUpdate> | null>(null);
+  const readyUpdateRef = useRef<UpdatePromptPayload<JuneUpdate> | null>(null);
   const relaunchingUpdateRef = useRef(false);
   const updateProgressHiddenRef = useRef(false);
   useEffect(() => {
@@ -1001,7 +1047,7 @@ export function App() {
   }, [relaunchingUpdate]);
 
   const prepareUpdate = useCallback(
-    (payload: UpdatePromptPayload<ScribeUpdate>, mode: UpdateCheckMode) => {
+    (payload: UpdatePromptPayload<JuneUpdate>, mode: UpdateCheckMode) => {
       if (
         preparingUpdateRef.current ||
         readyUpdateRef.current ||
@@ -1017,7 +1063,7 @@ export function App() {
       setUpdateProgress(null);
       setUpdateStatus(mode === "manual" ? "Downloading update..." : null);
 
-      void prepareScribeUpdate({
+      void prepareJuneUpdate({
         update: payload.update,
         reportProgress: (progress) => {
           setUpdateProgress(progress);
@@ -1064,9 +1110,9 @@ export function App() {
       checkingUpdateRef.current = true;
       if (mode === "manual") setUpdateStatus("Checking for updates...");
       else if (mode === "launch") setUpdateStatus(null);
-      void checkForScribeUpdate(
+      void checkForJuneUpdate(
         {
-          check: checkScribeUpdate,
+          check: checkJuneUpdate,
           prompt: (payload) => {
             prepareUpdate(payload, mode);
           },
@@ -1090,7 +1136,7 @@ export function App() {
     relaunchingUpdateRef.current = true;
     setRelaunchingUpdate(true);
     setUpdateStatus(null);
-    void relaunchScribe().catch((error) => {
+    void relaunchJune().catch((error) => {
       relaunchingUpdateRef.current = false;
       setRelaunchingUpdate(false);
       setUpdateStatus(`Relaunch failed: ${messageFromError(error)}`);
@@ -1111,7 +1157,7 @@ export function App() {
   useEffect(() => {
     if (import.meta.env.DEV) return;
     if (appBlocked) return;
-    return startPeriodicScribeUpdateChecks(runUpdateCheck);
+    return startPeriodicJuneUpdateChecks(runUpdateCheck);
   }, [appBlocked, runUpdateCheck]);
 
   useEffect(() => {
@@ -1646,12 +1692,6 @@ export function App() {
   // accessibility state via the dictation-event listener above.
   useEffect(() => {
     if (appBlocked) return;
-    const recordingState = state.recordingStatus?.state;
-    const captureActive =
-      recordingState === "recording" ||
-      recordingState === "paused" ||
-      recordingState === "finalizing" ||
-      recordingState === "validating";
     function refresh() {
       void dictationHelperCommand({ type: "get_permission_status" }).catch(
         () => undefined,
@@ -1663,7 +1703,7 @@ export function App() {
     }
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
-  }, [appBlocked, state.recordingStatus?.state]);
+  }, [appBlocked, captureActive]);
 
   // After the user asks to grant Accessibility, keep checking briefly while
   // macOS System Settings is in front. This avoids relying on a single webview
@@ -1696,6 +1736,47 @@ export function App() {
     };
   }, [accessibilityBlocked, accessibilityRefreshRequest, appBlocked]);
 
+  // After the user opens System Settings for System Audio Recording, keep
+  // checking briefly while macOS is in front. This matches Accessibility's
+  // permission flow and avoids relying on a single webview focus event.
+  useEffect(() => {
+    if (
+      appBlocked ||
+      captureActive ||
+      systemGranted ||
+      systemAudioRefreshRequest === 0
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let inFlight = false;
+    function poll() {
+      if (inFlight) return;
+      inFlight = true;
+      void checkRecordingSourceReadiness("microphonePlusSystem")
+        .then((readiness) => {
+          if (!cancelled) setSourceReadiness(readiness);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
+    }
+    poll();
+    const interval = window.setInterval(
+      poll,
+      SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS,
+    );
+    const timeout = window.setTimeout(() => {
+      window.clearInterval(interval);
+    }, SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.clearTimeout(timeout);
+    };
+  }, [appBlocked, captureActive, systemAudioRefreshRequest, systemGranted]);
+
   function handleSourceModeChange(next: RecordingSourceMode) {
     setUserWantsSystemAudio(next === "microphonePlusSystem");
   }
@@ -1705,6 +1786,7 @@ export function App() {
   // the user to the System Settings pane.
   function handleEnableSystemAudio() {
     setUserWantsSystemAudio(true);
+    setSystemAudioRefreshRequest((request) => request + 1);
     void openPrivacySettings("systemAudio");
   }
 
@@ -2918,6 +3000,9 @@ export function App() {
                 <AgentWorkspace
                   initialSession={activeAgentSessionSeed}
                   initialSessionId={activeAgentSessionId}
+                  onSessionSelected={setActiveAgentSession}
+                  topUpLabel={topUpLabel}
+                  onTopUp={handleTopUp}
                   origin={
                     agentOriginFolder
                       ? {
@@ -3235,11 +3320,8 @@ export function App() {
                           throw err;
                         }
                       }}
-                      onTopUp={() =>
-                        void osAccountsUpgrade().catch((err: unknown) =>
-                          setError(messageFromError(err)),
-                        )
-                      }
+                      onTopUp={handleTopUp}
+                      topUpLabel={topUpLabel}
                       onAssignFolder={(folderId) =>
                         void handleSetNoteFolder(selectedNote.id, folderId)
                       }
@@ -3408,7 +3490,7 @@ function UpdateHub({
   onDismissStatus,
   onRelaunch,
 }: {
-  readyUpdate: UpdatePromptPayload<ScribeUpdate> | null;
+  readyUpdate: UpdatePromptPayload<JuneUpdate> | null;
   status: string | null;
   preparing: boolean;
   relaunching: boolean;
@@ -3444,7 +3526,7 @@ function UpdateRelaunchCard({
   relaunching,
   onRelaunch,
 }: {
-  payload: UpdatePromptPayload<ScribeUpdate>;
+  payload: UpdatePromptPayload<JuneUpdate>;
   status: string | null;
   relaunching: boolean;
   onRelaunch: () => void;
@@ -3721,7 +3803,7 @@ function withFakeRecovery(payload: BootstrapResponse): {
       new URLSearchParams(window.location.search).get("fake-recovery") ===
         "1" ||
       window.location.hash.toLowerCase() === "#fake-recovery" ||
-      localStorage.getItem("os-scribe:dev:fake-recovery") === "1";
+      localStorage.getItem("os-june:dev:fake-recovery") === "1";
   } catch {
     return { payload };
   }
