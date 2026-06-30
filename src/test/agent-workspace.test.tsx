@@ -654,6 +654,56 @@ describe("AgentWorkspace", () => {
     ).toBeInTheDocument();
   });
 
+  it("redacts mid-run steering and its fallback follow-up when the privacy guard is enabled", async () => {
+    window.localStorage.setItem(AGENT_PRIVACY_GUARD_MODE_KEY, "structured");
+    const user = userEvent.setup();
+    render(<AgentWorkspace initialSession={existingSession} />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    const composer = screen.getByRole("textbox", { name: "Message June" });
+    await user.type(composer, "start this run");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "start this run",
+      }),
+    );
+    await screen.findByRole("button", { name: "Stop June" });
+
+    await user.type(composer, "Email ada@example.com next");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.steer", {
+        session_id: "session-1",
+        text: "Email [EMAIL_1] next",
+      }),
+    );
+    expect(
+      await screen.findByText(
+        "Privacy guard redacted 1 detail before sending.",
+      ),
+    ).toBeInTheDocument();
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({ type: "turn.completed", session_id: "runtime-session-1" });
+      }
+    });
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "Email [EMAIL_1] next",
+      }),
+    );
+    expect(JSON.stringify(mocks.gatewayRequest.mock.calls)).not.toContain(
+      "ada@example.com",
+    );
+  });
+
   it("never announces the restored session as selected while a New Session is pending", async () => {
     // Regression: "New session" from inside a project arms the pending marker
     // and remounts the workspace. Initializing from the last-open restore used
@@ -5747,6 +5797,50 @@ describe("AgentWorkspace", () => {
     expect(submitted.text).toContain(
       "ask the user to describe the image or paste the relevant text",
     );
+  });
+
+  it("redacts privacy guard details in text fallback image filenames", async () => {
+    window.localStorage.setItem(AGENT_PRIVACY_GUARD_MODE_KEY, "structured");
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listen).toHaveBeenCalledWith(
+        "tauri://drag-drop",
+        expect.any(Function),
+      ),
+    );
+
+    mocks.eventHandlers.get("tauri://drag-drop")?.({
+      payload: {
+        paths: [
+          "/Users/alex/Library/Application Support/CleanShot/media/receipt-ada@example.com.png",
+        ],
+      },
+    });
+
+    expect(
+      await screen.findByText("receipt-ada@example.com.png"),
+    ).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "what is in this image?");
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    await waitFor(() =>
+      expect(
+        mocks.gatewayRequest.mock.calls.some(
+          ([method]) => method === "prompt.submit",
+        ),
+      ).toBe(true),
+    );
+
+    const submitted = mocks.gatewayRequest.mock.calls.find(
+      ([method]) => method === "prompt.submit",
+    )?.[1] as { text: string };
+    expect(submitted.text).toContain("--- Attached Context ---");
+    expect(submitted.text).toMatch(/\[EMAIL_\d+\]/);
+    expect(submitted.text).not.toContain("ada@example.com");
   });
 
   it("warns and offers a one-tap switch when an image is attached to a non-vision model", async () => {

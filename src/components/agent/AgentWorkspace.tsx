@@ -273,6 +273,7 @@ import {
   agentPrivacyGuardNoticeMessage,
   getAgentPrivacyGuardMode,
   protectAgentPromptText,
+  type AgentPrivacyGuardMode,
 } from "../../lib/rampart-privacy";
 import {
   buildAgentChatTurns,
@@ -809,6 +810,7 @@ type PreparedComposerSubmission = {
 };
 
 type PreparedAgentPrivacyContent = {
+  mode: AgentPrivacyGuardMode;
   promptDisplayContent: string;
   runtimeContent: string;
   titleContent: string;
@@ -3212,6 +3214,7 @@ export function AgentWorkspace({
     const mode = getAgentPrivacyGuardMode();
     if (mode === "off") {
       return {
+        mode,
         promptDisplayContent,
         runtimeContent,
         titleContent,
@@ -3235,6 +3238,7 @@ export function AgentWorkspace({
     ]);
 
     return {
+      mode,
       promptDisplayContent: display.text,
       runtimeContent: runtime.text,
       titleContent: title.text,
@@ -3243,6 +3247,33 @@ export function AgentWorkspace({
           ? { redactedDetails: placeholders.size }
           : null,
     };
+  }
+
+  async function prepareAgentPrivacyFallbackContent(
+    text: string,
+    mode: AgentPrivacyGuardMode,
+  ): Promise<{
+    text: string;
+    notice: { redactedDetails: number } | null;
+  }> {
+    if (mode === "off") return { text, notice: null };
+    const protectedText = await protectAgentPromptText(text, { mode });
+    return {
+      text: protectedText.text,
+      notice: protectedText.redacted
+        ? { redactedDetails: protectedText.placeholders.length }
+        : null,
+    };
+  }
+
+  function mergeAgentPrivacyNotices(
+    ...notices: Array<{ redactedDetails: number } | null | undefined>
+  ) {
+    const redactedDetails = notices.reduce(
+      (sum, notice) => sum + (notice?.redactedDetails ?? 0),
+      0,
+    );
+    return redactedDetails > 0 ? { redactedDetails } : null;
   }
 
   async function prepareAgentPrivacySteer(text: string): Promise<{
@@ -3381,7 +3412,11 @@ export function AgentWorkspace({
       // clean completion resend anything still pending as a follow-up.
       // `registered` tracks whether Hermes accepted the steer, so a
       // tool.complete only clears ones a tool could actually have drained.
-      const steerEntry = { text: message, accepted: false, toolDrained: false };
+      const steerEntry = {
+        text: protectedSteer.text,
+        accepted: false,
+        toolDrained: false,
+      };
       pendingSteerBySessionIdRef.current = {
         ...pendingSteerBySessionIdRef.current,
         [steerSessionId]: [
@@ -4302,12 +4337,12 @@ export function AgentWorkspace({
           (model) => model.id === targetSessionModelId,
         )
       : undefined;
-    const imageInputFallbackContent =
-      // Only downgrade to the text-only fallback when the model is KNOWN to lack
-      // image input. An unresolved model id (stale or not-yet-loaded catalog)
-      // must NOT be assumed non-vision, or a vision-capable session would
-      // silently drop the image and never call attachPendingImages. Mirrors the
-      // composer banner's `!!generationModel && !modelSupportsImageInput` guard.
+    // Only downgrade to the text-only fallback when the model is KNOWN to lack
+    // image input. An unresolved model id (stale or not-yet-loaded catalog)
+    // must NOT be assumed non-vision, or a vision-capable session would
+    // silently drop the image and never call attachPendingImages. Mirrors the
+    // composer banner's `!!generationModel && !modelSupportsImageInput` guard.
+    const imageInputFallbackRawContent =
       pendingImages.length &&
       targetGenerationModel &&
       !modelSupportsImageInput(targetGenerationModel)
@@ -4320,6 +4355,17 @@ export function AgentWorkspace({
             runtimeContent,
           })
         : undefined;
+    const imageInputFallbackPrivacy = imageInputFallbackRawContent
+      ? await prepareAgentPrivacyFallbackContent(
+          imageInputFallbackRawContent,
+          privacyContent.mode,
+        )
+      : undefined;
+    const imageInputFallbackContent = imageInputFallbackPrivacy?.text;
+    const privacyNotice = mergeAgentPrivacyNotices(
+      privacyContent.notice,
+      imageInputFallbackPrivacy?.notice,
+    );
     const promptSubmitContent = imageInputFallbackContent ?? runtimeContent;
     // Issue reports skip title suggestion: the content is the wrapped
     // investigation prompt, which would title the session after the wrapper.
@@ -4591,11 +4637,11 @@ export function AgentWorkspace({
         session_id: runtimeSessionId,
         text: promptSubmitContent,
       });
-      if (privacyContent.notice) {
+      if (privacyNotice) {
         setPrivacyGuardNotice({
           sessionId: storedSessionId,
           message: agentPrivacyGuardNoticeMessage(
-            privacyContent.notice.redactedDetails,
+            privacyNotice.redactedDetails,
           ),
         });
       }
