@@ -209,7 +209,7 @@ function installBody(harness: ReturnType<typeof makeAdminHarness>) {
 describe("skill install review — force wiring", () => {
   it("never sends force on a plain (no-decision) install", async () => {
     const { harness, controller } = controllerFor();
-    await controller.search("");
+    await controller.search("pdf");
     const trusted = controller
       .getSnapshot()
       .results.find((r) => r.identifier === "official/pdf")!;
@@ -222,7 +222,7 @@ describe("skill install review — force wiring", () => {
 
   it("sends force only when the decision explicitly returns it", async () => {
     const { harness, controller } = controllerFor();
-    await controller.search("");
+    await controller.search("scraper");
     const caution = controller
       .getSnapshot()
       .results.find((r) => r.identifier === "skills.sh/scraper")!;
@@ -237,7 +237,7 @@ describe("skill install review — force wiring", () => {
 
   it("a proceed-without-force decision does not send force", async () => {
     const { harness, controller } = controllerFor();
-    await controller.search("");
+    await controller.search("scraper");
     const caution = controller
       .getSnapshot()
       .results.find((r) => r.identifier === "skills.sh/scraper")!;
@@ -250,7 +250,7 @@ describe("skill install review — force wiring", () => {
 
   it("a declined decision sends no install request", async () => {
     const { harness, controller } = controllerFor();
-    await controller.search("");
+    await controller.search("scraper");
     const caution = controller
       .getSnapshot()
       .results.find((r) => r.identifier === "skills.sh/scraper")!;

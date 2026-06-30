@@ -736,41 +736,90 @@ function makeEnv(send: AdminTransport): HermesAdminClient["env"] {
   };
 }
 
+/** Sets a dotted path (`a.b.c`) on a config tree in place, creating
+ * intermediate objects as needed. Replaces any non-object node in the way. */
+function setConfigAtPath(
+  tree: Record<string, unknown>,
+  path: string,
+  value: unknown,
+): void {
+  const keys = path.split(".");
+  let node = tree;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const key = keys[i]!;
+    const next = node[key];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) {
+      node[key] = {};
+    }
+    node = node[key] as Record<string, unknown>;
+  }
+  node[keys[keys.length - 1]!] = value;
+}
+
+/** Deletes a dotted path (`a.b.c`) from a config tree in place. No-op if any
+ * segment is missing. */
+function deleteConfigAtPath(tree: Record<string, unknown>, path: string): void {
+  const keys = path.split(".");
+  let node = tree;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const next = node[keys[i]!];
+    if (typeof next !== "object" || next === null || Array.isArray(next)) return;
+    node = next as Record<string, unknown>;
+  }
+  delete node[keys[keys.length - 1]!];
+}
+
 function makeConfig(send: AdminTransport): HermesAdminClient["config"] {
+  // Hermes' `PUT /api/config` (`ConfigUpdate`) takes the WHOLE config object
+  // and `save_config` replaces the tree (only env-ref templates are preserved),
+  // and there is NO `DELETE /api/config` route. So every write is a
+  // read-modify-write: GET the tree, change one dotted path, PUT it back under
+  // `{ config }`. This is why a `{ path, value }` body fails with a 422.
+  async function writePath(
+    label: "config.set" | "config.delete",
+    path: string,
+    apply: (tree: Record<string, unknown>) => void,
+  ): Promise<MutationOutcome<HermesConfigWriteResult>> {
+    const current = await send(
+      { method: "GET", path: "/api/config" },
+      parseConfigResult,
+    );
+    const next = structuredClone(current.config);
+    apply(next);
+    const result = await send(
+      { method: "PUT", path: "/api/config", body: { config: next } },
+      (raw) => parseConfigWriteResult(path, raw),
+    );
+    return outcome(label, result);
+  }
+
   return {
     get() {
       // GET /api/config (profile via the centrally-added ?profile= query).
       return send({ method: "GET", path: "/api/config" }, parseConfigResult);
     },
     async set(path, value) {
-      // PUT /api/config with ConfigUpdate { path, value }; profile via query.
-      // Skill config is non-secret, but the value is still not logged — the
-      // structural sanitizer masks any credential-shaped value defensively.
-      const result = await send(
-        { method: "PUT", path: "/api/config", body: { path, value } },
-        (raw) => parseConfigWriteResult(path, raw),
+      // Read-modify-write a single dotted path. Skill config is non-secret, but
+      // the value is still not logged — the structural sanitizer masks any
+      // credential-shaped value defensively.
+      return writePath("config.set", path, (tree) =>
+        setConfigAtPath(tree, path, value),
       );
-      return outcome("config.set", result);
     },
     async setValue(path, value) {
-      // Same PUT /api/config as `set`, but `value` is an arbitrary structure
+      // Same read-modify-write as `set`, but `value` is an arbitrary structure
       // (array/object) rather than a string. Used by the external directories
-      // manager to write the whole `skills.external_dirs` list. The structural
-      // sanitizer still masks any credential-shaped leaf defensively, though an
-      // external-dir list carries paths, not secrets.
-      const result = await send(
-        { method: "PUT", path: "/api/config", body: { path, value } },
-        (raw) => parseConfigWriteResult(path, raw),
+      // manager to write the whole `skills.external_dirs` list.
+      return writePath("config.set", path, (tree) =>
+        setConfigAtPath(tree, path, value),
       );
-      return outcome("config.set", result);
     },
     async delete(path) {
-      // DELETE /api/config with ConfigDelete { path } in the BODY (not the URL).
-      const result = await send(
-        { method: "DELETE", path: "/api/config", body: { path } },
-        (raw) => parseConfigWriteResult(path, raw),
+      // Clears a dotted path. Hermes has no DELETE /api/config, so this is a
+      // read-modify-write that removes the key and PUTs the tree back.
+      return writePath("config.delete", path, (tree) =>
+        deleteConfigAtPath(tree, path),
       );
-      return outcome("config.delete", result);
     },
   };
 }

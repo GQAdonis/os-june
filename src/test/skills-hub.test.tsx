@@ -180,10 +180,14 @@ function controllerFor(scenario = hubBrowseScenario()) {
 describe("skills hub — search", () => {
   it("lists results and reports ready", async () => {
     const { controller } = controllerFor();
-    await controller.search("");
+    // The hub is search-only (Hermes returns nothing for an empty query), so a
+    // real term drives the results.
+    await controller.search("data");
     const snapshot = controller.getSnapshot();
     expect(snapshot.status).toBe("ready");
-    expect(snapshot.results.length).toBe(4);
+    expect(
+      snapshot.results.some((r) => r.identifier === "skills.sh/data-science"),
+    ).toBe(true);
     controller.dispose();
   });
 
@@ -213,7 +217,7 @@ describe("skills hub — search", () => {
 describe("skills hub — install", () => {
   it("drives a background install to done, with progress, and invalidates skills", async () => {
     const { harness, controller } = controllerFor();
-    await controller.search("");
+    await controller.search("pdf");
     const result = controller
       .getSnapshot()
       .results.find((r) => r.identifier === "official/pdf")!;
@@ -257,7 +261,7 @@ describe("skills hub — install", () => {
       token: "fake-sync",
       hubResults: [{ identifier: "skills.sh/sync", name: "Sync" }],
     });
-    await controller.search("");
+    await controller.search("sync");
     const result = controller.getSnapshot().results[0];
     await controller.install(result);
     expect(controller.getSnapshot().installs.get("skills.sh/sync")?.phase).toBe(
@@ -269,7 +273,7 @@ describe("skills hub — install", () => {
 
   it("surfaces a background install failure inline and raises an error note", async () => {
     const { controller } = controllerFor(skillSecurityWarningScenario());
-    await controller.search("");
+    await controller.search("skill");
     const result = controller.getSnapshot().results[0];
     // Direct-URL result: confirm true so the install proceeds to the failure.
     await controller.install(result, { confirm: () => true });
@@ -282,7 +286,7 @@ describe("skills hub — install", () => {
 
   it("requires confirmation for a direct-URL install and is a no-op when declined", async () => {
     const { harness, controller } = controllerFor();
-    await controller.search("");
+    await controller.search("example");
     const urlResult = controller
       .getSnapshot()
       .results.find((r) => isDirectUrlInstall(r))!;
@@ -303,7 +307,7 @@ describe("skills hub — install", () => {
 
   it("clears a terminal install state", async () => {
     const { controller } = controllerFor();
-    await controller.search("");
+    await controller.search("pdf");
     const result = controller.getSnapshot().results[0];
     await controller.install(result);
     expect(

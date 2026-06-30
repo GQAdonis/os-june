@@ -428,14 +428,17 @@ export class FakeHermesServer {
       });
     }
     if (method === "GET" && path === "/api/skills/hub/search") {
-      const q = (query.q ?? "").toLowerCase();
+      // Mirrors Hermes: the hub is search-only. An empty query returns nothing
+      // (the real handler short-circuits before hitting any source), so the UI
+      // must drive a query rather than expect a browse-all on mount.
+      const q = (query.q ?? "").trim().toLowerCase();
       const results = q
         ? this.hubResults.filter(
             (r) =>
               r.identifier.toLowerCase().includes(q) ||
               (r.name ?? "").toLowerCase().includes(q),
           )
-        : this.hubResults;
+        : [];
       return json(200, { results });
     }
     if (method === "GET" && path === "/api/skills/hub/scan") {
@@ -652,34 +655,24 @@ export class FakeHermesServer {
       return json(200, { key, value: this.env[key] ?? "" });
     }
 
-    // Config (non-secret). GET returns the tree; PUT sets a dotted path; DELETE
-    // clears one (path in the BODY). Skill config lives under
+    // Config (non-secret). Mirrors Hermes: GET returns the tree; PUT takes the
+    // WHOLE config object (`ConfigUpdate`) and replaces it (`save_config`).
+    // There is NO DELETE route — the client clears a key by read-modify-write
+    // (GET, drop the key, PUT the tree). Skill config lives under
     // `skills.config.<skill>.<key>`.
     if (method === "GET" && path === "/api/config") {
       return json(200, { config: this.config });
     }
     if (method === "PUT" && path === "/api/config") {
-      const { path: dotted, value } =
-        (body as { path?: string; value?: unknown }) ?? {};
-      if (typeof dotted !== "string" || dotted.length === 0) {
+      const next = (body as { config?: unknown })?.config;
+      if (typeof next !== "object" || next === null || Array.isArray(next)) {
         throw new HttpError(422, {
           code: "validation_error",
-          error: "field required: path",
+          error: "field required: config",
         });
       }
-      setConfigPath(this.config, dotted.split("."), value);
-      return json(200, { ok: true, path: dotted, applies_at: "next-session" });
-    }
-    if (method === "DELETE" && path === "/api/config") {
-      const dotted = (body as { path?: unknown })?.path;
-      if (typeof dotted !== "string" || dotted.length === 0) {
-        throw new HttpError(422, {
-          code: "validation_error",
-          error: "field required: path",
-        });
-      }
-      deleteConfigPath(this.config, dotted.split("."));
-      return json(200, { ok: true, path: dotted, applies_at: "next-session" });
+      this.config = clone(next as Record<string, unknown>);
+      return json(200, { ok: true, applies_at: "next-session" });
     }
 
     throw new HttpError(404, { code: "not_found", error: `no route ${path}` });

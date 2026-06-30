@@ -492,8 +492,9 @@ export function useSkillsHubController(
     const unsubscribe = controller.subscribe(() => {
       setSnapshot(controller.getSnapshot());
     });
-    // List everything on mount so the browser opens with content, not a blank
-    // search box.
+    // Prime the snapshot to a ready (empty) state on mount. The hub is
+    // search-only: Hermes returns nothing for an empty query, so this just
+    // settles the status off "loading" and the view shows the search prompt.
     void controller.search("");
     return () => {
       unsubscribe();

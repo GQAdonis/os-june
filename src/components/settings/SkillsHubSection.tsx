@@ -254,11 +254,11 @@ export function SkillsHubView({
             <HubLoading />
           ) : !hasResults ? (
             <EmptyState
-              title="No results"
+              title={state.query ? "No results" : "Search the hub"}
               description={
                 state.query
                   ? "No hub skill matches your search. Try a different term."
-                  : "The hub returned no skills. Try a search term."
+                  : "Type a skill name or keyword to find skills to install."
               }
             />
           ) : visible.length === 0 ? (
