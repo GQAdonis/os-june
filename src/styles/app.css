@@ -19451,6 +19451,14 @@ input:focus-visible,
   width: 70%;
 }
 
+.skills-hub-loading-note {
+  margin: var(--sp-3) 0 0;
+  padding: 0 var(--sp-1);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  text-align: center;
+}
+
 /* Inspect drawer — a right-anchored sheet over a dimmed backdrop. */
 .skills-hub-drawer-backdrop {
   position: fixed;

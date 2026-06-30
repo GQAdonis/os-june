@@ -724,16 +724,21 @@ function TrustPill({ trust }: { trust: HermesHubSkillResult["trust"] }) {
 
 function HubLoading() {
   return (
-    <ul className="skills-hub-list" aria-hidden>
-      {[0, 1, 2].map((index) => (
-        <li key={index} className="skills-hub-row skills-hub-skeleton">
-          <div className="skills-hub-main">
-            <span className="skills-hub-skeleton-line skills-hub-skeleton-title" />
-            <span className="skills-hub-skeleton-line" />
-          </div>
-        </li>
-      ))}
-    </ul>
+    <div className="skills-hub-loading">
+      <ul className="skills-hub-list" aria-hidden>
+        {[0, 1, 2].map((index) => (
+          <li key={index} className="skills-hub-row skills-hub-skeleton">
+            <div className="skills-hub-main">
+              <span className="skills-hub-skeleton-line skills-hub-skeleton-title" />
+              <span className="skills-hub-skeleton-line" />
+            </div>
+          </li>
+        ))}
+      </ul>
+      <p className="skills-hub-loading-note" role="status">
+        Searching across skill sources. This can take a few seconds.
+      </p>
+    </div>
   );
 }
 

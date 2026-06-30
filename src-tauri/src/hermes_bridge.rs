@@ -4633,7 +4633,11 @@ async fn hermes_connection_json(
     let url = format!("{}{}", connection.base_url, path);
     let client = reqwest::Client::builder()
         .no_proxy()
-        .timeout(Duration::from_secs(30))
+        // Exceed Hermes' own 30s budgets (e.g. the skill hub's parallel
+        // source-search timeout) so a slow but successful response — partial
+        // results included — wins over a proxy-level timeout that would
+        // otherwise surface as a misleading "could not reach Hermes" error.
+        .timeout(Duration::from_secs(45))
         .build()
         .map_err(|error| AppError::new("hermes_bridge_api_failed", error.to_string()))?;
     let mut request = client
