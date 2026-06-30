@@ -396,10 +396,16 @@ jobs:
       - name: Open release version PR
         env:
           GH_TOKEN: ${{ github.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Attribute the bump commit to the release App (Open Software Release)
+          # rather than the generic github-actions[bot]. GitHub fixes the App
+          # committer email as <bot-user-id>+<app-slug>[bot]@users.noreply.github.com;
+          # the bot user id is read from the public users API.
+          bot_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${bot_id}+${APP_SLUG}[bot]@users.noreply.github.com"
           git add package.json pnpm-lock.yaml src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
           if git diff --cached --quiet; then
             echo "Release version files are already at v$VERSION; skipping version commit."
