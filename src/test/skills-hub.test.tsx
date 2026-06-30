@@ -319,6 +319,32 @@ describe("skills hub — install", () => {
     ).toBeUndefined();
     controller.dispose();
   });
+
+  it("fails an install that never finishes with an actionable timeout message", async () => {
+    // A background action that stays "running" forever + a zero poll budget so
+    // the first non-terminal poll trips the deadline, mimicking a stuck
+    // (e.g. GitHub-rate-limited) install.
+    const harness = makeAdminHarness({
+      token: "fake-timeout",
+      hubResults: [{ identifier: "skills.sh/slow", name: "Slow" }],
+      backgroundActions: true,
+      actionScripts: { install: { states: [{ state: "running" }] } },
+    });
+    const controller = new SkillsHubController(harness as SkillsHubEngine, {
+      sleep: instantSleep,
+      pollTimeoutMs: 0,
+    });
+    await controller.search("slow");
+    const result = controller.getSnapshot().results[0];
+    await controller.install(result);
+    const state = controller.getSnapshot().installs.get(result.identifier);
+    expect(state?.phase).toBe("failed");
+    // Actionable: names the timeout AND the GitHub-auth fix, not the generic
+    // "waiting for Hermes" copy.
+    expect(state?.error).toMatch(/timed out/i);
+    expect(state?.error).toMatch(/GITHUB_TOKEN/);
+    controller.dispose();
+  });
 });
 
 // ---------------------------------------------------------------------------
