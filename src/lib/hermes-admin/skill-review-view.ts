@@ -184,11 +184,14 @@ export function hasRedactedContent(write: PendingSkillWrite): boolean {
   return write.files.some((file) => file.redacted === true);
 }
 
-/** Whether June can apply this write. False for an unreadable manifest, which
- * can only be rejected (approve fails closed in Rust). The UI disables Approve
- * accordingly so it never offers an action that will error. */
+/** Whether June can apply this write. False when:
+ * - the manifest is unreadable / has no recognized op, or
+ * - any file was redacted: June only holds the masked copy of that content, so
+ *   applying it would persist `[redacted]` and corrupt the skill. Both fail
+ *   closed in Rust too; the UI disables Approve to match so it never offers an
+ *   action that will error. A redacted write must be approved in Hermes. */
 export function canApprove(write: PendingSkillWrite): boolean {
-  return write.readable && write.op !== "unknown";
+  return write.readable && write.op !== "unknown" && !hasRedactedContent(write);
 }
 
 // ---------------------------------------------------------------------------

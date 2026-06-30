@@ -18,7 +18,6 @@ import {
   ALLOWLIST_RECOMMENDATION,
   authMeta,
   classifyServerRisk,
-  emptyDraft,
   enableConfirmationFor,
   filterServers,
   hasAvailableTools,
@@ -736,6 +735,68 @@ function formatCommand(command: string | undefined, args: string[]): string {
 // Add-server dialog
 // ---------------------------------------------------------------------------
 
+/** A stable, monotonic id for an editor row. Rows are added and removed in the
+ * middle of a list, so a positional React key would let React reuse a row's
+ * (masked) input DOM node across logical rows on deletion; a minted id keeps
+ * each input bound to its own data. Module-level so ids stay unique across all
+ * lists in a form. */
+let nextEditorRowId = 0;
+function newEditorRowId(): string {
+  nextEditorRowId += 1;
+  return `mcp-row-${nextEditorRowId}`;
+}
+
+/** One stdio argument row, with a stable id for its React key. */
+type ArgRow = { id: string; value: string };
+/** One env / header pair row, with a stable id for its React key. */
+type PairRow = { id: string; key: string; value: string };
+
+/** The add-server form state. Mirrors {@link McpServerDraft} but carries a
+ * stable id on each list/pair row so the editors key on identity, not index.
+ * The ids are a UI concern only: {@link toValidationDraft} strips them so the
+ * pure validation / serialization contract never sees them. */
+type EditableDraft = {
+  name: string;
+  transport: McpServerDraft["transport"];
+  command: string;
+  args: ArgRow[];
+  env: PairRow[];
+  url: string;
+  headers: PairRow[];
+  auth: McpServerDraft["auth"];
+};
+
+/** A blank editable draft for a fresh add-server form. */
+function emptyEditableDraft(
+  transport: McpServerDraft["transport"] = "stdio",
+): EditableDraft {
+  return {
+    name: "",
+    transport,
+    command: "",
+    args: [],
+    env: [],
+    url: "",
+    headers: [],
+    auth: "none",
+  };
+}
+
+/** Strips the UI row ids, producing the plain {@link McpServerDraft} that
+ * {@link validateDraft} and the payload builder consume. */
+function toValidationDraft(draft: EditableDraft): McpServerDraft {
+  return {
+    name: draft.name,
+    transport: draft.transport,
+    command: draft.command,
+    args: draft.args.map((row) => row.value),
+    env: draft.env.map((row) => ({ key: row.key, value: row.value })),
+    url: draft.url,
+    headers: draft.headers.map((row) => ({ key: row.key, value: row.value })),
+    auth: draft.auth,
+  };
+}
+
 function AddServerDialog({
   open,
   adding,
@@ -751,12 +812,12 @@ function AddServerDialog({
     payload: import("../../lib/hermes-admin").HermesAddMcpServerPayload,
   ) => Promise<boolean>;
 }) {
-  const [draft, setDraft] = useState<McpServerDraft>(() => emptyDraft());
+  const [draft, setDraft] = useState<EditableDraft>(() => emptyEditableDraft());
   const [errors, setErrors] = useState<Record<string, string>>({});
   const headingId = useId();
 
   function reset() {
-    setDraft(emptyDraft());
+    setDraft(emptyEditableDraft());
     setErrors({});
   }
 
@@ -767,12 +828,13 @@ function AddServerDialog({
   }
 
   async function handleSubmit() {
-    const trimmedName = draft.name.trim();
+    const validationDraft = toValidationDraft(draft);
+    const trimmedName = validationDraft.name.trim();
     if (existingNames.includes(trimmedName)) {
       setErrors({ name: "A server with this name already exists." });
       return;
     }
-    const result = validateDraft(draft);
+    const result = validateDraft(validationDraft);
     if (!result.ok) {
       setErrors(result.errors);
       return;
@@ -1016,35 +1078,40 @@ function ListEditor({
 }: {
   legend: string;
   addLabel: string;
-  values: string[];
+  values: ArgRow[];
   errorPrefix: string;
   errors: Record<string, string>;
-  onChange: (values: string[]) => void;
+  onChange: (values: ArgRow[]) => void;
 }) {
   return (
     <fieldset className="mcp-add-field">
       <span className="mcp-add-label">{legend}</span>
-      {values.map((value, index) => (
-        <div key={index} className="mcp-add-row">
+      {values.map((row, index) => (
+        <div key={row.id} className="mcp-add-row">
           <input
             type="text"
             className="mcp-add-input"
-            value={value}
+            value={row.value}
             aria-label={`${legend} ${index + 1}`}
             autoComplete="off"
             spellCheck={false}
             aria-invalid={Boolean(errors[`${errorPrefix}.${index}`])}
             onChange={(event) => {
-              const next = [...values];
-              next[index] = event.currentTarget.value;
-              onChange(next);
+              const value = event.currentTarget.value;
+              onChange(
+                values.map((existing) =>
+                  existing.id === row.id ? { ...existing, value } : existing,
+                ),
+              );
             }}
           />
           <button
             type="button"
             className="mcp-add-row-remove"
             aria-label={`Remove ${legend} ${index + 1}`}
-            onClick={() => onChange(values.filter((_, i) => i !== index))}
+            onClick={() =>
+              onChange(values.filter((existing) => existing.id !== row.id))
+            }
           >
             <IconCrossSmall size={13} ariaHidden />
           </button>
@@ -1056,7 +1123,9 @@ function ListEditor({
       <button
         type="button"
         className="mcp-add-row-add"
-        onClick={() => onChange([...values, ""])}
+        onClick={() =>
+          onChange([...values, { id: newEditorRowId(), value: "" }])
+        }
       >
         <IconPlusMedium size={13} ariaHidden />
         {addLabel}
@@ -1081,16 +1150,16 @@ function PairEditor({
   addLabel: string;
   keyPlaceholder: string;
   valuePlaceholder: string;
-  pairs: Array<{ key: string; value: string }>;
+  pairs: PairRow[];
   errorPrefix: string;
   errors: Record<string, string>;
-  onChange: (pairs: Array<{ key: string; value: string }>) => void;
+  onChange: (pairs: PairRow[]) => void;
 }) {
   return (
     <fieldset className="mcp-add-field">
       <span className="mcp-add-label">{legend}</span>
       {pairs.map((pair, index) => (
-        <div key={index} className="mcp-add-pair">
+        <div key={pair.id} className="mcp-add-pair">
           <input
             type="text"
             className="mcp-add-input mcp-add-pair-key"
@@ -1101,9 +1170,12 @@ function PairEditor({
             spellCheck={false}
             aria-invalid={Boolean(errors[`${errorPrefix}.${index}`])}
             onChange={(event) => {
-              const next = [...pairs];
-              next[index] = { ...next[index], key: event.currentTarget.value };
-              onChange(next);
+              const key = event.currentTarget.value;
+              onChange(
+                pairs.map((existing) =>
+                  existing.id === pair.id ? { ...existing, key } : existing,
+                ),
+              );
             }}
           />
           <input
@@ -1114,19 +1186,21 @@ function PairEditor({
             aria-label={`${legend} ${index + 1} value`}
             autoComplete="off"
             onChange={(event) => {
-              const next = [...pairs];
-              next[index] = {
-                ...next[index],
-                value: event.currentTarget.value,
-              };
-              onChange(next);
+              const value = event.currentTarget.value;
+              onChange(
+                pairs.map((existing) =>
+                  existing.id === pair.id ? { ...existing, value } : existing,
+                ),
+              );
             }}
           />
           <button
             type="button"
             className="mcp-add-row-remove"
             aria-label={`Remove ${legend} ${index + 1}`}
-            onClick={() => onChange(pairs.filter((_, i) => i !== index))}
+            onClick={() =>
+              onChange(pairs.filter((existing) => existing.id !== pair.id))
+            }
           >
             <IconCrossSmall size={13} ariaHidden />
           </button>
@@ -1138,7 +1212,9 @@ function PairEditor({
       <button
         type="button"
         className="mcp-add-row-add"
-        onClick={() => onChange([...pairs, { key: "", value: "" }])}
+        onClick={() =>
+          onChange([...pairs, { id: newEditorRowId(), key: "", value: "" }])
+        }
       >
         <IconPlusMedium size={13} ariaHidden />
         {addLabel}

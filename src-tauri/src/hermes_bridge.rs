@@ -1254,11 +1254,8 @@ pub fn hermes_resolve_pending_skill_write(
 
     if request.approve {
         let parsed = parse_pending_skill_write(&request.id, &manifest_path);
-        if !parsed.readable {
-            return Err(AppError::new(
-                "hermes_pending_skill_unreadable",
-                "June could not fully read this change, so it cannot be approved. Reject it and review it in Hermes.",
-            ));
+        if let Some(error) = approval_block_reason(&parsed) {
+            return Err(error);
         }
         let skills_root = resolve_june_hermes_home(&app)?.join("skills");
         apply_pending_skill_write(&skills_root, &parsed)?;
@@ -1447,6 +1444,29 @@ fn redact_pending_line(line: &str) -> String {
         return format!("{head} [redacted]");
     }
     line.to_string()
+}
+
+/// Why June must refuse to apply a staged write from this surface, if at all.
+/// Two fail-closed cases, both of which the user must resolve in Hermes directly
+/// against the original content:
+/// - an unreadable manifest June could not recognize; and
+/// - a write whose content June redacted for display. `file.content` then holds
+///   the masked copy (secret looking lines replaced with `[redacted]`), so
+///   applying it would persist that masked text and silently corrupt the skill.
+fn approval_block_reason(write: &PendingSkillWrite) -> Option<AppError> {
+    if !write.readable {
+        return Some(AppError::new(
+            "hermes_pending_skill_unreadable",
+            "June could not fully read this change, so it cannot be approved. Reject it and review it in Hermes.",
+        ));
+    }
+    if write.files.iter().any(|file| file.redacted) {
+        return Some(AppError::new(
+            "hermes_pending_skill_redacted",
+            "This change had secret looking lines that June hid for display, so approving it here would save the hidden copy. Reject it and approve it in Hermes directly.",
+        ));
+    }
+    None
 }
 
 /// Applies a readable staged write against the managed skills root only.
@@ -7898,6 +7918,55 @@ mod tests {
         assert!(masked.contains("body"));
         assert!(!masked.contains("sk-supersecretvalue"));
         assert!(masked.contains("[redacted]"));
+    }
+
+    #[test]
+    fn pending_write_redacted_content_blocks_approval() {
+        // A readable write whose displayed content June had to redact must NOT be
+        // approvable here: `file.content` is the masked copy, so applying it would
+        // persist `[redacted]` and silently corrupt the skill (Greptile P1).
+        let redacted = PendingSkillWrite {
+            id: "change-1".to_string(),
+            skill: "research".to_string(),
+            op: PendingSkillWriteOp::Edit,
+            source: PendingSkillWriteSource::Background,
+            gist: None,
+            staged_at: None,
+            files: vec![PendingSkillWriteFile {
+                relative_path: "research/SKILL.md".to_string(),
+                diff: None,
+                content: Some("authorization: [redacted]".to_string()),
+                redacted: true,
+            }],
+            readable: true,
+        };
+        let blocked =
+            approval_block_reason(&redacted).expect("a redacted write must block approval");
+        assert_eq!(blocked.code, "hermes_pending_skill_redacted");
+
+        // A clean, readable write carries no block reason.
+        let clean = PendingSkillWrite {
+            files: vec![PendingSkillWriteFile {
+                relative_path: "research/SKILL.md".to_string(),
+                diff: None,
+                content: Some("plain body".to_string()),
+                redacted: false,
+            }],
+            ..redacted.clone()
+        };
+        assert!(approval_block_reason(&clean).is_none());
+
+        // An unreadable write is still blocked (behavior preserved by the helper).
+        let unreadable = PendingSkillWrite {
+            readable: false,
+            ..clean.clone()
+        };
+        assert_eq!(
+            approval_block_reason(&unreadable)
+                .expect("an unreadable write must block approval")
+                .code,
+            "hermes_pending_skill_unreadable",
+        );
     }
 
     #[test]

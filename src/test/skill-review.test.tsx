@@ -273,6 +273,29 @@ describe("SkillReviewView", () => {
     ).toBeInTheDocument();
   });
 
+  it("disables approve for a redacted write and points the user to Hermes", () => {
+    render(
+      <SkillReviewView
+        state={baseState({
+          writes: [
+            viewWrite({
+              files: [
+                {
+                  relativePath: "research/SKILL.md",
+                  content: "authorization: [redacted]",
+                  redacted: true,
+                },
+              ],
+            }),
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Approve" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeEnabled();
+    expect(screen.getByText(/approve it in Hermes/i)).toBeInTheDocument();
+  });
+
   it("expands the diff on demand", () => {
     render(<SkillReviewView state={baseState({ writes: [viewWrite()] })} />);
     const toggle = screen.getByRole("button", { name: "View diff" });

@@ -128,6 +128,26 @@ describe("write labeling and framing", () => {
     })!;
     expect(hasRedactedContent(write)).toBe(true);
   });
+
+  it("refuses to approve a readable write whose content was redacted", () => {
+    // June only holds the masked copy of redacted content, so approving here
+    // would persist `[redacted]` and corrupt the skill. Approve fails closed in
+    // Rust; canApprove must mirror that so the UI never offers the action.
+    const write = parsePendingSkillWrite({
+      id: "x",
+      skill: "git",
+      op: "edit",
+      readable: true,
+      files: [
+        {
+          path: "git/SKILL.md",
+          content: "api_key: [redacted]",
+          redacted: true,
+        },
+      ],
+    })!;
+    expect(canApprove(write)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

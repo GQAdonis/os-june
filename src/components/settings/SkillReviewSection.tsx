@@ -341,7 +341,7 @@ function WriteRow({
           </div>
         ) : null}
 
-        {!approvable ? (
+        {!approvable && !redacted ? (
           <p className="skill-review-unreadable">
             <IconWarningSign size={13} ariaHidden />
             June could not fully read this change, so it cannot be approved
@@ -352,7 +352,9 @@ function WriteRow({
         {redacted ? (
           <p className="skill-review-redacted">
             <IconWarningSign size={13} ariaHidden />
-            Secret looking lines in this change are hidden in the diff below.
+            Secret looking lines are hidden in the diff below, so this cannot be
+            approved here without saving the hidden copy. Reject it, or approve
+            it in Hermes.
           </p>
         ) : null}
 
