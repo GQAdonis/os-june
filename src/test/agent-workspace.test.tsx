@@ -3458,6 +3458,14 @@ describe("AgentWorkspace", () => {
         "session-1",
       ),
     );
+    hermesTraceBuffer.recordOutbound({
+      sessionId: "session-1",
+      method: "prompt.submit",
+      params: { session_id: "runtime-session-1", text: "old prompt" },
+    });
+    expect(
+      hermesTraceBuffer.exportSanitizedTrace("session-1").entries,
+    ).toHaveLength(1);
 
     act(() => {
       window.dispatchEvent(
@@ -3475,6 +3483,9 @@ describe("AgentWorkspace", () => {
     expect(
       window.localStorage.getItem("june.agent.unrestrictedSessions"),
     ).toBeNull();
+    expect(
+      hermesTraceBuffer.exportSanitizedTrace("session-1").entries,
+    ).toHaveLength(0);
   });
 
   it("keeps the blank composer after a New Session event during refresh", async () => {
@@ -5302,6 +5313,16 @@ describe("AgentWorkspace", () => {
             description: "Captured the current screen",
           },
         });
+        handler({
+          type: "tool.complete",
+          session_id: "runtime-session-2",
+          payload: {
+            name: "computer_use",
+            description: "Screen capture failed",
+            status: "error",
+            error: "permission denied",
+          },
+        });
       }
     });
 
@@ -5323,6 +5344,12 @@ describe("AgentWorkspace", () => {
       within(evidence).getByText("Captured the current screen"),
     ).toBeInTheDocument();
     expect(
+      within(evidence).getByText("Failed computer use"),
+    ).toBeInTheDocument();
+    expect(
+      within(evidence).getByText("Screen capture failed"),
+    ).toBeInTheDocument();
+    expect(
       hermesTraceBuffer
         .exportSanitizedTrace("session-2")
         .entries.some((entry) => entry.rawType === "tool.start"),
@@ -5332,7 +5359,7 @@ describe("AgentWorkspace", () => {
     ).toHaveLength(0);
   });
 
-  it("falls back to persisted tool rows in the evidence log for revisited sessions", async () => {
+  it("merges persisted tool rows with partial trace rows in the evidence log", async () => {
     const user = userEvent.setup();
     mocks.listHermesSessionMessages.mockResolvedValue([
       {
@@ -5350,6 +5377,16 @@ describe("AgentWorkspace", () => {
     await waitFor(() =>
       expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-1"),
     );
+    act(() => {
+      hermesTraceBuffer.recordOutbound({
+        sessionId: "session-1",
+        method: "prompt.submit",
+        params: {
+          session_id: "runtime-session-1",
+          text: "check the browser",
+        },
+      });
+    });
 
     await user.click(
       screen.getByRole("button", { name: "Show agent activity" }),
@@ -5366,6 +5403,8 @@ describe("AgentWorkspace", () => {
     expect(
       within(evidence).getByText("Captured browser window"),
     ).toBeInTheDocument();
+    expect(within(evidence).getByText("Prompt sent")).toBeInTheDocument();
+    expect(within(evidence).getByText("check the browser")).toBeInTheDocument();
   });
 
   it("lists every surfaced file behind the session bar files button", async () => {

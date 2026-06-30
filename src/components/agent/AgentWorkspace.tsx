@@ -1999,6 +1999,9 @@ export function AgentWorkspace({
       hermesActivityStore.clearSession(sessionId);
       // Feature 14: likewise drop its artifact timeline.
       hermesArtifactStore.clearSession(sessionId);
+      // Feature 20: evidence rows are trace-backed, so deleted sessions must
+      // not leave stale audit rows in memory either.
+      hermesTraceBuffer.clearSession(sessionId);
       sessionGatewayUnlistenRef.current.get(sessionId)?.();
       liveEventsRef.current = omitRecordKey(liveEventsRef.current, sessionId);
       setLiveEvents(liveEventsRef.current);

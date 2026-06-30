@@ -104,7 +104,10 @@ export function buildEvidenceLogRows({
   artifacts: AgentArtifact[];
 }): AgentEvidenceLogRow[] {
   const traceRows = traceEntries.flatMap(rowFromTraceEntry);
-  const turnRows = traceRows.length === 0 ? rowsFromTurns(turns) : [];
+  const traceKeys = new Set(traceRows.map(evidenceRowDedupeKey));
+  const turnRows = rowsFromTurns(turns).filter(
+    (row) => !traceKeys.has(evidenceRowDedupeKey(row)),
+  );
   const artifactRows = artifacts.map(rowFromArtifact);
   return [...traceRows, ...turnRows, ...artifactRows]
     .sort(compareRows)
@@ -176,7 +179,7 @@ function rowFromTraceEntry(entry: HermesTraceEntry): AgentEvidenceLogRow[] {
       {
         id: `trace:${entry.id}`,
         timestamp: entry.observedAt,
-        title: toolTitle(label, toolPhase(entry.rawType)),
+        title: toolTitle(label, toolPhase(entry.rawType, payload)),
         detail: detailFromPayload(payload),
         kind: label === "Computer use" ? "computer" : "tool",
       },
@@ -403,10 +406,15 @@ function toolTitle(label: string, phase: string | undefined): string {
   }
 }
 
-function toolPhase(rawType: string | undefined): string | undefined {
+function toolPhase(
+  rawType: string | undefined,
+  payload?: unknown,
+): string | undefined {
   if (rawType === "tool.start") return "start";
   if (rawType === "tool.progress") return "progress";
-  if (rawType === "tool.complete") return "complete";
+  if (rawType === "tool.complete") {
+    return payloadHasFailureSignal(payload) ? "failed" : "complete";
+  }
   return undefined;
 }
 
@@ -474,6 +482,25 @@ function payloadRecords(payload: unknown): Record<string, unknown>[] {
   return records;
 }
 
+function payloadHasFailureSignal(payload: unknown): boolean {
+  for (const record of payloadRecords(payload)) {
+    if (
+      record.error !== undefined &&
+      record.error !== null &&
+      record.error !== false
+    ) {
+      return true;
+    }
+    if (record.failed === true) return true;
+    const status =
+      typeof record.status === "string" ? record.status.toLowerCase() : "";
+    if (status === "error" || status === "failed" || status === "denied") {
+      return true;
+    }
+  }
+  return false;
+}
+
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -534,6 +561,12 @@ function lowerFirst(value: string): string {
 
 function compareRows(a: AgentEvidenceLogRow, b: AgentEvidenceLogRow): number {
   return timestampValue(a.timestamp) - timestampValue(b.timestamp);
+}
+
+function evidenceRowDedupeKey(row: AgentEvidenceLogRow): string {
+  return [row.kind, row.title, row.detail ?? ""]
+    .map((value) => value.replace(/\s+/g, " ").trim().toLowerCase())
+    .join("\u0000");
 }
 
 function timestampValue(value: string | undefined): number {
