@@ -7,8 +7,8 @@ use june_config::{
 use june_providers::{
     JwksTokenVerifier, LocalDevOsAccountsClient, LocalDevTokenVerifier, LogIssueReportSink,
     MultiFormatDurationProbe, OsAccountsHttpClient, OsPlatformIssueReportSink, RoutingTranscriber,
-    VeniceAgentChat, VeniceAugment, VeniceCleaner, VeniceGenerator, VeniceModelCatalog,
-    client_with_timeout, default_client, jwks_client,
+    VeniceAgentChat, VeniceAugment, VeniceCleaner, VeniceGenerator, VeniceImageGenerator,
+    VeniceModelCatalog, client_with_timeout, default_client, jwks_client,
 };
 use june_services::{
     AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps,
@@ -79,6 +79,11 @@ async fn load_pricing(
     pricing
 }
 
+// The dependency-injection composition root: it wires every provider and
+// service into the router, so its length grows by a line or two with each new
+// capability (image generation is the latest). Splitting it further would scatter
+// the wiring without making it clearer.
+#[allow(clippy::too_many_lines)]
 fn build_router(
     config: &AppConfig,
     http: &reqwest::Client,
@@ -178,6 +183,7 @@ fn build_router(
         agent_chat,
         dictate,
         web,
+        image_generator: build_image_generator(upstream_http, &config.upstreams.venice),
         issue_reports,
         limits: ApiLimits {
             max_audio_bytes: config.server.max_audio_bytes,
@@ -192,6 +198,16 @@ fn build_router(
         },
     });
     june_api::router(state)
+}
+
+fn build_image_generator(
+    upstream_http: &reqwest::Client,
+    venice: &june_config::UpstreamConfig,
+) -> Arc<dyn june_domain::ImageGenerator> {
+    Arc::new(VeniceImageGenerator::from_config(
+        upstream_http.clone(),
+        venice,
+    ))
 }
 
 fn build_os_accounts_client(

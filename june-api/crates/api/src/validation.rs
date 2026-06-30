@@ -38,6 +38,8 @@ pub(crate) const MAX_AGENT_OUTPUT_TOKENS: u64 = 32_768;
 /// Venice caps a search query at 400 characters.
 pub(crate) const MAX_WEB_QUERY_CHARS: usize = 400;
 pub(crate) const MAX_WEB_URL_CHARS: usize = 4_096;
+/// Venice caps an image prompt at 7,500 characters.
+pub(crate) const MAX_IMAGE_PROMPT_CHARS: usize = 7_500;
 
 pub(crate) fn validate_text_len(
     field: &str,

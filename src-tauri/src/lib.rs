@@ -250,6 +250,7 @@ pub fn run() {
             providers::provider_model_settings,
             providers::list_venice_models,
             providers::set_venice_model,
+            providers::generate_image,
             os_accounts::os_accounts_status,
             os_accounts::os_accounts_login,
             os_accounts::os_accounts_cancel_login,
