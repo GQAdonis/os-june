@@ -286,6 +286,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn note_generate_prompt_requests_contextual_meeting_filtering() {
+        let os_accounts = Arc::new(RecordingOsAccounts::default());
+        let generator = Arc::new(RecordingGenerator::default());
+        let service = NoteGenerateService::new(NoteGenerateServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "text-model",
+                PriceUnit::Tokens,
+                1,
+                ModelType::Text,
+            )]))),
+            os_accounts,
+            generator: generator.clone(),
+            hold_ttl_seconds: 300,
+            flat_estimate_credits: 1024,
+        });
+
+        service
+            .generate(note_generate_params())
+            .await
+            .expect("generate succeeds with happy path");
+
+        let prompt = generator.last_system_prompt().unwrap_or_default();
+        assert!(prompt.contains("Use contextual judgment like a human meeting note-taker"));
+        assert!(prompt.contains("decisions, commitments, action items"));
+        assert!(prompt.contains("Do not preserve transient logistics"));
+        assert!(prompt.contains("someone possibly being late"));
+        assert!(prompt.contains("Prefer useful meeting notes over a faithful summary"));
+    }
+
+    #[tokio::test]
     async fn note_generate_rejects_asr_model_before_authorize() {
         // Regression: generation accepted any priced model id. Passing an ASR
         // model could take a wallet hold and call the text upstream before the
