@@ -123,6 +123,28 @@ export type AgentChatSteeringPart = {
   text: string;
 };
 
+/** A built-in image generation result (the `/image` slash command). It lives as
+ * an assistant part so the generated image renders inline in the thread — with
+ * its own loader and error states — instead of being dropped into the composer
+ * as an attachment chip. `dataUrl` is the inline preview shown directly; `path`
+ * is the imported workspace file the open/download affordances reuse (the same
+ * bridge file flow as any other artifact). Synthesized client-side: it never
+ * comes off the gateway message stream, so it carries its bytes inline. */
+export type AgentChatImagePart = {
+  type: "image";
+  status: "running" | "complete" | "error";
+  /** The prompt the user typed after `/image`. */
+  prompt: string;
+  /** Imported workspace path; set once `status === "complete"`. */
+  path?: string;
+  /** `data:<mime>;base64,…` for the inline preview; set when complete. */
+  dataUrl?: string;
+  /** Display name of the imported file; set when complete. */
+  name?: string;
+  /** User-facing failure message; set when `status === "error"`. */
+  error?: string;
+};
+
 export type AgentChatPart =
   | AgentChatTextPart
   | AgentChatReasoningPart
@@ -133,7 +155,8 @@ export type AgentChatPart =
   | AgentChatSudoPart
   | AgentChatSecretPart
   | AgentChatNoticePart
-  | AgentChatSteeringPart;
+  | AgentChatSteeringPart
+  | AgentChatImagePart;
 
 export type AgentChatTurn = {
   id: string;
@@ -1395,6 +1418,9 @@ function partText(part: AgentChatPart) {
   if (part.type === "secret")
     return [part.keyName ?? "", part.reason ?? "", "secret"].join(" ");
   if (part.type === "context") return part.preview || part.text;
+  // A generated image is meaningful even though it has no body text — report the
+  // prompt so the turn isn't filtered out as empty and a copy reads sensibly.
+  if (part.type === "image") return part.prompt;
   return part.text;
 }
 

@@ -2330,6 +2330,95 @@ input:focus-visible,
   color: var(--foreground);
 }
 
+/* Generated image (the /image slash command) — rendered inline in the assistant
+ * turn. Running shows a square shimmer placeholder; complete shows the image in
+ * a quiet button that opens the file viewer (zoom-in cursor), with a download
+ * action in the caption bar. Sized to sit in the chat column without dominating
+ * it. */
+.agent-generated-image {
+  max-width: 320px;
+  margin-block: var(--sp-2);
+}
+
+.agent-generated-image-placeholder {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-generated-image-error {
+  margin: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  padding: var(--sp-3);
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+}
+
+.agent-generated-image-frame {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  padding: 0;
+  background: var(--card);
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+.agent-generated-image-frame:hover {
+  border-color: var(--border);
+}
+
+.agent-generated-image-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: inherit;
+}
+
+.agent-generated-image-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-top: var(--sp-1);
+}
+
+.agent-generated-image-name {
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-generated-image-download {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--sp-1);
+  border: 0;
+  border-radius: var(--r-sm);
+  padding: calc(var(--sp-1) / 2) var(--sp-2);
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.agent-generated-image-download:hover,
+.agent-generated-image-download:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
 /* Artifact viewer ----------------------------------------------------
  * The files panel is its own card on the background surface — a sibling of
  * .main-panel, not a box inside it. It fixes to the window's right edge with
