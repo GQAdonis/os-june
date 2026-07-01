@@ -14094,10 +14094,15 @@ input:focus-visible,
   transform: translateY(-100%);
 }
 
-/* Compact one-line tip (e.g. a shortcut hint): a little more padding than a
- * bare chip, and it springs out like a small popover rather than just fading. */
+/* Compact one-line tip (e.g. a shortcut hint or icon label): a tight inverted
+ * chip — dark on the light theme, light on the dark theme — so a label reads
+ * as annotation, distinct from the surface-colored explainer cards above. It
+ * springs out like a small popover rather than just fading. */
 .hover-tip-compact {
-  padding: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: none;
+  background: var(--foreground);
+  color: var(--background);
   line-height: 1.3;
   text-align: center;
   transform-origin: top center;
