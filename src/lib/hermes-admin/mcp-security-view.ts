@@ -25,7 +25,7 @@
  * Copy is sentence case, no em/en-dashes, per June conventions.
  */
 
-import { isLocalSubprocess, redactedEnv, redactedHeaders, transportMeta } from "./mcp-servers-view";
+import { isLocalSubprocess, redactedEnv, redactedHeaders } from "./mcp-servers-view";
 import { isLocalSubprocessEntry } from "./mcp-catalog-view";
 import type { HermesMcpCatalogEntry, HermesMcpServerInfo } from "./schemas";
 

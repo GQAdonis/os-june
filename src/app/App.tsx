@@ -1226,7 +1226,8 @@ export function App() {
         if (cancelled) return;
         const next: Record<string, string[]> = {};
         for (const assignment of assignments) {
-          (next[assignment.sessionId] ??= []).push(assignment.folderId);
+          next[assignment.sessionId] ??= [];
+          next[assignment.sessionId].push(assignment.folderId);
         }
         setSessionFolders(next);
       })
@@ -3437,6 +3438,7 @@ function handleTitlebarPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
   event.preventDefault();
   void getCurrentWindow()
     .startDragging()
+    // biome-ignore lint/suspicious/noConsole: surfacing a drag failure is a deliberate diagnostic
     .catch((error: unknown) => console.warn("Failed to start window drag", error));
 }
 

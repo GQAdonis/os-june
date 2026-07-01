@@ -1,5 +1,4 @@
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
-import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconCircleCheck } from "central-icons/IconCircleCheck";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconCircleX } from "central-icons/IconCircleX";

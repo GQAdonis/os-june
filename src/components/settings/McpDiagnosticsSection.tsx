@@ -6,7 +6,7 @@ import { IconCircleX } from "central-icons/IconCircleX";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconServer1 } from "central-icons/IconServer1";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   authMeta,
   diagnosticBundleFilename,

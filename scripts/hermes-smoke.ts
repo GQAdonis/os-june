@@ -418,7 +418,8 @@ function makeRpcClient(socket: WebSocket): RpcClient {
 
   return {
     request(method, params = {}, timeoutMs = RPC_TIMEOUT_MS) {
-      const id = (nextId += 1);
+      nextId += 1;
+      const id = nextId;
       return new Promise<unknown>((resolveValue, reject) => {
         const timer = setTimeout(() => {
           if (pending.delete(id)) reject(new Error(`request timed out: ${method}`));

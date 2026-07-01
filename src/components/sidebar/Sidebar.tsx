@@ -82,7 +82,7 @@ import type {
 } from "../../lib/tauri";
 import { osAccountsReferralSummary } from "../../lib/tauri";
 import { JuneMark } from "../account/AccountGate";
-import { type SettingsTab } from "../settings/AppSettings";
+import type { SettingsTab } from "../settings/AppSettings";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
 import { DotSpinner } from "../DotSpinner";

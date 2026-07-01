@@ -15,7 +15,7 @@
  * as a tab.
  */
 
-import { asRecord, finiteNumber, pickNumber, pickString } from "./hermes-control-plane";
+import { asRecord, pickNumber, pickString } from "./hermes-control-plane";
 
 /** A single tool or subagent cost line, when the gateway breaks costs down. */
 export type SessionToolCost = {

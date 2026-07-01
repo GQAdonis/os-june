@@ -20,7 +20,7 @@
  * with no Tauri and no rendering. The hook is a thin binding over it.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   hermesBridgeStatus,
   hermesSkillTapAdd,

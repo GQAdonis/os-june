@@ -79,7 +79,6 @@ import { SegmentedControl } from "../ui/SegmentedControl";
 import { Spinner } from "../ui/Spinner";
 import {
   cancelAgentTask,
-  createAgentTask,
   dictationHelperCommand,
   explainAgentApproval,
   getAgentTask,
@@ -103,7 +102,6 @@ import {
   osAccountsUpgrade,
   providerModelSettings,
   retryAgentTask,
-  sendAgentMessage,
   setHermesAgentCliAccess,
   setVeniceModel,
   startHermesBridge,
@@ -3189,6 +3187,7 @@ export function AgentWorkspace({
           // A rejected steer (common during a no-tool phase) is not fatal — the
           // completion fallback still delivers it. Don't alarm the user.
           if (import.meta.env.DEV) {
+            // biome-ignore lint/suspicious/noConsole: dev-only steer-rejection diagnostic
             console.debug("[steer] rejected; will deliver as follow-up", err);
           }
         });
@@ -3829,6 +3828,7 @@ export function AgentWorkspace({
         // by the classifier; nothing raw is retained or logged.
         unsupportedEventStore.record(classified);
         if (import.meta.env.DEV) {
+          // biome-ignore lint/suspicious/noConsole: dev-only unsupported-event diagnostic
           console.debug(
             "[hermes] unsupported event",
             classified.rawType,
@@ -6347,6 +6347,7 @@ export function AgentWorkspace({
           // `sanitizePayload`; there is no real reporting surface yet — see the
           // feature 15 notes). Logged in dev until that surface lands.
           if (import.meta.env.DEV) {
+            // biome-ignore lint/suspicious/noConsole: dev-only trace-bundle diagnostic
             console.debug(
               "[hermes] report issue trace bundle",
               hermesTraceBuffer.exportSanitizedTrace(selectedHermesSessionId),
@@ -10658,9 +10659,9 @@ function renderInlineMarkdown(
   const pattern =
     /(\*\*([^*]+)\*\*|\*([^*]+)\*|~~([^~]+)~~|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))/g;
   let lastIndex = 0;
-  let match: RegExpExecArray | null;
   let index = 0;
-  while ((match = pattern.exec(text))) {
+  let match = pattern.exec(text);
+  while (match !== null) {
     if (match.index > lastIndex) {
       nodes.push(...markProse(text.slice(lastIndex, match.index), `g${index}`));
     }
@@ -10683,6 +10684,7 @@ function renderInlineMarkdown(
     }
     lastIndex = pattern.lastIndex;
     index += 1;
+    match = pattern.exec(text);
   }
   if (lastIndex < text.length) {
     nodes.push(...markProse(text.slice(lastIndex), "t"));

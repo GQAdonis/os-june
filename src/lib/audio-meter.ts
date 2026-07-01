@@ -105,7 +105,7 @@ export function withWaveLayers(
   }
   if (SPEECH_WAVE_AMP > 0) {
     const crest = Math.sin(2 * Math.PI * SPEECH_WAVE_SPEED * t - index * SPEECH_WAVE_SPREAD);
-    const drive = Math.pow(speech, SPEECH_WAVE_CURVE);
+    const drive = speech ** SPEECH_WAVE_CURVE;
     lvl = clamp(lvl + SPEECH_WAVE_AMP * drive * crest, 0, 1);
   }
   return lvl;
@@ -139,7 +139,7 @@ export function scaleLiveInputPeak(peak: number) {
   if (gated <= 0) {
     return 0;
   }
-  const shaped = 1 - Math.exp(-LIVE_INPUT_KNEE * Math.pow(gated, LIVE_INPUT_LOW_LIFT));
+  const shaped = 1 - Math.exp(-LIVE_INPUT_KNEE * gated ** LIVE_INPUT_LOW_LIFT);
   return clamp(shaped, 0, 1);
 }
 

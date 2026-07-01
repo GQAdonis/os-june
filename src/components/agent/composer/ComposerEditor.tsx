@@ -107,9 +107,9 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
     }, [onChange, onSubmit, onReady, skills]);
 
     useEffect(() => {
-      document
-        .querySelectorAll(".agent-category-menu-host")
-        .forEach((host) => host.dispatchEvent(new CustomEvent(CATEGORY_SKILLS_CHANGED_EVENT)));
+      document.querySelectorAll(".agent-category-menu-host").forEach((host) => {
+        host.dispatchEvent(new CustomEvent(CATEGORY_SKILLS_CHANGED_EVENT));
+      });
     }, [skills]);
 
     function updateScrollFades(nextEditor: Editor | null) {

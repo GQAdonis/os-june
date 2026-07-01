@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.4.16/schema.json",
   "files": {
-    "includes": ["src/**", "scripts/**", "*.json", "*.ts", "*.mjs", "!**/*.min.js", "!**/dist/**"],
+    "includes": ["src/**", "scripts/**", "*.json", "*.ts", "*.mjs", "!**/*.min.js", "!**/dist"],
     "ignoreUnknown": true
   },
   "formatter": {
@@ -9,18 +9,46 @@
     "indentWidth": 2,
     "lineWidth": 100
   },
+  "assist": {
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
   "linter": {
     "rules": {
       "recommended": true,
+      "a11y": {
+        "noAriaHiddenOnFocusable": "warn",
+        "noAutofocus": "warn",
+        "noLabelWithoutControl": "warn",
+        "noNoninteractiveElementToInteractiveRole": "warn",
+        "noNoninteractiveTabindex": "warn",
+        "noRedundantRoles": "warn",
+        "noStaticElementInteractions": "warn",
+        "noSvgWithoutTitle": "warn",
+        "useAriaPropsForRole": "warn",
+        "useAriaPropsSupportedByRole": "warn",
+        "useFocusableInteractive": "warn",
+        "useKeyWithClickEvents": "warn",
+        "useMediaCaption": "warn",
+        "useSemanticElements": "warn",
+        "useValidAnchor": "warn"
+      },
       "correctness": {
         "noUnusedImports": "error",
         "useExhaustiveDependencies": "warn"
       },
       "suspicious": {
         "noConsole": "warn",
-        "noExplicitAny": "warn"
+        "noExplicitAny": "warn",
+        "noArrayIndexKey": "warn",
+        "noConfusingVoidType": "warn"
       },
       "style": {
+        "noNonNullAssertion": "warn",
+        "noDescendingSpecificity": "warn",
         "noRestrictedImports": {
           "level": "error",
           "options": {
@@ -30,6 +58,9 @@
             }
           }
         }
+      },
+      "complexity": {
+        "noImportantStyles": "warn"
       }
     }
   },

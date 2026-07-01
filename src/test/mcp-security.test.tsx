@@ -11,7 +11,6 @@ import {
   enableConfirmationFor,
   exposurePolicyMeta,
   exposurePolicyOptions,
-  installConfirmationFor,
   isDestructiveToolName,
   isSecretBacked,
   normalizeExposurePolicy,
@@ -27,7 +26,6 @@ import {
 } from "../lib/hermes-admin";
 import { McpSecurityView } from "../components/settings/McpSecuritySection";
 import { McpServersView } from "../components/settings/McpServersSection";
-import { McpCatalogView } from "../components/settings/McpCatalogSection";
 import { makeAdminHarness } from "./fixtures/hermes-admin-harness";
 
 /** Builds a HermesMcpServerInfo from a wire-shaped object. */

@@ -134,7 +134,7 @@ function classifyProvider(provider: string, id: string, name: string): ProviderK
 
 function initials(source: string) {
   const cleaned = source
-    .replace(/[/_\-]+/g, " ")
+    .replace(/[/_-]+/g, " ")
     .replace(/[^A-Za-z0-9 ]/g, " ")
     .trim();
   if (!cleaned) return "";

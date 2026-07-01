@@ -321,7 +321,7 @@ function renderAudioLevel(rawLevel: number) {
   const nowMs = performance.now();
   const dt = lastHoldAt ? clamp(nowMs - lastHoldAt, 1, 250) : HOLD_REF_EVENT_MS;
   lastHoldAt = nowMs;
-  const decay = Math.pow(AUDIO_HOLD_DECAY, dt / HOLD_REF_EVENT_MS);
+  const decay = AUDIO_HOLD_DECAY ** (dt / HOLD_REF_EVENT_MS);
   audioPeakHold = Math.max(rawLevel, audioPeakHold * decay);
   const held = audioPeakHold;
   let shaped: number;
@@ -331,7 +331,7 @@ function renderAudioLevel(rawLevel: number) {
     // Continuous with the ambient branch: at gated → 0 the knee is 0, so
     // shaped starts at AMBIENT_MAX_LEVEL and rises toward 1.0 without clipping.
     const gated = (held - AUDIO_NOISE_GATE) / (1 - AUDIO_NOISE_GATE);
-    const knee = 1 - Math.exp(-AUDIO_KNEE * Math.pow(gated, AUDIO_LOW_LIFT));
+    const knee = 1 - Math.exp(-AUDIO_KNEE * gated ** AUDIO_LOW_LIFT);
     shaped = clamp(AMBIENT_MAX_LEVEL + (1 - AMBIENT_MAX_LEVEL) * knee, 0, 1);
   }
   if (held > AUDIO_NOISE_GATE && shaped > 0.0001 && HUD_WHISPER_FLOOR > 0) {

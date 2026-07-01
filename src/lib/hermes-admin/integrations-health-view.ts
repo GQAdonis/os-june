@@ -36,7 +36,7 @@ import { restartPendingFromLifecycle } from "./use-mcp-diagnostics";
 import type { GatewayLifecycleSnapshot } from "./gateway-lifecycle";
 import type { ExternalDirRow } from "./external-dirs-view";
 import type { SkillSetupBadge } from "./skill-setup-view";
-import type { HermesMcpServerInfo, HermesSkillInfo, HermesToolsetInfo } from "./schemas";
+import type { HermesMcpServerInfo, HermesToolsetInfo } from "./schemas";
 
 // ---------------------------------------------------------------------------
 // Settings tabs an issue can deep-link to. Kept as a string union local to this

@@ -18,7 +18,7 @@
  */
 
 import { timingForMutation, type AdminMutation } from "./application-timing";
-import { AdminStateCache, type AdminResource } from "./cache";
+import type { AdminStateCache, AdminResource } from "./cache";
 import type { HermesAdminClient } from "./client";
 import { HermesAdminError } from "./errors";
 import type { HermesActionStatus } from "./schemas";

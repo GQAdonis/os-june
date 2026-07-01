@@ -14,7 +14,7 @@ import { IconPageSearch } from "central-icons/IconPageSearch";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconSortArrowUpDown } from "central-icons/IconSortArrowUpDown";
 import { IconTrashCan } from "central-icons/IconTrashCan";
-import { type FolderDto, type HermesSessionInfo, type NoteListItemDto } from "../../lib/tauri";
+import type { FolderDto, HermesSessionInfo, NoteListItemDto } from "../../lib/tauri";
 import { sessionTimestamp } from "../../lib/hermes-adapter";
 import {
   type DragEvent,

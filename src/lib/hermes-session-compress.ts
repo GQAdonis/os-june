@@ -17,7 +17,7 @@
  * `hermes-control-plane/parse`), same "missing in, undefined out" contract.
  */
 
-import { asRecord, finiteNumber, pickNumber, pickString } from "./hermes-control-plane";
+import { asRecord, pickNumber, pickString } from "./hermes-control-plane";
 
 /** Normalized, UI-ready result for one `session.compress` call. All metrics
  * optional: a field is present only when the gateway reported a usable value. */

@@ -5,7 +5,7 @@ import { IconCircleCheck } from "central-icons/IconCircleCheck";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconCircleX } from "central-icons/IconCircleX";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   requiredSecretId,
   useMcpServersEngine,
@@ -15,7 +15,6 @@ import {
   type ImportReport,
   type ImportStepResult,
   type SetupSnapshotState,
-  type SnapshotDiff,
   type SnapshotRequiredSecret,
 } from "../../lib/hermes-admin";
 import { hermesBridgeStatus, type HermesBridgeStatus } from "../../lib/tauri";

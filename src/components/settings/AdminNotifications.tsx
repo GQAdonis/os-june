@@ -32,7 +32,9 @@ export function AdminNotifications({
     const timers = notifications
       .filter((note) => !note.isError)
       .map((note) => window.setTimeout(() => onDismiss(note.id), NOTIFICATION_TOAST_MS));
-    return () => timers.forEach((timer) => window.clearTimeout(timer));
+    return () => {
+      for (const timer of timers) window.clearTimeout(timer);
+    };
   }, [notifications, onDismiss]);
 
   if (notifications.length === 0) return null;

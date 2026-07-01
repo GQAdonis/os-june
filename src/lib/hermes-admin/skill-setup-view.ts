@@ -218,7 +218,7 @@ export function validateConfigValue(
   if (looksLikePathKey(requirement.key) && trimmed.length > 0) {
     // A path setting should not contain a newline or a null byte; otherwise we
     // accept it (Hermes validates existence on its side).
-    if (/[\n\r ]/.test(trimmed)) {
+    if (trimmed.includes("\n") || trimmed.includes("\r") || trimmed.includes("\0")) {
       return { ok: false, message: "A path cannot contain line breaks." };
     }
   }
