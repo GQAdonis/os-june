@@ -3837,8 +3837,7 @@ input:focus-visible,
   transition:
     opacity 120ms ease,
     transform 120ms ease,
-    background-color var(--t-fast) var(--ease-out),
-    border-color var(--t-fast) var(--ease-out);
+    background-color var(--t-fast) var(--ease-out);
 }
 
 .agent-scroll-to-latest[data-visible="true"] {
@@ -3848,10 +3847,8 @@ input:focus-visible,
 }
 
 .agent-scroll-to-latest:hover {
-  /* The theme's light accent as the backdrop, with the border warming toward
-   * the brand — themed without going solid. */
+  /* The theme's light accent as the backdrop; the border stays put. */
   background: var(--accent);
-  border-color: color-mix(in oklch, var(--brand) 25%, var(--border));
 }
 
 @media (prefers-reduced-motion: reduce) {
