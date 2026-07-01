@@ -106,6 +106,18 @@ user explicitly asks for that context or the reference is required for a
 concrete integration, compatibility note, migration, or legal attribution.
 Prefer describing the behavior, workflow, or category generically.
 
+Every PR description should state (the template in
+`.github/pull_request_template.md` has these sections):
+
+- whether the change was **tested visually** — for UI changes, attach a
+  screenshot or recording;
+- whether it **needs a June API (backend) deploy** to work end to end (a desktop
+  change that depends on an unshipped June API change will not work until June
+  API is deployed);
+- the **root cause**, for bug fixes (the actual cause, not just the symptom);
+- what is deliberately **out of scope**;
+- any **followups** it sets up or defers (link issues where possible).
+
 ## Skills
 
 Vendored agent skills live in **`.agents/skills/`** and are **symlinked into
