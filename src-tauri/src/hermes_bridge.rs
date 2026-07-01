@@ -45,13 +45,15 @@ const HERMES_TEXT_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const HERMES_SKILL_MAX_BYTES: usize = 512 * 1024;
 const JUNE_PROVIDER_PROXY_MAX_HEADER_BYTES: usize = 32 * 1024;
 // Must sit ABOVE june-api's aggregate request-string cap
-// (`MAX_AGENT_TOTAL_STRING_CHARS`, ~1M chars) plus JSON/tool-schema overhead, or
-// this proxy rejects an in-window upload before june-api's larger cap can allow
-// it (JUN-169 review). This is a 127.0.0.1 loopback proxy for a single-user
-// desktop, so the memory/DoS surface of the larger buffer is minimal. A body
-// over this cap is genuinely beyond any model window and degrades to the
-// context-overflow notice (see the recognizable wording in `read_http_request`).
-const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+// (`MAX_AGENT_TOTAL_STRING_CHARS`, 1.5M chars) counted in BYTES, or this proxy
+// rejects an in-window upload before june-api's larger cap can allow it (JUN-169
+// review). Chars vs bytes: 1.5M chars is up to ~3M bytes for 2-byte UTF-8, so
+// 3 MiB keeps the proxy from becoming the stricter gate. This is a 127.0.0.1
+// loopback proxy for a single-user desktop, so the memory/DoS surface of the
+// larger buffer is minimal. A body over this cap is genuinely beyond any model
+// window and degrades to the context-overflow notice (recognizable wording in
+// `read_http_request`).
+const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
 const JUNE_CONTEXT_MCP_SERVER_NAME: &str = "june_context";
 const JUNE_CONTEXT_MCP_DIR_NAME: &str = "hermes-mcp";
 const JUNE_CONTEXT_MCP_SCRIPT_NAME: &str = "june_context_mcp.py";
