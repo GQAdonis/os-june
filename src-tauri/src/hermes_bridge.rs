@@ -1347,7 +1347,10 @@ fn parse_pending_skill_write(id: &str, path: &Path) -> PendingSkillWrite {
         _ => PendingSkillWriteSource::Unknown,
     };
 
-    let gist = json_str(&value, &["gist", "summary", "title", "description", "message"]);
+    let gist = json_str(
+        &value,
+        &["gist", "summary", "title", "description", "message"],
+    );
     let staged_at = value
         .get("stagedAt")
         .or_else(|| value.get("staged_at"))
@@ -1429,8 +1432,16 @@ fn redact_pending_content(text: &str) -> String {
 fn redact_pending_line(line: &str) -> String {
     let lower = line.to_ascii_lowercase();
     let sensitive = [
-        "api_key", "apikey", "secret", "password", "passphrase", "token",
-        "private_key", "credential", "authorization", "bearer",
+        "api_key",
+        "apikey",
+        "secret",
+        "password",
+        "passphrase",
+        "token",
+        "private_key",
+        "credential",
+        "authorization",
+        "bearer",
     ]
     .iter()
     .any(|needle| lower.contains(needle));
@@ -1530,9 +1541,12 @@ fn apply_pending_skill_write(
 fn resolve_pending_target(root: &Path, relative: &str) -> Result<PathBuf, AppError> {
     let rel = Path::new(relative);
     if rel.is_absolute()
-        || rel
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
+        || rel.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
     {
         return Err(AppError::new(
             "hermes_pending_skill_path_invalid",
@@ -2852,7 +2866,9 @@ fn redact_cli_word(word: &str) -> String {
     if word.len() >= 32
         && !word.contains('/')
         && !word.contains('\\')
-        && word.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         && word.chars().any(|c| c.is_ascii_alphanumeric())
     {
         return "[redacted]".to_string();
@@ -3059,8 +3075,7 @@ pub async fn hermes_reset_bundled_skill(
     let name = request.name.clone();
     let profile = request.profile.clone();
     let restore = request.restore;
-    let mut cmd =
-        build_hermes_skill_reset_command(&connection, &name, restore, profile.as_deref());
+    let mut cmd = build_hermes_skill_reset_command(&connection, &name, restore, profile.as_deref());
 
     let join = tauri::async_runtime::spawn_blocking(move || {
         let child = cmd.spawn().map_err(|error| {
@@ -3783,7 +3798,10 @@ fn read_bundles_in_dir(bundles_dir: &Path) -> Result<Vec<HermesSkillBundle>, App
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(bundles),
         Err(error) => {
-            return Err(AppError::new("hermes_bundle_read_failed", error.to_string()));
+            return Err(AppError::new(
+                "hermes_bundle_read_failed",
+                error.to_string(),
+            ));
         }
     };
     for entry in entries.flatten() {
@@ -3925,7 +3943,10 @@ pub async fn hermes_delete_skill_bundle(
     match fs::remove_file(&file) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(AppError::new("hermes_bundle_delete_failed", error.to_string())),
+        Err(error) => Err(AppError::new(
+            "hermes_bundle_delete_failed",
+            error.to_string(),
+        )),
     }
 }
 
@@ -3982,7 +4003,10 @@ fn write_bundle_file(bundles_dir: &Path, path: &Path, content: &str) -> Result<(
     })();
     if let Err(error) = write_result {
         let _ = fs::remove_file(&temp_path);
-        return Err(AppError::new("hermes_bundle_write_failed", error.to_string()));
+        return Err(AppError::new(
+            "hermes_bundle_write_failed",
+            error.to_string(),
+        ));
     }
     Ok(())
 }
@@ -6654,8 +6678,7 @@ mod tests {
     #[test]
     fn mcp_login_command_passes_server_as_discrete_argument() {
         let connection = oauth_test_connection();
-        let cmd =
-            build_hermes_mcp_login_command(&connection, "linear", Some("work"));
+        let cmd = build_hermes_mcp_login_command(&connection, "linear", Some("work"));
         let program = cmd.get_program().to_string_lossy().to_string();
         let args: Vec<String> = cmd
             .get_args()
@@ -6690,8 +6713,7 @@ mod tests {
     #[test]
     fn skill_reset_command_passes_name_as_discrete_argument() {
         let connection = oauth_test_connection();
-        let cmd =
-            build_hermes_skill_reset_command(&connection, "pdf", false, Some("work"));
+        let cmd = build_hermes_skill_reset_command(&connection, "pdf", false, Some("work"));
         let program = cmd.get_program().to_string_lossy().to_string();
         let args: Vec<String> = cmd
             .get_args()
@@ -6726,8 +6748,7 @@ mod tests {
     #[test]
     fn skill_tap_list_command_passes_profile_as_discrete_argument() {
         let connection = oauth_test_connection();
-        let cmd =
-            build_hermes_skill_tap_command(&connection, "list", None, None, Some("work"));
+        let cmd = build_hermes_skill_tap_command(&connection, "list", None, None, Some("work"));
         let program = cmd.get_program().to_string_lossy().to_string();
         let args: Vec<String> = cmd
             .get_args()
@@ -6753,7 +6774,14 @@ mod tests {
             .collect();
         assert_eq!(
             args,
-            vec!["skills", "tap", "add", "acme/runbooks", "--path", "skills/ops"]
+            vec![
+                "skills",
+                "tap",
+                "add",
+                "acme/runbooks",
+                "--path",
+                "skills/ops"
+            ]
         );
     }
 
@@ -6827,17 +6855,15 @@ mod tests {
 
     #[test]
     fn redacts_tokens_and_bearer_from_cli_output() {
-        let message = redact_cli_message(
-            "Authorized. token=sk-super-secret-token-value access granted",
-        )
-        .unwrap();
+        let message =
+            redact_cli_message("Authorized. token=sk-super-secret-token-value access granted")
+                .unwrap();
         assert!(!message.contains("sk-super-secret-token-value"));
         assert!(message.contains("[redacted]"));
 
         // A long credential-shaped bare run is masked regardless of surrounding.
         let masked =
-            redact_cli_message("saved AKIAIOSFODNN7EXAMPLEKEY1234567890abcd done")
-                .unwrap();
+            redact_cli_message("saved AKIAIOSFODNN7EXAMPLEKEY1234567890abcd done").unwrap();
         assert!(!masked.contains("AKIAIOSFODNN7EXAMPLEKEY1234567890abcd"));
     }
 
@@ -7965,7 +7991,10 @@ mod tests {
         assert_eq!(parsed.skill, "research");
         assert_eq!(parsed.op, PendingSkillWriteOp::Edit);
         assert_eq!(parsed.source, PendingSkillWriteSource::Background);
-        assert_eq!(parsed.gist.as_deref(), Some("Tighten the research checklist"));
+        assert_eq!(
+            parsed.gist.as_deref(),
+            Some("Tighten the research checklist")
+        );
         assert_eq!(parsed.files.len(), 1);
         assert_eq!(parsed.files[0].relative_path, "research/SKILL.md");
         assert_eq!(parsed.files[0].content.as_deref(), Some("new body"));
@@ -7984,7 +8013,10 @@ mod tests {
         .expect("write manifest");
 
         let parsed = parse_pending_skill_write("future", &path);
-        assert!(!parsed.readable, "an unknown version must not be approvable");
+        assert!(
+            !parsed.readable,
+            "an unknown version must not be approvable"
+        );
     }
 
     #[test]
@@ -8232,7 +8264,10 @@ mod tests {
         // canonically so the macOS /var -> /private/var symlink does not trip it).
         let canon_root = bundles.canonicalize().expect("canon");
         assert_eq!(
-            ok.parent().expect("parent").canonicalize().expect("parent canon"),
+            ok.parent()
+                .expect("parent")
+                .canonicalize()
+                .expect("parent canon"),
             canon_root
         );
         assert_eq!(
@@ -8252,7 +8287,10 @@ mod tests {
         let named = resolve_bundles_dir(dir.path(), Some("team")).expect("named");
         assert_eq!(
             named,
-            dir.path().join("profiles").join("team").join("skill-bundles")
+            dir.path()
+                .join("profiles")
+                .join("team")
+                .join("skill-bundles")
         );
     }
 
