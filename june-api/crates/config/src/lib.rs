@@ -836,6 +836,40 @@ mod tests {
     }
 
     #[test]
+    fn packaged_config_toml_keeps_kimi_vision_in_sync() {
+        // config.toml overrides default_pricing() via Figment and ships in the
+        // Docker image, so it is what `/models` serves when the live Venice
+        // catalog is unreachable. It must agree that Kimi is a vision model, or
+        // the image-attach fallback breaks in the packaged build (JUN-165).
+        use figment::{
+            Figment,
+            providers::{Format, Serialized, Toml},
+        };
+        let toml_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.toml");
+        let config = Figment::new()
+            .merge(Serialized::defaults(AppConfig::default()))
+            .merge(Toml::file(toml_path))
+            .extract::<AppConfig>()
+            .unwrap_or_default();
+        // A TOML-only model proves config.toml actually merged, so a failed
+        // load can't make the vision assertion below pass on the default alone.
+        assert!(
+            config
+                .pricing
+                .contains_key("nvidia-nemotron-3-nano-30b-a3b"),
+            "packaged config.toml did not merge"
+        );
+        let kimi_declares_vision = config
+            .pricing
+            .get("kimi-k2-6")
+            .is_some_and(|model| model.capabilities.iter().any(|c| c == "supportsVision"));
+        assert!(
+            kimi_declares_vision,
+            "packaged config.toml must declare supportsVision for kimi-k2-6"
+        );
+    }
+
+    #[test]
     fn config_debug_redacts_secrets() {
         let mut config = AppConfig::default();
         config.os_accounts.app_api_key = "app_api_key_secret_value".to_string();
