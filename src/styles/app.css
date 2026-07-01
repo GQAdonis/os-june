@@ -3846,8 +3846,7 @@ input:focus-visible,
   transition:
     opacity 120ms ease,
     transform 120ms ease,
-    background-color var(--t-fast) var(--ease-out),
-    border-color var(--t-fast) var(--ease-out);
+    background-color var(--t-fast) var(--ease-out);
 }
 
 .agent-scroll-to-latest[data-visible="true"] {
@@ -3859,10 +3858,8 @@ input:focus-visible,
 .agent-scroll-to-latest:hover {
   /* A whisper of the active accent, not the near-neutral --accent (only a 3%
    * brand mix, which reads as a grey flicker here): a real but very light
-   * brand wash over the pill's own surface, with an even fainter warming of
-   * the hairline so the chrome follows the fill. */
+   * brand wash over the pill's own surface. The border stays put. */
   background: color-mix(in oklch, var(--brand) 8%, var(--popover));
-  border-color: color-mix(in oklch, var(--brand) 12%, var(--border-subtle));
 }
 
 @media (prefers-reduced-motion: reduce) {
