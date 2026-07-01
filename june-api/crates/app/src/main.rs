@@ -11,9 +11,9 @@ use june_providers::{
     VeniceModelCatalog, client_with_timeout, default_client, jwks_client,
 };
 use june_services::{
-    AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps,
-    NoteGenerateService, NoteGenerateServiceDeps, NoteTranscribeService, NoteTranscribeServiceDeps,
-    PricingTable, WebAugmentService, WebAugmentServiceDeps,
+    AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps, ImageService,
+    ImageServiceDeps, NoteGenerateService, NoteGenerateServiceDeps, NoteTranscribeService,
+    NoteTranscribeServiceDeps, PricingTable, WebAugmentService, WebAugmentServiceDeps,
 };
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc, time::Duration};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -162,6 +162,12 @@ fn build_router(
         fetch_credits: config.os_accounts.web_fetch_credits,
         hold_ttl_seconds: config.os_accounts.authorize_hold_ttl_web_secs,
     }));
+    let image = Arc::new(ImageService::new(ImageServiceDeps {
+        os_accounts: os_accounts.clone(),
+        generator: build_image_generator(upstream_http, &config.upstreams.venice),
+        pricing: config.image_pricing.clone(),
+        hold_ttl_seconds: config.os_accounts.authorize_hold_ttl_image_secs,
+    }));
     let dictate = Arc::new(DictateService::new(DictateServiceDeps {
         pricing: pricing.clone(),
         os_accounts,
@@ -183,7 +189,7 @@ fn build_router(
         agent_chat,
         dictate,
         web,
-        image_generator: build_image_generator(upstream_http, &config.upstreams.venice),
+        image,
         issue_reports,
         limits: ApiLimits {
             max_audio_bytes: config.server.max_audio_bytes,

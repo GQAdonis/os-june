@@ -4,6 +4,7 @@ mod agent_chat;
 mod charge_flow;
 mod dictate;
 mod error;
+mod image;
 mod note_generate;
 mod note_transcribe;
 mod pricing;
@@ -17,6 +18,7 @@ pub use dictate::{
     DictateTranscribeOutput, DictateTranscribeParams,
 };
 pub use error::ServiceError;
+pub use image::{ImageGenerateOutput, ImageGenerateParams, ImageService, ImageServiceDeps};
 pub use note_generate::{
     NOTE_GENERATE_PROMPT_VERSION, NoteGenerateOutput, NoteGenerateParams, NoteGenerateService,
     NoteGenerateServiceDeps,

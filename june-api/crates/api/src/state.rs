@@ -1,7 +1,7 @@
-use june_domain::{ImageGenerator, IssueReportSink, TokenVerifier};
+use june_domain::{IssueReportSink, TokenVerifier};
 use june_services::{
-    AgentChatService, DictateService, NoteGenerateService, NoteTranscribeService, PricingTable,
-    WebAugmentService,
+    AgentChatService, DictateService, ImageService, NoteGenerateService, NoteTranscribeService,
+    PricingTable, WebAugmentService,
 };
 use std::sync::Arc;
 
@@ -18,10 +18,10 @@ struct ApiStateInner {
     agent_chat: Arc<AgentChatService>,
     dictate: Arc<DictateService>,
     web: Arc<WebAugmentService>,
-    // Image generation is held as the bare provider (not a service): billing is
-    // deferred, so there is no metering layer wrapping it — same shape as
-    // `issue_reports`.
-    image_generator: Arc<dyn ImageGenerator>,
+    // Image generation is metered (authorize -> generate -> charge), so it is
+    // held as a service like the other billed surfaces rather than the bare
+    // provider.
+    image: Arc<ImageService>,
     issue_reports: Arc<dyn IssueReportSink>,
     limits: ApiLimits,
     attestation: AttestationInfo,
@@ -53,7 +53,7 @@ pub struct ApiStateParams {
     pub agent_chat: Arc<AgentChatService>,
     pub dictate: Arc<DictateService>,
     pub web: Arc<WebAugmentService>,
-    pub image_generator: Arc<dyn ImageGenerator>,
+    pub image: Arc<ImageService>,
     pub issue_reports: Arc<dyn IssueReportSink>,
     pub limits: ApiLimits,
     pub attestation: AttestationInfo,
@@ -70,7 +70,7 @@ impl ApiState {
                 agent_chat: params.agent_chat,
                 dictate: params.dictate,
                 web: params.web,
-                image_generator: params.image_generator,
+                image: params.image,
                 issue_reports: params.issue_reports,
                 limits: params.limits,
                 attestation: params.attestation,
@@ -106,8 +106,8 @@ impl ApiState {
         &self.inner.web
     }
 
-    pub(crate) fn image_generator(&self) -> &dyn ImageGenerator {
-        self.inner.image_generator.as_ref()
+    pub(crate) fn image(&self) -> &ImageService {
+        &self.inner.image
     }
 
     pub(crate) fn issue_reports(&self) -> &dyn IssueReportSink {

@@ -15,8 +15,8 @@ use june_domain::{
     WebFetcher, WebSearchRequest, WebSearchResult, WebSearchResults, WebSearcher,
 };
 use june_services::{
-    AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps,
-    NOTE_GENERATE_PROMPT_VERSION, NoteGenerateService, NoteGenerateServiceDeps,
+    AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps, ImageService,
+    ImageServiceDeps, NOTE_GENERATE_PROMPT_VERSION, NoteGenerateService, NoteGenerateServiceDeps,
     NoteTranscribeService, NoteTranscribeServiceDeps, PricingTable, WebAugmentService,
     WebAugmentServiceDeps,
 };
@@ -488,6 +488,24 @@ async fn integration_image_generate_maps_upstream_failure_to_502() -> Result<(),
 }
 
 #[tokio::test]
+async fn integration_image_generate_rejects_unpriced_model() -> Result<(), Box<dyn Error>> {
+    // A model with no configured image price is rejected at the metering
+    // boundary (before Venice is called) rather than generating for free.
+    let response = send(json_request(
+        "/v1/image/generate",
+        &serde_json::json!({ "prompt": "a red bicycle", "model": "unpriced-image-model" }),
+        Some(AUTHORIZATION),
+    )?)
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["success"], false);
+    assert_eq!(body["message"], "model_not_priced");
+    Ok(())
+}
+
+#[tokio::test]
 async fn integration_verify_page_is_public_html() -> Result<(), Box<dyn Error>> {
     let response = send(get_request("/verify")?).await;
 
@@ -581,7 +599,12 @@ fn test_state_with_sinks(
     let cleaner = Arc::new(FakeCleaner);
     let duration_probe = Arc::new(FakeDurationProbe);
     let chat_completer = Arc::new(FakeChatCompleter);
-    let image_generator = Arc::new(FakeImageGenerator);
+    let image = Arc::new(ImageService::new(ImageServiceDeps {
+        os_accounts: os_accounts.clone(),
+        generator: Arc::new(FakeImageGenerator),
+        pricing: BTreeMap::from([("venice-sd35".to_string(), 20_u64)]),
+        hold_ttl_seconds: 30,
+    }));
 
     ApiState::new(ApiStateParams {
         pricing: pricing.clone(),
@@ -627,7 +650,7 @@ fn test_state_with_sinks(
             fetch_credits: 20,
             hold_ttl_seconds: 30,
         })),
-        image_generator,
+        image,
         issue_reports,
         limits: ApiLimits {
             max_audio_bytes: 1024 * 1024,

@@ -2,7 +2,8 @@ use crate::{
     auth::authenticated_user, envelope::ApiResponse, error::ApiError, state::ApiState, validation,
 };
 use axum::{Json, extract::State, http::HeaderMap};
-use june_domain::{DomainError, GeneratedImage, ImageGenerationRequest, ModelId};
+use june_domain::GeneratedImage;
+use june_services::ImageGenerateParams;
 use serde::{Deserialize, Serialize};
 
 /// Largest and smallest image dimension Venice accepts (pixel-based models).
@@ -18,6 +19,11 @@ pub struct ImageGenerateRequest {
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    /// Optional client idempotency id reused across retries so a dropped-response
+    /// retry is not double-charged. Empty means the server sequences each call as
+    /// a distinct charge.
+    #[serde(default)]
+    pub request_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,17 +46,16 @@ impl From<GeneratedImage> for ImageGenerateResponse {
     }
 }
 
-/// Generates an image from a text prompt via Venice. Authenticated like every
-/// other endpoint, but NOT metered: subscription metering is an explicit
-/// follow-up, so there is no authorize/charge flow here yet.
+/// Generates an image from a text prompt via Venice. Metered: the service holds
+/// a wallet estimate, generates, then charges the model's flat per-image price
+/// (see `ImageService`). An unpriced model is rejected `model_not_priced`; an
+/// out-of-credits user gets 402 before Venice is called.
 pub(crate) async fn generate(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Json(request): Json<ImageGenerateRequest>,
 ) -> Result<Json<ApiResponse<ImageGenerateResponse>>, ApiError> {
-    // Enforce auth (a valid OS Accounts token) even though we don't meter yet —
-    // the endpoint must never be open to anonymous callers.
-    authenticated_user(&state, &headers).await?;
+    let user_id = authenticated_user(&state, &headers).await?;
 
     let prompt = request.prompt.trim().to_string();
     if prompt.is_empty() {
@@ -67,18 +72,19 @@ pub(crate) async fn generate(
     let width = validate_dimension("width", request.width)?;
     let height = validate_dimension("height", request.height)?;
 
-    let generated = state
-        .image_generator()
-        .generate(ImageGenerationRequest {
+    let output = state
+        .image()
+        .generate(ImageGenerateParams {
+            user_id,
+            request_id: request.request_id,
             prompt,
-            model: ModelId(model),
+            model,
             width,
             height,
         })
-        .await
-        .map_err(map_image_error)?;
+        .await?;
 
-    Ok(Json(ApiResponse::ok(generated.into())))
+    Ok(Json(ApiResponse::ok(output.image.into())))
 }
 
 fn validate_dimension(field: &str, value: Option<u32>) -> Result<Option<u32>, ApiError> {
@@ -87,18 +93,5 @@ fn validate_dimension(field: &str, value: Option<u32>) -> Result<Option<u32>, Ap
             Err(ApiError::bad_request(format!("{field}_out_of_range")))
         }
         other => Ok(other),
-    }
-}
-
-/// Direct `DomainError -> ApiError` mapping (image generation never goes
-/// through `ServiceError`). Exhaustive so a new `DomainError` variant forces a
-/// deliberate mapping instead of silently collapsing into an upstream failure.
-fn map_image_error(error: DomainError) -> ApiError {
-    match error {
-        DomainError::InvalidInput { reason } => ApiError::bad_request(reason),
-        DomainError::MeteringProvider => ApiError::Metering,
-        DomainError::UpstreamProvider
-        | DomainError::ModelNotPriced
-        | DomainError::InsufficientCredits => ApiError::Upstream,
     }
 }
