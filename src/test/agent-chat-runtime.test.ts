@@ -1438,6 +1438,27 @@ describe("Agent chat runtime", () => {
     ]);
   });
 
+  it("keeps a persisted answer that explains the error tokens as prose", () => {
+    // June discussing its own error codes in a saved answer must not reload as
+    // an overflow notice: the sentinel is anchored to the start of the message,
+    // so a mid-sentence mention of prompt_too_long/string_too_long stays text
+    // (JUN-169 review).
+    const prose =
+      "The agent API can return prompt_too_long or string_too_long when a request is too big.";
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "1",
+        role: "assistant",
+        content: prose,
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toEqual([
+      { type: "text", text: prose, status: "complete" },
+    ]);
+  });
+
   it("keeps a successful message.complete that mentions context length as prose", () => {
     const prose = "The maximum context length for GLM 5.2 is 200k tokens.";
     const turns = buildHermesSessionChatTurns(

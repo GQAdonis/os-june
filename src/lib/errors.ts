@@ -69,7 +69,14 @@ export function isContextOverflowMessage(message?: string) {
  * further." */
 export function isContextOverflowErrorSentinel(message?: string) {
   if (!message) return false;
-  return /cannot compress further|context_length_exceeded|prompt_too_long|string_too_long|request_too_large/i.test(
+  // Anchored to the START of the message (like the credits path keys on an
+  // "Error:" prefix): a real rejection LEADS with its error code or shape,
+  // while prose that merely explains what `prompt_too_long` means embeds the
+  // token mid-sentence. Anchoring keeps a saved answer that discusses these
+  // codes from reloading as an overflow notice and dropping the real answer
+  // (JUN-169 review). Hermes' terminal wording leads with "Context length
+  // exceeded (…)", the proxy rewrite leads with the token, so both still match.
+  return /^\s*(cannot compress further|context_length_exceeded|context length exceeded|prompt_too_long|string_too_long|request_too_large)\b/i.test(
     message,
   );
 }
