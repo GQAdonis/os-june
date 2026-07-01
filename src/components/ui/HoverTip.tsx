@@ -126,8 +126,9 @@ export function HoverTip({
       centerX: rect.left + rect.width / 2,
       top: side === "bottom" ? rect.bottom + TIP_GAP : rect.top - TIP_GAP,
     });
-    // A re-entry mid-fade reuses the mounted node; re-assert the open phase so
-    // the closing state is cleared even when the measure effect is skipped.
+    // A re-entry mid-fade reuses the mounted node: re-assert the open phase so
+    // the render before the measure effect lands shows "open", not a stale
+    // mid-fade "closing" frame.
     setPhase("open");
   }
 

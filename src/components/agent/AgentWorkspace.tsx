@@ -8676,8 +8676,10 @@ export function AgentScrollToLatestButton({
     scroller.addEventListener("scroll", recheck, { passive: true });
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(recheck) : undefined;
     observer?.observe(scroller);
-    const content = scroller.firstElementChild;
-    if (content) observer?.observe(content);
+    // The scroller box itself never resizes when content grows (fixed height,
+    // overflow scroll), so watch its children — all of them, not a presumed
+    // single content column — since their growth is what moves scrollHeight.
+    for (const child of Array.from(scroller.children)) observer?.observe(child);
     return () => {
       scroller.removeEventListener("scroll", recheck);
       observer?.disconnect();
