@@ -1459,6 +1459,26 @@ describe("Agent chat runtime", () => {
     ]);
   });
 
+  it("folds a persisted prefixed overflow error into a context-overflow notice", () => {
+    // Hermes persists a provider failure with the runtime "Error:" prefix (the
+    // same shape as the credits path); a prefixed prompt_too_long must still
+    // fold on reload, not fall back to the raw dead-end (JUN-169 review).
+    const persisted =
+      "Error: Error code: 400 - {'message': 'prompt_too_long: the request exceeds the maximum context length'}";
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "1",
+        role: "assistant",
+        content: persisted,
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toEqual([
+      { type: "notice", kind: "context-overflow", text: persisted },
+    ]);
+  });
+
   it("keeps a successful message.complete that mentions context length as prose", () => {
     const prose = "The maximum context length for GLM 5.2 is 200k tokens.";
     const turns = buildHermesSessionChatTurns(
