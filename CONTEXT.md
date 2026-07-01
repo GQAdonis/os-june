@@ -180,6 +180,20 @@ structured markdown note, currently via a Venice chat-completion call. Always
 follows a successful note transcription; not used in dictation.
 _Avoid_: notes generation, AI summarisation.
 
+**Image generation**:
+Producing a new image from a text **prompt** (text-to-image), via Venice. The
+user reaches it two ways: an explicit `/image` command (a fast, no-model shot),
+or the assistant calling it as a tool mid-conversation. Distinct from **image
+editing**. See [ADR 0003](docs/adr/0003-image-generation-and-editing-tools.md).
+_Avoid_: rendering, drawing (say **image generation**).
+
+**Image editing**:
+Producing a new image by transforming an *existing* image plus an instruction
+(image-to-image / inpaint), via Venice's separate edit models. Always references
+a prior image (a generated one, by filename); never starts from a blank canvas.
+Distinct from **image generation**.
+_Avoid_: img2img (jargon), regenerate (that's a fresh **image generation**).
+
 **Credit price** (per upstream model):
 The number of OS Accounts credits June charges per unit of consumed work
 (audio seconds for transcription, tokens for generation) for a given upstream

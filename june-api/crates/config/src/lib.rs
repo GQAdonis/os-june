@@ -26,6 +26,14 @@ pub struct AppConfig {
     #[serde(default)]
     pub issue_reports: IssueReportsConfig,
     pub pricing: BTreeMap<String, ModelPriceConfig>,
+    /// Flat credits charged per generated image, keyed by image model id. Kept
+    /// separate from `pricing` (the text/ASR catalog) so image models never leak
+    /// into the served model pickers. A model absent here is rejected at the
+    /// `/image/generate` boundary (`model_not_priced`), so the settings picker
+    /// must only offer models listed here. `$1 = 1000 credits`; values are the
+    /// Venice per-image cost with margin (e.g. SD3.5 costs ~$0.01, charged 20).
+    #[serde(default = "default_image_pricing")]
+    pub image_pricing: BTreeMap<String, u64>,
 }
 
 impl Debug for AppConfig {
@@ -39,6 +47,7 @@ impl Debug for AppConfig {
             .field("attestation", &self.attestation)
             .field("issue_reports", &self.issue_reports)
             .field("pricing", &self.pricing)
+            .field("image_pricing", &self.image_pricing)
             .finish()
     }
 }
@@ -226,6 +235,8 @@ pub struct OsAccountsConfig {
     pub web_fetch_credits: u64,
     /// Hold TTL for the metered web search and web fetch actions.
     pub authorize_hold_ttl_web_secs: u64,
+    /// Hold TTL for the metered image generation action.
+    pub authorize_hold_ttl_image_secs: u64,
 }
 
 impl Debug for OsAccountsConfig {
@@ -267,6 +278,10 @@ impl Debug for OsAccountsConfig {
             .field(
                 "authorize_hold_ttl_web_secs",
                 &self.authorize_hold_ttl_web_secs,
+            )
+            .field(
+                "authorize_hold_ttl_image_secs",
+                &self.authorize_hold_ttl_image_secs,
             )
             .finish()
     }
@@ -496,6 +511,23 @@ fn default_pricing() -> BTreeMap<String, ModelPriceConfig> {
     pricing
 }
 
+/// Per-image credit price for the curated Venice image models June offers. Keep
+/// the ids in sync with `IMAGE_MODELS` in the frontend (`src/lib/image-models.ts`)
+/// and `DEFAULT_IMAGE_MODEL` in the Tauri providers module — every id here must
+/// be a current Venice image model (verified against the models list), or
+/// generation fails `image_generation_rejected`. Values are the Venice per-image
+/// cost with a ~2x margin (mirroring the flat web-tool pricing): SD3.5 ~$0.01 ->
+/// 20, Chroma ~$0.01 -> 20, Qwen Image ~$0.03 -> 60, FLUX 2 Pro ~$0.03 -> 60.
+/// `$1 = 1000 credits`.
+fn default_image_pricing() -> BTreeMap<String, u64> {
+    BTreeMap::from([
+        ("venice-sd35".to_string(), 20),
+        ("flux-2-pro".to_string(), 60),
+        ("qwen-image".to_string(), 60),
+        ("chroma".to_string(), 20),
+    ])
+}
+
 fn text_model_config(model: TextModelFallback) -> ModelPriceConfig {
     ModelPriceConfig {
         unit: PriceUnit::Tokens,
@@ -545,6 +577,7 @@ impl Default for AppConfig {
                 web_search_credits: 20,
                 web_fetch_credits: 20,
                 authorize_hold_ttl_web_secs: 30,
+                authorize_hold_ttl_image_secs: 60,
             },
             upstreams: UpstreamsConfig {
                 openai: UpstreamConfig {
@@ -566,6 +599,7 @@ impl Default for AppConfig {
             },
             issue_reports: IssueReportsConfig::default(),
             pricing: default_pricing(),
+            image_pricing: default_image_pricing(),
         }
     }
 }
@@ -704,6 +738,21 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
                     "output_credits_per_million_tokens",
                 )?;
             }
+        }
+    }
+    validate_image_pricing(config)?;
+    Ok(())
+}
+
+/// A zero per-image price would silently generate for free — reject it like the
+/// per-model rate validation so a misconfigured price fails fast.
+fn validate_image_pricing(config: &AppConfig) -> Result<(), ConfigError> {
+    for (model_id, credits) in &config.image_pricing {
+        if *credits == 0 {
+            return Err(ConfigError::InvalidPricing {
+                model: model_id.clone(),
+                reason: "credits_per_image must be > 0".to_string(),
+            });
         }
     }
     Ok(())
@@ -957,6 +1006,28 @@ mod tests {
         let result = validate(&config);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_rejects_zero_image_price() {
+        // A zero per-image price would silently generate for free; reject it.
+        let mut config = valid_config();
+        config.image_pricing.insert("free-image".to_string(), 0);
+
+        let result = validate(&config);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_config_prices_the_curated_image_models() {
+        let config = valid_config();
+        for model in ["venice-sd35", "flux-2-pro", "qwen-image", "chroma"] {
+            assert!(
+                config.image_pricing.get(model).is_some_and(|c| *c > 0),
+                "missing image price for {model}"
+            );
+        }
     }
 
     #[test]

@@ -88,6 +88,7 @@ import {
   modelOptions,
   selectedModel,
 } from "./ModelPickerDialog";
+import { DEFAULT_IMAGE_MODEL, IMAGE_MODELS } from "../../lib/image-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { ExternalDirsSection } from "./ExternalDirsSection";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
@@ -205,6 +206,8 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   // Mirrors DEFAULT_GENERATION_MODEL in the Rust providers module and the
   // leading Suggested pick in lib/suggested-models.ts.
   generationModel: "zai-org-glm-5-2",
+  // Mirrors DEFAULT_IMAGE_MODEL in the Rust providers module.
+  imageModel: DEFAULT_IMAGE_MODEL,
 };
 
 const MIC_TEST_DURATION_SECONDS = 5;
@@ -319,6 +322,9 @@ export function AppSettings({
   >({
     transcription: [],
     generation: [],
+    // Image options come from a curated local list, not the fetched catalog;
+    // this stays empty and `imageOptions` supplies the picker.
+    image: [],
   });
   const [microphones, setMicrophones] = useState<
     DictationMicrophoneDeviceDto[]
@@ -470,7 +476,12 @@ export function AppSettings({
         setSettings(response.settings);
         const modelResponse = await providerModelSettings();
         if (cancelled) return;
-        setProviderSettings(modelResponse.settings);
+        // Merge over defaults so a settings payload that predates a field
+        // (e.g. imageModel from an older backend) still has every model set.
+        setProviderSettings({
+          ...DEFAULT_PROVIDER_MODELS,
+          ...modelResponse.settings,
+        });
         await requestMicrophones();
         await Promise.all([
           requestVeniceModels("transcription"),
@@ -795,7 +806,9 @@ export function AppSettings({
       setStatus(
         mode === "transcription"
           ? "Transcription model updated."
-          : "Text model updated.",
+          : mode === "image"
+            ? "Image model updated."
+            : "Text model updated.",
       );
     } catch (error) {
       setStatus(messageFromError(error));
@@ -847,6 +860,7 @@ export function AppSettings({
     veniceModels.generation,
     providerSettings.generationModel,
   );
+  const imageOptions = modelOptions(IMAGE_MODELS, providerSettings.imageModel);
   const pickerOptions = pickerMode ? modelOptionsForMode(pickerMode) : [];
   const pickerValue = pickerMode ? modelValueForMode(pickerMode) : "";
 
@@ -887,19 +901,22 @@ export function AppSettings({
   }
 
   function modelOptionsForMode(mode: ProviderModelMode) {
-    return mode === "transcription" ? transcriptionOptions : generationOptions;
+    if (mode === "transcription") return transcriptionOptions;
+    if (mode === "image") return imageOptions;
+    return generationOptions;
   }
 
   function modelValueForMode(mode: ProviderModelMode) {
-    return mode === "transcription"
-      ? providerSettings.transcriptionModel
-      : providerSettings.generationModel;
+    if (mode === "transcription") return providerSettings.transcriptionModel;
+    if (mode === "image") return providerSettings.imageModel;
+    return providerSettings.generationModel;
   }
 
   function openModelPicker(mode: ProviderModelMode) {
     setPickerMode(mode);
     setModelSearch("");
-    void requestVeniceModels(mode);
+    // Image models are a curated local list, not a fetched catalog.
+    if (mode !== "image") void requestVeniceModels(mode);
   }
 
   function microphonePopoverStyle(): CSSProperties {
@@ -1357,6 +1374,32 @@ export function AppSettings({
                     value={providerSettings.generationModel}
                     options={generationOptions}
                     onOpen={() => openModelPicker("generation")}
+                  />
+                </div>
+              </div>
+            </section>
+
+            <section
+              className="settings-group"
+              aria-labelledby="image-generation-heading"
+            >
+              <h2
+                id="image-generation-heading"
+                className="settings-group-heading"
+              >
+                Image generation
+              </h2>
+              <p className="settings-group-description">
+                Choose the model June uses when you ask it to generate an image.
+              </p>
+              <div className="settings-card">
+                <div className="settings-rows">
+                  <ModelRow
+                    title="Image"
+                    description="Used when you generate an image from chat."
+                    value={providerSettings.imageModel}
+                    options={imageOptions}
+                    onOpen={() => openModelPicker("image")}
                   />
                 </div>
               </div>

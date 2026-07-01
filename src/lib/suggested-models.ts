@@ -64,6 +64,10 @@ export const SUGGESTED_MODELS: Record<ProviderModelMode, SuggestedModel[]> = {
         "Best multilingual accuracy at the same low price, with zero data retention.",
     },
   ],
+  // Image models are a curated local list (see lib/image-models.ts), not a
+  // priced catalog the picker fetches, so there is no "Suggested" subset to
+  // surface — the picker shows the full curated list.
+  image: [],
 };
 
 /**

@@ -171,12 +171,20 @@ export type DictationHelperEvent = {
   };
 };
 
-export type ProviderModelMode = "transcription" | "generation";
+export type ProviderModelMode = "transcription" | "generation" | "image";
 
 export type ProviderModelSettingsDto = {
   transcriptionProvider: string;
   transcriptionModel: string;
   generationModel: string;
+  imageModel: string;
+};
+
+export type GeneratedImageDto = {
+  imageBase64: string;
+  mimeType: string;
+  model: string;
+  provider: string;
 };
 
 export type ProviderModelSettingsResponse = {
@@ -1588,6 +1596,14 @@ export async function listVeniceModels(mode: ProviderModelMode) {
 export async function setVeniceModel(mode: ProviderModelMode, modelId: string) {
   return invoke<ProviderModelSettingsDto>("set_venice_model", {
     request: { mode, modelId },
+  });
+}
+
+// Generates an image from a prompt via the June API. `model` is optional; the
+// backend falls back to the saved default image model when it is omitted.
+export async function generateImage(prompt: string, model?: string) {
+  return invoke<GeneratedImageDto>("generate_image", {
+    request: { prompt, model },
   });
 }
 

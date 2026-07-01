@@ -200,6 +200,7 @@ describe("AppSettings", () => {
         transcriptionProvider: "venice",
         transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
         generationModel: "zai-org-glm-5-2",
+        imageModel: "venice-sd35",
       },
     });
     mocks.listVeniceModels.mockImplementation(async (mode) => ({
@@ -340,6 +341,7 @@ describe("AppSettings", () => {
       transcriptionModel:
         mode === "transcription" ? modelId : "nvidia/parakeet-tdt-0.6b-v3",
       generationModel: mode === "generation" ? modelId : "zai-org-glm-5-2",
+      imageModel: mode === "image" ? modelId : "venice-sd35",
     }));
     mocks.dictationHelperCommand.mockResolvedValue(undefined);
     mocks.openPrivacySettings.mockResolvedValue(undefined);
@@ -1787,6 +1789,52 @@ describe("AppSettings", () => {
     expect(mocks.setVeniceModel).toHaveBeenCalledWith(
       "generation",
       "zai-org-glm-5-1",
+    );
+  });
+
+  it("shows the image generation section and saves the default image model", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(await screen.findByRole("tab", { name: "Models" }));
+
+    // The section renders and the saved default is shown.
+    expect(
+      screen.getByRole("heading", { name: "Image generation" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Venice SD3.5")).toBeInTheDocument();
+
+    // The picker opens with the curated image options (no backend fetch).
+    await user.click(
+      screen.getByRole("button", { name: "Change image model" }),
+    );
+    expect(
+      await screen.findByRole("option", { name: /Venice SD3\.5/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: /FLUX 2 Pro/ }),
+    ).toBeInTheDocument();
+    // Image models are not fetched from the catalog.
+    expect(mocks.listVeniceModels).not.toHaveBeenCalledWith("image");
+
+    await user.click(screen.getByRole("option", { name: /FLUX 2 Pro/ }));
+    expect(mocks.setVeniceModel).toHaveBeenCalledWith("image", "flux-2-pro");
+    // The picker closes after a selection.
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("option", { name: /FLUX 2 Pro/ }),
+      ).not.toBeInTheDocument(),
     );
   });
 
