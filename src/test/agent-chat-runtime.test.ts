@@ -1364,6 +1364,28 @@ describe("Agent chat runtime", () => {
     ]);
   });
 
+  it("folds a live string_too_long rejection into a context-overflow notice", () => {
+    // A single oversized string (per-string cap) is a hard size failure too;
+    // the classifier catches the raw token so it degrades like the aggregate
+    // overflow instead of surfacing raw (JUN-169 review).
+    const text = "string_too_long: a single field exceeded the size limit.";
+    const turns = buildAgentChatTurns(
+      [],
+      [],
+      [
+        {
+          type: "error",
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          payload: { message: text },
+        },
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([
+      { type: "notice", kind: "context-overflow", text },
+    ]);
+  });
+
   it("folds a failed context-overflow message.complete into a context-overflow notice", () => {
     const turns = buildHermesSessionChatTurns(
       [],

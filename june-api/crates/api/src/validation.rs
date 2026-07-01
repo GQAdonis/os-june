@@ -18,15 +18,18 @@ pub(crate) const MAX_ISSUE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 // Abuse ceilings for an agent request body, NOT the model's context window.
 // The model enforces its own window; these only stop a runaway/malicious
 // request from reaching it. They must sit ABOVE real model capacity so a
-// legitimate large input isn't rejected here before the model ever sees it.
-// Text models in the catalog top out at 256k tokens (~1M chars at ~4
-// chars/token), so the aggregate cap tracks that; the per-string cap allows a
-// single large tool-result/file-read within a 200k-token model. JUN-169: the
-// old 240k aggregate (~60-68k tokens) rejected a single ~67k-token upload that
-// GLM 5.2's 200k window holds easily, and the proxy rebranded that rejection as
-// a "maximum context length" overflow, dead-ending the session on turn one.
+// legitimate large input isn't rejected here before the model ever sees it, and
+// they must stay CONSISTENT with the Tauri provider proxy's body cap
+// (`JUNE_PROVIDER_PROXY_MAX_BODY_BYTES`) — otherwise the stricter gate wins and
+// an in-window upload fails anyway (JUN-169 review). Text models in the catalog
+// top out at 256k tokens (~1M chars at ~4 chars/token), so the aggregate tracks
+// that; per-string equals the aggregate because a single pasted document or
+// file-read may legitimately fill the whole allowance. JUN-169: the old 240k
+// aggregate (~60-68k tokens) rejected a single ~67k-token upload that GLM 5.2's
+// 200k window holds easily, and the proxy rebranded that rejection as a "maximum
+// context length" overflow, dead-ending the session on turn one.
 // Tune with cost/abuse in mind — a larger cap allows larger (costlier) requests.
-pub(crate) const MAX_AGENT_STRING_CHARS: usize = 400_000;
+pub(crate) const MAX_AGENT_STRING_CHARS: usize = 1_000_000;
 pub(crate) const MAX_AGENT_TOTAL_STRING_CHARS: usize = 1_000_000;
 pub(crate) const MAX_AGENT_JSON_DEPTH: usize = 16;
 pub(crate) const MAX_AGENT_OUTPUT_TOKENS: u64 = 32_768;

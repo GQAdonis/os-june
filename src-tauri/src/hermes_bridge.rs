@@ -44,7 +44,14 @@ const HERMES_IMAGE_PREVIEW_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const HERMES_TEXT_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const HERMES_SKILL_MAX_BYTES: usize = 512 * 1024;
 const JUNE_PROVIDER_PROXY_MAX_HEADER_BYTES: usize = 32 * 1024;
-const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 512 * 1024;
+// Must sit ABOVE june-api's aggregate request-string cap
+// (`MAX_AGENT_TOTAL_STRING_CHARS`, ~1M chars) plus JSON/tool-schema overhead, or
+// this proxy rejects an in-window upload before june-api's larger cap can allow
+// it (JUN-169 review). This is a 127.0.0.1 loopback proxy for a single-user
+// desktop, so the memory/DoS surface of the larger buffer is minimal. A body
+// over this cap is genuinely beyond any model window and degrades to the
+// context-overflow notice (see the recognizable wording in `read_http_request`).
+const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
 const JUNE_CONTEXT_MCP_SERVER_NAME: &str = "june_context";
 const JUNE_CONTEXT_MCP_DIR_NAME: &str = "hermes-mcp";
 const JUNE_CONTEXT_MCP_SCRIPT_NAME: &str = "june_context_mcp.py";
@@ -6373,9 +6380,16 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
         })
         .unwrap_or(0);
     if content_length > JUNE_PROVIDER_PROXY_MAX_BODY_BYTES {
+        // The handler turns this into a 400 for the client. Phrase it as a
+        // context overflow (JUN-169): the wording carries the tokens Hermes'
+        // overflow patterns match ("maximum context length") and the frontend
+        // classifier keys on (`prompt_too_long`), so an over-cap body degrades
+        // into the recoverable context-overflow notice instead of a raw
+        // transport error that re-wedges or dead-ends the session.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "HTTP body is too large",
+            "prompt_too_long: the request body exceeds the model's maximum \
+             context length. Reduce the length of the messages and retry.",
         ));
     }
     let mut body = buffer[header_end..].to_vec();
@@ -6423,7 +6437,11 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
 fn translate_context_overflow_error(body: &[u8]) -> Option<serde_json::Value> {
     let mut value: serde_json::Value = serde_json::from_slice(body).ok()?;
     let message = value.get("message")?.as_str()?;
-    if !message.contains("prompt_too_long") {
+    // Both of june-api's size rejections are hard "too big" limits the agent
+    // must not retry as-is: `prompt_too_long` (aggregate string cap) and
+    // `string_too_long` (a single oversized string). Normalize both to the
+    // recognized-overflow wording so neither re-wedges the session (JUN-169).
+    if !message.contains("prompt_too_long") && !message.contains("string_too_long") {
         return None;
     }
     value["message"] = serde_json::Value::String(
@@ -6943,10 +6961,25 @@ mod tests {
     }
 
     #[test]
+    fn string_too_long_rejection_translates_to_a_recognized_overflow() {
+        // A single oversized string is a hard size limit too (JUN-169 review):
+        // left bare, `string_too_long` is unrecognized by the agent and wedges
+        // the session, so it must normalize to the same overflow wording.
+        let body =
+            br#"{"data":null,"success":false,"error_code":2001,"message":"string_too_long"}"#;
+
+        let rewritten = translate_context_overflow_error(body).expect("translated");
+
+        let message = rewritten["message"].as_str().expect("message");
+        assert!(message.contains("maximum context"));
+        assert!(message.contains("context length"));
+        assert!(message.starts_with("prompt_too_long"));
+        assert_eq!(rewritten["error_code"], 2001);
+    }
+
+    #[test]
     fn unrelated_error_bodies_pass_through_untranslated() {
         for body in [
-            br#"{"data":null,"success":false,"error_code":2001,"message":"string_too_long"}"#
-                .as_slice(),
             br#"{"error":{"message":"rate limited"}}"#.as_slice(),
             b"not json at all".as_slice(),
             br#"{"message":42}"#.as_slice(),

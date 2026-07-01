@@ -54,7 +54,7 @@ export function isInsufficientCreditsMessage(message?: string) {
  * failure flag, use {@link isContextOverflowErrorSentinel} instead. */
 export function isContextOverflowMessage(message?: string) {
   if (!message) return false;
-  return /cannot compress further|context length exceeded|context_length_exceeded|maximum context length|prompt_too_long|request_too_large/i.test(
+  return /cannot compress further|context length exceeded|context_length_exceeded|maximum context length|prompt_too_long|string_too_long|request_too_large/i.test(
     message,
   );
 }
@@ -69,7 +69,7 @@ export function isContextOverflowMessage(message?: string) {
  * further." */
 export function isContextOverflowErrorSentinel(message?: string) {
   if (!message) return false;
-  return /cannot compress further|context_length_exceeded|prompt_too_long|request_too_large/i.test(
+  return /cannot compress further|context_length_exceeded|prompt_too_long|string_too_long|request_too_large/i.test(
     message,
   );
 }
