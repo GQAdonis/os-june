@@ -280,6 +280,7 @@ const AGENT_WORKSPACE_MAX_SESSION_RETRY_DELAY_MS =
 const QUEUED_STEER_RETRY_DELAY_MS = 300;
 const RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS = 1000;
 const RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS = 3000;
+const COMPOSER_TOKEN_ESTIMATE_CHARS_PER_TOKEN = 4;
 
 // What the user reads instead of the gateway's "session busy" rejection. No
 // action in the pill — the composer's send slot already shows stop while
@@ -759,6 +760,15 @@ type PreparedComposerSubmission = {
   runtimeContent: string;
   titleContent: string;
   typedMessage: string;
+};
+
+type ComposerInputSizeWarning = {
+  inputSignature: string;
+  signature: string;
+  estimatedTokens: number;
+  contextLimit: number;
+  modelName: string;
+  switchModel?: VeniceModelDto;
 };
 
 type ComposerDraftSnapshot = {
@@ -1282,6 +1292,11 @@ export function AgentWorkspace({
   // Confirmation that a submitted issue report reached the June team; shown
   // in the composer notice slot until dismissed by the next send.
   const [issueReportNotice, setIssueReportNotice] = useState<AgentWorkspaceNotice | null>(null);
+  const [composerSizeWarning, setComposerSizeWarning] = useState<ComposerInputSizeWarning | null>(
+    null,
+  );
+  const composerSizeProceedSignatureRef = useRef<string | null>(null);
+  const composerSizeProceedInputSignatureRef = useRef<string | null>(null);
   // Honest result of the last model switch (feature 10): scoped to the session
   // it acted on so it survives background refreshes and disappears when the
   // user moves to another conversation. A null sessionId means it reports a
@@ -1936,6 +1951,18 @@ export function AgentWorkspace({
     composerHasPendingImage &&
     !!resolvedGenerationModel &&
     !modelSupportsImageInput(resolvedGenerationModel);
+  const composerInputSignature = useMemo(
+    () =>
+      composerInputSignatureFor({
+        message: draft.trim(),
+        category,
+        attachments,
+        model: generationModel,
+      }),
+    [attachments, category, draft, generationModel],
+  );
+  const visibleComposerSizeWarning =
+    composerSizeWarning?.inputSignature === composerInputSignature ? composerSizeWarning : null;
   const selectedHermesMessages = useMemo(() => {
     if (!selectedHermesSessionId) return [];
     return [
@@ -2884,6 +2911,19 @@ export function AgentWorkspace({
   }, [attachments]);
 
   useEffect(() => {
+    if (composerSizeWarning && composerSizeWarning.inputSignature !== composerInputSignature) {
+      setComposerSizeWarning(null);
+    }
+    if (
+      composerSizeProceedSignatureRef.current &&
+      composerSizeProceedInputSignatureRef.current !== composerInputSignature
+    ) {
+      composerSizeProceedSignatureRef.current = null;
+      composerSizeProceedInputSignatureRef.current = null;
+    }
+  }, [composerInputSignature, composerSizeWarning]);
+
+  useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     const installListener = async (eventName: string) => {
@@ -3237,6 +3277,21 @@ export function AgentWorkspace({
       selectedHermesSessionId &&
       workingSessionIdsRef.current.has(selectedHermesSessionId)
     ) {
+      const steerSizeWarning = oversizedComposerInputWarning({
+        content: message,
+        inputSignature: composerInputSignature,
+        attachments: [],
+        model: generationModel,
+        models: generationModels,
+      });
+      if (
+        steerSizeWarning &&
+        composerSizeProceedSignatureRef.current !== steerSizeWarning.signature
+      ) {
+        setComposerSizeWarning(steerSizeWarning);
+        composerEditorRef.current?.focus();
+        return;
+      }
       const steerSessionId = selectedHermesSessionId;
       // Delivery guarantee. Hermes only injects a steer into the next tool
       // result and rejects the RPC during a no-tool phase, so the steer alone
@@ -3299,6 +3354,21 @@ export function AgentWorkspace({
       | undefined;
     try {
       const prepared = await prepareComposerSubmission(message, attachments);
+      const runtimeContent = reportCategory
+        ? categoryPrompt(reportCategory, prepared.runtimeContent)
+        : prepared.runtimeContent;
+      const sizeWarning = oversizedComposerInputWarning({
+        content: runtimeContent,
+        inputSignature: composerInputSignature,
+        attachments,
+        model: generationModel,
+        models: generationModels,
+      });
+      if (sizeWarning && composerSizeProceedSignatureRef.current !== sizeWarning.signature) {
+        setComposerSizeWarning(sizeWarning);
+        composerEditorRef.current?.focus();
+        return;
+      }
       const nextIssueReport: PendingIssueReport | undefined = reportCategory
         ? {
             category: reportCategory,
@@ -3341,18 +3411,12 @@ export function AgentWorkspace({
         };
       }
       setIssueReportNotice(null);
-      await submitHermesSession(
-        reportCategory
-          ? categoryPrompt(reportCategory, prepared.runtimeContent)
-          : prepared.runtimeContent,
-        undefined,
-        {
-          displayContent: prepared.displayContent,
-          titleContent: prepared.titleContent,
-          attachments,
-          ...(nextIssueReport ? { issueReport: nextIssueReport } : {}),
-        },
-      );
+      await submitHermesSession(runtimeContent, undefined, {
+        displayContent: prepared.displayContent,
+        titleContent: prepared.titleContent,
+        attachments,
+        ...(nextIssueReport ? { issueReport: nextIssueReport } : {}),
+      });
       if (reportFollowUpSessionId) {
         deferredFailedIssueReportDeliverySessionIdsRef.current.delete(reportFollowUpSessionId);
       }
@@ -3417,6 +3481,30 @@ export function AgentWorkspace({
       // is dropped and can land on the always-on-top agent HUD.
       window.requestAnimationFrame(() => composerEditorRef.current?.focus());
     }
+  }
+
+  function proceedWithOversizeComposerInput() {
+    if (!visibleComposerSizeWarning) return;
+    composerSizeProceedSignatureRef.current = visibleComposerSizeWarning.signature;
+    composerSizeProceedInputSignatureRef.current = visibleComposerSizeWarning.inputSignature;
+    setComposerSizeWarning(null);
+    void submit();
+  }
+
+  function editOversizeComposerInput() {
+    setComposerSizeWarning(null);
+    composerSizeProceedSignatureRef.current = null;
+    composerSizeProceedInputSignatureRef.current = null;
+    composerEditorRef.current?.focus();
+  }
+
+  function switchOversizeComposerModel() {
+    const switchModel = visibleComposerSizeWarning?.switchModel;
+    if (!switchModel) return;
+    setComposerSizeWarning(null);
+    composerSizeProceedSignatureRef.current = null;
+    composerSizeProceedInputSignatureRef.current = null;
+    void handleSelectGenerationModel(switchModel.id);
   }
 
   function handleComposerDragOver(event: DragEvent<HTMLFormElement>) {
@@ -6127,6 +6215,47 @@ export function AgentWorkspace({
                   Switch to {preferredVisionModel.name}
                 </button>
               ) : null}
+            </div>
+          ) : null}
+          {visibleComposerSizeWarning ? (
+            <div className="agent-composer-size-warning" role="status">
+              <IconExclamationTriangle
+                size={14}
+                aria-hidden
+                className="agent-composer-size-warning-icon"
+              />
+              <span className="agent-composer-size-warning-text">
+                This message is about{" "}
+                {formatComposerTokenCount(visibleComposerSizeWarning.estimatedTokens)} tokens, over{" "}
+                {visibleComposerSizeWarning.modelName}'s{" "}
+                {formatComposerTokenCount(visibleComposerSizeWarning.contextLimit)} token context
+                window.
+              </span>
+              <span className="agent-composer-size-warning-actions">
+                <button
+                  type="button"
+                  className="agent-composer-notice-button"
+                  onClick={proceedWithOversizeComposerInput}
+                >
+                  Proceed
+                </button>
+                <button
+                  type="button"
+                  className="agent-composer-notice-button"
+                  onClick={editOversizeComposerInput}
+                >
+                  Edit message
+                </button>
+                {visibleComposerSizeWarning.switchModel ? (
+                  <button
+                    type="button"
+                    className="agent-composer-notice-button"
+                    onClick={switchOversizeComposerModel}
+                  >
+                    Switch to {visibleComposerSizeWarning.switchModel.name}
+                  </button>
+                ) : null}
+              </span>
             </div>
           ) : null}
           <ComposerEditor
@@ -10839,6 +10968,139 @@ function artifactsFromFilesystemSnapshot(
   return (snapshot?.roots ?? []).flatMap((root) =>
     filesystemEntriesToArtifacts(root.entries, root.label),
   );
+}
+
+function composerInputSignatureFor({
+  message,
+  category,
+  attachments,
+  model,
+}: {
+  message: string;
+  category: ReportCategory | null;
+  attachments: AgentAttachment[];
+  model?: VeniceModelDto;
+}) {
+  const attachmentSignature = composerAttachmentSignature(attachments);
+  return [
+    model?.id ?? "",
+    positiveContextTokens(model?.contextTokens) ?? "",
+    category ?? "",
+    composerInputHash(`${message}\n${attachmentSignature}`),
+  ].join(":");
+}
+
+function oversizedComposerInputWarning({
+  content,
+  inputSignature,
+  attachments,
+  model,
+  models,
+}: {
+  content: string;
+  inputSignature: string;
+  attachments: AgentAttachment[];
+  model?: VeniceModelDto;
+  models: VeniceModelDto[];
+}): ComposerInputSizeWarning | null {
+  const contextLimit = positiveContextTokens(model?.contextTokens);
+  if (!contextLimit) return null;
+
+  // The composer only has attachment metadata here. Treat file bytes as a
+  // conservative character proxy so large pending files still get a warning.
+  const attachmentCharacterProxy = attachments.reduce(
+    (total, attachment) => total + nonNegativeAttachmentSize(attachment.size),
+    0,
+  );
+  const estimatedTokens = Math.ceil(
+    (content.length + attachmentCharacterProxy) / COMPOSER_TOKEN_ESTIMATE_CHARS_PER_TOKEN,
+  );
+  if (estimatedTokens <= contextLimit) return null;
+
+  const signature = [
+    inputSignature,
+    model?.id ?? "",
+    contextLimit,
+    estimatedTokens,
+    composerInputHash(content),
+  ].join(":");
+
+  return {
+    inputSignature,
+    signature,
+    estimatedTokens,
+    contextLimit,
+    modelName: model?.name?.trim() || "the selected model",
+    switchModel: largerContextModel({
+      currentModel: model,
+      estimatedTokens,
+      currentContextLimit: contextLimit,
+      models,
+    }),
+  };
+}
+
+function composerAttachmentSignature(attachments: AgentAttachment[]) {
+  return attachments
+    .map((attachment) =>
+      [
+        attachment.id,
+        attachment.path,
+        attachment.name,
+        attachment.size ?? "",
+        attachment.attach.status,
+      ].join("|"),
+    )
+    .join("\n");
+}
+
+function positiveContextTokens(value?: number) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+function nonNegativeAttachmentSize(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.ceil(value) : 0;
+}
+
+function largerContextModel({
+  currentModel,
+  estimatedTokens,
+  currentContextLimit,
+  models,
+}: {
+  currentModel?: VeniceModelDto;
+  estimatedTokens: number;
+  currentContextLimit: number;
+  models: VeniceModelDto[];
+}) {
+  const candidates = models
+    .filter((model) => model.id !== currentModel?.id)
+    .filter((model) => modelSupportsTools(model))
+    .map((model) => ({ model, contextTokens: positiveContextTokens(model.contextTokens) }))
+    .filter(
+      (item): item is { model: VeniceModelDto; contextTokens: number } =>
+        item.contextTokens !== undefined && item.contextTokens > currentContextLimit,
+    );
+  const sufficient = candidates
+    .filter((item) => item.contextTokens >= estimatedTokens)
+    .sort((a, b) => a.contextTokens - b.contextTokens);
+  if (sufficient.length) return sufficient[0].model;
+  return candidates.sort((a, b) => b.contextTokens - a.contextTokens)[0]?.model;
+}
+
+function composerInputHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function formatComposerTokenCount(value: number) {
+  return value.toLocaleString();
 }
 
 function promptWithAttachments(message: string, attachments: AgentAttachment[]): string {
