@@ -3822,12 +3822,12 @@ input:focus-visible,
   inline-size: var(--sp-10);
   block-size: var(--sp-10);
   padding: 0;
-  /* Borderless, themed like the send button's family: the shadow does the
-   * lifting and the brand-colored arrow ties it to the active accent. */
-  border: none;
+  /* Same register as the composer box right below it: its hairline border and
+   * soft shadow, with the brand-colored arrow tying it to the active accent. */
+  border: 1px solid var(--border-subtle);
   border-radius: var(--r-pill);
   background: var(--popover);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-sm);
   color: var(--brand);
   line-height: 1;
   cursor: pointer;
@@ -3836,7 +3836,9 @@ input:focus-visible,
   transform: translate(-50%, var(--sp-2));
   transition:
     opacity 120ms ease,
-    transform 120ms ease;
+    transform 120ms ease,
+    background-color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
 }
 
 .agent-scroll-to-latest[data-visible="true"] {
@@ -3846,9 +3848,10 @@ input:focus-visible,
 }
 
 .agent-scroll-to-latest:hover {
-  /* Mirrors .agent-composer-send: solid brand with a white glyph. */
-  background: var(--brand);
-  color: oklch(100% 0 none);
+  /* The theme's light accent as the backdrop, with the border warming toward
+   * the brand — themed without going solid. */
+  background: var(--accent);
+  border-color: color-mix(in oklch, var(--brand) 25%, var(--border));
 }
 
 @media (prefers-reduced-motion: reduce) {
