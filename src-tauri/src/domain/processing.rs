@@ -875,6 +875,14 @@ async fn transcribe_prepared_audio(
     let mut language = None;
     let mut provider_name = request.provider.clone();
     for (index, audio_path) in audio_paths.into_iter().enumerate() {
+        // Skip clearly-silent chunks before any API call. Fixed-size splitting of
+        // a long (or fully silent) source leaves quiet boundary chunks, and each
+        // request authorizes a credit hold that a no-speech response never
+        // settles — so sending every silent chunk of a silent source would strand
+        // holds until TTL and can trip `authorization_denied` on later work.
+        if crate::audio::turns::source_is_effectively_silent(&audio_path) {
+            continue;
+        }
         let context = merge_transcription_context(
             request.base_context.as_deref(),
             build_transcription_context(&previous).as_deref(),
@@ -894,10 +902,9 @@ async fn transcribe_prepared_audio(
         .await
         {
             Ok(transcript) => transcript,
-            // A no-speech chunk is a silent segment, not a turn failure: fixed-size
-            // splitting routinely leaves a quiet trailing chunk. Skip it so the
-            // speech already transcribed from this turn's earlier chunks survives.
-            // Aborting here would discard that text and silently drop the turn.
+            // Backstop for a chunk the local silence check judged audible but the
+            // provider still reports as no-speech: skip it so earlier chunks' text
+            // survives, rather than aborting and dropping the whole turn.
             Err(error) if is_no_speech_error(&error) => continue,
             Err(error) => return Err(error),
         };
@@ -2276,7 +2283,15 @@ mod tests {
         writer.finalize().unwrap();
     }
 
-    fn write_mono_wav(path: &std::path::Path, sample_rate: u32, sample_count: usize) {
+    /// Loud tone, above the silence floor, so every chunk survives the local
+    /// silence prefilter and reaches the (mock) transcriber.
+    fn write_loud_wav(path: &std::path::Path, sample_rate: u32, sample_count: usize) {
+        write_segmented_wav(path, sample_rate, &[(sample_count, 20_000)]);
+    }
+
+    /// Writes consecutive `(frame_count, amplitude)` segments. Amplitude `0`
+    /// yields a silent span; a large amplitude yields an audible tone.
+    fn write_segmented_wav(path: &std::path::Path, sample_rate: u32, segments: &[(usize, i16)]) {
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate,
@@ -2284,10 +2299,15 @@ mod tests {
             sample_format: hound::SampleFormat::Int,
         };
         let mut writer = hound::WavWriter::create(path, spec).unwrap();
-        for index in 0..sample_count {
-            // Content is irrelevant: the mock transcriber keys on the chunk
-            // operation id, not the audio. A non-zero ramp keeps it a signal.
-            writer.write_sample((index % 100) as i16 - 50).unwrap();
+        for (count, amplitude) in segments {
+            for index in 0..*count {
+                let sample = if index % 2 == 0 {
+                    *amplitude
+                } else {
+                    -*amplitude
+                };
+                writer.write_sample(sample).unwrap();
+            }
         }
         writer.finalize().unwrap();
     }
@@ -2314,7 +2334,7 @@ mod tests {
             std::env::temp_dir().join(format!("os-june-chunk-nospeech-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let audio_path = dir.join("turn.wav");
-        write_mono_wav(&audio_path, 16_000, 16_000 * 31);
+        write_loud_wav(&audio_path, 16_000, 16_000 * 31);
 
         let transcriber = Arc::new(move |request: TranscriptionRequest| {
             Box::pin(async move {
@@ -2361,7 +2381,7 @@ mod tests {
             std::env::temp_dir().join(format!("os-june-chunk-allsilent-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let audio_path = dir.join("turn.wav");
-        write_mono_wav(&audio_path, 16_000, 16_000 * 31);
+        write_loud_wav(&audio_path, 16_000, 16_000 * 31);
 
         let transcriber = Arc::new(move |_request: TranscriptionRequest| {
             Box::pin(async move { Err(AppError::new("no_speech", "no_speech")) })
@@ -2393,6 +2413,66 @@ mod tests {
             error.code,
             error.message
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn silent_chunks_are_skipped_before_reaching_the_transcriber() {
+        // 62s: loud 0-30s, silent 30-60s, loud 60-62s -> chunks 0 and 2 audible,
+        // chunk 1 silent. The silent chunk must never reach the API (no credit
+        // hold), while both audible chunks are transcribed.
+        let dir =
+            std::env::temp_dir().join(format!("os-june-chunk-silentskip-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let audio_path = dir.join("turn.wav");
+        write_segmented_wav(
+            &audio_path,
+            16_000,
+            &[
+                (16_000 * 30, 20_000),
+                (16_000 * 30, 0),
+                (16_000 * 2, 20_000),
+            ],
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let transcriber = {
+            let calls = Arc::clone(&calls);
+            Arc::new(move |_request: TranscriptionRequest| {
+                let calls = Arc::clone(&calls);
+                Box::pin(async move {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(TranscriptionProviderResult {
+                        text: format!("chunk text {n}"),
+                        language: None,
+                        provider: "test".to_string(),
+                    })
+                }) as TranscriptionFuture
+            }) as TurnTranscriber
+        };
+
+        let result = transcribe_prepared_audio(
+            transcriber,
+            TranscribePreparedAudioRequest {
+                provider: "test".to_string(),
+                audio_path,
+                temp_dir: dir.clone(),
+                chunk_stem: "turn-0".to_string(),
+                title: "Meeting".to_string(),
+                base_context: None,
+                operation_id: "turn-0".to_string(),
+                source: "microphone".to_string(),
+                start_ms: Some(0),
+                end_ms: Some(62_000),
+                turn_index: Some(0),
+            },
+        )
+        .await
+        .expect("audible chunks should transcribe");
+
+        // Only the two audible chunks reach the API; the silent middle is skipped.
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(result.text, "chunk text 0\nchunk text 1");
         let _ = std::fs::remove_dir_all(dir);
     }
 
