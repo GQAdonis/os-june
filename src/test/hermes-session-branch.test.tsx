@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -208,11 +208,10 @@ describe("BranchFromHereAction", () => {
     );
     const button = screen.getByRole("button", { name: /branch from here/i });
     expect(button).toBeDisabled();
-    // The title/explanation makes the gating honest rather than silent.
-    expect(button).toHaveAttribute(
-      "title",
-      expect.stringMatching(/available once the message is saved/i),
-    );
+    // The gating stays honest rather than silent: the HoverTip anchor around
+    // the inert disabled button explains why on hover/focus.
+    fireEvent.focus(button.parentElement as HTMLElement);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/available once the message is saved/i);
   });
 
   it("shows a spinning/disabled state while a branch is in flight", () => {

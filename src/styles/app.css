@@ -14087,25 +14087,40 @@ input:focus-visible,
   text-align: left;
   white-space: normal;
   pointer-events: none;
+}
+
+/* First frame: rendered hidden so its content width can be measured before the
+ * clamped position is set. No animation runs in this state. */
+.hover-tip[data-state="measuring"] {
+  visibility: hidden;
+}
+
+.hover-tip[data-state="open"] {
   animation: hover-tip-in 120ms var(--ease-out);
+}
+
+/* Exit fade — flipped to on hide, then the node unmounts after the fade. */
+.hover-tip[data-state="closing"] {
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
 }
 
 .hover-tip[data-side="top"] {
   transform: translateY(-100%);
 }
 
-/* Compact one-line tip (e.g. a shortcut hint or icon label): a tight inverted
- * chip — dark on the light theme, light on the dark theme — so a label reads
- * as annotation, distinct from the surface-colored explainer cards above. It
- * springs out like a small popover rather than just fading. */
+/* Compact one-line tip (e.g. a shortcut hint or icon label): a tight chip on
+ * the popover surface, so a label reads as annotation next to the wider
+ * explainer cards above. It springs out like a small popover rather than just
+ * fading. */
 .hover-tip-compact {
   padding: var(--sp-1) var(--sp-2);
-  border: none;
-  background: var(--foreground);
-  color: var(--background);
   line-height: 1.3;
   text-align: center;
   transform-origin: top center;
+}
+
+.hover-tip-compact[data-state="open"] {
   animation: hover-tip-pop var(--t-med) var(--ease-spring);
 }
 
@@ -14130,6 +14145,17 @@ input:focus-visible,
   }
   to {
     opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hover-tip[data-state="open"],
+  .hover-tip-compact[data-state="open"] {
+    animation: none;
+  }
+
+  .hover-tip[data-state="closing"] {
+    transition: none;
   }
 }
 
