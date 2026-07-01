@@ -219,7 +219,7 @@ export function validateConfigValue(
     // A path setting should not contain a newline or a null byte; otherwise we
     // accept it (Hermes validates existence on its side).
     if (trimmed.includes("\n") || trimmed.includes("\r") || trimmed.includes("\0")) {
-      return { ok: false, message: "A path cannot contain line breaks." };
+      return { ok: false, message: "A path cannot contain line breaks or null bytes." };
     }
   }
   return { ok: true };
