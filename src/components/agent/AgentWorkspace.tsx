@@ -321,13 +321,13 @@ function isSessionGoneError(message: string): boolean {
 }
 
 // A Hermes REST 5xx (`Hermes API returned 5xx: …`) is a transient server-side
-// fault, so session-load handlers show this friendly line instead of the raw
+// fault, so session-load handlers show this June-branded line instead of the raw
 // wire string — which read as a doubled "500 Internal Server Error: Internal
-// Server Error" before the bridge deduped it (JUN-167). Mirrors the admin
-// path's copy; the banner's own "Try again" button provides the retry, so the
-// message stays a plain description. `visibleErrorRetryable` keys off this
+// Server Error" before the bridge deduped it (JUN-167). The banner's own
+// "Try again" button provides the retry, so the message stays a plain
+// description. `visibleErrorRetryable` keys off this
 // constant to offer that retry.
-const HERMES_SERVER_ERROR_MESSAGE = "Hermes ran into a problem with that request.";
+const HERMES_SERVER_ERROR_MESSAGE = "June ran into a problem with that request.";
 
 // Picks the banner text for a caught session-command error: a transient Hermes
 // 5xx becomes the friendly retryable line; anything else passes through raw.

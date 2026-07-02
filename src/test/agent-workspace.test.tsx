@@ -6825,7 +6825,7 @@ describe("AgentWorkspace", () => {
 
     // The banner shows the friendly line, never the raw wire error.
     expect(
-      await screen.findByText("Hermes ran into a problem with that request."),
+      await screen.findByText("June ran into a problem with that request."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Hermes API returned 500/)).toBeNull();
     // A 5xx is a transient server fault, so the banner offers a retry (unlike a
@@ -6834,7 +6834,7 @@ describe("AgentWorkspace", () => {
     expect(screen.getByRole("button", { name: "Send bug report" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
-    expect(screen.queryByText("Hermes ran into a problem with that request.")).toBeNull();
+    expect(screen.queryByText("June ran into a problem with that request.")).toBeNull();
   });
 
   it("sends the raw Hermes 5xx as a bug report from the error banner (JUN-167)", async () => {
@@ -6847,7 +6847,7 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
     expect(
-      await screen.findByText("Hermes ran into a problem with that request."),
+      await screen.findByText("June ran into a problem with that request."),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Send bug report" }));
@@ -6874,7 +6874,7 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
     expect(
-      await screen.findByText("Hermes ran into a problem with that request."),
+      await screen.findByText("June ran into a problem with that request."),
     ).toBeInTheDocument();
 
     const callsBeforeRetry = mocks.listHermesSessionMessages.mock.calls.length;
@@ -6888,7 +6888,7 @@ describe("AgentWorkspace", () => {
     // The 500 persists, so the friendly banner returns rather than leaving a
     // silently-empty transcript; the raw wire string never appears.
     expect(
-      await screen.findByText("Hermes ran into a problem with that request."),
+      await screen.findByText("June ran into a problem with that request."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/Hermes API returned 500/)).toBeNull();
   });
