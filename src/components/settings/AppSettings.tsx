@@ -1,4 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
+import {
+  disable as disableAutostart,
+  enable as enableAutostart,
+  isEnabled as isAutostartEnabled,
+} from "@tauri-apps/plugin-autostart";
 import { IconCheckmark1Small } from "central-icons/IconCheckmark1Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconCircleCheck } from "central-icons/IconCircleCheck";
@@ -317,6 +322,8 @@ export function AppSettings({
   const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
   const [releaseChannel, setReleaseChannelValue] = useState<ReleaseChannel>("stable");
+  const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [launchAtLoginBusy, setLaunchAtLoginBusy] = useState(false);
   // Set only when a leave-rc switch turns up an installable stable, so the
   // bespoke in-context confirm below the toggle can name the exact version.
   const [reconcileVersion, setReconcileVersion] = useState<string>();
@@ -381,6 +388,38 @@ export function AppSettings({
       active = false;
     };
   }, [updaterAvailable]);
+
+  // Reflect the real launch-at-login state (macOS Login Items, the Windows Run
+  // key, or a Linux ~/.config/autostart entry) once on mount. A read failure
+  // leaves the toggle off rather than surfacing an error.
+  useEffect(() => {
+    let active = true;
+    void isAutostartEnabled()
+      .then((enabled) => {
+        if (active) setLaunchAtLogin(enabled);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  const handleLaunchAtLoginChange = (next: boolean) => {
+    // Optimistic flip so the switch feels instant, then persist. If writing the
+    // platform launch entry fails, re-read the real state so the toggle never
+    // lies about whether June actually launches at login.
+    setLaunchAtLogin(next);
+    setLaunchAtLoginBusy(true);
+    void (next ? enableAutostart() : disableAutostart())
+      .catch(() => {
+        void isAutostartEnabled()
+          .then((enabled) => setLaunchAtLogin(enabled))
+          .catch(() => setLaunchAtLogin(!next));
+      })
+      .finally(() => {
+        setLaunchAtLoginBusy(false);
+      });
+  };
 
   const handleReleaseChannelChange = (next: ReleaseChannel) => {
     setReleaseChannelValue(next);
@@ -998,6 +1037,32 @@ export function AppSettings({
                           setBrand(id);
                           setStoredBrand(id);
                         }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="settings-group" aria-labelledby="startup-heading">
+              <h2 id="startup-heading" className="settings-group-heading">
+                Startup
+              </h2>
+              <div className="settings-card">
+                <div className="settings-rows">
+                  <div className="settings-row">
+                    <div className="settings-row-info">
+                      <h3 className="settings-row-title">Launch at login</h3>
+                      <p className="settings-row-description">
+                        Open June automatically when you sign in to your computer.
+                      </p>
+                    </div>
+                    <div className="settings-row-control">
+                      <Switch
+                        checked={launchAtLogin}
+                        disabled={launchAtLoginBusy}
+                        aria-label="Launch June at login"
+                        onCheckedChange={handleLaunchAtLoginChange}
                       />
                     </div>
                   </div>
