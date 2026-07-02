@@ -736,16 +736,44 @@ type PendingIssueReport = {
   diagnosisStartedAt?: string;
 };
 
+function hermesServerErrorIssueReport(err: unknown): PendingIssueReport | undefined {
+  const rawMessage = messageFromError(err).trim();
+  if (!isHermesServerError(rawMessage)) return undefined;
+  return {
+    category: "bug",
+    description: [
+      "June hit a Hermes server error while loading this agent session.",
+      "",
+      "Raw error:",
+      rawMessage,
+    ].join("\n"),
+    followUps: [],
+    attachmentNames: [],
+    attachmentPaths: [],
+  };
+}
+
+function reportableAgentErrorOptions(
+  err: unknown,
+  options: AgentWorkspaceErrorOptions = {},
+): AgentWorkspaceErrorOptions {
+  const issueReport = hermesServerErrorIssueReport(err);
+  if (!issueReport) return options;
+  return { ...options, issueReport };
+}
+
 type HermesToolEventPhase = "start" | "progress" | "complete";
 
 type AgentWorkspaceError = {
   message: string;
   /** Null means the error belongs to the no-session workspace surface. */
   sessionId: string | null;
+  issueReport?: PendingIssueReport;
 };
 
 type AgentWorkspaceErrorOptions = {
   sessionId?: string | null;
+  issueReport?: PendingIssueReport;
 };
 
 type AgentWorkspaceNotice = {
@@ -1345,6 +1373,7 @@ export function AgentWorkspace({
   // Confirmation that a submitted issue report reached the June team; shown
   // in the composer notice slot until dismissed by the next send.
   const [issueReportNotice, setIssueReportNotice] = useState<AgentWorkspaceNotice | null>(null);
+  const [submittingErrorIssueReport, setSubmittingErrorIssueReport] = useState(false);
   const [composerSizeWarning, setComposerSizeWarning] = useState<ComposerInputSizeWarning | null>(
     null,
   );
@@ -1422,13 +1451,17 @@ export function AgentWorkspace({
         setErrorState(null);
         return;
       }
-      setErrorState({
+      const next: AgentWorkspaceError = {
         message,
         sessionId:
           options.sessionId === undefined
             ? (selectedHermesSessionIdRef.current ?? null)
             : options.sessionId,
-      });
+      };
+      if (options.issueReport) {
+        next.issueReport = options.issueReport;
+      }
+      setErrorState(next);
     },
     [],
   );
@@ -2153,7 +2186,8 @@ export function AgentWorkspace({
   // because the composer auto-grow effect below needs it as a dependency.
   const heroMode =
     !gallerySections && (newSessionMode || (!selectedHermesSessionId && !selectedTask));
-  const visibleError = visibleAgentWorkspaceError(errorState, selectedHermesSessionId);
+  const visibleErrorState = visibleAgentWorkspaceError(errorState, selectedHermesSessionId);
+  const visibleError = visibleErrorState?.message ?? null;
   // The banner offers "Try again" for failures a reconnect-and-reload can clear:
   // our own gateway/bridge connection errors, and a transient Hermes 5xx
   // (HERMES_SERVER_ERROR_MESSAGE, JUN-167). retryGatewayConnection re-runs the
@@ -2533,7 +2567,7 @@ export function AgentWorkspace({
           keepLoading = true;
           return "transient-startup-error";
         }
-        setError(describeAgentError(err));
+        setError(describeAgentError(err), reportableAgentErrorOptions(err));
         return "failed";
       } finally {
         if (!keepLoading) {
@@ -3049,7 +3083,10 @@ export function AgentWorkspace({
         // working-gated poll re-loads once it resolves — so don't flash it as
         // an error banner (JUN-116).
         if (isSessionGoneError(message)) return;
-        setError(describeAgentError(err), { sessionId: selectedHermesSessionId });
+        setError(
+          describeAgentError(err),
+          reportableAgentErrorOptions(err, { sessionId: selectedHermesSessionId }),
+        );
       });
     return () => {
       cancelled = true;
@@ -3077,7 +3114,7 @@ export function AgentWorkspace({
         }
       })
       .catch((err: unknown) => {
-        if (!cancelled) setError(describeAgentError(err));
+        if (!cancelled) setError(describeAgentError(err), reportableAgentErrorOptions(err));
       });
     return () => {
       cancelled = true;
@@ -3099,7 +3136,7 @@ export function AgentWorkspace({
         if (cancelled) return;
         setBridge(status);
       } catch (err) {
-        if (!cancelled) setError(describeAgentError(err));
+        if (!cancelled) setError(describeAgentError(err), reportableAgentErrorOptions(err));
       }
     })();
     return () => {
@@ -3964,6 +4001,41 @@ export function AgentWorkspace({
       if (result) {
         dispatchIssueReportDeliverySettled({ sessionId, report, result });
       }
+    }
+  }
+
+  async function sendErrorIssueReport(error: AgentWorkspaceError) {
+    const report = error.issueReport;
+    if (!report || submittingErrorIssueReport) return;
+    const sessionId = error.sessionId ?? selectedHermesSessionIdRef.current;
+    setSubmittingErrorIssueReport(true);
+    try {
+      await submitIssueReport({
+        category: report.category,
+        description: issueReportDescription(report),
+        agentDiagnosis: undefined,
+        attachmentNames: report.attachmentNames,
+        attachmentPaths: report.attachmentPaths,
+        ...(sessionId ? { sessionId } : {}),
+      });
+      if (sessionId) {
+        clearErrorForSession(sessionId);
+        if (selectedHermesSessionIdRef.current === sessionId) {
+          setIssueReportNotice({
+            message: "Your report was sent to the June team. Thank you for helping improve June.",
+            sessionId,
+          });
+        }
+      } else {
+        setError(null);
+      }
+    } catch (err) {
+      setError(`The issue report could not be sent. ${messageFromError(err)}`, {
+        sessionId: sessionId ?? null,
+        issueReport: report,
+      });
+    } finally {
+      setSubmittingErrorIssueReport(false);
     }
   }
 
@@ -4842,7 +4914,7 @@ export function AgentWorkspace({
         await refreshHermesSession(sessionId);
       }
     } catch (err) {
-      setError(describeAgentError(err));
+      setError(describeAgentError(err), reportableAgentErrorOptions(err));
     }
   }
 
@@ -5077,7 +5149,7 @@ export function AgentWorkspace({
       // "Session not found" 404 resolves on the next poll, so don't surface
       // it as an error banner (JUN-116).
       if (isSessionGoneError(message)) return;
-      setError(describeAgentError(err), { sessionId });
+      setError(describeAgentError(err), reportableAgentErrorOptions(err, { sessionId }));
     }
   }
 
@@ -7182,6 +7254,12 @@ export function AgentWorkspace({
             <AgentErrorBanner
               message={visibleError}
               onRetry={visibleErrorRetryable ? () => void retryGatewayConnection() : undefined}
+              onReportBug={
+                visibleErrorState?.issueReport
+                  ? () => void sendErrorIssueReport(visibleErrorState)
+                  : undefined
+              }
+              reportBugSubmitting={submittingErrorIssueReport}
               onDismiss={() => setError(null)}
             />
           ) : null}
@@ -7240,6 +7318,12 @@ export function AgentWorkspace({
                 <AgentErrorBanner
                   message={visibleError}
                   onRetry={visibleErrorRetryable ? () => void retryGatewayConnection() : undefined}
+                  onReportBug={
+                    visibleErrorState?.issueReport
+                      ? () => void sendErrorIssueReport(visibleErrorState)
+                      : undefined
+                  }
+                  reportBugSubmitting={submittingErrorIssueReport}
                   onDismiss={() => setError(null)}
                 />
               ) : null}
@@ -9652,11 +9736,15 @@ function CompactSuccess({ result }: { result: CompressSessionResult | null }) {
 function AgentErrorBanner({
   message,
   onDismiss,
+  onReportBug,
   onRetry,
+  reportBugSubmitting = false,
 }: {
   message: string;
   onDismiss: () => void;
+  onReportBug?: () => void;
   onRetry?: () => void;
+  reportBugSubmitting?: boolean;
 }) {
   return (
     <div className="error-banner agent-error-banner" role="alert">
@@ -9665,6 +9753,11 @@ function AgentErrorBanner({
         {onRetry ? (
           <button type="button" onClick={onRetry}>
             Try again
+          </button>
+        ) : null}
+        {onReportBug ? (
+          <button type="button" onClick={onReportBug} disabled={reportBugSubmitting}>
+            {reportBugSubmitting ? "Sending" : "Send bug report"}
           </button>
         ) : null}
         <button type="button" aria-label="Dismiss" onClick={onDismiss}>
@@ -9701,8 +9794,8 @@ function visibleAgentWorkspaceError(
   selectedSessionId: string | undefined,
 ) {
   if (!error) return null;
-  if (!error.sessionId) return selectedSessionId ? null : error.message;
-  return error.sessionId === selectedSessionId ? error.message : null;
+  if (!error.sessionId) return selectedSessionId ? null : error;
+  return error.sessionId === selectedSessionId ? error : null;
 }
 
 // The raw billing failure ("Error: Error code: 402 - …") never reaches the

@@ -9172,6 +9172,15 @@ input:focus-visible,
   background: color-mix(in oklch, var(--destructive) 12%, transparent);
 }
 
+.agent-error-banner-actions button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+.agent-error-banner-actions button:disabled:hover {
+  background: transparent;
+}
+
 /* Out-of-credits card in the transcript: no title, just the tone-colored
  * wallet glyph flowing inline with one sentence. The base notice lays its
  * pieces out as wrapping flex items, so long text drops wholesale onto its

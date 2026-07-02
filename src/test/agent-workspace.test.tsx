@@ -6805,6 +6805,7 @@ describe("AgentWorkspace", () => {
     // Connection-shaped failures are the retryable ones — reconnecting can fix
     // them, unlike one-off action failures which only offer dismiss.
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send bug report" })).toBeNull();
 
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByText("Hermes gateway is not connected.")).toBeNull();
@@ -6828,11 +6829,40 @@ describe("AgentWorkspace", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText(/Hermes API returned 500/)).toBeNull();
     // A 5xx is a transient server fault, so the banner offers a retry (unlike a
-    // one-off 4xx, which only offers dismiss).
+    // one-off 4xx, which only offers dismiss), plus direct bug reporting.
     expect(screen.getByRole("button", { name: "Try again" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send bug report" })).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByText("Hermes ran into a problem with that request.")).toBeNull();
+  });
+
+  it("sends the raw Hermes 5xx as a bug report from the error banner (JUN-167)", async () => {
+    const user = userEvent.setup();
+    mocks.submitIssueReport.mockResolvedValue({ received: true });
+    mocks.listHermesSessionMessages.mockRejectedValue(
+      new Error("Hermes API returned 500: Internal Server Error"),
+    );
+
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Hermes ran into a problem with that request."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Send bug report" }));
+
+    await waitFor(() =>
+      expect(mocks.submitIssueReport).toHaveBeenCalledWith({
+        category: "bug",
+        description: expect.stringContaining("Hermes API returned 500: Internal Server Error"),
+        agentDiagnosis: undefined,
+        attachmentNames: [],
+        attachmentPaths: [],
+        sessionId: "session-1",
+      }),
+    );
+    expect(await screen.findByText(/Your report was sent to the June team/)).toBeInTheDocument();
   });
 
   it("re-fetches the transcript when Try again is clicked on a Hermes 5xx banner (JUN-167)", async () => {
