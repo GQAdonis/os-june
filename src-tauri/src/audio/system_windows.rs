@@ -406,6 +406,11 @@ fn spawn_writer_thread(
         let started = Instant::now();
         // Per-channel frames written to the file (real audio + silence).
         let mut frames_written: i64 = 0;
+        // First mid-capture write failure (disk full, I/O error). Recorded in
+        // shared state for live status(), and returned from the thread so
+        // stop() fails the recording instead of finalizing a file that
+        // silently lost audio.
+        let mut first_write_error: Option<String> = None;
 
         loop {
             let stopping = stop_flag.load(Ordering::Acquire);
@@ -427,7 +432,8 @@ fn spawn_writer_thread(
                 chunk_cap,
                 &shared,
             ) {
-                record_error(&shared, message);
+                record_error(&shared, message.clone());
+                first_write_error.get_or_insert(message);
             }
 
             if stopping {
@@ -449,7 +455,8 @@ fn spawn_writer_thread(
                     chunk_cap,
                     &shared,
                 ) {
-                    record_error(&shared, message);
+                    record_error(&shared, message.clone());
+                    first_write_error.get_or_insert(message);
                 }
                 break;
             }
@@ -457,8 +464,26 @@ fn spawn_writer_thread(
             std::thread::sleep(WRITER_TICK);
         }
 
-        writer.finalize().map_err(|error| error.to_string())
+        // Finalize regardless (a truncated-but-valid WAV beats a corrupt one),
+        // then report the outcome with the first write failure taking
+        // precedence over the finalize result.
+        let finalize_result = writer.finalize().map_err(|error| error.to_string());
+        writer_thread_outcome(first_write_error, finalize_result)
     })
+}
+
+/// The writer thread's exit value, which `stop()` maps onto
+/// `audio_finalization_failed`: the first mid-capture write failure wins over
+/// the finalize result, because audio has already been lost even when finalize
+/// itself later succeeds. Factored out so the precedence is unit-testable.
+fn writer_thread_outcome(
+    first_write_error: Option<String>,
+    finalize_result: Result<(), String>,
+) -> Result<(), String> {
+    match first_write_error {
+        Some(message) => Err(message),
+        None => finalize_result,
+    }
 }
 
 /// Take the buffered samples out of the shared state without holding the lock
@@ -705,6 +730,34 @@ mod tests {
         assert!(!readiness.capture_available);
         let message = readiness.message.expect("message");
         assert!(message.contains("device not available"));
+    }
+
+    #[test]
+    fn writer_outcome_propagates_a_mid_capture_write_failure() {
+        // A write failure must fail the recording even when finalize itself
+        // succeeds, otherwise the file finalizes after silently losing audio.
+        assert_eq!(
+            writer_thread_outcome(Some("disk full".to_string()), Ok(())),
+            Err("disk full".to_string())
+        );
+        // The first write failure also wins over a later finalize failure:
+        // it is the root cause the user should see.
+        assert_eq!(
+            writer_thread_outcome(
+                Some("disk full".to_string()),
+                Err("finalize failed".to_string())
+            ),
+            Err("disk full".to_string())
+        );
+    }
+
+    #[test]
+    fn writer_outcome_reports_finalize_result_without_write_failures() {
+        assert_eq!(writer_thread_outcome(None, Ok(())), Ok(()));
+        assert_eq!(
+            writer_thread_outcome(None, Err("finalize failed".to_string())),
+            Err("finalize failed".to_string())
+        );
     }
 
     #[test]
