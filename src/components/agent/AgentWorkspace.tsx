@@ -522,20 +522,22 @@ type AgentShortcut = {
   description: string;
   prompt: string;
   /**
-   * "run" submits the prompt immediately; "prefill" drops it into the
-   * composer for the user to finish (selecting the <placeholder> if there is
-   * one); "attach" prefills and opens the file picker.
+   * "prefill" drops the prompt into the composer for the user to finish
+   * (selecting the <placeholder> if there is one); "attach" prefills and
+   * opens the file picker. There is deliberately no action that submits on
+   * click: every preset lands in the composer first, so the person sees
+   * exactly what will run — and approves the spend — before it costs tokens.
    */
-  action: "run" | "prefill" | "attach";
+  action: "prefill" | "attach";
 };
 
 /**
  * Suggestion pool for the new-session hero. Shown HERO_SHORTCUT_COUNT at a
  * time and reshuffled on each visit, so the entry point stays a handful of
  * fresh ideas instead of a wall of ten cards. Pool order matters: the leading
- * window is the curated first-impression mix (an instant run, a prefill, an
- * attach flow, and a health check) that shows when the shuffle is identity
- * (e.g. in tests with Math.random mocked to 0).
+ * window is the curated first-impression mix (a ready-to-send prompt, a
+ * placeholder prefill, an attach flow, and a health check) that shows when
+ * the shuffle is identity (e.g. in tests with Math.random mocked to 0).
  *
  * Every suggestion must succeed inside the default write-jail: reads are
  * broad, but writes land only in the agent workspace. Don't add shortcuts
@@ -551,7 +553,7 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     description: "A quick rundown of what's new across your folders.",
     prompt:
       "Look through my Desktop, Documents, and Downloads folders for files added or changed in the last week and give me a quick rundown of what's new, grouped by what they seem to be for. Don't move or change anything.",
-    action: "run",
+    action: "prefill",
   },
   {
     key: "research",
@@ -576,7 +578,7 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     description: "Disk, memory, and login items that need attention.",
     prompt:
       "Give my computer a quick health check: free disk space, memory pressure, login items, and anything else worth flagging. Summarize what looks fine and what needs attention.",
-    action: "run",
+    action: "prefill",
   },
   {
     key: "find-file",
@@ -3336,9 +3338,9 @@ export function AgentWorkspace({
       ? reviewableIssueReportsRef.current[reportFollowUpSessionId]
       : undefined;
     const submittedDraftKey = composerDraftKeyRef.current;
-    // A typed hero submit plays the same teardown as a run shortcut: greeting
-    // up, suggestions down during the session-create latency. Without it they
-    // sit frozen through the wait and then vanish in a single frame when the
+    // A hero submit plays the teardown transition: greeting up, suggestions
+    // down during the session-create latency. Without it they sit frozen
+    // through the wait and then vanish in a single frame when the
     // conversation takes over.
     if (heroMode) setHeroLeaving(true);
     setSubmitting(true);
@@ -5286,46 +5288,10 @@ export function AgentWorkspace({
     }
   }
 
-  // Run shortcuts fire the session directly — the prompt never touches the
-  // composer, so there's no flash of text + send button before the submit.
-  // The hero plays its exit transition during the session-create latency.
-  async function launchShortcutSession(prompt: string) {
-    if (submitting || importingFiles) return;
-    setHeroLeaving(true);
-    dispatchAgentSessionStatus({
-      prompt,
-      title: titleFromPrompt(prompt),
-      status: "starting",
-      summary: "Starting June.",
-    });
-    setSubmitting(true);
-    try {
-      await submitHermesSession(prompt);
-      setError(null);
-    } catch (err) {
-      // Bring the hero back and park the prompt in the composer so the user
-      // can see what would have run and retry it.
-      if (composerEditorRef.current?.isEmpty() ?? true) {
-        composerEditorRef.current?.setContent(prompt);
-      }
-      setError(messageFromError(err));
-      dispatchAgentSessionStatus({
-        prompt,
-        title: titleFromPrompt(prompt),
-        status: "failed",
-        summary: messageFromError(err),
-      });
-    } finally {
-      setSubmitting(false);
-      setHeroLeaving(false);
-    }
-  }
-
+  // Shortcuts never submit on click — they stage the prompt in the composer
+  // so the person reads what will run and sends it themselves. The click is
+  // free; only the explicit send spends tokens.
   function runShortcut(shortcut: AgentShortcut) {
-    if (shortcut.action === "run") {
-      void launchShortcutSession(shortcut.prompt);
-      return;
-    }
     if (shortcut.action === "attach") {
       rememberComposerDraft(composerDraftKeyRef.current, shortcut.prompt, null);
       composerEditorRef.current?.setContent(shortcut.prompt);

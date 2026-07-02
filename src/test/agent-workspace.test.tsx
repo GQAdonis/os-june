@@ -6179,7 +6179,7 @@ describe("AgentWorkspace", () => {
     }
   });
 
-  it("launches a session immediately from a run shortcut", async () => {
+  it("prefills the composer from a hero shortcut instead of auto-submitting", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
       JSON.stringify({ createdAt: Date.now() }),
@@ -6192,6 +6192,15 @@ describe("AgentWorkspace", () => {
       const user = userEvent.setup();
 
       await user.click(await screen.findByRole("button", { name: /Catch up on recent files/ }));
+
+      // The click only stages the prompt: nothing may be submitted (and no
+      // tokens spent) until the person sends it themselves.
+      await waitFor(() =>
+        expect(screen.getByRole("textbox")).toHaveTextContent(/changed in the last week/),
+      );
+      expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+
+      await user.click(screen.getByRole("button", { name: "Start session" }));
 
       await waitFor(() =>
         expect(mocks.gatewayRequest).toHaveBeenCalledWith(

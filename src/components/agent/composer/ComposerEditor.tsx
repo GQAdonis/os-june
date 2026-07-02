@@ -18,7 +18,7 @@ export type ComposerEditorHandle = {
   focus: () => void;
   clear: () => void;
   /** Replaces the whole document with plain text plus an optional leading
-   * category chip. Used to prefill (run shortcuts, HUD replies) and to restore
+   * category chip. Used to prefill (hero shortcuts, HUD replies) and to restore
    * the composer after a failed send. With `selectPlaceholder`, the first
    * `<placeholder>` token is selected so the user can overtype it in place. */
   setContent: (
@@ -62,7 +62,7 @@ function focusEnd(editor: Editor | null) {
 }
 
 /** Maps the first `<placeholder>` token in a prefilled single-paragraph prompt
- * to its ProseMirror selection range, so a run shortcut can highlight it. The
+ * to its ProseMirror selection range, so a hero shortcut can highlight it. The
  * paragraph's opening boundary occupies position 0, so a string index `i` maps
  * to document position `i + 1`; the range spans `<` through `>` inclusive. */
 export function placeholderSelection(text: string): { from: number; to: number } | null {
@@ -221,7 +221,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
           editor.commands.setContent(buildDoc(text, category), {
             emitUpdate: true,
           });
-          // A run shortcut prefills a "<placeholder>" token; select it (rather
+          // A hero shortcut prefills a "<placeholder>" token; select it (rather
           // than parking the caret at the end) so typing overtypes it in place.
           const range = options?.selectPlaceholder && !category ? placeholderSelection(text) : null;
           const shouldFocus = options?.focus !== false;
