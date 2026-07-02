@@ -10,8 +10,9 @@ import { OsMark } from "../../account/AccountGate";
 import { OnboardingPrimaryButton, StepCard } from "../StepChrome";
 
 // macOS can introduce the full agent, dictation, and notes surface because the
-// release bundle includes the runtime and helpers. Windows narrows the welcome
-// promise below until its Hermes and dictation support is turnkey.
+// release bundle includes the runtime and helpers. Windows now ships dictation
+// too (via the in-process helper), so it promises notes and dictation and
+// narrows only the agent promise until Windows agent support is turnkey.
 const JUNE_POINTS = [
   {
     icon: IconSparkle,
@@ -46,6 +47,8 @@ const WINDOWS_JUNE_POINTS = [
     title: "Meeting notes from your mic",
     detail: "Record meetings from your microphone and turn them into notes.",
   },
+  // Dictation ("Speak instead of type"); shared with the macOS promise.
+  JUNE_POINTS[1],
   JUNE_POINTS[3],
 ];
 

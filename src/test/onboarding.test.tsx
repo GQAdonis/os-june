@@ -429,10 +429,12 @@ describe("OnboardingFlow", () => {
       expect(
         screen.getByText("Record meetings from your microphone and turn them into notes."),
       ).toBeInTheDocument();
-      expect(screen.queryByText("Speak instead of type")).not.toBeInTheDocument();
+      // Windows now ships dictation, so the welcome promises it.
+      expect(screen.getByText("Speak instead of type")).toBeInTheDocument();
       expect(
-        screen.queryByText(/June turns your voice into polished writing/),
-      ).not.toBeInTheDocument();
+        screen.getByText(/June turns your voice into polished writing/),
+      ).toBeInTheDocument();
+      // Meeting auto-capture and the agent remain macOS-only.
       expect(screen.queryByText("Effortlessly capture meetings")).not.toBeInTheDocument();
       expect(screen.queryByText("Chat and work with June")).not.toBeInTheDocument();
     } finally {

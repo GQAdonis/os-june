@@ -7,6 +7,34 @@ export function isMacLikePlatform() {
   return true;
 }
 
+export function isWindowsPlatform() {
+  const platform =
+    typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`;
+  return /Windows|Win32|Win64/i.test(platform);
+}
+
+// Dictation (global shortcuts, capture, paste) ships on macOS and Windows.
+// Other platforms (Linux) fall back to microphone note recording only.
+export function isDictationSupportedPlatform() {
+  return isMacLikePlatform() || isWindowsPlatform();
+}
+
+// Rewrites a stored shortcut label into the current platform's modifier
+// names. Dictation shortcut defaults are stored with macOS modifier names
+// ("Ctrl+Opt+D"); on Windows those read as "Ctrl+Alt+D".
+export function displayShortcutLabel(label: string) {
+  if (!isWindowsPlatform()) {
+    return label;
+  }
+  return label
+    .replace(/\bOpt\b/g, "Alt")
+    .replace(/\bCmd\b/g, "Win")
+    .replace(/⌘/g, "Win")
+    .replace(/⌥/g, "Alt")
+    .replace(/⌃/g, "Ctrl")
+    .replace(/⇧/g, "Shift");
+}
+
 export function primaryShortcutLabel(key: string) {
   // No space after the ⌘ glyph (it reads tight), but keep one after the
   // "Ctrl" word so Windows labels don't run together as "CtrlN".
