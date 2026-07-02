@@ -810,6 +810,25 @@ describe("NoteEditor", () => {
     }
   });
 
+  it("hides recording options on Windows until source readiness first loads", () => {
+    // Before the first readiness check resolves, sourceReadiness is undefined.
+    // Non-macOS hosts must treat that unknown state as unsupported so nothing
+    // flashes on platforms whose backend will report "unsupported".
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    try {
+      render(<NoteEditor {...props} note={note()} sourceReadiness={undefined} />);
+
+      expect(screen.getByRole("button", { name: "Record" })).toBeEnabled();
+      expect(screen.queryByRole("button", { name: "Recording options" })).not.toBeInTheDocument();
+      expect(screen.queryByText("Capture system audio")).not.toBeInTheDocument();
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("surfaces a dismissible consent reminder after the recorder settles", async () => {
     vi.useFakeTimers();
     render(

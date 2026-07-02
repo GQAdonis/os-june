@@ -405,8 +405,12 @@ export function AppSettings({
   // System audio availability follows the backend readiness rather than the
   // host OS: macOS and Windows both ship a capture backend (Windows via WASAPI
   // loopback, which needs no permission), while platforms without one report
-  // "unsupported" from the stub backend and hide the control.
-  const systemUnavailable = systemState === "unsupported";
+  // "unsupported" from the stub backend and hide the control. Before readiness
+  // first arrives, non-macOS platforms treat the unknown state as unavailable
+  // so unsupported hosts never flash the toggle; macOS keeps showing it while
+  // loading, as it always has.
+  const systemUnavailable =
+    systemState === "unsupported" || (!macLikePlatform && systemState === undefined);
 
   useEffect(() => {
     capturingShortcutRef.current = capturingShortcut;

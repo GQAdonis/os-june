@@ -1445,6 +1445,40 @@ describe("AppSettings", () => {
     }
   });
 
+  it("hides the system audio toggle on Windows until source readiness first loads", async () => {
+    // Before the first readiness check resolves, sourceReadiness is undefined.
+    // Non-macOS hosts must treat that unknown state as unavailable so hosts
+    // whose backend will report "unsupported" never flash the toggle.
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    try {
+      render(
+        <AppSettings
+          account={signedInAccount}
+          accountLoading={false}
+          sourceMode="microphoneOnly"
+          sourceReadiness={undefined}
+          checkingSourceReadiness={true}
+          onAccountChanged={vi.fn()}
+          onAccountRefresh={vi.fn()}
+          onSourceModeChange={vi.fn()}
+          onEnableSystemAudio={vi.fn()}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("tab", { name: "Audio" }));
+      expect(
+        screen.queryByRole("switch", {
+          name: "Capture system audio for notes",
+        }),
+      ).not.toBeInTheDocument();
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("records push-to-talk and toggle dictation shortcuts in settings", async () => {
     const user = userEvent.setup();
     render(

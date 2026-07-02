@@ -322,6 +322,33 @@ fn build_loopback_stream(
                 err_fn,
                 None,
             ),
+            // The WASAPI shared-mode mix engine is F32 in practice, but some
+            // professional or HDMI render devices expose 32-bit int or 64-bit
+            // float mix formats; capture those too instead of failing outright.
+            cpal::SampleFormat::I32 => device.build_input_stream(
+                config,
+                move |data: &[i32], _| {
+                    ingest_samples(
+                        data.iter().map(|sample| *sample as f32 / i32::MAX as f32),
+                        &shared,
+                        &pause_flag,
+                    )
+                },
+                err_fn,
+                None,
+            ),
+            cpal::SampleFormat::F64 => device.build_input_stream(
+                config,
+                move |data: &[f64], _| {
+                    ingest_samples(
+                        data.iter().map(|sample| sample.clamp(-1.0, 1.0) as f32),
+                        &shared,
+                        &pause_flag,
+                    )
+                },
+                err_fn,
+                None,
+            ),
             other => Err(cpal::BuildStreamError::BackendSpecific {
                 err: cpal::BackendSpecificError {
                     description: format!(
