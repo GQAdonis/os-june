@@ -264,6 +264,7 @@ mod windows_impl {
     use std::fs::File;
     use std::io::BufWriter;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicIsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
     use std::sync::{Arc, Mutex, OnceLock};
     use std::time::Duration;
@@ -287,9 +288,10 @@ mod windows_impl {
         KEYEVENTF_KEYUP, VIRTUAL_KEY,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-        SetForegroundWindow, SetWindowsHookExW, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-        LLKHF_LOWER_IL_INJECTED, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
+        CallNextHookEx, CreateWindowExW, GetForegroundWindow, GetMessageW,
+        GetWindowThreadProcessId, SetForegroundWindow, SetWindowsHookExW, HC_ACTION, HMENU,
+        HWND_MESSAGE, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLKHF_LOWER_IL_INJECTED, MSG,
+        WH_KEYBOARD_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
         WM_SYSKEYUP,
     };
 
@@ -495,9 +497,52 @@ mod windows_impl {
 
     // ---- keyboard hook ----------------------------------------------------
 
+    /// HWND of the hidden clipboard-owner window as an isize (HWND is not
+    /// Send). Zero until the hook thread has created it.
+    static CLIPBOARD_OWNER: AtomicIsize = AtomicIsize::new(0);
+
+    /// The window that owns our clipboard sessions. Win32 documents (on
+    /// EmptyClipboard) that opening the clipboard with a NULL hwnd and then
+    /// calling EmptyClipboard sets the clipboard owner to NULL, "which causes
+    /// SetClipboardData to fail" — so the paste path must open the clipboard
+    /// with a real window. Falls back to HWND(0) if the owner window could
+    /// not be created (degraded, but no worse than not owning one).
+    fn clipboard_owner() -> HWND {
+        HWND(CLIPBOARD_OWNER.load(Ordering::Acquire))
+    }
+
     fn run_hook_thread() {
         unsafe {
             let module = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+
+            // Hidden message-only window (HWND_MESSAGE parent) that serves as
+            // the clipboard owner for paste_text; see clipboard_owner(). The
+            // pre-registered STATIC class avoids registering our own. It lives
+            // on this thread, which already pumps messages for the keyboard
+            // hook, and is intentionally never destroyed: like the hook, it is
+            // owned for the lifetime of the process (there is no hook-thread
+            // teardown path; the OS reclaims both at process exit).
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let owner = CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                PCWSTR(class.as_ptr()),
+                PCWSTR::null(),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                HMENU(0),
+                HINSTANCE(module.0),
+                None,
+            );
+            if owner.0 != 0 {
+                CLIPBOARD_OWNER.store(owner.0, Ordering::Release);
+            } else {
+                tracing::warn!("failed to create clipboard owner window for dictation paste");
+            }
+
             let hook = SetWindowsHookExW(
                 WH_KEYBOARD_LL,
                 Some(keyboard_hook_proc),
@@ -505,10 +550,12 @@ mod windows_impl {
                 0,
             );
             if hook.is_err() {
-                return;
+                tracing::warn!("failed to install dictation keyboard hook");
             }
-            // Low-level hooks require the installing thread to pump messages;
-            // the proc itself runs between GetMessage calls.
+            // Low-level hooks require the installing thread to pump messages
+            // (the proc runs between GetMessage calls), and the owner window
+            // needs the same pump. Keep pumping even if the hook failed so
+            // clipboard ownership still works.
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, HWND(0), 0, 0).as_bool() {}
         }
@@ -1245,7 +1292,7 @@ mod windows_impl {
 
     fn clipboard_get_text() -> Option<String> {
         unsafe {
-            if OpenClipboard(HWND(0)).is_err() {
+            if OpenClipboard(clipboard_owner()).is_err() {
                 return None;
             }
             let result = (|| {
@@ -1273,7 +1320,10 @@ mod windows_impl {
         let mut utf16: Vec<u16> = text.encode_utf16().collect();
         utf16.push(0);
         unsafe {
-            OpenClipboard(HWND(0)).map_err(|_| {
+            // Open with the owner window: after OpenClipboard(NULL) +
+            // EmptyClipboard the clipboard owner is NULL and SetClipboardData
+            // is documented to fail. See clipboard_owner().
+            OpenClipboard(clipboard_owner()).map_err(|_| {
                 AppError::new(
                     "pasteboard_write_failed",
                     "Could not open the Windows clipboard.",
@@ -1325,7 +1375,7 @@ mod windows_impl {
 
     fn clipboard_clear() {
         unsafe {
-            if OpenClipboard(HWND(0)).is_ok() {
+            if OpenClipboard(clipboard_owner()).is_ok() {
                 let _ = EmptyClipboard();
                 let _ = CloseClipboard();
             }
