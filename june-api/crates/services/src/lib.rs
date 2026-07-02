@@ -426,6 +426,28 @@ mod tests {
         assert!(prompt.contains("Prefer useful meeting notes over a faithful summary"));
     }
 
+    #[test]
+    fn dictate_cleanup_prompt_forbids_reshaping_the_transcript() {
+        // Regression guard for the "too eager to summarize/reformat" report.
+        // The cleanup prompt gained paragraph-grouping and disfluency-repair
+        // latitude (#306); this locks the anti-editorial contract so that
+        // latitude can never be read as license to condense, reorder, or
+        // restructure the speaker's content.
+        let prompt = crate::prompts::DICTATE_CLEANUP;
+
+        assert!(prompt.contains(
+            "Do not summarize, condense, shorten, paraphrase, reorder, restructure, bullet"
+        ));
+        assert!(
+            prompt.contains(
+                "keep every point the speaker made, in their own words and original order"
+            )
+        );
+        assert!(prompt.contains(
+            "grouping only inserts blank lines and must never drop, condense, reorder, or reword"
+        ));
+    }
+
     #[tokio::test]
     async fn note_generate_rejects_asr_model_before_authorize() {
         // Regression: generation accepted any priced model id. Passing an ASR
