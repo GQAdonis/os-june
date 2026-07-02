@@ -1,3 +1,8 @@
+/// Pure chord-matching / key-mapping / command-parsing logic for the Windows
+/// helper. Host-independent so its unit tests run everywhere.
+#[cfg(any(target_os = "windows", test))]
+mod win_chords;
+
 use crate::domain::{
     processing::{build_dictionary_context, merge_transcription_context},
     types::{AppError, ListDictationHistoryResponse},
