@@ -200,6 +200,24 @@ const micOnlyReadiness: RecordingSourceReadinessDto = {
   sources: [microphoneSource],
 };
 
+// The system entry exists but is not ready: Windows with no output device
+// connected at the last check. Permission is granted (WASAPI loopback never
+// needs one), so the toggle stays visible and enabled.
+const systemNotReadyReadiness: RecordingSourceReadinessDto = {
+  sourceMode: "microphonePlusSystem",
+  ready: false,
+  checkedAt: now,
+  sources: [
+    microphoneSource,
+    {
+      ...systemSource,
+      ready: false,
+      deviceAvailable: false,
+      captureAvailable: false,
+    },
+  ],
+};
+
 describe("system audio round trip on Windows", () => {
   beforeEach(() => {
     resetSystemAudioSupportForTests();
@@ -301,6 +319,46 @@ describe("system audio round trip on Windows", () => {
       });
       // The re-probe restored systemGranted, so sourceMode followed the
       // intent back to microphonePlusSystem.
+      await waitFor(() => expect(systemSwitch).toBeChecked());
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("re-probes when enabling while the system entry is present but not ready", async () => {
+    // The stored readiness can contain a system entry with ready=false, e.g.
+    // Windows with no output device connected at the last check. Toggling on
+    // must re-probe (the gate is "system source not ready", not "entry
+    // absent") so that once the device is back, the switch recovers without
+    // waiting for an unrelated focus refresh.
+    const user = userEvent.setup();
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    try {
+      mocks.checkRecordingSourceReadiness.mockResolvedValue(systemNotReadyReadiness);
+      render(<App />);
+      await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+
+      await user.click(await screen.findByRole("button", { name: "Meeting notes" }));
+      await user.click(await screen.findByRole("button", { name: /First note Preview/ }));
+
+      // Permission is granted, so the toggle is visible and enabled, but the
+      // unready system source keeps sourceMode at microphoneOnly.
+      await user.click(await screen.findByRole("button", { name: "Recording options" }));
+      const systemSwitch = await screen.findByRole("switch", { name: "Capture system audio" });
+      await waitFor(() => expect(systemSwitch).not.toBeChecked());
+
+      // The output device is back: the next probe reports ready.
+      mocks.checkRecordingSourceReadiness.mockResolvedValue(fullReadiness);
+      const callsBeforeEnable = mocks.checkRecordingSourceReadiness.mock.calls.length;
+      await user.click(systemSwitch);
+
+      await waitFor(() => {
+        const reprobes = mocks.checkRecordingSourceReadiness.mock.calls.slice(callsBeforeEnable);
+        expect(reprobes.some((call) => call[0] === "microphonePlusSystem")).toBe(true);
+      });
       await waitFor(() => expect(systemSwitch).toBeChecked());
     } finally {
       restoreNavigator();
