@@ -829,6 +829,80 @@ describe("NoteEditor", () => {
     }
   });
 
+  it("keeps recording options on Windows after a mic-only readiness check", async () => {
+    // Turning system audio off makes the recording preflight store a
+    // microphoneOnly readiness with no system source. Backend support is a
+    // property of the host, not of the last-checked mode, so the options must
+    // stay visible or the user could never turn system audio back on.
+    const user = userEvent.setup();
+    const onSourceModeChange = vi.fn();
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    const microphoneSource = {
+      source: "microphone" as const,
+      required: true,
+      ready: true,
+      permissionState: "granted" as const,
+      deviceAvailable: true,
+      captureAvailable: true,
+    };
+    try {
+      const { rerender } = render(
+        <NoteEditor
+          {...props}
+          note={note()}
+          sourceMode="microphonePlusSystem"
+          onSourceModeChange={onSourceModeChange}
+          sourceReadiness={{
+            sourceMode: "microphonePlusSystem",
+            ready: true,
+            checkedAt: now,
+            sources: [
+              microphoneSource,
+              {
+                source: "system",
+                required: true,
+                ready: true,
+                permissionState: "granted",
+                deviceAvailable: true,
+                captureAvailable: true,
+              },
+            ],
+          }}
+        />,
+      );
+
+      // System audio switched off; the preflight readiness now covers only
+      // the microphone.
+      rerender(
+        <NoteEditor
+          {...props}
+          note={note()}
+          sourceMode="microphoneOnly"
+          onSourceModeChange={onSourceModeChange}
+          sourceReadiness={{
+            sourceMode: "microphoneOnly",
+            ready: true,
+            checkedAt: now,
+            sources: [microphoneSource],
+          }}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Recording options" }));
+      const systemSwitch = screen.getByRole("switch", { name: "Capture system audio" });
+      expect(systemSwitch).toBeEnabled();
+
+      // And the user can turn system audio back on.
+      await user.click(systemSwitch);
+      expect(onSourceModeChange).toHaveBeenCalledWith("microphonePlusSystem");
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("surfaces a dismissible consent reminder after the recorder settles", async () => {
     vi.useFakeTimers();
     render(

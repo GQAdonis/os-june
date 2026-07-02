@@ -1479,6 +1479,90 @@ describe("AppSettings", () => {
     }
   });
 
+  it("keeps the system audio toggle on Windows after a mic-only readiness check", async () => {
+    // Turning system audio off makes the recording preflight store a
+    // microphoneOnly readiness with no system source. Backend support is a
+    // property of the host, not of the last-checked mode, so the toggle must
+    // stay visible or the user could never turn system audio back on.
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    const microphoneSource = {
+      source: "microphone" as const,
+      required: true,
+      ready: true,
+      permissionState: "granted" as const,
+      deviceAvailable: true,
+      captureAvailable: true,
+    };
+    const onSourceModeChange = vi.fn();
+    const sharedProps = {
+      account: signedInAccount,
+      accountLoading: false,
+      checkingSourceReadiness: false,
+      onAccountChanged: vi.fn(),
+      onAccountRefresh: vi.fn(),
+      onSourceModeChange,
+      onEnableSystemAudio: vi.fn(),
+    };
+    try {
+      const { rerender } = render(
+        <AppSettings
+          {...sharedProps}
+          sourceMode="microphonePlusSystem"
+          sourceReadiness={{
+            sourceMode: "microphonePlusSystem",
+            ready: true,
+            checkedAt: "2026-06-08T12:00:00Z",
+            sources: [
+              microphoneSource,
+              {
+                source: "system",
+                required: true,
+                ready: true,
+                permissionState: "granted",
+                deviceAvailable: true,
+                captureAvailable: true,
+              },
+            ],
+          }}
+        />,
+      );
+
+      await userEvent.click(screen.getByRole("tab", { name: "Audio" }));
+      expect(
+        screen.getByRole("switch", { name: "Capture system audio for notes" }),
+      ).toBeInTheDocument();
+
+      // System audio switched off; the preflight readiness now covers only
+      // the microphone.
+      rerender(
+        <AppSettings
+          {...sharedProps}
+          sourceMode="microphoneOnly"
+          sourceReadiness={{
+            sourceMode: "microphoneOnly",
+            ready: true,
+            checkedAt: "2026-06-08T12:01:00Z",
+            sources: [microphoneSource],
+          }}
+        />,
+      );
+
+      const systemSwitch = screen.getByRole("switch", {
+        name: "Capture system audio for notes",
+      });
+      expect(systemSwitch).toBeEnabled();
+
+      // And the user can turn system audio back on.
+      await userEvent.click(systemSwitch);
+      expect(onSourceModeChange).toHaveBeenCalledWith("microphonePlusSystem");
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("records push-to-talk and toggle dictation shortcuts in settings", async () => {
     const user = userEvent.setup();
     render(

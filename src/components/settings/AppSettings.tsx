@@ -74,6 +74,7 @@ import {
   type ReleaseChannel,
 } from "../../lib/updater";
 import { isMacLikePlatform } from "../../lib/platform";
+import { useSystemAudioSupport } from "../../lib/use-system-audio-support";
 import { parseDictationHelperEvent } from "../../lib/dictation-events";
 import { dispatchProviderModelSettingsChanged } from "../../lib/model-privacy";
 import {
@@ -405,12 +406,17 @@ export function AppSettings({
   // System audio availability follows the backend readiness rather than the
   // host OS: macOS and Windows both ship a capture backend (Windows via WASAPI
   // loopback, which needs no permission), while platforms without one report
-  // "unsupported" from the stub backend and hide the control. Before readiness
-  // first arrives, non-macOS platforms treat the unknown state as unavailable
-  // so unsupported hosts never flash the toggle; macOS keeps showing it while
-  // loading, as it always has.
-  const systemUnavailable =
-    systemState === "unsupported" || (!macLikePlatform && systemState === undefined);
+  // "unsupported" from the stub backend and hide the control. On non-macOS
+  // platforms the unknown state (no readiness result has covered the system
+  // source yet) also reads as unavailable so unsupported hosts never flash the
+  // toggle; support is sticky across mic-only preflights, which drop the
+  // system source from the DTO, so turning system audio off never hides the
+  // way to turn it back on. macOS keeps showing the toggle while readiness
+  // loads, as it always has.
+  const systemAudioSupport = useSystemAudioSupport(sourceReadiness);
+  const systemUnavailable = macLikePlatform
+    ? systemState === "unsupported"
+    : systemAudioSupport !== "supported";
 
   useEffect(() => {
     capturingShortcutRef.current = capturingShortcut;
