@@ -19,6 +19,10 @@
 //! `SystemAudioCapture::{start, pause, resume, status, stop}`,
 //! `system_audio_readiness`, and `helper_permission_check`.
 
+use crate::audio::system_timeline::{
+    active_elapsed, expected_frames, max_silence_chunk_frames, silence_frames_to_fill,
+    tolerance_frames, LevelAccumulator,
+};
 use crate::domain::types::{AppError, AudioLevelDto, RecordingSource, SourceReadinessDto};
 use hound::{SampleFormat, WavSpec, WavWriter};
 use libpulse_binding::{
@@ -32,7 +36,6 @@ use libpulse_binding::{
 use libpulse_simple_binding::Simple;
 use std::{
     cell::RefCell,
-    collections::VecDeque,
     fs::File,
     io::BufWriter,
     path::PathBuf,
@@ -53,10 +56,6 @@ const CAPTURE_CHANNELS: u8 = 2;
 /// 10 ms read granularity: small enough to keep `stop()` latency and the live
 /// meter responsive, large enough to avoid excessive syscalls.
 const READ_CHUNK_FRAMES: usize = (CAPTURE_SAMPLE_RATE as usize) / 100;
-/// Rolling window of recent per-chunk peaks, matching the microphone path.
-const RECENT_PEAKS_CAP: usize = 24;
-/// Only fill silence once drift exceeds ~80 ms, matching the macOS helper.
-const ALIGNMENT_TOLERANCE_SECS: f64 = 0.08;
 const CONNECT_BUDGET: Duration = Duration::from_secs(5);
 const OPERATION_BUDGET: Duration = Duration::from_secs(5);
 const START_TIMEOUT: Duration = Duration::from_secs(10);
@@ -76,10 +75,9 @@ struct MonitorSource {
 
 #[derive(Default)]
 struct CaptureStats {
-    peak: f32,
-    sum_square: f64,
-    samples: u64,
-    recent_peaks: VecDeque<f32>,
+    /// Cumulative peak/rms plus the rolling per-chunk peak window, computed
+    /// exactly like the microphone path and the Windows backend.
+    level: LevelAccumulator,
     bytes_written: i64,
     last_error: Option<String>,
 }
@@ -187,17 +185,11 @@ impl SystemAudioCapture {
         let Ok(stats) = self.shared.stats.lock() else {
             return (AudioLevelDto::default(), 0, None);
         };
-        let rms = if stats.samples == 0 {
-            0.0
-        } else {
-            (stats.sum_square / stats.samples as f64).sqrt() as f32
-        };
-        let level = AudioLevelDto {
-            peak: stats.peak,
-            rms,
-            recent_peaks: stats.recent_peaks.iter().copied().collect(),
-        };
-        (level, stats.bytes_written, stats.last_error.clone())
+        (
+            stats.level.level(),
+            stats.bytes_written,
+            stats.last_error.clone(),
+        )
     }
 
     pub fn stop(mut self) -> Result<PathBuf, AppError> {
@@ -325,11 +317,14 @@ fn capture_loop(
         }
 
         let frames_in = READ_CHUNK_FRAMES as u64;
-        let active_elapsed = active_elapsed_secs(timeline_offset, origin, accumulated_paused, None);
+        // Not paused here (the loop `continue`s above while paused), so there is
+        // no in-progress pause to fold in: the paused offset is exactly the
+        // accumulated paused span.
+        let elapsed = active_elapsed(origin.elapsed(), timeline_offset, accumulated_paused);
         match fill_alignment_silence(
             &mut writer,
             &shared,
-            active_elapsed,
+            elapsed,
             frames_written,
             frames_in,
             channels,
@@ -360,17 +355,17 @@ fn capture_loop(
 
     // Pad to the current active wall-clock like the macOS helper's
     // `flushTimelineSilenceToNow()` on stop, so the track length reflects the
-    // full recording window.
-    let active_elapsed =
-        active_elapsed_secs(timeline_offset, origin, accumulated_paused, pause_started);
-    let _ = fill_alignment_silence(
-        &mut writer,
-        &shared,
-        active_elapsed,
-        frames_written,
-        0,
-        channels,
+    // full recording window. Fold in any in-progress pause so a recording
+    // stopped while paused pads only up to the last active instant.
+    let active_pause = pause_started
+        .map(|started| started.elapsed())
+        .unwrap_or_default();
+    let elapsed = active_elapsed(
+        origin.elapsed(),
+        timeline_offset,
+        accumulated_paused + active_pause,
     );
+    let _ = fill_alignment_silence(&mut writer, &shared, elapsed, frames_written, 0, channels);
 
     if let Err(error) = writer.finalize() {
         record_error(
@@ -380,38 +375,28 @@ fn capture_loop(
     }
 }
 
-fn active_elapsed_secs(
-    timeline_offset: Duration,
-    origin: Instant,
-    accumulated_paused: Duration,
-    pause_started: Option<Instant>,
-) -> f64 {
-    let active_pause = pause_started
-        .map(|started| started.elapsed())
-        .unwrap_or_default();
-    (timeline_offset.as_secs_f64() + origin.elapsed().as_secs_f64())
-        - accumulated_paused.as_secs_f64()
-        - active_pause.as_secs_f64()
-}
-
 /// Writes leading/drift silence so the file tracks wall-clock time, returning the
 /// number of silence frames written. Mirrors `writeTimelineSilenceIfNeeded`:
 /// only fills once the gap exceeds the tolerance, then closes the whole gap.
 fn fill_alignment_silence(
     writer: &mut WavFileWriter,
     shared: &Arc<Shared>,
-    active_elapsed_secs: f64,
+    elapsed: Duration,
     frames_written: u64,
     incoming_frames: u64,
     channels: usize,
 ) -> Result<u64, String> {
-    let expected = (active_elapsed_secs * CAPTURE_SAMPLE_RATE as f64) as i64;
-    let tolerance = (CAPTURE_SAMPLE_RATE as f64 * ALIGNMENT_TOLERANCE_SECS) as i64;
-    let mut missing = expected - frames_written as i64 - incoming_frames as i64;
-    if missing <= tolerance {
-        return Ok(0);
-    }
-    let chunk_cap = (CAPTURE_SAMPLE_RATE / 2) as i64;
+    let expected = expected_frames(elapsed, CAPTURE_SAMPLE_RATE);
+    let tolerance = tolerance_frames(CAPTURE_SAMPLE_RATE);
+    // Returns the whole gap once it exceeds the 80 ms tolerance, else 0 (so the
+    // loop below never runs and no silence is written).
+    let mut missing = silence_frames_to_fill(
+        expected,
+        frames_written as i64,
+        incoming_frames as i64,
+        tolerance,
+    );
+    let chunk_cap = max_silence_chunk_frames(CAPTURE_SAMPLE_RATE);
     let mut filled: u64 = 0;
     while missing > 0 {
         let chunk = missing.min(chunk_cap);
@@ -435,30 +420,23 @@ fn write_chunk(
     shared: &Arc<Shared>,
     buffer: &[u8],
 ) -> Result<(), String> {
-    let mut chunk_peak = 0.0_f32;
-    let mut sum_square = 0.0_f64;
-    let mut sample_count: u64 = 0;
     for pair in buffer.chunks_exact(2) {
         let sample = i16::from_le_bytes([pair[0], pair[1]]);
         writer
             .write_sample(sample)
             .map_err(|error| error.to_string())?;
-        let normalized = (sample as f32 / i16::MAX as f32).abs();
-        chunk_peak = chunk_peak.max(normalized);
-        sum_square += (normalized as f64).powi(2);
-        sample_count += 1;
     }
+    let sample_count = (buffer.len() / 2) as i64;
     if let Ok(mut stats) = shared.stats.lock() {
-        stats.peak = stats.peak.max(chunk_peak);
-        stats.sum_square += sum_square;
-        stats.samples += sample_count;
-        stats.bytes_written += sample_count as i64 * 2;
-        if sample_count > 0 {
-            if stats.recent_peaks.len() == RECENT_PEAKS_CAP {
-                stats.recent_peaks.pop_front();
-            }
-            stats.recent_peaks.push_back(chunk_peak);
-        }
+        // Fold this chunk into the shared level exactly like the microphone path
+        // and the Windows backend: `record_callback` takes signed normalized
+        // samples and applies `.abs()` internally.
+        stats.level.record_callback(
+            buffer
+                .chunks_exact(2)
+                .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / i16::MAX as f32),
+        );
+        stats.bytes_written += sample_count * 2;
     }
     Ok(())
 }

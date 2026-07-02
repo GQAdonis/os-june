@@ -51,7 +51,9 @@ use std::{
 };
 use tauri::AppHandle;
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, HGLOBAL, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, GlobalFree, HANDLE, HGLOBAL, LPARAM, LRESULT, WPARAM,
+};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
 };
@@ -1132,13 +1134,17 @@ fn set_clipboard_text(text: &str) -> Result<(), String> {
                 GlobalAlloc(GMEM_MOVEABLE, wide.len() * 2).map_err(|error| error.to_string())?;
             let pointer = GlobalLock(hglobal) as *mut u16;
             if pointer.is_null() {
+                let _ = GlobalFree(Some(hglobal));
                 return Err("could not lock clipboard memory".to_string());
             }
             std::ptr::copy_nonoverlapping(wide.as_ptr(), pointer, wide.len());
             let _ = GlobalUnlock(hglobal);
-            // On success the system owns the allocation.
-            SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0)))
-                .map_err(|error| error.to_string())?;
+            // Only a successful SetClipboardData hands the allocation to the
+            // system; on failure it is still ours to free.
+            if let Err(error) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(hglobal.0))) {
+                let _ = GlobalFree(Some(hglobal));
+                return Err(error.to_string());
+            }
             Ok(())
         })()
     };
