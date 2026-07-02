@@ -10,6 +10,7 @@ import { PROVIDER_MODEL_SETTINGS_CHANGED_EVENT } from "../lib/model-privacy";
 
 const mocks = vi.hoisted(() => ({
   dictationSettings: vi.fn(),
+  dictationHotkeyStatus: vi.fn(),
   dictationHelperCommand: vi.fn(),
   localAudioFileSrc: vi.fn(),
   providerModelSettings: vi.fn(),
@@ -68,6 +69,7 @@ vi.mock("../app/build-info", () => ({
 
 vi.mock("../lib/tauri", () => ({
   JUNE_COMMUNITY_URL: "https://t.me/osjune",
+  dictationHotkeyStatus: mocks.dictationHotkeyStatus,
   dictationSettings: mocks.dictationSettings,
   dictationHelperCommand: mocks.dictationHelperCommand,
   localAudioFileSrc: mocks.localAudioFileSrc,
@@ -216,6 +218,10 @@ describe("AppSettings", () => {
     localState = { baseUrl: "", modelId: "", apiKey: "", enabled: false };
     mocks.eventHandler = undefined;
     mocks.dictationSettings.mockResolvedValue({ settings: baseSettings });
+    mocks.dictationHotkeyStatus.mockResolvedValue({
+      type: "hotkey_trigger_ready",
+      payload: { shortcut: baseSettings.pushToTalkShortcut },
+    });
     mocks.localAudioFileSrc.mockImplementation((path) => `asset://${path}`);
     mocks.setDictationLanguage.mockImplementation(async (language) => ({
       ...baseSettings,
@@ -1540,6 +1546,128 @@ describe("AppSettings", () => {
     expect(mocks.dictationHelperCommand).toHaveBeenCalledWith({
       type: "cancel_shortcut_capture",
     });
+  });
+
+  it("shows a restarting notice when the dictation helper goes unavailable", async () => {
+    const user = userEvent.setup();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
+    expect(await screen.findByText("Push to talk")).toBeInTheDocument();
+
+    act(() => {
+      mocks.eventHandler?.({
+        payload: JSON.stringify({
+          type: "helper_unavailable",
+          payload: { reason: "restarting", message: "Dictation stopped and is restarting." },
+        }),
+      });
+    });
+
+    const notice = await screen.findByRole("alert", { name: "Dictation unavailable" });
+    expect(within(notice).getByText("Dictation stopped and is restarting.")).toBeInTheDocument();
+    // Without a staged update there is no relaunch action.
+    expect(screen.queryByRole("button", { name: "Relaunch June" })).not.toBeInTheDocument();
+
+    // The helper re-arming the hotkey clears the notice.
+    act(() => {
+      mocks.eventHandler?.({
+        payload: JSON.stringify({
+          type: "hotkey_trigger_ready",
+          payload: { shortcut: "Ctrl+Opt+D" },
+        }),
+      });
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("alert", { name: "Dictation unavailable" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("shows persisted helper downtime when Settings opens after retries exhaust", async () => {
+    const user = userEvent.setup();
+    mocks.dictationHotkeyStatus.mockResolvedValue({
+      type: "helper_unavailable",
+      payload: {
+        reason: "exhausted",
+        message: "Dictation stopped and could not restart. Relaunch June to restore it.",
+      },
+    });
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
+
+    const notice = await screen.findByRole("alert", { name: "Dictation unavailable" });
+    expect(
+      within(notice).getByText(
+        "Dictation stopped and could not restart. Relaunch June to restore it.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("prompts a relaunch to finish updating when the helper is down mid-update", async () => {
+    const user = userEvent.setup();
+    const onRelaunch = vi.fn();
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        updateReadyToRelaunch
+        onRelaunch={onRelaunch}
+      />,
+    );
+
+    await user.click(screen.getByRole("tab", { name: "Shortcuts" }));
+    expect(await screen.findByText("Push to talk")).toBeInTheDocument();
+
+    act(() => {
+      mocks.eventHandler?.({
+        payload: JSON.stringify({
+          type: "helper_unavailable",
+          payload: { reason: "restarting", message: "Dictation stopped and is restarting." },
+        }),
+      });
+    });
+
+    const notice = await screen.findByRole("alert", { name: "Dictation unavailable" });
+    expect(within(notice).getByText("Relaunch to finish updating")).toBeInTheDocument();
+    expect(
+      within(notice).getByText("Dictation is paused until you relaunch to finish updating."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Relaunch June" }));
+    expect(onRelaunch).toHaveBeenCalledTimes(1);
   });
 
   it("resets customized dictation shortcuts and hides reset for defaults", async () => {
