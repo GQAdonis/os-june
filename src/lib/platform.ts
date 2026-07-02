@@ -1,16 +1,15 @@
+// Single source string for all platform detectors, so the predicates can never
+// diverge in what they read and composed calls don't rebuild it twice.
+function platformString() {
+  return typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`;
+}
+
 export function isMacLikePlatform() {
-  const platform =
-    typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`;
-  if (/Windows|Win32|Win64|Linux|Android/i.test(platform)) {
-    return false;
-  }
-  return true;
+  return !/Windows|Win32|Win64|Linux|Android/i.test(platformString());
 }
 
 export function isWindowsPlatform() {
-  const platform =
-    typeof navigator === "undefined" ? "" : `${navigator.platform} ${navigator.userAgent}`;
-  return /Windows|Win32|Win64/i.test(platform);
+  return /Windows|Win32|Win64/i.test(platformString());
 }
 
 // Dictation (global shortcuts, capture, paste) ships on macOS and Windows.

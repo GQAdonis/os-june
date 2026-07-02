@@ -185,7 +185,7 @@ mod windows_impl {
     use tauri::AppHandle;
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{
-        CloseHandle, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+        CloseHandle, GlobalFree, HANDLE, HGLOBAL, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
     };
     use windows::Win32::System::DataExchange::{
         CloseClipboard, EmptyClipboard, GetClipboardData, OpenClipboard, SetClipboardData,
@@ -1163,8 +1163,14 @@ mod windows_impl {
                         "Could not allocate clipboard memory.",
                     )
                 })?;
+                // Win32 clipboard ownership rule: once SetClipboardData
+                // succeeds, the system owns the HGLOBAL and the app must NOT
+                // free it. On every path where SetClipboardData is not
+                // reached, or fails, the allocation is still ours and must be
+                // released with GlobalFree or it leaks.
                 let ptr = GlobalLock(hglobal) as *mut u16;
                 if ptr.is_null() {
+                    let _ = GlobalFree(hglobal);
                     return Err(AppError::new(
                         "pasteboard_write_failed",
                         "Could not lock clipboard memory.",
@@ -1172,15 +1178,14 @@ mod windows_impl {
                 }
                 std::ptr::copy_nonoverlapping(utf16.as_ptr(), ptr, utf16.len());
                 let _ = GlobalUnlock(hglobal);
-                // On success the system owns the memory, so we must not free it.
-                SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(hglobal.0 as isize)).map_err(
-                    |_| {
-                        AppError::new(
-                            "pasteboard_write_failed",
-                            "Could not write transcript to the clipboard.",
-                        )
-                    },
-                )?;
+                if SetClipboardData(CF_UNICODETEXT.0 as u32, HANDLE(hglobal.0 as isize)).is_err() {
+                    let _ = GlobalFree(hglobal);
+                    return Err(AppError::new(
+                        "pasteboard_write_failed",
+                        "Could not write transcript to the clipboard.",
+                    ));
+                }
+                // Ownership transferred to the clipboard; do not free.
                 Ok(())
             })();
             let _ = CloseClipboard();
