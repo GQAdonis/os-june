@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { IconArrowDown } from "central-icons/IconArrowDown";
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconArrowsRepeat } from "central-icons/IconArrowsRepeat";
@@ -6,6 +7,7 @@ import { IconBolt } from "central-icons/IconBolt";
 import { IconBranchSimple } from "central-icons/IconBranchSimple";
 import { IconBubble3 } from "central-icons/IconBubble3";
 import { IconBubbleWide } from "central-icons/IconBubbleWide";
+import { IconCheckmark1Medium } from "central-icons/IconCheckmark1Medium";
 import { IconCheckmark1Small } from "central-icons/IconCheckmark1Small";
 import { IconCircleQuestionmark } from "central-icons/IconCircleQuestionmark";
 import { IconClipboard } from "central-icons/IconClipboard";
@@ -46,7 +48,6 @@ import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconPencil } from "central-icons/IconPencil";
-import { IconPencilLine } from "central-icons/IconPencilLine";
 import { IconPieChart1 } from "central-icons/IconPieChart1";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconShieldCrossed } from "central-icons/IconShieldCrossed";
@@ -5058,10 +5059,37 @@ export function AgentWorkspace({
     const unrestricted = sessionUnrestricted(modeSessionId);
     try {
       const gateway = await ensureHermesGateway(unrestricted);
-      const raw = await createHermesMethods(gateway).branchSession({
-        sessionId,
-        fromMessageId,
-      });
+      const methods = createHermesMethods(gateway);
+      const branchVia = (runtimeId: string) =>
+        methods.branchSession({ sessionId: runtimeId, fromMessageId });
+      // session.branch targets the LIVE runtime id, not the stored id the turn
+      // carries — a stored (or stale runtime) id answers "Session not found"
+      // once the runtime that minted it is gone. Resolution keys off the
+      // SOURCE session being branched (a delegated turn carries its own
+      // session id; the parent's runtime must never be asked to fork a
+      // child's message) — modeSessionId only picks the gateway. Try the
+      // freshest id we know; if that runtime has been torn down, resume the
+      // source session for a new runtime and retry once. Mirrors
+      // fetchSessionUsage.
+      let raw: unknown;
+      try {
+        raw = await branchVia(runtimeSessionIdsRef.current[sessionId] ?? sessionId);
+      } catch (err) {
+        if (!isSessionGoneError(messageFromError(err))) throw err;
+        const resumed = await gateway.request<HermesRuntimeSessionResponse>("session.resume", {
+          session_id: sessionId,
+          cols: 96,
+        });
+        const runtimeSessionId = resumed.session_id;
+        if (!runtimeSessionId) {
+          throw new Error("Hermes did not resume the session.");
+        }
+        setRuntimeSessionIds((current) => ({
+          ...current,
+          [sessionId]: runtimeSessionId,
+        }));
+        raw = await branchVia(runtimeSessionId);
+      }
       const result: BranchSessionResult | undefined = parseBranchSessionResult(raw, {
         sourceSessionId: sessionId,
         sourceMessageId: fromMessageId,
@@ -5230,16 +5258,6 @@ export function AgentWorkspace({
     editor.setContent(snapshot?.text ?? "", snapshot?.category ?? null, {
       focus: false,
     });
-  }
-
-  function editUserPrompt(text: string) {
-    composerEditorRef.current?.setContent(text, null);
-    setDraft(text);
-    setCategory(null);
-    draftRef.current = text;
-    categoryRef.current = null;
-    setComposerAttachments([]);
-    rememberComposerDraft(composerDraftKeyRef.current, text, null, []);
   }
 
   function setComposerAttachments(
@@ -5933,6 +5951,34 @@ export function AgentWorkspace({
     transcriptShouldStickToBottomRef.current = true;
   }, [renderedTurnsSignature, selectedHermesSessionId, selectedHistoryLoaded, selectedTaskId]);
 
+  // Jump back to the live edge from the floating pill. Glide the same way the
+  // auto-scroll effect does — arm the programmatic-scroll ref + timeout so the
+  // scroll handler reads the glide as ours, not a user scroll that would
+  // release follow mode.
+  const scrollTranscriptToLatest = useCallback(() => {
+    const scroller = agentScrollRef.current;
+    if (!scroller) return;
+    if (typeof scroller.scrollTo !== "function") return; // jsdom has no scrollTo
+    transcriptShouldStickToBottomRef.current = true;
+    transcriptLastScrollTopRef.current = scroller.scrollTop;
+    transcriptProgrammaticScrollRef.current = true;
+    if (transcriptProgrammaticScrollTimeoutRef.current !== undefined) {
+      window.clearTimeout(transcriptProgrammaticScrollTimeoutRef.current);
+    }
+    transcriptProgrammaticScrollTimeoutRef.current = window.setTimeout(() => {
+      transcriptProgrammaticScrollRef.current = false;
+      transcriptShouldStickToBottomRef.current = isAgentTranscriptNearBottom(scroller);
+      transcriptProgrammaticScrollTimeoutRef.current = undefined;
+    }, 800);
+    const reduceMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    scroller.scrollTo({
+      top: scroller.scrollHeight,
+      behavior: reduceMotion ? "auto" : "smooth",
+    });
+  }, []);
+
   // Reshuffle the deck each time the hero comes back, so repeat visits start
   // from a fresh hand instead of wherever the last rotation left off.
   useEffect(() => {
@@ -6072,6 +6118,12 @@ export function AgentWorkspace({
         onDrop={handleComposerDrop}
         onPaste={handleComposerPaste}
       >
+        {/* Anchored inside the fixed composer column so it rides the box's
+            real height (multi-line drafts, stacked notices) instead of
+            guessing a clearance from the card edge. */}
+        {heroMode ? null : (
+          <AgentScrollToLatestButton scrollRef={agentScrollRef} onJump={scrollTranscriptToLatest} />
+        )}
         <AnimatePresence>
           {busyNotice || galleryErrors ? (
             // Same fade as the recording-consent note, so the pill dissolves
@@ -6631,7 +6683,6 @@ export function AgentWorkspace({
             )
           }
           branchingMessageId={branchingMessageId}
-          onEditUserPrompt={editUserPrompt}
         />
       ))}
       {workingSessionIds.has(selectedHermesSessionId) && hermesTurns.at(-1)?.role === "user" ? (
@@ -6735,7 +6786,6 @@ export function AgentWorkspace({
                 sessionUnrestricted(selectedTask.hermesSessionId),
               );
             }}
-            onEditUserPrompt={editUserPrompt}
           />
         ))}
         {workingTaskIds.has(selectedTask.id) && taskTurns.at(-1)?.role === "user" ? (
@@ -8589,12 +8639,68 @@ function chatTurnsSignature(turns: AgentChatTurn[]) {
   );
 }
 
+// Deliberate-tooltip delay for the icon-only turn actions, matching the tab
+// bar's shortcut tips — slower than the shared hover-intent debounce so
+// sweeping across the row doesn't pop a trail of labels.
+const TURN_ACTION_TIP_DELAY_MS = 550;
+
 const AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX = 48;
 
 function isAgentTranscriptNearBottom(scroller: HTMLElement) {
   return (
     scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
     AGENT_TRANSCRIPT_BOTTOM_THRESHOLD_PX
+  );
+}
+
+// Self-contained so scroll-driven visibility never re-renders the huge
+// AgentWorkspace: only this leaf flips on its own scroll + resize signals.
+// While the reader is parked up-thread, streamed turns grow the content
+// WITHOUT firing a scroll event, so the ResizeObserver watches the content
+// column (not just the scroller) to catch that growth.
+export function AgentScrollToLatestButton({
+  scrollRef,
+  onJump,
+}: {
+  scrollRef: RefObject<HTMLDivElement | null>;
+  onJump: () => void;
+}) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const recheck = () => {
+      const nothingToScroll = scroller.scrollHeight <= scroller.clientHeight;
+      const next = !nothingToScroll && !isAgentTranscriptNearBottom(scroller);
+      setVisible((current) => (current === next ? current : next));
+    };
+    recheck();
+    scroller.addEventListener("scroll", recheck, { passive: true });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(recheck) : undefined;
+    observer?.observe(scroller);
+    // The scroller box itself never resizes when content grows (fixed height,
+    // overflow scroll), so watch its children — all of them, not a presumed
+    // single content column — since their growth is what moves scrollHeight.
+    for (const child of Array.from(scroller.children)) observer?.observe(child);
+    return () => {
+      scroller.removeEventListener("scroll", recheck);
+      observer?.disconnect();
+    };
+  }, [scrollRef]);
+
+  return (
+    <button
+      type="button"
+      className="agent-scroll-to-latest"
+      data-visible={visible ? "true" : undefined}
+      aria-label="Scroll to latest"
+      aria-hidden={visible ? undefined : true}
+      tabIndex={visible ? undefined : -1}
+      onClick={onJump}
+    >
+      <IconArrowDown size={16} ariaHidden />
+    </button>
   );
 }
 
@@ -8732,7 +8838,6 @@ function AgentChatTurnRow({
   onTopUp,
   topUpLabel,
   onBranch,
-  onEditUserPrompt,
   branchingMessageId,
   turn,
 }: {
@@ -8762,7 +8867,6 @@ function AgentChatTurnRow({
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
   topUpLabel?: string;
-  onEditUserPrompt?: (text: string) => void;
   /** Fork the conversation from this turn into a new session (feature 07).
    * Optional: only Hermes-session rows pass it — task rows and the dev gallery
    * omit it, so the action is absent there. */
@@ -8835,7 +8939,6 @@ function AgentChatTurnRow({
   );
   const nonTextParts = turn.parts.filter((part) => part.type !== "text");
   const copyText = copyableTextForTurn(turn);
-  const userPromptText = turn.role === "user" ? copyText : "";
 
   async function copyTurn() {
     if (!copyText) return;
@@ -8868,42 +8971,57 @@ function AgentChatTurnRow({
     />
   ) : null;
   const copyAction = copyText ? (
-    <button
-      type="button"
-      className="agent-turn-action"
-      aria-label={copied ? "Copied message" : "Copy message"}
-      title={copied ? "Copied" : "Copy message"}
-      data-copied={copied ? "true" : undefined}
-      onClick={() => void copyTurn()}
+    <HoverTip
+      compact
+      width={104}
+      delay={TURN_ACTION_TIP_DELAY_MS}
+      tip={copied ? "Copied" : "Copy message"}
+      className="agent-turn-action-tip"
     >
-      {copied ? (
-        <IconCheckmark1Small size={13} aria-hidden />
-      ) : (
-        <IconClipboard size={13} aria-hidden />
-      )}
-      <span>{copied ? "Copied" : "Copy"}</span>
-    </button>
-  ) : null;
-  const editAction =
-    turn.role === "user" && !turn.isScheduledRun && userPromptText && onEditUserPrompt ? (
       <button
         type="button"
         className="agent-turn-action"
-        aria-label="Edit message"
-        title="Edit message"
-        onClick={() => onEditUserPrompt(userPromptText)}
+        aria-label={copied ? "Copied message" : "Copy message"}
+        data-copied={copied ? "true" : undefined}
+        onClick={() => void copyTurn()}
       >
-        <IconPencilLine size={13} aria-hidden />
-        <span>Edit</span>
+        {copied ? (
+          // Medium checkmark: the small variant reads too slight as the only
+          // confirmation left now that the label is gone.
+          <IconCheckmark1Medium size={14} aria-hidden />
+        ) : (
+          <IconClipboard size={14} aria-hidden />
+        )}
       </button>
-    ) : null;
+    </HoverTip>
+  ) : null;
+  // Timestamp for the row. relativeDate returns "" for an unparseable value, so
+  // we only render the <time> when there's a real date to show.
+  const timestampLabel = relativeDate(turn.createdAt);
+  const timestampAction = timestampLabel ? (
+    <HoverTip
+      compact
+      width={200}
+      delay={TURN_ACTION_TIP_DELAY_MS}
+      tip={new Date(turn.createdAt).toLocaleString()}
+      className="agent-turn-action-tip"
+    >
+      <time className="agent-turn-timestamp" dateTime={turn.createdAt}>
+        {timestampLabel}
+      </time>
+    </HoverTip>
+  ) : null;
   const turnActions =
-    copyAction || editAction || branchAction ? (
+    copyAction || branchAction || timestampAction ? (
       <div className="agent-turn-actions">
         <div className="agent-turn-actions-inner">
+          {/* The timestamp sits on the outer/far side of the row: before the
+           * icons on right-aligned user turns, after them on left-aligned
+           * assistant turns, so the icons always stay nearest the message. */}
+          {turn.role === "user" ? timestampAction : null}
           {copyAction}
-          {editAction}
           {branchAction}
+          {turn.role === "user" ? null : timestampAction}
         </div>
       </div>
     ) : null;
@@ -9841,19 +9959,25 @@ export function BranchFromHereAction({
   const branchable = isBranchableMessageId(messageId);
   const disabled = submitting || !branchable;
   return (
-    <button
-      type="button"
-      className="agent-turn-action"
+    <HoverTip
+      compact
+      width={branchable ? 136 : 216}
+      delay={TURN_ACTION_TIP_DELAY_MS}
       // The disabled reason is honest, not silent: a synthetic/in-flight turn
       // has no persisted id Hermes can fork from yet.
-      title={branchable ? "Branch from here" : "Branching is available once the message is saved"}
-      aria-label="Branch from here"
-      disabled={disabled}
-      onClick={() => onBranch(messageId, sessionId)}
+      tip={branchable ? "Branch from here" : "Branching is available once the message is saved"}
+      className="agent-turn-action-tip"
     >
-      <IconBranchSimple size={13} aria-hidden />
-      <span>Branch from here</span>
-    </button>
+      <button
+        type="button"
+        className="agent-turn-action"
+        aria-label="Branch from here"
+        disabled={disabled}
+        onClick={() => onBranch(messageId, sessionId)}
+      >
+        <IconBranchSimple size={14} aria-hidden />
+      </button>
+    </HoverTip>
   );
 }
 

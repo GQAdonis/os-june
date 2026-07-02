@@ -3095,7 +3095,7 @@ describe("AgentWorkspace", () => {
     }
   });
 
-  it("prefills a user prompt for editing and resubmits the revision", async () => {
+  it("keeps turn actions inside the message row so hover reveal cannot move the transcript", async () => {
     mocks.listHermesSessionMessages.mockResolvedValue([
       {
         id: "u1",
@@ -3110,6 +3110,74 @@ describe("AgentWorkspace", () => {
         timestamp: "2026-06-12T10:00:05Z",
       },
     ]);
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    const userTurn = (await screen.findByText("Draft the launch plan")).closest("article");
+    const assistantTurn = (await screen.findByText("Here is the launch plan.")).closest("article");
+
+    // Both action rows are always-mounted DESCENDANTS of their message
+    // article — never flow siblings in the timeline column that could open
+    // the inter-turn gap. Out-of-flow positioning (absolute at 100% block
+    // offset, opacity-only reveal) is the CSS contract pinned in
+    // agent-turn-actions-css.test.ts; together the two tests guarantee the
+    // reveal cannot change transcript spacing.
+    for (const turn of [userTurn, assistantTurn]) {
+      expect(turn).not.toBeNull();
+      expect((turn as HTMLElement).querySelector(".agent-turn-actions")).not.toBeNull();
+    }
+
+    // The reveal itself is pure CSS (:hover flips opacity/pointer-events), so
+    // hovering must not mutate the transcript DOM at all — there is no React
+    // path that could insert or resize anything between messages.
+    const timeline = (userTurn as HTMLElement).parentElement as HTMLElement;
+    const observer = new MutationObserver(() => {});
+    observer.observe(timeline, {
+      attributes: true,
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    fireEvent.mouseOver(userTurn as HTMLElement);
+    fireEvent.mouseOver(assistantTurn as HTMLElement);
+    const mutations = observer.takeRecords();
+    observer.disconnect();
+    expect(mutations).toEqual([]);
+  });
+
+  it("resumes a torn-down runtime and retries when branching answers session not found", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "Draft the launch plan",
+        timestamp: "2026-06-12T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "Here is the launch plan.",
+        timestamp: "2026-06-12T10:00:05Z",
+      },
+    ]);
+    const branchTargets: string[] = [];
+    mocks.gatewayRequest.mockImplementation((method: string, params?: { session_id?: string }) => {
+      if (method === "session.branch") {
+        branchTargets.push(params?.session_id ?? "");
+        // session.branch is keyed by the LIVE runtime id: the stored id the
+        // turn carries 404s once its runtime is gone.
+        if (params?.session_id !== "runtime-fresh") {
+          return Promise.reject(
+            new Error('Hermes API returned 404 Not Found: {"detail":"Session not found"}'),
+          );
+        }
+        return Promise.resolve({ new_session_id: "session-fork" });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-fresh" });
+      }
+      return Promise.resolve({});
+    });
     const user = userEvent.setup();
 
     render(<AgentWorkspace initialSession={existingSession} />);
@@ -3118,24 +3186,18 @@ describe("AgentWorkspace", () => {
     expect(userTurn).not.toBeNull();
     await user.click(
       within(userTurn as HTMLElement).getByRole("button", {
-        name: "Edit message",
+        name: "Branch from here",
       }),
     );
 
-    const composer = screen.getByRole("textbox");
-    expect(composer).toHaveTextContent("Draft the launch plan");
-    await user.type(composer, " for sales");
-
-    const send = screen.getByRole("button", { name: "Send message" });
-    await waitFor(() => expect(send).not.toBeDisabled());
-    await user.click(send);
-
-    await waitFor(() =>
-      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
-        session_id: "runtime-session-1",
-        text: "Draft the launch plan for sales",
-      }),
-    );
+    // Stored id first (no cached runtime), then resume, then the retry lands.
+    await waitFor(() => expect(branchTargets).toEqual(["session-1", "runtime-fresh"]));
+    expect(mocks.gatewayRequest).toHaveBeenCalledWith("session.resume", {
+      session_id: "session-1",
+      cols: 96,
+    });
+    // The fork opened instead of surfacing the raw 404.
+    expect(await screen.findByText(/Branched from/)).toBeInTheDocument();
   });
 
   it("repairs gateway-glued contractions in assistant prose but not code or user text", async () => {
