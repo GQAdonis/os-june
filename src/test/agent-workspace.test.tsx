@@ -6865,6 +6865,32 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText(/Your report was sent to the June team/)).toBeInTheDocument();
   });
 
+  it("confirms a no-session Hermes 5xx bug report after sending (JUN-167)", async () => {
+    const user = userEvent.setup();
+    mocks.submitIssueReport.mockResolvedValue({ received: true });
+    mocks.listHermesSessions.mockRejectedValue(
+      new Error("Hermes API returned 500: Internal Server Error"),
+    );
+
+    render(<AgentWorkspace />);
+    expect(
+      await screen.findByText("June ran into a problem with that request."),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Send bug report" }));
+
+    await waitFor(() =>
+      expect(mocks.submitIssueReport).toHaveBeenCalledWith({
+        category: "bug",
+        description: expect.stringContaining("Hermes API returned 500: Internal Server Error"),
+        agentDiagnosis: undefined,
+        attachmentNames: [],
+        attachmentPaths: [],
+      }),
+    );
+    expect(await screen.findByText(/Your report was sent to the June team/)).toBeInTheDocument();
+  });
+
   it("re-fetches the transcript when Try again is clicked on a Hermes 5xx banner (JUN-167)", async () => {
     const user = userEvent.setup();
     mocks.listHermesSessionMessages.mockRejectedValue(

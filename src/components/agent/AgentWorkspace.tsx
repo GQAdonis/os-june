@@ -778,7 +778,7 @@ type AgentWorkspaceErrorOptions = {
 
 type AgentWorkspaceNotice = {
   message: string;
-  sessionId: string;
+  sessionId: string | null;
 };
 
 type AgentDeleteSessionDetail = {
@@ -921,6 +921,8 @@ const REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY = "june:agent:reviewable-issue-report
 const ISSUE_REPORT_DELIVERY_SETTLED_EVENT = "june-agent-issue-report-delivery-settled";
 const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
   "june-agent-issue-report-follow-up-submit-failed";
+const ISSUE_REPORT_SENT_MESSAGE =
+  "Your report was sent to the June team. Thank you for helping improve June.";
 const ISSUE_REPORT_DIAGNOSIS_REFRESH_TIMEOUT_MS = 1500;
 const ISSUE_REPORT_DIAGNOSIS_BOUNDARY_SKEW_MS = 1500;
 const agentComposerDrafts = new Map<string, ComposerDraftSnapshot>();
@@ -2196,7 +2198,7 @@ export function AgentWorkspace({
     visibleError != null &&
     (GATEWAY_CONNECTION_ERROR.test(visibleError) || visibleError === HERMES_SERVER_ERROR_MESSAGE);
   const visibleIssueReportNotice =
-    issueReportNotice && issueReportNotice.sessionId === selectedHermesSessionId
+    issueReportNotice && issueReportNotice.sessionId === (selectedHermesSessionId ?? null)
       ? issueReportNotice.message
       : null;
   // The model-switch notice (feature 10) shows on the session it acted on; a
@@ -3968,7 +3970,7 @@ export function AgentWorkspace({
       clearErrorForSession(sessionId);
       if (selectedHermesSessionIdRef.current === sessionId) {
         setIssueReportNotice({
-          message: "Your report was sent to the June team. Thank you for helping improve June.",
+          message: ISSUE_REPORT_SENT_MESSAGE,
           sessionId,
         });
       }
@@ -4022,12 +4024,16 @@ export function AgentWorkspace({
         clearErrorForSession(sessionId);
         if (selectedHermesSessionIdRef.current === sessionId) {
           setIssueReportNotice({
-            message: "Your report was sent to the June team. Thank you for helping improve June.",
+            message: ISSUE_REPORT_SENT_MESSAGE,
             sessionId,
           });
         }
       } else {
         setError(null);
+        setIssueReportNotice({
+          message: ISSUE_REPORT_SENT_MESSAGE,
+          sessionId: null,
+        });
       }
     } catch (err) {
       setError(`The issue report could not be sent. ${messageFromError(err)}`, {
