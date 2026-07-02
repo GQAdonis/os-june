@@ -347,7 +347,9 @@ impl DictationShortcutSetting {
         if is_modifier_only_input(&self.code, &self.modifiers) {
             return DictationShortcutSetting::modifier_only(self.modifiers);
         }
-        let Some(key_code) = key_code_for_code(&self.code) else {
+        let Some(key_code) =
+            shortcut_key_code_for_platform(&self.code, cfg!(target_os = "windows"))
+        else {
             return default_shortcut_for_kind(kind);
         };
         if !self.modifiers.has_any() {
@@ -544,12 +546,13 @@ impl DictationShortcutInput {
             return Ok(DictationShortcutSetting::modifier_only(self.modifiers));
         }
 
-        let key_code = key_code_for_code(&self.code).ok_or_else(|| {
-            AppError::new(
-                "dictation_shortcut_unsupported",
-                "Shortcut must include a supported non-modifier key.",
-            )
-        })?;
+        let key_code = shortcut_key_code_for_platform(&self.code, cfg!(target_os = "windows"))
+            .ok_or_else(|| {
+                AppError::new(
+                    "dictation_shortcut_unsupported",
+                    "Shortcut must include a supported non-modifier key.",
+                )
+            })?;
 
         if !self.modifiers.has_any() {
             return Err(AppError::new(
@@ -3647,6 +3650,25 @@ fn set_hotkey_status(state: &HotkeyStatus, event: serde_json::Value) {
     }
 }
 
+/// Resolve a shortcut's non-modifier key for the current platform. The shared
+/// table below is the macOS Carbon key-code map and predates Windows support,
+/// so it lacks keys the Windows hook can arm (e.g. F2-F12). On Windows, any
+/// key the hook's own mapping knows is accepted as a fallback, storing the
+/// Windows virtual key in `key_code` (the hook matches by `code`, so the
+/// numeric value is informational there). On macOS the fallback never runs,
+/// keeping validation byte-for-byte unchanged. Takes `windows` as a parameter
+/// (call sites pass `cfg!(target_os = "windows")`) so both branches are
+/// unit-testable on any host.
+fn shortcut_key_code_for_platform(code: &str, windows: bool) -> Option<u32> {
+    if let Some(key_code) = key_code_for_code(code) {
+        return Some(key_code);
+    }
+    if windows {
+        return crate::dictation_windows::vk_for_code(code).map(u32::from);
+    }
+    None
+}
+
 pub fn key_code_for_code(code: &str) -> Option<u32> {
     Some(match code {
         "KeyA" => 0x00,
@@ -4040,6 +4062,68 @@ mod tests {
         assert_eq!(shortcut.code, "KeyT");
         assert!(shortcut.modifiers.control);
         assert_eq!(shortcut.press_count, 1);
+    }
+
+    #[test]
+    fn windows_key_resolution_accepts_hook_armable_f_keys() {
+        // The shared table predates Windows support and lacks F2-F12, but the
+        // Windows hook can arm them (capture emits these codes), so the save
+        // path must resolve them on Windows.
+        assert_eq!(shortcut_key_code_for_platform("F7", true), Some(0x76));
+        assert_eq!(shortcut_key_code_for_platform("F2", true), Some(0x71));
+        // Keys in the shared table keep the shared value on Windows too.
+        assert_eq!(shortcut_key_code_for_platform("KeyD", true), Some(0x02));
+    }
+
+    #[test]
+    fn macos_key_resolution_is_unchanged() {
+        // macOS resolution must stay byte-for-byte what the shared table says:
+        // F1 resolves, F2-F12 stay rejected there today.
+        assert_eq!(shortcut_key_code_for_platform("F1", false), Some(0x7a));
+        assert_eq!(shortcut_key_code_for_platform("F7", false), None);
+        assert_eq!(shortcut_key_code_for_platform("KeyD", false), Some(0x02));
+    }
+
+    /// Pins today's macOS save behavior for an F-key chord: the shared table
+    /// has no F7, so into_setting rejects it (this test compiles the macOS
+    /// resolution path).
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn shortcut_input_f7_chord_is_still_rejected_on_macos() {
+        let error = DictationShortcutInput {
+            code: "F7".to_string(),
+            modifiers: DictationShortcutModifiers {
+                control: true,
+                option: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Ctrl+Opt+F7".to_string(),
+            press_count: Some(1),
+        }
+        .into_setting()
+        .expect_err("F7 has no macOS key code in the shared table");
+        assert_eq!(error.code, "dictation_shortcut_unsupported");
+    }
+
+    /// On Windows the same chord saves: capture emits F-key codes and the
+    /// hook can arm them, so into_setting must accept what capture produces.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn shortcut_input_f7_chord_saves_on_windows() {
+        let shortcut = DictationShortcutInput {
+            code: "F7".to_string(),
+            modifiers: DictationShortcutModifiers {
+                control: true,
+                option: true,
+                ..DictationShortcutModifiers::default()
+            },
+            label: "Ctrl+Alt+F7".to_string(),
+            press_count: Some(1),
+        }
+        .into_setting()
+        .expect("F7 chord must save on Windows");
+        assert_eq!(shortcut.code, "F7");
+        assert_eq!(shortcut.key_code, 0x76);
     }
 
     #[test]

@@ -440,6 +440,30 @@ describe("OnboardingFlow", () => {
     }
   });
 
+  it("does not promise dictation in the Linux welcome copy", async () => {
+    const restoreNavigator = stubNavigatorPlatform(
+      "Linux x86_64",
+      "Mozilla/5.0 (X11; Linux x86_64)",
+    );
+    try {
+      render(<OnboardingFlow {...flowProps({ account: signedOutAccount })} />);
+
+      await screen.findByRole("heading", { name: "Welcome to June" });
+      expect(screen.getByText("Desktop notes for your work")).toBeInTheDocument();
+      expect(screen.getByText("Meeting notes from your mic")).toBeInTheDocument();
+      expect(screen.getByText("Private by default")).toBeInTheDocument();
+      // Dictation does not ship on Linux, so the welcome must not promise it.
+      expect(screen.queryByText("Speak instead of type")).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/June turns your voice into polished writing/),
+      ).not.toBeInTheDocument();
+      expect(screen.queryByText("Effortlessly capture meetings")).not.toBeInTheDocument();
+      expect(screen.queryByText("Chat and work with June")).not.toBeInTheDocument();
+    } finally {
+      restoreNavigator();
+    }
+  });
+
   it("does not ask unsubscribed users for a card during onboarding", async () => {
     const user = userEvent.setup();
     render(<OnboardingFlow {...flowProps({ account: unsubscribedAccount })} />);
