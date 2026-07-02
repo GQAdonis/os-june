@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resetSystemAudioSupportForTests } from "../lib/use-system-audio-support";
 import { AppSettings } from "../components/settings/AppSettings";
 import type { DictationSettingsDto } from "../lib/tauri";
 import { APP_COMMIT_HASH, APP_VERSION } from "../app/build-info";
@@ -215,6 +216,9 @@ function stubNavigatorPlatform(platform: string, userAgent: string) {
 
 describe("AppSettings", () => {
   beforeEach(() => {
+    // The remembered system-audio support is module-scoped on purpose (it must
+    // survive remounts in the app); tests reset it so cases stay independent.
+    resetSystemAudioSupportForTests();
     vi.clearAllMocks();
     localStorage.clear();
     localState = { baseUrl: "", modelId: "", apiKey: "", enabled: false };

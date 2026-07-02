@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
+import { resetSystemAudioSupportForTests } from "../lib/use-system-audio-support";
 import type {
   AccountStatus,
   BootstrapResponse,
@@ -201,6 +202,7 @@ const micOnlyReadiness: RecordingSourceReadinessDto = {
 
 describe("system audio round trip on Windows", () => {
   beforeEach(() => {
+    resetSystemAudioSupportForTests();
     vi.clearAllMocks();
     mocks.listeners.clear();
 

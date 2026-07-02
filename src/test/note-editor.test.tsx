@@ -1,8 +1,9 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
 import type { NoteDto, RecoverableRecordingDto } from "../lib/tauri";
+import { resetSystemAudioSupportForTests } from "../lib/use-system-audio-support";
 
 const now = "2026-05-19T10:00:00Z";
 
@@ -82,6 +83,12 @@ function stubNavigatorPlatform(platform: string, userAgent: string) {
 }
 
 describe("NoteEditor", () => {
+  beforeEach(() => {
+    // The remembered system-audio support is module-scoped on purpose (it must
+    // survive remounts in the app); tests reset it so cases stay independent.
+    resetSystemAudioSupportForTests();
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
@@ -898,6 +905,73 @@ describe("NoteEditor", () => {
       // And the user can turn system audio back on.
       await user.click(systemSwitch);
       expect(onSourceModeChange).toHaveBeenCalledWith("microphonePlusSystem");
+    } finally {
+      restoreNavigator();
+    }
+  });
+
+  it("keeps recording options on Windows across a remount after a mic-only check", async () => {
+    // Support is remembered at module scope, not per component instance: a
+    // NoteEditor mounted after a mic-only preflight overwrote sourceReadiness
+    // (e.g. the user navigated away and back) must still show the options, or
+    // navigation would reintroduce the lost-toggle bug.
+    const user = userEvent.setup();
+    const restoreNavigator = stubNavigatorPlatform(
+      "Win32",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    );
+    const microphoneSource = {
+      source: "microphone" as const,
+      required: true,
+      ready: true,
+      permissionState: "granted" as const,
+      deviceAvailable: true,
+      captureAvailable: true,
+    };
+    try {
+      // First mount sees a readiness result that covers the system source.
+      const { unmount } = render(
+        <NoteEditor
+          {...props}
+          note={note()}
+          sourceMode="microphonePlusSystem"
+          sourceReadiness={{
+            sourceMode: "microphonePlusSystem",
+            ready: true,
+            checkedAt: now,
+            sources: [
+              microphoneSource,
+              {
+                source: "system",
+                required: true,
+                ready: true,
+                permissionState: "granted",
+                deviceAvailable: true,
+                captureAvailable: true,
+              },
+            ],
+          }}
+        />,
+      );
+      unmount();
+
+      // A fresh instance mounts while the stored readiness is mic-only.
+      render(
+        <NoteEditor
+          {...props}
+          note={note()}
+          sourceMode="microphoneOnly"
+          sourceReadiness={{
+            sourceMode: "microphoneOnly",
+            ready: true,
+            checkedAt: now,
+            sources: [microphoneSource],
+          }}
+        />,
+      );
+
+      await user.click(screen.getByRole("button", { name: "Recording options" }));
+      expect(screen.getByRole("switch", { name: "Capture system audio" })).toBeEnabled();
     } finally {
       restoreNavigator();
     }
