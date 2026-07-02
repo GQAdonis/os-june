@@ -37,14 +37,15 @@ import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal
 import { IconFiles } from "central-icons/IconFiles";
 import { IconFileSparkle } from "central-icons/IconFileSparkle";
 import { IconFileText } from "central-icons/IconFileText";
+import { IconEmail1Sparkle } from "central-icons/IconEmail1Sparkle";
 import { IconGauge } from "central-icons/IconGauge";
 import { IconGhost2 } from "central-icons/IconGhost2";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
-import { IconHistory } from "central-icons/IconHistory";
-import { IconListBullets } from "central-icons/IconListBullets";
 import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
+import { IconNotes } from "central-icons/IconNotes";
+import { IconPageTextSearch } from "central-icons/IconPageTextSearch";
 import { IconPencil } from "central-icons/IconPencil";
 import { IconPencilLine } from "central-icons/IconPencilLine";
 import { IconPieChart1 } from "central-icons/IconPieChart1";
@@ -535,9 +536,11 @@ type AgentShortcut = {
  * Suggestion pool for the new-session hero. Shown HERO_SHORTCUT_COUNT at a
  * time and reshuffled on each visit, so the entry point stays a handful of
  * fresh ideas instead of a wall of ten cards. Pool order matters: the leading
- * window is the curated first-impression mix (a ready-to-send prompt, a
- * placeholder prefill, an attach flow, and a health check) that shows when
- * the shuffle is identity (e.g. in tests with Math.random mocked to 0).
+ * window is the curated first-impression mix (a note-native ready-to-send
+ * prompt, a placeholder prefill, an attach flow) that shows when the shuffle
+ * is identity (e.g. in tests with Math.random mocked to 0). At least one
+ * chip in that window should be something only June can do — recapping your
+ * own notes — not a generic computer chore.
  *
  * Every suggestion must succeed inside the default write-jail: reads are
  * broad, but writes land only in the agent workspace. Don't add shortcuts
@@ -547,12 +550,12 @@ type AgentShortcut = {
  */
 const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
-    key: "recent-files",
-    icon: <IconHistory size={18} />,
-    title: "Catch up on recent files",
-    description: "A quick rundown of what's new across your folders.",
+    key: "recap-notes",
+    icon: <IconNotes size={18} />,
+    title: "Recap my notes",
+    description: "What happened, what got decided, what's still open.",
     prompt:
-      "Look through my Desktop, Documents, and Downloads folders for files added or changed in the last week and give me a quick rundown of what's new, grouped by what they seem to be for. Don't move or change anything.",
+      "Look through my recent meeting notes and give me a quick recap: what happened, what got decided, and any action items still open. Keep it brief.",
     action: "prefill",
   },
   {
@@ -560,7 +563,8 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     icon: <IconDeepSearch size={18} />,
     title: "Research a topic",
     description: "Get a short, sourced write-up on anything.",
-    prompt: "Research <topic> and write a short summary of what you find, with sources.",
+    prompt:
+      "Research <topic> and write a short summary (a few paragraphs) of what you find, with sources.",
     action: "prefill",
   },
   {
@@ -574,10 +578,19 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
   {
     key: "health-check",
     icon: <IconHeartBeat size={18} />,
-    title: "Check my computer's health",
+    title: "Check my Mac's health",
     description: "Disk, memory, and login items that need attention.",
     prompt:
       "Give my computer a quick health check: free disk space, memory pressure, login items, and anything else worth flagging. Summarize what looks fine and what needs attention.",
+    action: "prefill",
+  },
+  {
+    key: "draft-follow-up",
+    icon: <IconEmail1Sparkle size={18} />,
+    title: "Draft a follow-up",
+    description: "Turn your latest meeting note into a follow-up message.",
+    prompt:
+      "From my most recent meeting note, draft a short follow-up message covering the decisions and next steps.",
     action: "prefill",
   },
   {
@@ -585,7 +598,8 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     icon: <IconMagnifyingGlass size={18} />,
     title: "Find a file",
     description: "Describe what you remember; June tracks it down.",
-    prompt: "Find <a file I half-remember> on my computer and tell me where it is.",
+    prompt:
+      "Find <a file I half-remember> on my computer and tell me where it is. If several candidates match, list them with paths and dates.",
     action: "prefill",
   },
   {
@@ -598,20 +612,12 @@ const AGENT_SHORTCUTS: AgentShortcut[] = [
     action: "attach",
   },
   {
-    key: "extract-text",
-    icon: <IconFileText size={18} />,
-    title: "Extract text from a file",
-    description: "Pull clean text out of a PDF, image, or scan.",
-    prompt: "Extract all the text from the attached file and clean it up into tidy Markdown.",
-    action: "attach",
-  },
-  {
-    key: "plan-project",
-    icon: <IconListBullets size={18} />,
-    title: "Plan a project",
-    description: "Turn a vague goal into concrete first steps.",
+    key: "search-notes",
+    icon: <IconPageTextSearch size={18} />,
+    title: "Search my notes",
+    description: "Find where something came up across your meetings.",
     prompt:
-      "Help me plan <a project>: break it into concrete steps, flag the risks, and suggest what to tackle first.",
+      "Search my notes and transcripts for <what I'm trying to remember> and show me where it came up.",
     action: "prefill",
   },
 ];

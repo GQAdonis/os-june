@@ -6185,18 +6185,18 @@ describe("AgentWorkspace", () => {
       JSON.stringify({ createdAt: Date.now() }),
     );
     // rand() of 0 keeps the rotating hero suggestions in curated pool order,
-    // so the leading window (incl. "Catch up on recent files") is what renders.
+    // so the leading window (incl. "Recap my notes") is what renders.
     const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0);
     try {
       render(<AgentWorkspace />);
       const user = userEvent.setup();
 
-      await user.click(await screen.findByRole("button", { name: /Catch up on recent files/ }));
+      await user.click(await screen.findByRole("button", { name: /Recap my notes/ }));
 
       // The click only stages the prompt: nothing may be submitted (and no
       // tokens spent) until the person sends it themselves.
       await waitFor(() =>
-        expect(screen.getByRole("textbox")).toHaveTextContent(/changed in the last week/),
+        expect(screen.getByRole("textbox")).toHaveTextContent(/action items still open/),
       );
       expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
 
@@ -6206,7 +6206,7 @@ describe("AgentWorkspace", () => {
         expect(mocks.gatewayRequest).toHaveBeenCalledWith(
           "prompt.submit",
           expect.objectContaining({
-            text: expect.stringContaining("changed in the last week"),
+            text: expect.stringContaining("action items still open"),
           }),
         ),
       );
