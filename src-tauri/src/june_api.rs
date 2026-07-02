@@ -126,6 +126,9 @@ pub struct DictateTranscribeRequest {
 pub struct DictateCleanupRequestParams {
     pub text: String,
     pub dictionary_context: Option<String>,
+    /// Where the cleaned text will be inserted ("email"); lays the output
+    /// out for that surface. None means no special layout.
+    pub app_context: Option<String>,
     pub style: String,
     pub session_id: String,
     pub utterance_id: String,
@@ -232,6 +235,8 @@ struct DictateCleanupBody {
     utterance_id: String,
     text: String,
     dictionary_context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_context: Option<String>,
     style: String,
     model: String,
 }
@@ -359,6 +364,7 @@ pub async fn cleanup_text(params: DictateCleanupRequestParams) -> Result<String,
         utterance_id: params.utterance_id,
         text: params.text,
         dictionary_context: params.dictionary_context,
+        app_context: params.app_context,
         style: params.style,
         model,
     };
