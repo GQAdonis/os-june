@@ -3074,6 +3074,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "window-vibrancy",
+ "windows 0.61.3",
  "zeroize",
 ]
 
