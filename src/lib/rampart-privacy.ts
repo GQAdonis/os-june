@@ -1,5 +1,3 @@
-import type { ChatGuard } from "@nationaldesignstudio/rampart";
-
 export const AGENT_PRIVACY_GUARD_MODE_KEY = "june:agent:privacyGuardMode";
 export const AGENT_PRIVACY_GUARD_MODE_CHANGED_EVENT = "june:agent:privacy-guard-mode-changed";
 
@@ -10,7 +8,10 @@ export type AgentPrivacyGuardModeChangedDetail = {
   mode: AgentPrivacyGuardMode;
 };
 
-type AgentPrivacyGuard = Pick<ChatGuard, "protect" | "reveal">;
+type AgentPrivacyGuard = {
+  protect: (text: string) => Promise<{ text: string; placeholders: readonly string[] }>;
+  reveal: (text: string) => string;
+};
 
 type LoadedAgentPrivacyGuard = {
   guard: AgentPrivacyGuard;
@@ -172,9 +173,13 @@ export class AgentPrivacyGuardUnavailableError extends Error {
 async function createRampartGuard(
   mode: AgentPrivacyGuardActiveMode,
 ): Promise<LoadedAgentPrivacyGuard> {
-  const { createGuard } = await import("@nationaldesignstudio/rampart");
+  const { SessionEntityTable, detectHeuristics } = await import("@nationaldesignstudio/rampart");
+  const table = new SessionEntityTable();
   return {
-    guard: await createGuard({ heuristicsOnly: true }),
+    guard: {
+      protect: async (text) => table.scrub(text, detectHeuristics(text)),
+      reveal: (text) => table.rehydrate(text),
+    },
     mode,
   };
 }

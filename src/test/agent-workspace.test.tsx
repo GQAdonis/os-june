@@ -169,46 +169,78 @@ vi.mock("../lib/hermes-gateway", async (importOriginal) => ({
   },
 }));
 
-vi.mock("@nationaldesignstudio/rampart", () => ({
-  createGuard: vi.fn(async () => {
-    const emails = new Map<string, string>();
-    const ssns = new Map<string, string>();
-    return {
-      protect: vi.fn(async (text: string) => {
-        const placeholders = new Set<string>();
-        let next = text.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, (email) => {
-          let placeholder = emails.get(email);
-          if (!placeholder) {
-            placeholder = `[EMAIL_${emails.size + 1}]`;
-            emails.set(email, placeholder);
-          }
-          placeholders.add(placeholder);
-          return placeholder;
-        });
-        next = next.replace(/\b\d{3}-\d{2}-\d{4}\b/g, (ssn) => {
-          let placeholder = ssns.get(ssn);
-          if (!placeholder) {
-            placeholder = `[SSN_${ssns.size + 1}]`;
-            ssns.set(ssn, placeholder);
-          }
-          placeholders.add(placeholder);
-          return placeholder;
-        });
-        return { text: next, placeholders: [...placeholders] };
-      }),
-      reveal: vi.fn((text: string) => {
-        let next = text;
-        for (const [email, placeholder] of emails) {
-          next = next.replaceAll(placeholder, email);
-        }
-        for (const [ssn, placeholder] of ssns) {
-          next = next.replaceAll(placeholder, ssn);
-        }
-        return next;
-      }),
-    };
-  }),
-}));
+vi.mock("@nationaldesignstudio/rampart", () => {
+  class SessionEntityTable {
+    private readonly forward = new Map<string, string>();
+    private readonly reverse = new Map<string, string>();
+    private readonly counters = new Map<string, number>();
+
+    scrub(
+      raw: string,
+      spans: ReadonlyArray<{ start: number; end: number; label: string; text: string }>,
+    ) {
+      const placeholders: string[] = [];
+      let text = raw;
+      for (const span of [...spans].sort((a, b) => b.start - a.start)) {
+        const token = this.placeholderFor(span.label, span.text);
+        placeholders.push(token);
+        text = `${text.slice(0, span.start)}${token}${text.slice(span.end)}`;
+      }
+      return { text, placeholders: placeholders.reverse() };
+    }
+
+    rehydrate(text: string) {
+      return text.replace(/\[[A-Z][A-Z_]*_\d+\]/g, (token) => this.reverse.get(token) ?? token);
+    }
+
+    private placeholderFor(label: string, value: string) {
+      const key = `${label}:${value.toLowerCase().replace(/\s+/g, " ").trim()}`;
+      const existing = this.forward.get(key);
+      if (existing) return existing;
+      const next = (this.counters.get(label) ?? 0) + 1;
+      this.counters.set(label, next);
+      const token = `[${label}_${next}]`;
+      this.forward.set(key, token);
+      this.reverse.set(token, value);
+      return token;
+    }
+  }
+
+  function detectHeuristics(text: string) {
+    const spans: Array<{ start: number; end: number; label: string; text: string }> = [];
+    for (const match of text.matchAll(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi)) {
+      if (match.index === undefined) continue;
+      spans.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        label: "EMAIL",
+        text: match[0],
+      });
+    }
+    for (const match of text.matchAll(/\b\d{3}-\d{2}-\d{4}\b/g)) {
+      if (match.index === undefined) continue;
+      spans.push({
+        start: match.index,
+        end: match.index + match[0].length,
+        label: "SSN",
+        text: match[0],
+      });
+    }
+    return spans;
+  }
+
+  return {
+    SessionEntityTable,
+    detectHeuristics,
+    createGuard: vi.fn(async () => {
+      const table = new SessionEntityTable();
+      return {
+        protect: vi.fn(async (text: string) => table.scrub(text, detectHeuristics(text))),
+        reveal: vi.fn((text: string) => table.rehydrate(text)),
+      };
+    }),
+  };
+});
 
 const existingTask = {
   id: "task-1",
