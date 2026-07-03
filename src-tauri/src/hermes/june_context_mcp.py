@@ -18,10 +18,11 @@ from typing import Any
 
 
 PROTOCOL_VERSION = "2025-03-26"
-SERVER_INFO = {"name": "june-context", "version": "0.1.0"}
+SERVER_INFO = {"name": "june-context", "version": "0.2.0"}
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 8
 SNIPPET_CHARS = 900
+FULL_TEXT_CHARS = 60_000
 # Keep this in sync with DICTATION_HISTORY_RETENTION_DAYS in db/repositories.rs.
 DICTATION_HISTORY_RETENTION_DAYS = 7
 
@@ -70,6 +71,32 @@ TOOLS: list[dict[str, Any]] = [
                     "default": DEFAULT_LIMIT,
                 },
             },
+        },
+    },
+    {
+        "name": "get_meeting_note",
+        "description": (
+            "Fetch one June meeting note in full by its id. Use this when a "
+            "message references a specific note (for example an `@note:<id>` "
+            "reference) or when a search result's snippet is not enough. Set "
+            "include_transcript only when the note content alone cannot answer."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "note_id": {
+                    "type": "string",
+                    "description": (
+                        "The note id, e.g. from an @note:<id> reference or a "
+                        "search_meeting_notes result."
+                    ),
+                },
+                "include_transcript": {
+                    "type": "boolean",
+                    "default": False,
+                },
+            },
+            "required": ["note_id"],
         },
     },
 ]
@@ -160,6 +187,8 @@ def call_tool(db_path: Path, request_id: Any, params: dict[str, Any]) -> dict[st
             result = search_meeting_notes(db_path, arguments)
         elif name == "search_dictation_history":
             result = search_dictation_history(db_path, arguments)
+        elif name == "get_meeting_note":
+            result = get_meeting_note(db_path, arguments)
         else:
             return error_response(request_id, -32602, f"Unknown tool: {name}")
     except Exception as exc:
@@ -267,6 +296,70 @@ def search_meeting_notes(db_path: Path, arguments: dict[str, Any]) -> dict[str, 
     return {"query": query, "count": len(items), "items": items}
 
 
+def get_meeting_note(db_path: Path, arguments: dict[str, Any]) -> dict[str, Any]:
+    note_id = str(arguments.get("note_id") or "").strip()
+    if not note_id:
+        raise ValueError("note_id is required")
+
+    if not db_path.exists():
+        return {
+            "noteId": note_id,
+            "found": False,
+            "message": "June notes database does not exist yet.",
+        }
+
+    sql = """
+        SELECT
+            n.id,
+            n.title,
+            n.generated_content,
+            n.edited_content,
+            n.processing_status,
+            n.created_at,
+            n.updated_at,
+            (
+                SELECT group_concat(t.text, char(10))
+                FROM transcripts t
+                WHERE t.note_id = n.id
+                  AND trim(coalesce(t.text, '')) != ''
+            ) AS transcript_text
+        FROM notes n
+        WHERE n.id = ?
+        LIMIT 1
+    """
+
+    with connect_readonly(db_path) as conn:
+        row = conn.execute(sql, [note_id]).fetchone()
+
+    if row is None:
+        return {
+            "noteId": note_id,
+            "found": False,
+            "message": "No note with this id.",
+        }
+
+    note_text = first_text(row["edited_content"], row["generated_content"])
+    note_content, note_content_truncated = capped_text(note_text)
+    transcript_text = row["transcript_text"] or ""
+    transcript, transcript_truncated = capped_text(transcript_text)
+
+    result = {
+        "noteId": row["id"],
+        "found": True,
+        "title": row["title"] or "Untitled note",
+        "processingStatus": row["processing_status"],
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
+        "noteContent": note_content,
+        "noteContentTruncated": note_content_truncated,
+        "transcriptChars": len(transcript_text),
+    }
+    if arguments.get("include_transcript"):
+        result["transcript"] = transcript
+        result["transcriptTruncated"] = transcript_truncated
+    return result
+
+
 def search_dictation_history(db_path: Path, arguments: dict[str, Any]) -> dict[str, Any]:
     query = str(arguments.get("query") or "").strip()
     limit = bounded_limit(arguments.get("limit"))
@@ -345,6 +438,12 @@ def first_text(*values: str | None) -> str:
         if value and value.strip():
             return value
     return ""
+
+
+def capped_text(text: str) -> tuple[str, bool]:
+    if len(text) <= FULL_TEXT_CHARS:
+        return text, False
+    return text[:FULL_TEXT_CHARS], True
 
 
 def snippet(text: str, query: str) -> str:
