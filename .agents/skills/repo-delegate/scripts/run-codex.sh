@@ -45,10 +45,15 @@ out=${out:-$(mktemp "${TMPDIR:-/tmp}/repo-delegate-codex.XXXXXX")}
 # are the delegate's job; everything else in git is off limits.
 git_state() { git -C "$1" rev-parse HEAD; git -C "$1" for-each-ref; git -C "$1" diff --cached --name-status; }
 
-# Clean index required: with pre-staged content, a delegate could restage a
-# path with different content and the name-status guard would not see it.
-git -C "$worktree" diff --cached --quiet \
-  || { echo "error: staged changes present in $worktree — commit or unstage before delegating" >&2; exit 1; }
+# Clean tracked tree required (staged or unstaged): pre-existing uncommitted
+# work could be silently clobbered by the delegate, and restaged content is
+# invisible to a name-status guard. Clean base = the post-run diff is a
+# complete record of what the delegate did.
+[ -z "$(git -C "$worktree" status --porcelain --untracked-files=no)" ] \
+  || { echo "error: uncommitted tracked changes in $worktree — commit or stash before delegating" >&2; exit 1; }
+untracked=$(git -C "$worktree" status --porcelain | grep -c '^??') || true
+[ "${untracked:-0}" -eq 0 ] \
+  || echo "warning: $untracked untracked file(s) in $worktree — the delegate could overwrite them" >&2
 
 state_before=$(git_state "$worktree")
 harness_rc=0

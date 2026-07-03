@@ -48,10 +48,15 @@ cd "$worktree"
 # are the delegate's job; everything else in git is off limits.
 git_state() { git rev-parse HEAD; git for-each-ref; git diff --cached --name-status; }
 
-# Clean index required: with pre-staged content, a delegate could restage a
-# path with different content and the name-status guard would not see it.
-git diff --cached --quiet \
-  || { echo "error: staged changes present — commit or unstage before delegating" >&2; exit 1; }
+# Clean tracked tree required (staged or unstaged): pre-existing uncommitted
+# work could be silently clobbered by the delegate, and restaged content is
+# invisible to a name-status guard. Clean base = the post-run diff is a
+# complete record of what the delegate did.
+[ -z "$(git status --porcelain --untracked-files=no)" ] \
+  || { echo "error: uncommitted tracked changes — commit or stash before delegating" >&2; exit 1; }
+untracked=$(git status --porcelain | grep -c '^??') || true
+[ "${untracked:-0}" -eq 0 ] \
+  || echo "warning: $untracked untracked file(s) — the delegate could overwrite them" >&2
 
 state_before=$(git_state)
 printf -- '--- report (%s) ---\n' "$out"

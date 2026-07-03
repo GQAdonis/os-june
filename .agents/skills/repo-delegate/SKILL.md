@@ -57,6 +57,8 @@ orchestrating model (see repo-build-pr's model orchestration rules).
 
 ## Gotchas
 
+- Delegate from a clean tracked tree (the runners enforce it) — dirty base
+  means the delegate can clobber uncommitted work without diff evidence.
 - Fresh worktrees need `pnpm install` before the gate can pass; say so in the
   brief or run it first.
 - `codex exec` is synchronous — no job babysitting. If dispatching many
