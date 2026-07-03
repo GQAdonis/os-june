@@ -24,6 +24,17 @@ Use this skill for the end-to-end implementation loop in `open-software-network/
 
 To hand this entire workflow to a *different* harness as orchestrator (e.g. dispatch a whole build to Codex from Claude Code, or vice versa), use the `repo-orchestrate` skill instead — it wraps this workflow in a per-harness runner with a stop-before-publish default.
 
+## Skill map
+
+This is the repo's entry-point skill; it orchestrates and defers. Each fact lives in exactly one owner — load the owner at the step that needs it, never restate its commands here:
+
+- `repo-review` — pre-publish review battery: axes, per-harness runners, disposition triage, convergence loop.
+- `repo-delegate` — single-brief implementation dispatch to another harness (the building block of the cross-harness implementer mode).
+- `repo-orchestrate` — hand this whole workflow to another harness.
+- `agent-e2e-qa` — live QA process: surface decision tree, video recording/compression, os-platform upload, PASS/FAIL/BLOCKED evidence format.
+- `browser-test-tauri-fe` — browser-surface technique: fake Tauri IPC bridge, Playwright/CDP driving, screenshot suites, PR-embeddable GIFs.
+- `os-platform` / `os-task-prep` — tracker reads, task diagnosis and enrichment (intake step 3).
+
 ## Intake
 
 Treat everything after `/repo-build-pr` (or `$repo-build-pr` in Codex) as the build prompt. If the user did not use the literal command but asks to build, implement, ship, or fix something in the repo, use this skill anyway.
@@ -174,7 +185,7 @@ If a check cannot run because of local tooling, missing services, or credentials
 
 ### Live app walkthroughs
 
-Use `$agent-e2e-qa` as the default human-like validation layer whenever the change affects a user-visible workflow or would be hard to trust from code and terminal output alone. Load that skill before running the walkthrough.
+Use `$agent-e2e-qa` as the default human-like validation layer whenever the change affects a user-visible workflow or would be hard to trust from code and terminal output alone. Load that skill before running the walkthrough — it owns the surface decision tree (web preview / background browser video / native Tauri / Chrome handoff), the recording, compression, and os-platform upload pipeline, and the evidence format. For lightweight browser-only visual verification — screenshots or a PR-embeddable GIF without a full QA charter — load `$browser-test-tauri-fe` instead; it owns the technique of driving the Vite frontend in Chromium with a faked Tauri IPC bridge.
 
 Run an agent-driven walkthrough for changes that touch:
 
@@ -186,21 +197,14 @@ Run an agent-driven walkthrough for changes that touch:
 
 Skip live walkthroughs for narrow docs-only, test-only, build config, pure refactor, or low-level utility changes when no user-visible behavior is affected. Say why it was skipped in the PR validation notes.
 
-Pick the least invasive surface from `$agent-e2e-qa`: Browser or the background Playwright helper for web-reachable flows, Computer Use for native-only Tauri behavior, and Chrome only for flows that depend on the user's browser session. Do not perform live billing, enter credentials, record microphone audio, or expose private data without explicit user confirmation.
-
-For a recorded video walkthrough, default to Playwright via the bundled background helper rather than foreground screen capture:
-
-```bash
-.agents/skills/agent-e2e-qa/scripts/run_background_agent_prompt.mjs --prompt "<walkthrough goal>"
-```
-
-It drives the Vite app in headless Chromium, records Playwright video to `.tmp/qa-recordings/*.webm`, and shims only the Tauri shell calls the web surface needs, so the run does not fight the user's screen. If `playwright-core` is missing, install it outside repo dependencies with `npm install --prefix .tmp/playwright-tools playwright-core@latest`. The resulting `.webm` feeds straight into `prepare_qa_video.py` for compression and upload. Reserve Computer Use recording for native-only Tauri behavior that Playwright cannot reach.
+Pick the least invasive surface per `$agent-e2e-qa`'s decision tree. Do not perform live billing, enter credentials, record microphone audio, or expose private data without explicit user confirmation.
 
 Treat walkthrough failures as validation failures. Fix the issue, rerun the relevant deterministic checks, and rerun the live walkthrough before asking for final review. If the live surface is blocked by permissions, credentials, hardware, or unavailable services, include `BLOCKED` evidence and the remaining risk.
 
-Record, compress, upload the compressed video to os-platform, and attach the resulting remote URL to the PR when human reviewers would benefit from seeing the result, such as visual/UI changes, native interactions, agent behavior, fixed bug repros, or "the test is the demo" flows. Prefer `.agents/skills/agent-e2e-qa/scripts/prepare_qa_video.py --upload --confirm-public --comment-pr <pr-number>` after the user or task has authorized public PR sharing. Do not treat a local video path as sufficient PR evidence when video sharing was authorized; include the os-platform URL or PR comment in the validation evidence.
+What this workflow requires of the walkthrough (the commands and pipeline live in `$agent-e2e-qa`):
 
-The upload reads the os-platform API key from `june-api/.env` (`JUNE__ISSUE_REPORTS__OS_PLATFORM_API_KEY` or `OS_PLATFORM_API_KEY`), falling back to that file when the env vars are unset. Because `june-api/.env` is gitignored and absent from fresh worktrees, either copy it into the worktree (see Worktree strategy) or run `prepare_qa_video.py` with the working directory set to the main checkout while passing the worktree's raw recording path as input. If the key is still missing, the upload fails with a "set OS_PLATFORM_API_KEY" error; record that as a `BLOCKED` upload and keep the local video path in the evidence.
+- Record video when human reviewers would benefit from seeing the result (visual/UI changes, native interactions, agent behavior, fixed bug repros, "the test is the demo" flows); prefer the background browser helper over foreground screen capture so the run does not fight the user's screen.
+- When PR sharing was authorized, compress and upload the video to os-platform and put the remote URL or PR comment in the validation evidence — a local path is not sufficient. The upload key rides in `june-api/.env`, which fresh worktrees lack (see Worktree strategy); a missing key is a `BLOCKED` upload with the local path kept as evidence.
 
 ### Pre-publish review pass
 
