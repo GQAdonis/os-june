@@ -9,6 +9,7 @@ import {
 } from "react";
 import { IconNoteText } from "central-icons/IconNoteText";
 
+import { displayNoteTitle } from "./noteReference";
 import type { NoteListItemDto } from "../../../lib/tauri";
 
 export type NoteSuggestionListProps = {
@@ -147,7 +148,7 @@ export const NoteSuggestionList = forwardRef<NoteSuggestionListHandle, NoteSugge
                 </span>
                 <span className="agent-category-menu-copy">
                   <span className="agent-category-menu-label agent-note-suggestion-menu-label">
-                    {displayTitle(item.title)}
+                    {displayNoteTitle(item.title)}
                   </span>
                 </span>
               </button>
@@ -159,7 +160,3 @@ export const NoteSuggestionList = forwardRef<NoteSuggestionListHandle, NoteSugge
   },
 );
 NoteSuggestionList.displayName = "NoteSuggestionList";
-
-function displayTitle(title: string) {
-  return title.trim() || "New note";
-}

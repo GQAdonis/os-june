@@ -1,9 +1,7 @@
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
 import { IconNoteText } from "central-icons/IconNoteText";
 
-function displayTitle(title: string) {
-  return title.trim() || "New note";
-}
+import { displayNoteTitle } from "./noteReference";
 
 export function NoteReferenceChipView({ node }: NodeViewProps) {
   const title = typeof node.attrs.title === "string" ? node.attrs.title : "";
@@ -19,7 +17,7 @@ export function NoteReferenceChipView({ node }: NodeViewProps) {
       <span className="agent-note-reference-chip-icon" aria-hidden="true">
         <IconNoteText size={10} />
       </span>
-      <span className="agent-note-reference-chip-title">{displayTitle(title)}</span>
+      <span className="agent-note-reference-chip-title">{displayNoteTitle(title)}</span>
     </NodeViewWrapper>
   );
 }

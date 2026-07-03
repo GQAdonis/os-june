@@ -5771,7 +5771,12 @@ export function AgentWorkspace({
       currentEditor.setContent("", null);
       currentEditor.insertNoteReference(seed.noteRef);
       if (seed.prompt) {
-        currentTiptapEditor.chain().focus().insertContent(seed.prompt).run();
+        // String insertContent parses HTML; a node insert keeps the prompt literal.
+        currentTiptapEditor
+          .chain()
+          .focus()
+          .insertContent({ type: "text", text: seed.prompt })
+          .run();
       } else {
         currentEditor.focus();
       }

@@ -369,7 +369,7 @@ def search_meeting_notes(db_path: Path, arguments: dict[str, Any]) -> dict[str, 
 def get_meeting_note(db_path: Path, arguments: dict[str, Any]) -> dict[str, Any]:
     note_id = str(arguments.get("note_id") or "").strip()
     if not note_id:
-        raise ValueError("note_id is required")
+        return {"noteId": note_id, "found": False, "message": "note_id is required."}
 
     if not db_path.exists():
         return {

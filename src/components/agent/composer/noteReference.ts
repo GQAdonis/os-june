@@ -31,6 +31,11 @@ export type NoteReferenceOptions = {
   fetchNotes?: () => Promise<NoteListItemDto[]>;
 };
 
+/** Fallback matches the note title input's placeholder. */
+export function displayNoteTitle(title: string): string {
+  return title.trim() || "New note";
+}
+
 export function noteReferenceToken(ref: NoteReferenceInput): string {
   const title = ref.title.replace(/\s+/g, " ").replaceAll('"', "").trim().slice(0, 80);
   return title ? `@note:${ref.id} ("${title}")` : `@note:${ref.id}`;
