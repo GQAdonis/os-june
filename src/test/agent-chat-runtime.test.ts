@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  classifyHermesEvent,
-  isTerminalHermesEvent,
-  type JuneHermesEvent,
-} from "../lib/hermes-control-plane";
+import { isTerminalHermesEvent, type JuneHermesEvent } from "../lib/hermes-control-plane";
 import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
@@ -24,6 +20,7 @@ type PendingActionEvent = Extract<JuneHermesEvent, { kind: "pending_action" }>;
 type PendingActionResolutionEvent = Extract<JuneHermesEvent, { kind: "pending_action_resolution" }>;
 type BackgroundActivityEvent = Extract<JuneHermesEvent, { kind: "background_activity" }>;
 type ErrorEvent = Extract<JuneHermesEvent, { kind: "error" }>;
+type LifecycleEvent = Extract<JuneHermesEvent, { kind: "lifecycle" }>;
 
 function transcriptEvent(event: Partial<TranscriptEvent> = {}): TranscriptEvent {
   return {
@@ -106,6 +103,18 @@ function errorEvent(event: Partial<ErrorEvent> = {}): ErrorEvent {
   return {
     kind: "error",
     message: "The agent reported an error.",
+    receivedAt: DEFAULT_RECEIVED_AT,
+    ...event,
+  };
+}
+
+function lifecycleEvent(event: Partial<LifecycleEvent> = {}): LifecycleEvent {
+  return {
+    kind: "lifecycle",
+    sessionId: "",
+    flavor: "info",
+    status: "status.update",
+    text: "",
     receivedAt: DEFAULT_RECEIVED_AT,
     ...event,
   };
@@ -1038,9 +1047,11 @@ describe("Agent chat runtime", () => {
   });
 
   it("ignores message.completed for transcript turns while keeping it terminal", () => {
-    const completed = classifyHermesEvent({
-      type: "message.completed",
-      session_id: "runtime-session",
+    const completed = lifecycleEvent({
+      sessionId: "runtime-session",
+      flavor: "terminal",
+      status: "message.completed",
+      text: "Should not render",
       payload: { text: "Should not render" },
     });
 
@@ -1049,14 +1060,17 @@ describe("Agent chat runtime", () => {
   });
 
   it("does not duplicate assistant text when message.completed follows message.complete", () => {
-    const complete = classifyHermesEvent({
-      type: "message.complete",
-      session_id: "runtime-session",
-      payload: { text: "Done." },
+    const complete = transcriptEvent({
+      sessionId: "runtime-session",
+      complete: true,
+      failed: false,
+      delta: "Done.",
     });
-    const completed = classifyHermesEvent({
-      type: "message.completed",
-      session_id: "runtime-session",
+    const completed = lifecycleEvent({
+      sessionId: "runtime-session",
+      flavor: "terminal",
+      status: "message.completed",
+      text: "Done.",
       payload: { text: "Done." },
     });
 
@@ -1381,10 +1395,9 @@ describe("Agent chat runtime", () => {
   });
 
   it("folds a summary-only classified error into the same notice path", () => {
-    const event = classifyHermesEvent({
-      type: "error",
-      session_id: "runtime-session",
-      payload: { summary: CREDITS_ERROR },
+    const event = errorEvent({
+      sessionId: "runtime-session",
+      message: CREDITS_ERROR,
     });
     expect(event.kind).toBe("error");
 

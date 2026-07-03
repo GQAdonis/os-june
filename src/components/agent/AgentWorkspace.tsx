@@ -4212,7 +4212,7 @@ export function AgentWorkspace({
       // name a known file/url field (conservative — never parses prose), so one
       // unconditional call is safe for every kind. Mode rides along so each
       // artifact can show its blast radius (sandboxed copy vs unrestricted path).
-      hermesArtifactStore.record(classified, hermesModeFor(storedSessionId));
+      hermesArtifactStore.record(storedClassified, hermesModeFor(storedSessionId));
       const nextSessionEvents = [
         ...(liveEventsRef.current[storedSessionId] ?? []),
         classified,

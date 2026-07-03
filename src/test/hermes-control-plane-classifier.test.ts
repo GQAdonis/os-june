@@ -499,8 +499,10 @@ describe("classifyHermesEvent — lifecycle", () => {
     }
   });
 
-  it("maps turn/background completion aliases to terminal lifecycle events", () => {
+  it("maps lifecycle and turn/background completion aliases to terminal lifecycle events", () => {
     for (const name of [
+      "lifecycle.complete",
+      "lifecycle.completed",
       "message.completed",
       "turn.complete",
       "turn.completed",
@@ -533,6 +535,16 @@ describe("classifyHermesEvent — lifecycle", () => {
     if (result.kind === "lifecycle") {
       expect(result.status).toBe("done");
       expect(result.flavor).toBe("running");
+      expect(isTerminalHermesEvent(result)).toBe(false);
+    }
+  });
+
+  it("keeps lifecycle.update non-terminal", () => {
+    const result = classifyHermesEvent(event("lifecycle.update", { status: "done" }));
+    expect(result.kind).toBe("lifecycle");
+    if (result.kind === "lifecycle") {
+      expect(result.status).toBe("done");
+      expect(result.flavor).toBe("info");
       expect(isTerminalHermesEvent(result)).toBe(false);
     }
   });

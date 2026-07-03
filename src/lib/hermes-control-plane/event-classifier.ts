@@ -377,6 +377,10 @@ function lifecycleStatus(type: string, payload: RawHermesPayload | undefined): s
 
 function lifecycleFlavor(type: string): Extract<JuneHermesEvent, { kind: "lifecycle" }>["flavor"] {
   switch (type.toLowerCase()) {
+    // Intentional extension beyond main's terminal type list: main never tore
+    // down on lifecycle.complete, but June's typed lifecycle union does.
+    case "lifecycle.complete":
+    case "lifecycle.completed":
     case "message.completed":
     case "turn.complete":
     case "turn.completed":
