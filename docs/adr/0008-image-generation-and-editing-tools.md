@@ -4,13 +4,15 @@
 
 accepted - all three phases (A, B, C) implemented under JUN-171.
 
-Landed: **image generation is metered** through a `june_services::ImageService`
-(authorize hold -> generate -> charge, mirroring the web tools), priced per model
-by a dedicated `image_pricing` map in `june-config` kept separate from the
-text/ASR catalog so image models never leak into the served pickers. An unpriced
-model is rejected `model_not_priced` (422); an out-of-credits user gets 402
-before Venice is called. Prices (Venice per-image cost x ~2, `$1 = 1000
-credits`): `venice-sd35` 20, `flux-2-pro` 60, `qwen-image` 60, `chroma` 20.
+Landed ahead of the phases: **image generation is now metered** (this PR). It
+runs through a `june_services::ImageService` (authorize hold -> generate ->
+charge, mirroring the web tools), priced per model by a dedicated `image_pricing`
+map in `june-config` kept separate from the text/ASR catalog so image models
+never leak into the served pickers. An unpriced model is rejected
+`model_not_priced` (422); an out-of-credits user gets 402 before Venice is
+called. Prices (Venice per-image cost x ~2, `$1 = 1000 credits`):
+`venice-sd35` 20, `flux-dev` 20, `qwen-image` 60, `hidream` 40. **Editing**
+metering ships with the `/image/edit` endpoint in Phase C.
 
 Implemented since (JUN-171):
 
@@ -21,7 +23,7 @@ Implemented since (JUN-171):
   loopback proxy to `/v1/image/generate` (the proxy injects the selected image
   model + safe-mode setting); tool-result image content renders inline by
   reusing `AgentChatImagePart`.
-- **Phase C** — `edit_image` (img2img) is backed by a new `POST /v1/image/edit`
+- **Phase C** — `edit_image` is backed by a new `POST /v1/image/edit`
   endpoint + `VeniceImageEditor` provider (base64 in, **raw-binary** response
   re-encoded to base64) + `ImageEditRequest` domain type, metered on
   `ActionSlug::ImageEdit` with its own `image_edit_pricing` map
@@ -31,6 +33,13 @@ Implemented since (JUN-171):
 - **safe_mode** — Venice safe mode is a Settings toggle, **default off**
   (privacy-first). It flows end to end as `Option<bool>` (absent = Venice
   default), so older app builds calling the endpoints are unaffected.
+
+## Addendum - 2026-07-03
+
+Phase C has landed. The current built-in fallback image generation price list is
+`venice-sd35` 20, `flux-2-pro` 60, `qwen-image` 60, and `chroma` 20 credits per
+image. Image editing is metered separately through `image_edit_pricing`, with
+`firered-image-edit` priced at 80 credits per image edit.
 
 ## Context
 
@@ -62,7 +71,7 @@ Architecture facts established while designing:
   image is a session message the model reads — context and iteration for free.
 - **June API** already has `POST /v1/image/generate` (text-to-image; base64 in an
   `images[]` response; authenticated, **not metered** yet).
-- **Venice supports editing** via `POST /api/v1/image/edit` (img2img/inpaint):
+- **Venice supports editing** via `POST /api/v1/image/edit` (image edit/inpaint):
   input `image` as base64/URL + `prompt`, a **separate** set of edit models
   (default `firered-image-edit`), and a **raw binary** response (not the base64
   envelope `/image/generate` returns). So editing needs a *new* June API provider
@@ -92,7 +101,7 @@ Architecture facts established while designing:
    Distinct schemas make the model's choice explicit (no source = generate; a
    required `source` = edit) and force the model to name a real prior image.
 
-4. **img2img via a new June API endpoint.** `POST /v1/image/edit` backed by a new
+4. **Image edit via a new June API endpoint.** `POST /v1/image/edit` backed by a new
    `VeniceImageEditor` provider (base64 input, binary response) and an
    `ImageEditRequest` domain type, with its own default edit model. Edit models
    are a separate catalog from generation models.
@@ -111,7 +120,7 @@ Phased so each phase ships value on its own:
   registration in `hermes_bridge.rs` (script const, sync, config render, system
   prompt line), backed by the existing `/v1/image/generate`. Render tool-result
   images inline.
-- **Phase C - `edit_image` + img2img backend (large).** New `/v1/image/edit`
+- **Phase C - `edit_image` + image edit backend (large).** New `/v1/image/edit`
   endpoint + `VeniceImageEditor` provider + `ImageEditRequest` domain type +
   edit-model default/setting + the `edit_image` tool.
 
