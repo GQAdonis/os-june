@@ -43,6 +43,8 @@ out=${out:-$(mktemp "${TMPDIR:-/tmp}/repo-delegate-<harness>.XXXXXX")}
 git_state() { git -C "$1" rev-parse HEAD; git -C "$1" for-each-ref; git -C "$1" diff --cached --name-status; }
 [ -z "$(git -C "$worktree" status --porcelain --untracked-files=no)" ] \
   || { echo "error: uncommitted tracked changes — commit or stash first" >&2; exit 1; }
+[ -z "$(git -C "$worktree" ls-files -o --exclude-standard)" ] || [ "$allow_untracked" = 1 ] \
+  || { echo "error: untracked files present (--allow-untracked to override)" >&2; exit 1; }
 state_before=$(git_state "$worktree")
 harness_rc=0
 printf '%s\n' "$prompt" | <harness-cli> <worktree-write flags> > "$out" \
