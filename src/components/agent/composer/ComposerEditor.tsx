@@ -11,6 +11,13 @@ import {
   createCategoryChip,
   insertReportCategory,
 } from "./categoryChip";
+import {
+  NOTE_REFERENCE_NODE,
+  createNoteReference,
+  insertNoteReference,
+  noteReferenceToken,
+  type NoteReferenceInput,
+} from "./noteReference";
 import type { ReportCategory } from "./reportCategory";
 import type { HermesSkillInfo } from "../../../lib/tauri";
 
@@ -29,6 +36,9 @@ export type ComposerEditorHandle = {
   ) => void;
   /** Inserts or swaps the message's single category tag at the caret. */
   insertCategory: (category: ReportCategory) => void;
+  /** Inserts a note reference chip at the caret. Multiple references can
+   * coexist because they serialize into the prompt text. */
+  insertNoteReference: (ref: NoteReferenceInput) => void;
   isEmpty: () => boolean;
 };
 
@@ -43,12 +53,20 @@ type ComposerEditorProps = {
 };
 
 /** Serializes the doc to the plain string sent to June: paragraph and
- * hard-break boundaries become newlines, and the category chip (a leaf atom)
- * contributes nothing — its meaning rides along as the category, not as text. */
+ * hard-break boundaries become newlines, the category chip contributes
+ * nothing, and note reference atoms emit the stable token Hermes resolves via
+ * June's note context tool. */
 export function serializePlainText(doc: ProseMirrorNode): string {
-  return doc.textBetween(0, doc.content.size, "\n", (leaf) =>
-    leaf.type.name === "hardBreak" ? "\n" : "",
-  );
+  return doc.textBetween(0, doc.content.size, "\n", (leaf) => {
+    if (leaf.type.name === "hardBreak") return "\n";
+    if (leaf.type.name === NOTE_REFERENCE_NODE) {
+      return noteReferenceToken({
+        id: typeof leaf.attrs.noteId === "string" ? leaf.attrs.noteId : "",
+        title: typeof leaf.attrs.title === "string" ? leaf.attrs.title : "",
+      });
+    }
+    return "";
+  });
 }
 
 /** Focuses the editor with the caret at the end, synchronously. tiptap's
@@ -170,6 +188,7 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
         }),
         Placeholder.configure({ placeholder }),
         createCategoryChip({ skills: () => skillsRef.current }),
+        createNoteReference(),
       ],
       editorProps: {
         attributes: {
@@ -199,8 +218,8 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
           if (event.key !== "Enter" || event.shiftKey || event.isComposing) {
             return false;
           }
-          // The "/" palette owns Enter while it's open (it commits the
-          // highlighted category); only a closed palette submits the message.
+          // Suggestion palettes own Enter while open (they commit the
+          // highlighted row); only a closed palette submits the message.
           if (document.querySelector(".agent-category-menu-host")) return false;
           event.preventDefault();
           onSubmitRef.current();
@@ -272,6 +291,9 @@ export const ComposerEditor = forwardRef<ComposerEditorHandle, ComposerEditorPro
         },
         insertCategory: (category) => {
           if (editor) insertReportCategory(editor, category);
+        },
+        insertNoteReference: (noteReference) => {
+          if (editor) insertNoteReference(editor, noteReference);
         },
         isEmpty: () => editor?.isEmpty ?? true,
       }),

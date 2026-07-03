@@ -5259,6 +5259,45 @@ input:focus-visible,
   outline-offset: 1px;
 }
 
+/* Inline note references are prompt content, not message metadata. They keep
+ * the category chip's atom affordance but use neutral note styling and allow
+ * several references in one composer message. */
+.agent-note-reference-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: min(calc(var(--sp-12) * 6), 100%);
+  gap: var(--sp-px);
+  vertical-align: baseline;
+  padding: var(--sp-px) var(--sp-2);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--muted) 58%, transparent);
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.agent-note-reference-chip-icon {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+}
+
+.agent-note-reference-chip-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-note-reference-chip.ProseMirror-selectednode {
+  outline: 2px solid color-mix(in oklch, var(--foreground) 24%, transparent);
+  outline-offset: var(--sp-px);
+}
+
 /* "/" suggestion palette + "+" popover share the floating-menu look. */
 .agent-category-menu-host {
   position: fixed;
@@ -5472,6 +5511,14 @@ input:focus-visible,
 .agent-category-menu-icon[data-category="feature"],
 .agent-attach-menu-icon[data-category="feature"] {
   color: var(--success);
+}
+
+.agent-note-suggestion-menu-label {
+  min-width: 0;
+}
+
+.agent-note-suggestion-menu-icon {
+  color: var(--muted-foreground);
 }
 
 /* Opens upward, just above the toolbar where the "+" trigger sits (the box
