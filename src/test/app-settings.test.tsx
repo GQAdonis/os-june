@@ -3014,8 +3014,7 @@ describe("AppSettings", () => {
       "true",
     );
 
-    await user.click(controls.getByRole("button", { name: "Full" }));
-    expect(localStorage.getItem(AGENT_PRIVACY_GUARD_MODE_KEY)).toBe("full");
+    expect(controls.queryByRole("button", { name: "Full" })).toBeNull();
   });
 
   it("opts into agent CLI access from Agent settings", async () => {

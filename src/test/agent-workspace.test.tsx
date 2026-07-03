@@ -196,6 +196,16 @@ vi.mock("@nationaldesignstudio/rampart", () => ({
         });
         return { text: next, placeholders: [...placeholders] };
       }),
+      reveal: vi.fn((text: string) => {
+        let next = text;
+        for (const [email, placeholder] of emails) {
+          next = next.replaceAll(placeholder, email);
+        }
+        for (const [ssn, placeholder] of ssns) {
+          next = next.replaceAll(placeholder, ssn);
+        }
+        return next;
+      }),
     };
   }),
 }));
@@ -696,6 +706,54 @@ describe("AgentWorkspace", () => {
     expect(
       await screen.findByText("Privacy guard redacted 2 details before sending."),
     ).toBeInTheDocument();
+  });
+
+  it("reveals privacy guard placeholders in persisted session replies", async () => {
+    window.localStorage.setItem(AGENT_PRIVACY_GUARD_MODE_KEY, "structured");
+    render(<AgentWorkspace />);
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent(AGENT_NEW_SESSION_EVENT, {
+          detail: {
+            prompt: "Email ada@example.com",
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "Email [EMAIL_1]",
+      }),
+    );
+
+    const persistedAt = new Date().toISOString();
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-reveal-user",
+        role: "user",
+        content: "Email [EMAIL_1]",
+        timestamp: persistedAt,
+      },
+      {
+        id: "message-reveal-assistant",
+        role: "assistant",
+        content: "I emailed [EMAIL_1].",
+        timestamp: persistedAt,
+      },
+    ]);
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({ type: "turn.completed", session_id: "runtime-session-2" });
+      }
+    });
+
+    expect(await screen.findByText("I emailed ada@example.com.")).toBeInTheDocument();
+    expect(screen.queryByText("I emailed [EMAIL_1].")).toBeNull();
+    expect(screen.getAllByText("Email ada@example.com")).toHaveLength(1);
   });
 
   it("redacts delayed title suggestions for existing prompt-like sessions", async () => {

@@ -39,7 +39,6 @@ const PRIVACY_GUARD_MODE_OPTIONS: {
 }[] = [
   { value: "off", label: agentPrivacyGuardModeLabel("off") },
   { value: "structured", label: agentPrivacyGuardModeLabel("structured") },
-  { value: "full", label: agentPrivacyGuardModeLabel("full") },
 ];
 
 export function AgentSettingsSection() {
@@ -262,8 +261,8 @@ export function AgentSettingsSection() {
             <div className="settings-row-info">
               <h3 className="settings-row-title">Privacy guard</h3>
               <p className="settings-row-description">
-                Redacts text in agent prompts before sending. Attached files are unchanged. Full
-                mode uses Rampart by National Design Studio on this device.
+                Redacts text in agent prompts before sending. Attached files are unchanged. Uses
+                Rampart's structured detector on this device.
               </p>
             </div>
             <div className="settings-row-control">

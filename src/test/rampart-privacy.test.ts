@@ -51,6 +51,12 @@ describe("agent privacy guard", () => {
     expect(events).toEqual(["structured", "off"]);
   });
 
+  it("treats the retired full mode as structured", () => {
+    window.localStorage.setItem(AGENT_PRIVACY_GUARD_MODE_KEY, "full");
+
+    expect(getAgentPrivacyGuardMode()).toBe("structured");
+  });
+
   it("protects text through the selected guard mode", async () => {
     const loadGuard = vi.fn<AgentPrivacyGuardLoader>(async (mode) => ({
       mode,
@@ -59,6 +65,7 @@ describe("agent privacy guard", () => {
           text: text.replace("ada@example.com", "[EMAIL_1]"),
           placeholders: ["[EMAIL_1]"],
         }),
+        reveal: (text: string) => text.replace("[EMAIL_1]", "ada@example.com"),
       },
     }));
 
@@ -96,6 +103,13 @@ describe("agent privacy guard", () => {
             });
             return { text: protectedText, placeholders };
           },
+          reveal: (text: string) => {
+            let revealed = text;
+            for (const [email, placeholder] of placeholdersByEmail) {
+              revealed = revealed.replaceAll(placeholder, email);
+            }
+            return revealed;
+          },
         },
       };
     });
@@ -120,6 +134,25 @@ describe("agent privacy guard", () => {
     ).resolves.toMatchObject({ text: "Email [EMAIL_1]" });
 
     expect(loadGuard).toHaveBeenCalledTimes(2);
+  });
+
+  it("reveals placeholders through the loaded session guard", async () => {
+    const loadGuard = vi.fn<AgentPrivacyGuardLoader>(async (mode) => ({
+      mode,
+      guard: {
+        protect: async (text: string) => ({
+          text: text.replace("ada@example.com", "[EMAIL_1]"),
+          placeholders: ["[EMAIL_1]"],
+        }),
+        reveal: (text: string) => text.replaceAll("[EMAIL_1]", "ada@example.com"),
+      },
+    }));
+    const session = createAgentPrivacyGuardSession({ loadGuard });
+
+    expect(session.revealText("Email [EMAIL_1]")).toBe("Email [EMAIL_1]");
+    await session.protectText("Email ada@example.com", { mode: "structured" });
+
+    expect(session.revealText("Email [EMAIL_1]")).toBe("Email ada@example.com");
   });
 
   it("formats the redaction notice with singular and plural counts", () => {

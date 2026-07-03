@@ -3,14 +3,14 @@ import type { ChatGuard } from "@nationaldesignstudio/rampart";
 export const AGENT_PRIVACY_GUARD_MODE_KEY = "june:agent:privacyGuardMode";
 export const AGENT_PRIVACY_GUARD_MODE_CHANGED_EVENT = "june:agent:privacy-guard-mode-changed";
 
-export type AgentPrivacyGuardMode = "off" | "structured" | "full";
+export type AgentPrivacyGuardMode = "off" | "structured";
 export type AgentPrivacyGuardActiveMode = Exclude<AgentPrivacyGuardMode, "off">;
 
 export type AgentPrivacyGuardModeChangedDetail = {
   mode: AgentPrivacyGuardMode;
 };
 
-type AgentPrivacyGuard = Pick<ChatGuard, "protect">;
+type AgentPrivacyGuard = Pick<ChatGuard, "protect" | "reveal">;
 
 type LoadedAgentPrivacyGuard = {
   guard: AgentPrivacyGuard;
@@ -26,6 +26,7 @@ export type AgentPrivacyGuardSession = {
     text: string,
     options?: { mode?: AgentPrivacyGuardMode },
   ) => Promise<AgentPrivacyProtection>;
+  revealText: (text: string) => string;
 };
 
 export type AgentPrivacyProtection = {
@@ -36,11 +37,12 @@ export type AgentPrivacyProtection = {
   redacted: boolean;
 };
 
-const VALID_PRIVACY_GUARD_MODES: AgentPrivacyGuardMode[] = ["off", "structured", "full"];
+const VALID_PRIVACY_GUARD_MODES: AgentPrivacyGuardMode[] = ["off", "structured"];
 
 export function getAgentPrivacyGuardMode(): AgentPrivacyGuardMode {
   try {
     const stored = window.localStorage.getItem(AGENT_PRIVACY_GUARD_MODE_KEY);
+    if (stored === "full") return "structured";
     return isAgentPrivacyGuardMode(stored) ? stored : "off";
   } catch {
     return "off";
@@ -102,6 +104,7 @@ export function createAgentPrivacyGuardSession(
   options: { loadGuard?: AgentPrivacyGuardLoader } = {},
 ): AgentPrivacyGuardSession {
   const guardPromises = new Map<AgentPrivacyGuardActiveMode, Promise<LoadedAgentPrivacyGuard>>();
+  const loadedGuards = new Map<AgentPrivacyGuardActiveMode, LoadedAgentPrivacyGuard>();
   const loadGuard = options.loadGuard ?? createRampartGuard;
 
   async function loadSessionGuard(
@@ -112,7 +115,9 @@ export function createAgentPrivacyGuardSession(
     const promise = loadGuard(mode);
     guardPromises.set(mode, promise);
     try {
-      return await promise;
+      const loaded = await promise;
+      loadedGuards.set(mode, loaded);
+      return loaded;
     } catch (error) {
       guardPromises.delete(mode);
       throw error;
@@ -126,6 +131,18 @@ export function createAgentPrivacyGuardSession(
         loadGuard: loadSessionGuard,
       });
     },
+    revealText(text) {
+      let revealed = text;
+      for (const loaded of loadedGuards.values()) {
+        try {
+          revealed = loaded.guard.reveal(revealed);
+        } catch {
+          // Revealing is a display convenience. A stale or partial guard should
+          // never block rendering the assistant message.
+        }
+      }
+      return revealed;
+    },
   };
 }
 
@@ -137,7 +154,6 @@ export function agentPrivacyGuardNoticeMessage(redactedDetails: number) {
 
 export function agentPrivacyGuardModeLabel(mode: AgentPrivacyGuardMode) {
   if (mode === "structured") return "Structured";
-  if (mode === "full") return "Full";
   return "Off";
 }
 
@@ -157,24 +173,10 @@ async function createRampartGuard(
   mode: AgentPrivacyGuardActiveMode,
 ): Promise<LoadedAgentPrivacyGuard> {
   const { createGuard } = await import("@nationaldesignstudio/rampart");
-  if (mode === "structured") {
-    return {
-      guard: await createGuard({ heuristicsOnly: true }),
-      mode: "structured",
-    };
-  }
-
-  try {
-    return {
-      guard: await createGuard({ device: "wasm" }),
-      mode: "full",
-    };
-  } catch {
-    return {
-      guard: await createGuard({ heuristicsOnly: true }),
-      mode: "structured",
-    };
-  }
+  return {
+    guard: await createGuard({ heuristicsOnly: true }),
+    mode,
+  };
 }
 
 function isAgentPrivacyGuardMode(value: unknown): value is AgentPrivacyGuardMode {

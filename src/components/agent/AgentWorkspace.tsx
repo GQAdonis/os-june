@@ -2404,10 +2404,11 @@ export function AgentWorkspace({
     composerSizeWarning?.inputSignature === composerInputSignature ? composerSizeWarning : null;
   const selectedHermesMessages = useMemo(() => {
     if (!selectedHermesSessionId) return [];
-    return [
+    const messages = [
       ...(hermesSessionMessages[selectedHermesSessionId] ?? []),
       ...(pendingHermesMessages[selectedHermesSessionId] ?? []),
     ];
+    return revealHermesMessagesForPrivacy(selectedHermesSessionId, messages);
   }, [hermesSessionMessages, pendingHermesMessages, selectedHermesSessionId]);
   const composerDraftKey = selectedHermesSessionId
     ? sessionComposerDraftKey(selectedHermesSessionId)
@@ -3741,6 +3742,71 @@ export function AgentWorkspace({
       [sessionId]: next,
     };
     return next;
+  }
+
+  function revealHermesMessagesForPrivacy(
+    sessionId: string,
+    messages: HermesSessionMessage[],
+  ): HermesSessionMessage[] {
+    const privacyGuardSession = privacyGuardSessionsRef.current[sessionId];
+    if (!privacyGuardSession) return messages;
+    return messages.map((message) => revealHermesMessageForPrivacy(message, privacyGuardSession));
+  }
+
+  function revealHermesMessageForPrivacy(
+    message: HermesSessionMessage,
+    privacyGuardSession: AgentPrivacyGuardSession,
+  ): HermesSessionMessage {
+    const next: HermesSessionMessage = { ...message };
+    let changed = false;
+    const revealField = (key: keyof HermesSessionMessage) => {
+      const current = next[key];
+      const revealed = revealAgentPrivacyValue(current, privacyGuardSession);
+      if (!Object.is(revealed, current)) {
+        changed = true;
+        next[key] = revealed as never;
+      }
+    };
+
+    revealField("content");
+    revealField("text");
+    revealField("context");
+    revealField("tool_calls");
+    revealField("reasoning");
+    revealField("reasoning_content");
+    revealField("reasoning_details");
+    revealField("codex_reasoning_items");
+    revealField("codex_message_items");
+
+    return changed ? next : message;
+  }
+
+  function revealAgentPrivacyValue(
+    value: unknown,
+    privacyGuardSession: AgentPrivacyGuardSession,
+    depth = 0,
+  ): unknown {
+    if (typeof value === "string") return privacyGuardSession.revealText(value);
+    if (!value || depth > 8) return value;
+    if (Array.isArray(value)) {
+      let changed = false;
+      const next = value.map((item) => {
+        const revealed = revealAgentPrivacyValue(item, privacyGuardSession, depth + 1);
+        if (!Object.is(revealed, item)) changed = true;
+        return revealed;
+      });
+      return changed ? next : value;
+    }
+    if (typeof value !== "object") return value;
+
+    let changed = false;
+    const next: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      const revealed = revealAgentPrivacyValue(item, privacyGuardSession, depth + 1);
+      if (!Object.is(revealed, item)) changed = true;
+      next[key] = revealed;
+    }
+    return changed ? next : value;
   }
 
   async function handleBuiltinComposerSlashCommand(commandText: string) {
@@ -5757,6 +5823,7 @@ export function AgentWorkspace({
       const retainedPending = retainUnpersistedPendingMessages(
         pendingHermesMessagesRef.current[sessionId] ?? [],
         messages,
+        privacyGuardSessionsRef.current[sessionId],
       );
       setHermesSessionMessages((current) => ({
         ...current,
@@ -12677,17 +12744,20 @@ const PENDING_MATCH_SKEW_MS = 1500;
 function retainUnpersistedPendingMessages(
   pending: HermesSessionMessage[],
   persisted: HermesSessionMessage[],
+  privacyGuardSession?: AgentPrivacyGuardSession,
 ) {
   return pending.filter((pendingMessage) => {
     const pendingAt = hermesMessageTimestampMs(pendingMessage);
     return !persisted.some((message) => {
       if (message.role !== pendingMessage.role) return false;
-      if (
-        !sameVisibleMessageText(
-          visibleHermesMessageText(message),
-          visibleHermesMessageText(pendingMessage),
-        )
-      ) {
+      const persistedText = visibleHermesMessageText(message);
+      const pendingText = visibleHermesMessageText(pendingMessage);
+      const sameText =
+        sameVisibleMessageText(persistedText, pendingText) ||
+        (privacyGuardSession
+          ? sameVisibleMessageText(privacyGuardSession.revealText(persistedText), pendingText)
+          : false);
+      if (!sameText) {
         return false;
       }
       if (pendingAt === undefined) return true;
