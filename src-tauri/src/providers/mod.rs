@@ -56,6 +56,12 @@ pub struct ProviderModelSettings {
     pub venice_api_key: Option<String>,
     #[serde(default)]
     pub local_generation: LocalGenerationSettings,
+    /// When true, Venice `safe_mode` blurs adult content on generated/edited
+    /// images. June defaults it OFF (privacy-first: no server-side censoring of
+    /// the user's own image work); the user opts in via Settings. Defaulted so
+    /// settings files predating this field still deserialize (to `false`).
+    #[serde(default)]
+    pub image_safe_mode: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -81,6 +87,7 @@ pub struct ProviderModelSettingsDto {
     pub image_model: String,
     pub venice_api_key_configured: bool,
     pub local_generation: LocalGenerationSettings,
+    pub image_safe_mode: bool,
 }
 
 impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
@@ -97,6 +104,7 @@ impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty()),
             local_generation: settings.local_generation.clone(),
+            image_safe_mode: settings.image_safe_mode,
         }
     }
 }
@@ -263,6 +271,13 @@ pub fn venice_api_key() -> Option<String> {
     current_settings().venice_api_key
 }
 
+/// Whether Venice safe mode is on for image generation/editing. `false` (the
+/// default) means June sends `safe_mode: false` so it never server-side-censors
+/// the user's own image work; the user can turn it on in Settings.
+pub fn image_safe_mode() -> bool {
+    current_settings().image_safe_mode
+}
+
 /// Context window (tokens) of the configured generation model, looked up in
 /// the backend's model catalog and cached per model id. The agent provider
 /// proxy advertises it on `/v1/models` so Hermes sizes its history to the
@@ -358,9 +373,52 @@ pub fn set_venice_model(
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct SetImageSafeModeRequest {
+    pub enabled: bool,
+}
+
+/// Persists the image safe-mode toggle. Off by default (privacy-first); the
+/// value flows into every image generation/edit request from the loopback proxy
+/// and the fast path.
+#[tauri::command]
+pub fn set_image_safe_mode(
+    state: State<'_, ProviderSettingsState>,
+    request: SetImageSafeModeRequest,
+) -> Result<ProviderModelSettingsDto, AppError> {
+    update_settings(&state, |settings| {
+        settings.image_safe_mode = request.enabled;
+    })
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct GenerateImageRequest {
     pub prompt: String,
     /// Optional model override; falls back to the saved default image model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Stable logical request id supplied by the chat orchestration layer.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    /// Optional safe-mode override pinned at turn creation. A retry must replay
+    /// the exact request shape June API hashed into its replay-ledger key, so a
+    /// settings change between attempt and retry cannot mint a second charge.
+    /// Absent falls back to the live saved setting.
+    #[serde(default)]
+    pub safe_mode: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditImageRequest {
+    pub image: String,
+    pub prompt: String,
+    /// Stable logical request id supplied by the caller.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// Optional edit-model override; absent uses June API's default edit model.
     #[serde(default)]
     pub model: Option<String>,
 }
@@ -381,7 +439,55 @@ pub async fn generate_image(
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
         .unwrap_or_else(image_model);
-    crate::june_api::generate_image(prompt, model).await
+    let request_id = request
+        .request_id
+        .map(|request_id| request_id.trim().to_string())
+        .filter(|request_id| !request_id.is_empty());
+    let safe_mode = request.safe_mode.unwrap_or_else(image_safe_mode);
+    crate::june_api::generate_image(prompt, model, Some(safe_mode), request_id).await
+}
+
+/// Edits a source image through June API. Provider keys and the upstream call
+/// live in June API; this command only validates and forwards the image bytes.
+#[tauri::command]
+pub async fn edit_image(
+    request: EditImageRequest,
+) -> Result<crate::june_api::GeneratedImageDto, AppError> {
+    let image = request.image.trim().to_string();
+    if image.is_empty() {
+        return Err(AppError::new(
+            "image_source_required",
+            "Choose an image to edit.",
+        ));
+    }
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err(AppError::new(
+            "image_prompt_required",
+            "Enter an edit instruction.",
+        ));
+    }
+    let model = request
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty());
+    let request_id = request
+        .request_id
+        .map(|request_id| request_id.trim().to_string())
+        .filter(|request_id| !request_id.is_empty());
+    let mime_type = request
+        .mime_type
+        .map(|mime_type| mime_type.trim().to_string())
+        .filter(|mime_type| !mime_type.is_empty());
+    crate::june_api::edit_image(
+        image,
+        prompt,
+        mime_type,
+        model,
+        Some(image_safe_mode()),
+        request_id,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -663,6 +769,7 @@ fn default_settings() -> ProviderModelSettings {
         image_model: DEFAULT_IMAGE_MODEL.to_string(),
         venice_api_key: None,
         local_generation: LocalGenerationSettings::default(),
+        image_safe_mode: false,
     }
 }
 
@@ -749,6 +856,7 @@ fn sanitize_settings(
         image_model: non_empty_or(settings.image_model, &defaults.image_model),
         venice_api_key: normalize_api_key_option(settings.venice_api_key),
         local_generation,
+        image_safe_mode: settings.image_safe_mode,
     }
 }
 

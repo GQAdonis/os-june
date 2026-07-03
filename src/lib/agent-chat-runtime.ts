@@ -126,6 +126,18 @@ export type AgentChatImagePart = {
   status: "running" | "complete" | "error";
   /** The prompt the user typed after `/image`. */
   prompt: string;
+  /** Stable June API replay key for this logical `/image` turn. */
+  requestId?: string;
+  /** Image model pinned at turn creation. A retry must replay the exact
+   * request shape June API hashed into the replay-ledger key, so a settings
+   * change between attempt and retry cannot become a second charge. */
+  model?: string;
+  /** Safe-mode value pinned at turn creation; same replay-shape reason. */
+  safeMode?: boolean;
+  /** Original synthetic user-turn timestamp, kept so retry can finish the same turn. */
+  userCreatedAt?: string;
+  /** Original synthetic assistant-turn timestamp, kept so retry can finish the same turn. */
+  imageCreatedAt?: string;
   /** Imported workspace path; set once `status === "complete"`. */
   path?: string;
   /** `data:<mime>;base64,…` for the inline preview; set when complete. */
@@ -162,6 +174,14 @@ export type AgentChatTurn = {
    * so a cron run reads as a routine rather than a message the user sent. */
   isScheduledRun?: boolean;
 };
+
+const MEDIA_IMAGE_EXTENSION_PATTERN = "png|jpe?g|gif|webp|tiff?|bmp|avif";
+const MEDIA_IMAGE_REFERENCE_PATTERN = new RegExp(
+  `MEDIA:(/[^\\r\\n]+?\\.(?:${MEDIA_IMAGE_EXTENSION_PATTERN}))(?:[)\\].,;:]?)(?=\\s|$)`,
+  "gi",
+);
+const mediaImageReferencePattern = () =>
+  new RegExp(MEDIA_IMAGE_REFERENCE_PATTERN.source, MEDIA_IMAGE_REFERENCE_PATTERN.flags);
 
 function sortAgentChatTurns(turns: AgentChatTurn[]) {
   return turns
@@ -204,11 +224,19 @@ export function buildHermesSessionChatTurns(
         text: textFromHermesContent(message.content) ?? "",
         status: "complete",
       });
+      // An image tool result carries its image inline (base64); render it as an
+      // image part so it shows in-thread instead of being lost to the collapsed
+      // tool row. The base64 is stripped from the tool text above.
+      for (const imagePart of imagePartsFromHermesContent(message.content)) {
+        turn.parts.push(imagePart);
+      }
       turn.status = "complete";
       continue;
     }
 
     const content = displayContentForHermesMessage(message);
+    const messageImageParts =
+      message.role === "assistant" ? imagePartsFromHermesContent(message.content) : [];
     const contextPart = content ? contextCompactionPartForHermesContent(content) : undefined;
 
     const turn: AgentChatTurn = {
@@ -254,15 +282,20 @@ export function buildHermesSessionChatTurns(
       }
 
       if (content) {
-        turn.parts.push(
-          (turn.role === "assistant"
+        const notice =
+          turn.role === "assistant"
             ? (creditsNoticeFromTurnText(content) ?? persistedContextOverflowNotice(content))
-            : undefined) ?? {
+            : undefined;
+        turn.parts.push(
+          notice ?? {
             type: "text",
             text: content,
             status: "complete",
           },
         );
+      }
+      if (!contextPart && turn.role === "assistant") {
+        appendImageParts(turn.parts, messageImageParts);
       }
     }
 
@@ -457,9 +490,11 @@ function appendLiveHermesEvents(turns: AgentChatTurn[], events: JuneHermesEvent[
         // A billing failure is recognizable from its "Error:" text prefix; a
         // context overflow is not, so only fold it when the turn actually
         // failed — an ordinary sentence that mentions "context length" stays prose.
-        const notice = text
-          ? (creditsNoticeFromTurnText(text) ??
-            (event.failed ? contextOverflowNotice(text) : undefined))
+        const displayText = stripMediaImageReferences(text);
+        const imageParts = imagePartsFromHermesContent(text);
+        const notice = displayText
+          ? (creditsNoticeFromTurnText(displayText) ??
+            (event.failed ? contextOverflowNotice(displayText) : undefined))
           : undefined;
         if (notice) {
           // The complete text is authoritative for the turn (see
@@ -468,7 +503,12 @@ function appendLiveHermesEvents(turns: AgentChatTurn[], events: JuneHermesEvent[
           currentAssistant.parts = currentAssistant.parts.filter((part) => part.type !== "text");
           currentAssistant.parts.push(notice);
         } else if (text) {
-          completeAssistantTextPart(currentAssistant.parts, text);
+          if (displayText.trim()) {
+            completeAssistantTextPart(currentAssistant.parts, displayText);
+          } else if (imageParts.length) {
+            removeAssistantTextParts(currentAssistant.parts);
+          }
+          appendImageParts(currentAssistant.parts, imageParts);
         }
         currentAssistant.status = "complete";
         completeRunningParts(currentAssistant.parts);
@@ -803,6 +843,24 @@ function completeAssistantTextPart(parts: AgentChatPart[], text: string) {
   }
 }
 
+function removeAssistantTextParts(parts: AgentChatPart[]) {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (parts[index]?.type === "text") parts.splice(index, 1);
+  }
+}
+
+function appendImageParts(parts: AgentChatPart[], images: AgentChatImagePart[]) {
+  for (const image of images) {
+    const exists = parts.some(
+      (part) =>
+        part.type === "image" &&
+        ((image.path && part.path === image.path) ||
+          (image.dataUrl && part.dataUrl === image.dataUrl)),
+    );
+    if (!exists) parts.push(image);
+  }
+}
+
 // True when `complete` can be derived from `streamed` purely by deleting
 // whitespace characters. Deliberately rejects whitespace substitutions:
 // deletions are the only damage joining trimmed chunks can do, so anything
@@ -1033,10 +1091,11 @@ function safeJsonParse(value: string) {
 }
 
 function resolveHermesMessageText(message: HermesSessionMessage) {
+  const stripMediaImageReferences = message.role !== "user";
   return (
-    textFromHermesContent(message.content) ??
-    textFromHermesContent(message.text) ??
-    textFromHermesContent(message.context) ??
+    textFromHermesContent(message.content, { stripMediaImageReferences }) ??
+    textFromHermesContent(message.text, { stripMediaImageReferences }) ??
+    textFromHermesContent(message.context, { stripMediaImageReferences }) ??
     stringValue(message.name, true) ??
     ""
   );
@@ -1115,26 +1174,49 @@ function contextCompactionPreview(value: string) {
     : "Earlier turns were compacted into a reference summary.";
 }
 
-export function textFromHermesContent(value: unknown, depth = 0): string | undefined {
+type TextFromHermesContentOptions = {
+  stripMediaImageReferences?: boolean;
+};
+
+export function textFromHermesContent(
+  value: unknown,
+  options: TextFromHermesContentOptions = {},
+): string | undefined {
+  return textFromHermesContentInner(value, 0, options);
+}
+
+function textFromHermesContentInner(
+  value: unknown,
+  depth: number,
+  options: TextFromHermesContentOptions,
+): string | undefined {
   if (value === null || value === undefined || depth > 4) return undefined;
   if (typeof value === "string") {
     if (!value.trim()) return undefined;
     const parsed = parseLikelyJsonContent(value);
     if (parsed !== undefined) {
-      const parsedText = textFromHermesContent(parsed, depth + 1);
+      const parsedText = textFromHermesContentInner(parsed, depth + 1, options);
       if (parsedText?.trim()) return parsedText;
     }
-    return value;
+    const text =
+      options.stripMediaImageReferences === false ? value : stripMediaImageReferences(value);
+    return text.trim() ? text : undefined;
   }
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) {
-    const text = value.map((item) => textFromHermesContent(item, depth + 1) ?? "").join("");
+    const text = value
+      .map((item) => textFromHermesContentInner(item, depth + 1, options) ?? "")
+      .join("");
     return text.trim() ? text : undefined;
   }
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
+    // MCP image content blocks carry raw base64 in `data`; never surface that as
+    // "text" — it would dump a giant base64 string into a tool row. They render
+    // inline as image parts instead (see imagePartsFromHermesContent).
+    if (record.type === "image") return undefined;
     for (const key of ["text", "output_text", "content", "message", "delta", "summary"]) {
-      const text = textFromHermesContent(record[key], depth + 1);
+      const text = textFromHermesContentInner(record[key], depth + 1, options);
       if (text?.trim()) return text;
     }
     return stringifyObject(value) || undefined;
@@ -1146,6 +1228,139 @@ function parseLikelyJsonContent(value: string) {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
   return safeJsonParse(trimmed);
+}
+
+function stripMediaImageReferences(value: string) {
+  return value
+    .replace(mediaImageReferencePattern(), "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+function mediaImageReferences(value: unknown, depth = 0): string[] {
+  if (value === null || value === undefined || depth > 4) return [];
+  if (typeof value === "string") {
+    const parsed = parseLikelyJsonContent(value);
+    const nested = parsed !== undefined ? mediaImageReferences(parsed, depth + 1) : [];
+    const direct = [...value.matchAll(mediaImageReferencePattern())]
+      .map((match) => match[1]?.trim())
+      .filter((path): path is string => Boolean(path));
+    return uniqueStrings([...nested, ...direct]);
+  }
+  if (Array.isArray(value)) {
+    return uniqueStrings(value.flatMap((item) => mediaImageReferences(item, depth + 1)));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return uniqueStrings(
+      ["text", "output_text", "content", "message", "delta", "summary", "url", "image_url"].flatMap(
+        (key) => mediaImageReferences(record[key], depth + 1),
+      ),
+    );
+  }
+  return [];
+}
+
+function mediaImagePart(path: string): AgentChatImagePart {
+  return {
+    type: "image",
+    status: "complete",
+    prompt: "Generated image",
+    path,
+    name: filenameFromPath(path),
+  };
+}
+
+function filenameFromPath(path: string) {
+  const name = path.split(/[\\/]/).pop()?.trim();
+  return name || "generated-image.png";
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
+}
+
+type McpImageBlock = { data: string; mimeType: string };
+
+/** Collects MCP image content blocks ({type:"image", data:<base64>, mimeType})
+ * from a tool result. The content may be an array of blocks, a JSON string of
+ * one, or nested under `content`, so walk it defensively (depth-bounded). */
+function mcpImageContentBlocks(value: unknown, depth = 0): McpImageBlock[] {
+  if (value === null || value === undefined || depth > 4) return [];
+  if (typeof value === "string") {
+    const parsed = parseLikelyJsonContent(value);
+    return parsed !== undefined ? mcpImageContentBlocks(parsed, depth + 1) : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => mcpImageContentBlocks(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record.type === "image" && typeof record.data === "string" && record.data.trim()) {
+      const mimeType =
+        typeof record.mimeType === "string" && record.mimeType.trim()
+          ? record.mimeType
+          : "image/png";
+      return [{ data: record.data, mimeType }];
+    }
+    if (Array.isArray(record.content)) {
+      return mcpImageContentBlocks(record.content, depth + 1);
+    }
+  }
+  return [];
+}
+
+/** The caption/filename an image tool ({@link mcpImageContentBlocks}) returned
+ * alongside its image, carried in a sibling JSON text block ({label, filename}).
+ * Best-effort: used for the inline image's alt text and open/download name. */
+function mcpImageMetadata(value: unknown, depth = 0): { label?: string; filename?: string } {
+  if (value === null || value === undefined || depth > 4) return {};
+  if (typeof value === "string") {
+    const parsed = parseLikelyJsonContent(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const label = typeof record.label === "string" ? record.label : undefined;
+      const filename = typeof record.filename === "string" ? record.filename : undefined;
+      if (label || filename) return { label, filename };
+    }
+    return {};
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const meta = mcpImageMetadata(item, depth + 1);
+      if (meta.label || meta.filename) return meta;
+    }
+    return {};
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      const meta = mcpImageMetadata(record.text, depth + 1);
+      if (meta.label || meta.filename) return meta;
+    }
+    if (Array.isArray(record.content)) {
+      return mcpImageMetadata(record.content, depth + 1);
+    }
+  }
+  return {};
+}
+
+/** Turns MCP image content blocks in a tool result into inline image parts, so a
+ * tool-produced image (e.g. the `june_image` MCP `generate_image`/`edit_image`
+ * tools) renders in-thread the same way the `/image` fast path does — and thus
+ * enters the session context the model reads. */
+export function imagePartsFromHermesContent(content: unknown): AgentChatImagePart[] {
+  const blocks = mcpImageContentBlocks(content);
+  const meta = mcpImageMetadata(content);
+  const blockParts = blocks.map((block) => ({
+    type: "image" as const,
+    status: "complete" as const,
+    prompt: meta.label?.trim() || "Generated image",
+    dataUrl: `data:${block.mimeType};base64,${block.data}`,
+    ...(meta.filename ? { name: meta.filename } : {}),
+  }));
+  const mediaParts = mediaImageReferences(content).map(mediaImagePart);
+  return [...blockParts, ...mediaParts];
 }
 
 function stripHermesContextMarkers(value: string) {

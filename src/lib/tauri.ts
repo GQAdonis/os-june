@@ -183,6 +183,9 @@ export type ProviderModelSettingsDto = {
   imageModel: string;
   veniceApiKeyConfigured: boolean;
   localGeneration: LocalGenerationSettingsDto;
+  /** Venice safe mode for image generation/editing (blurs adult content). Off
+   * by default (privacy-first); the user opts in via Settings. */
+  imageSafeMode: boolean;
 };
 
 export type LocalGenerationSettingsDto = {
@@ -959,6 +962,12 @@ export async function hermesBridgeFilePreview(path: string) {
   });
 }
 
+export async function hermesBridgeImageDataUrl(path: string) {
+  return invoke<string | null>("hermes_bridge_image_data_url", {
+    request: { path },
+  });
+}
+
 // Null when the file can't be shown as text (too large or binary) — the
 // caller falls back to a download affordance instead of erroring.
 export async function hermesBridgeFileText(path: string) {
@@ -1604,11 +1613,44 @@ export async function clearVeniceApiKey() {
   return invoke<ProviderModelSettingsDto>("clear_venice_api_key");
 }
 
+// Toggles Venice safe mode for image generation/editing. Off by default; when
+// on, Venice blurs adult content.
+export async function setImageSafeMode(enabled: boolean) {
+  return invoke<ProviderModelSettingsDto>("set_image_safe_mode", {
+    request: { enabled },
+  });
+}
+
 // Generates an image from a prompt via the June API. `model` is optional; the
 // backend falls back to the saved default image model when it is omitted.
-export async function generateImage(prompt: string, model?: string) {
+// `safeMode` pins the safe-mode value a retry must replay; omitted uses the
+// live saved setting.
+export async function generateImage(
+  prompt: string,
+  model?: string,
+  requestId?: string,
+  safeMode?: boolean,
+) {
   return invoke<GeneratedImageDto>("generate_image", {
-    request: { prompt, model },
+    request: { prompt, model, requestId, safeMode },
+  });
+}
+
+export async function editImage(input: {
+  imageBase64: string;
+  prompt: string;
+  mimeType?: string;
+  model?: string;
+  requestId?: string;
+}) {
+  return invoke<GeneratedImageDto>("edit_image", {
+    request: {
+      image: input.imageBase64,
+      prompt: input.prompt,
+      mimeType: input.mimeType,
+      model: input.model,
+      requestId: input.requestId,
+    },
   });
 }
 

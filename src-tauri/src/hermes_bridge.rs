@@ -1,11 +1,12 @@
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use rand::{distributions::Alphanumeric, Rng};
+use rand::{distributions::Alphanumeric, Rng, RngCore};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs,
-    io::{self, Write},
+    fs::{self, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     net::TcpListener,
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -39,7 +40,15 @@ const HERMES_SOURCE_TARBALL_SHA256: &str =
     "7a9bd367066183898831c2760f269368ab54b458a1d1b51d14ef1f484dd490cc";
 const FILESYSTEM_MAX_DEPTH: usize = 2;
 const FILESYSTEM_MAX_ENTRIES_PER_DIR: usize = 80;
-const HERMES_IMPORT_MAX_BYTES: u64 = 50 * 1024 * 1024;
+const HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES: usize = 50 * 1024 * 1024;
+const HERMES_IMAGE_SIGNATURE_READ_BYTES: usize = 32;
+const IMAGE_SOURCE_CAPABILITY_SECRET_FILE: &str = ".june-image-source-capability.key";
+const IMAGE_SOURCE_CAPABILITY_SECRET_BYTES: usize = 32;
+const IMAGE_SOURCE_CAPABILITY_HMAC_PREFIX: &[u8] = b"june-image-source-v2\0";
+const IMAGE_SOURCE_MARKER: &str = ".june-source-";
+const IMAGE_SOURCE_SIGNATURE_HEX_LEN: usize = 64;
+const LEGACY_IMAGE_SOURCE_SECRET_FILE: &str = ".images.june-image-source-secret";
+const HERMES_IMPORT_MAX_BYTES: u64 = HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES as u64;
 const HERMES_IMAGE_PREVIEW_MAX_BYTES: u64 = 5 * 1024 * 1024;
 const HERMES_TEXT_PREVIEW_MAX_BYTES: u64 = 2 * 1024 * 1024;
 const HERMES_SKILL_MAX_BYTES: usize = 512 * 1024;
@@ -53,7 +62,18 @@ const JUNE_PROVIDER_PROXY_MAX_HEADER_BYTES: usize = 32 * 1024;
 // larger buffer is minimal. A body over this cap is genuinely beyond any model
 // window and degrades to the context-overflow notice (recognizable wording in
 // `read_http_request`).
-const JUNE_PROVIDER_PROXY_MAX_BODY_BYTES: usize = 3 * 1024 * 1024;
+const JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES: usize = 3 * 1024 * 1024;
+// Image edit forwarding expands a source ref into base64 JSON before June API
+// sees it. Keep the loopback image cap derived from the same 50 MiB source
+// maximum enforced by imports and the proxy validator.
+const JUNE_PROVIDER_PROXY_IMAGE_JSON_OVERHEAD_BYTES: usize = 16 * 1024;
+const JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES: usize =
+    base64_encoded_len(HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES)
+        + JUNE_PROVIDER_PROXY_IMAGE_JSON_OVERHEAD_BYTES;
+
+const fn base64_encoded_len(byte_count: usize) -> usize {
+    byte_count.div_ceil(3) * 4
+}
 const JUNE_CONTEXT_MCP_SERVER_NAME: &str = "june_context";
 const JUNE_CONTEXT_MCP_DIR_NAME: &str = "hermes-mcp";
 const JUNE_CONTEXT_MCP_SCRIPT_NAME: &str = "june_context_mcp.py";
@@ -64,6 +84,18 @@ const JUNE_WEB_MCP_SCRIPT: &str = include_str!("hermes/june_web_mcp.py");
 /// Environment variable the `june_web` MCP reads its loopback proxy token from.
 /// Kept out of argv so it does not appear in process listings.
 const JUNE_WEB_MCP_TOKEN_ENV: &str = "JUNE_WEB_PROXY_TOKEN";
+const JUNE_IMAGE_MCP_SERVER_NAME: &str = "june_image";
+const JUNE_IMAGE_MCP_SCRIPT_NAME: &str = "june_image_mcp.py";
+const JUNE_IMAGE_MCP_SCRIPT: &str = include_str!("hermes/june_image_mcp.py");
+/// Hermes's generated-image directory (under the Hermes home). The `june_image`
+/// MCP writes generated/edited images here under storage names minted by the
+/// Rust loopback proxy; edit-source validation and source-byte reads stay in
+/// Rust.
+const JUNE_IMAGE_MCP_IMAGES_DIR_NAME: &str = "images";
+const JUNE_WORKSPACE_UPLOADS_DIR_NAME: &str = "uploads";
+/// Environment variable the `june_image` MCP reads its loopback proxy token
+/// from. Kept out of argv so it does not appear in process listings.
+const JUNE_IMAGE_MCP_TOKEN_ENV: &str = "JUNE_IMAGE_PROXY_TOKEN";
 
 /// Identity injected into every Hermes session via `SOUL.md`. Hermes loads
 /// this file from `HERMES_HOME` at prompt-build time; without it the runtime
@@ -103,6 +135,18 @@ Clarifying questions: before acting on a request, especially the first user mess
 /// first-class capability.
 const JUNE_SOUL_WEB_MD: &str = r#"
 Web tools: you have a `june_web` MCP toolset with `web_search` and `web_fetch`. Use `web_search` for current information, recent events, or facts you are not sure of, then `web_fetch` to read a specific result or URL in full as markdown. Reach for these instead of guessing when an answer may have changed since your training, and base your reply only on what the results actually say. Some sites block automated fetching; if a fetch is refused, search for another source.
+"#;
+
+/// Appended to `SOUL.md` for every runtime. The `generate_image` and
+/// `edit_image` tools are discovered through the `june_image` MCP server; this
+/// note teaches the model when to reach for them and to thread a returned
+/// filename back when editing. Image generation runs through the app's metered,
+/// privacy-preserving proxy, so the model should treat it as a first-class
+/// capability.
+const JUNE_SOUL_IMAGE_MD: &str = r#"
+Image tools: you have a `june_image` MCP toolset with `generate_image` and `edit_image`. Use `generate_image` when the user asks you to draw, create, make, or generate an image, picture, illustration, or logo; the result is shown to the user in the conversation and the tool returns a `filename`.
+Use this toolset instead of any generic image, media, or vision-analysis tool for image creation or edits, so June can display the returned image and keep the returned filename in context.
+When the user asks to change, adjust, refine, or reframe an image you just made with `generate_image` or `edit_image`, including "make it bigger/wider", "zoom out", "from a bigger perspective", "closer", "another angle", "different color", "add/remove X", or "make it a cartoon", call `edit_image` with the exact edit-safe filename returned by the prior image tool result as `source_filename` and an `instruction` describing the change. `edit_image` transforms the existing image file directly (image to image): you do NOT need to see, view, analyze, or describe the image to edit it, and you must not ask the user to describe it or call any vision or image-analysis tool first. Prefer `edit_image` over `generate_image` for any follow-up tweak to an image this toolset already produced, even if you cannot see it. Only pass a `source_filename` from a prior `june_image` tool result.
 "#;
 
 /// Appended to `SOUL.md` only when the Seatbelt write-jail engages on this
@@ -272,6 +316,24 @@ struct SharedProviderProxy {
     port: u16,
     token: String,
     shutdown: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Clone)]
+struct ProviderProxyState {
+    token: String,
+    image_sources: ImageSourceCapabilities,
+}
+
+#[derive(Clone)]
+struct ImageSourceCapabilities {
+    images_dir: PathBuf,
+    secret: [u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
+}
+
+#[derive(Debug)]
+struct ValidatedImageSource {
+    image_base64: String,
+    mime_type: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -783,15 +845,17 @@ async fn start_hermes_bridge_inner(
         .map(std::path::PathBuf::from)
         .unwrap_or(default_cwd);
     let cwd_display = Some(cwd.to_string_lossy().into_owned());
-    let provider_proxy = ensure_provider_proxy(bridge).await?;
+    let provider_proxy = ensure_provider_proxy(app, bridge, &hermes_home).await?;
     let june_context_mcp = sync_june_context_mcp(app, &command)?;
     let june_web_mcp = sync_june_web_mcp(app, &command)?;
+    let june_image_mcp = sync_june_image_mcp(app, &hermes_home, &command)?;
     sync_hermes_config(
         &hermes_home,
         provider_proxy.port,
         &provider_proxy.token,
         &june_context_mcp,
         &june_web_mcp,
+        &june_image_mcp,
     )?;
 
     // Wrap the spawn in a macOS Seatbelt write-jail when possible. The model,
@@ -925,7 +989,11 @@ async fn start_hermes_bridge_inner(
 
 /// The shared provider proxy's coordinates, starting it on first use. Both
 /// runtime processes point at it through the one shared config.yaml.
-async fn ensure_provider_proxy(bridge: &HermesBridge) -> Result<SharedProviderProxyInfo, AppError> {
+async fn ensure_provider_proxy(
+    app: &AppHandle,
+    bridge: &HermesBridge,
+    hermes_home: &Path,
+) -> Result<SharedProviderProxyInfo, AppError> {
     {
         let guard = bridge.provider_proxy.lock().map_err(|_| {
             AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed.")
@@ -938,7 +1006,13 @@ async fn ensure_provider_proxy(bridge: &HermesBridge) -> Result<SharedProviderPr
         }
     }
     let token = random_token();
-    let started = start_june_provider_proxy(token.clone()).await?;
+    let app_data_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
+    let image_sources = ImageSourceCapabilities {
+        images_dir: hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
+        secret: load_or_create_image_source_capability_secret(&app_data_dir)?,
+    };
+    let started = start_june_provider_proxy(token.clone(), image_sources).await?;
     let mut guard = bridge
         .provider_proxy
         .lock()
@@ -972,6 +1046,13 @@ struct JuneContextMcpConfig {
 struct JuneWebMcpConfig {
     command: String,
     script_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct JuneImageMcpConfig {
+    command: String,
+    script_path: PathBuf,
+    images_dir: PathBuf,
 }
 
 #[tauri::command]
@@ -2358,6 +2439,15 @@ pub async fn hermes_bridge_file_preview(
 }
 
 #[tauri::command]
+pub async fn hermes_bridge_image_data_url(
+    app: AppHandle,
+    request: HermesFilePreviewRequest,
+) -> Result<Option<String>, AppError> {
+    let requested = validate_hermes_file_path(&app, &request.path)?;
+    image_source_data_url(&requested)
+}
+
+#[tauri::command]
 pub async fn hermes_bridge_file_text(
     app: AppHandle,
     request: HermesFilePreviewRequest,
@@ -2381,7 +2471,9 @@ pub async fn import_hermes_bridge_file(
         ));
     }
     let hermes_home = resolve_june_hermes_home(&app)?;
-    let upload_dir = hermes_home.join("workspace").join("uploads");
+    let upload_dir = hermes_home
+        .join("workspace")
+        .join(JUNE_WORKSPACE_UPLOADS_DIR_NAME);
     fs::create_dir_all(&upload_dir)
         .map_err(|error| AppError::new("hermes_file_import_failed", error.to_string()))?;
     let destination = unique_upload_path(&upload_dir, &source)?;
@@ -2435,7 +2527,9 @@ pub fn import_hermes_bridge_file_bytes(
         .unwrap_or_default();
     let file_name = validate_dropped_file_name(&raw_name)?;
     let hermes_home = resolve_june_hermes_home(&app)?;
-    let upload_dir = hermes_home.join("workspace").join("uploads");
+    let upload_dir = hermes_home
+        .join("workspace")
+        .join(JUNE_WORKSPACE_UPLOADS_DIR_NAME);
     fs::create_dir_all(&upload_dir)
         .map_err(|error| AppError::new("hermes_file_import_failed", error.to_string()))?;
     let destination = unique_upload_path(&upload_dir, Path::new(&file_name))?;
@@ -2486,23 +2580,34 @@ fn validate_hermes_file_path(app: &AppHandle, path: &str) -> Result<PathBuf, App
     if !requested.is_file() {
         return Err(AppError::new(
             "hermes_file_download_failed",
-            "Only files in the Hermes workspace or memory can be downloaded.",
+            "Only files in June's workspace, memory, or generated images can be downloaded.",
         ));
     }
     if is_hidden_secret_path(&requested) {
         return Err(AppError::new(
             "hermes_file_download_denied",
-            "This Hermes file is hidden or sensitive.",
+            "This June file is hidden or sensitive.",
         ));
     }
-    let allowed = filesystem_roots(&hermes_home)?
+    let mut allowed_roots = filesystem_roots(&hermes_home)?
         .into_iter()
         .filter_map(|root| root.path.canonicalize().ok())
+        .collect::<Vec<_>>();
+    // "image_cache" is where the Hermes runtime copies tool-result images;
+    // assistant MEDIA: references point at those copies, so dropping it breaks
+    // inline rendering and download of every tool-generated image.
+    allowed_roots.extend(
+        ["images", "image_cache"]
+            .into_iter()
+            .filter_map(|relative| hermes_home.join(relative).canonicalize().ok()),
+    );
+    let allowed = allowed_roots
+        .into_iter()
         .any(|root| requested.starts_with(root));
     if !allowed {
         return Err(AppError::new(
             "hermes_file_download_denied",
-            "Only files in this app's Hermes workspace or memory can be downloaded.",
+            "Only files in June's workspace, memory, or generated images can be downloaded.",
         ));
     }
     Ok(requested)
@@ -2534,7 +2639,7 @@ fn unique_download_path(downloads_dir: &Path, source: &Path) -> Result<PathBuf, 
         .ok_or_else(|| {
             AppError::new(
                 "hermes_file_download_failed",
-                "The Hermes file does not have a downloadable filename.",
+                "The June file does not have a downloadable filename.",
             )
         })?;
     let candidate = downloads_dir.join(file_name);
@@ -2635,6 +2740,26 @@ fn image_preview_data_url(path: &Path) -> Result<Option<String>, AppError> {
     }
     let bytes = fs::read(path)
         .map_err(|error| AppError::new("hermes_file_preview_failed", error.to_string()))?;
+    Ok(Some(format!(
+        "data:{mime_type};base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    )))
+}
+
+fn image_source_data_url(path: &Path) -> Result<Option<String>, AppError> {
+    let Some(mime_type) = image_mime_type(path) else {
+        return Ok(None);
+    };
+    let metadata = fs::metadata(path)
+        .map_err(|error| AppError::new("hermes_file_image_failed", error.to_string()))?;
+    if metadata.len() > HERMES_IMPORT_MAX_BYTES {
+        return Err(AppError::new(
+            "hermes_file_image_denied",
+            "Image files must be 50 MB or smaller.",
+        ));
+    }
+    let bytes = fs::read(path)
+        .map_err(|error| AppError::new("hermes_file_image_failed", error.to_string()))?;
     Ok(Some(format!(
         "data:{mime_type};base64,{}",
         BASE64_STANDARD.encode(bytes)
@@ -5663,6 +5788,8 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     }
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let runtime_dir = managed_hermes_runtime_dir(app).ok()?;
+    let app_data_dir = crate::app_paths::app_data_dir(app).ok()?;
+    let image_source_key_path = image_source_capability_secret_path(&app_data_dir);
     let write_roots = sandbox_write_roots(hermes_home, &runtime_dir);
     let config_write_path = sandbox_config_write_path(hermes_home);
     let config_temp_prefix = sandbox_config_temp_prefix(hermes_home);
@@ -5671,9 +5798,9 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
         &write_roots,
         &config_write_path,
         &config_temp_prefix,
+        std::slice::from_ref(&image_source_key_path),
         agent_cli_access,
     );
-    let app_data_dir = crate::app_paths::app_data_dir(app).ok()?;
     if std::fs::create_dir_all(&app_data_dir).is_err() {
         return None;
     }
@@ -5804,6 +5931,7 @@ fn build_sandbox_profile(
     write_roots: &[PathBuf],
     config_write_path: &Path,
     config_temp_prefix: &Path,
+    secret_read_paths: &[PathBuf],
     agent_cli_access: bool,
 ) -> String {
     let mut out = String::new();
@@ -5913,6 +6041,12 @@ fn build_sandbox_profile(
         out.push_str(&format!(
             "  (literal {})\n",
             sbpl_quote(&home.join(relative).to_string_lossy())
+        ));
+    }
+    for path in secret_read_paths {
+        out.push_str(&format!(
+            "  (literal {})\n",
+            sbpl_quote(&path.to_string_lossy())
         ));
     }
     out.push_str(")\n");
@@ -6029,6 +6163,50 @@ fn sync_june_web_mcp(app: &AppHandle, hermes_command: &str) -> Result<JuneWebMcp
     })
 }
 
+fn sync_june_image_mcp(
+    app: &AppHandle,
+    hermes_home: &std::path::Path,
+    hermes_command: &str,
+) -> Result<JuneImageMcpConfig, AppError> {
+    let data_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("june_image_mcp_failed", error.to_string()))?;
+    let mcp_dir = data_dir.join(JUNE_CONTEXT_MCP_DIR_NAME);
+    fs::create_dir_all(&mcp_dir)
+        .map_err(|error| AppError::new("june_image_mcp_failed", error.to_string()))?;
+    let script_path = mcp_dir.join(JUNE_IMAGE_MCP_SCRIPT_NAME);
+    fs::write(&script_path, JUNE_IMAGE_MCP_SCRIPT)
+        .map_err(|error| AppError::new("june_image_mcp_failed", error.to_string()))?;
+    // Keep generated/edited images in Hermes's image dir. The MCP writes the
+    // proxy-returned storage filename here; Rust validates source refs later.
+    let images_dir = hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME);
+    fs::create_dir_all(&images_dir)
+        .map_err(|error| AppError::new("june_image_mcp_failed", error.to_string()))?;
+    remove_legacy_image_source_secret(hermes_home)?;
+    let uploads_dir = hermes_home
+        .join("workspace")
+        .join(JUNE_WORKSPACE_UPLOADS_DIR_NAME);
+    fs::create_dir_all(&uploads_dir)
+        .map_err(|error| AppError::new("june_image_mcp_failed", error.to_string()))?;
+
+    Ok(JuneImageMcpConfig {
+        command: hermes_python_command(hermes_command),
+        script_path,
+        images_dir,
+    })
+}
+
+fn remove_legacy_image_source_secret(hermes_home: &Path) -> Result<(), AppError> {
+    let path = hermes_home.join(LEGACY_IMAGE_SOURCE_SECRET_FILE);
+    match fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AppError::new(
+            "june_image_mcp_failed",
+            format!("failed to remove legacy image edit-source secret: {error}"),
+        )),
+    }
+}
+
 fn hermes_python_command(hermes_command: &str) -> String {
     let command_path = Path::new(hermes_command);
     if let Some(parent) = command_path
@@ -6064,6 +6242,7 @@ fn sync_hermes_config(
     provider_proxy_token: &str,
     june_context_mcp: &JuneContextMcpConfig,
     june_web_mcp: &JuneWebMcpConfig,
+    june_image_mcp: &JuneImageMcpConfig,
 ) -> Result<(), AppError> {
     let model = crate::providers::generation_model();
     let base_url = format!("http://127.0.0.1:{provider_proxy_port}/v1");
@@ -6075,6 +6254,7 @@ fn sync_hermes_config(
         &external_skill_dirs(),
         Some(june_context_mcp),
         Some(june_web_mcp),
+        Some(june_image_mcp),
     );
     let config_path = hermes_home.join("config.yaml");
     // MERGE over the existing config, never replace it: the jailed dashboard
@@ -6139,6 +6319,7 @@ fn render_hermes_config(
     external_skill_dirs: &[PathBuf],
     june_context_mcp: Option<&JuneContextMcpConfig>,
     june_web_mcp: Option<&JuneWebMcpConfig>,
+    june_image_mcp: Option<&JuneImageMcpConfig>,
 ) -> String {
     let skills_block = if external_skill_dirs.is_empty() {
         "  external_dirs: []\n".to_string()
@@ -6152,6 +6333,7 @@ fn render_hermes_config(
     let mcp_servers_block = render_mcp_servers_config(
         june_context_mcp,
         june_web_mcp,
+        june_image_mcp,
         base_url,
         provider_proxy_token,
     );
@@ -6182,6 +6364,7 @@ skills:
 fn render_mcp_servers_config(
     context: Option<&JuneContextMcpConfig>,
     web: Option<&JuneWebMcpConfig>,
+    image: Option<&JuneImageMcpConfig>,
     base_url: &str,
     proxy_token: &str,
 ) -> String {
@@ -6191,6 +6374,9 @@ fn render_mcp_servers_config(
     }
     if let Some(config) = web {
         entries.push_str(&render_web_mcp_entry(config, base_url, proxy_token));
+    }
+    if let Some(config) = image {
+        entries.push_str(&render_image_mcp_entry(config, base_url, proxy_token));
     }
     if entries.is_empty() {
         return "mcp_servers: {}\n".to_string();
@@ -6245,6 +6431,39 @@ fn render_web_mcp_entry(config: &JuneWebMcpConfig, base_url: &str, proxy_token: 
     )
 }
 
+/// The image MCP gets the loopback proxy base URL plus the generated-image
+/// directory as arguments, and the proxy token via the environment (kept out of
+/// argv). The timeout stays above June API's image route timeout so a retry
+/// with the same request id can replay a settled call.
+fn render_image_mcp_entry(
+    config: &JuneImageMcpConfig,
+    base_url: &str,
+    proxy_token: &str,
+) -> String {
+    format!(
+        r#"  {server_name}:
+    enabled: true
+    command: {command}
+    args:
+      - {script_path}
+      - {base_url}
+      - {images_dir}
+    env:
+      PYTHONUNBUFFERED: "1"
+      {token_env}: {token}
+    timeout: 660
+    connect_timeout: 10
+"#,
+        server_name = JUNE_IMAGE_MCP_SERVER_NAME,
+        command = yaml_string(&config.command),
+        script_path = yaml_string(&config.script_path.to_string_lossy()),
+        base_url = yaml_string(base_url),
+        images_dir = yaml_string(&config.images_dir.to_string_lossy()),
+        token_env = JUNE_IMAGE_MCP_TOKEN_ENV,
+        token = yaml_string(proxy_token),
+    )
+}
+
 /// User-global skill directories Hermes loads in addition to its built-in
 /// `$HERMES_HOME/skills`. June advertises the conventional `~/.agents/skills`
 /// folder (where the `skills` CLI installs) when it exists, so a user or team
@@ -6282,10 +6501,10 @@ fn sync_june_soul(
             JUNE_SOUL_CLI_BLOCKED_MD
         };
         format!(
-            "{JUNE_SOUL_MD}{JUNE_SOUL_CONTEXT_MD}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_SANDBOX_MD}{cli_section}"
+            "{JUNE_SOUL_MD}{JUNE_SOUL_CONTEXT_MD}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{JUNE_SOUL_SANDBOX_MD}{cli_section}"
         )
     } else {
-        format!("{JUNE_SOUL_MD}{JUNE_SOUL_CONTEXT_MD}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}")
+        format!("{JUNE_SOUL_MD}{JUNE_SOUL_CONTEXT_MD}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}")
     };
     std::fs::write(hermes_home.join("SOUL.md"), soul)
         .map_err(|error| AppError::new("hermes_bridge_soul_failed", error.to_string()))
@@ -6440,7 +6659,10 @@ fn yaml_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-async fn start_june_provider_proxy(token: String) -> Result<RunningJuneProviderProxy, AppError> {
+async fn start_june_provider_proxy(
+    token: String,
+    image_sources: ImageSourceCapabilities,
+) -> Result<RunningJuneProviderProxy, AppError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
     listener
@@ -6455,7 +6677,10 @@ async fn start_june_provider_proxy(token: String) -> Result<RunningJuneProviderP
     let (shutdown, shutdown_rx) = oneshot::channel();
     tauri::async_runtime::spawn(run_june_provider_proxy(
         listener,
-        Arc::new(token),
+        Arc::new(ProviderProxyState {
+            token,
+            image_sources,
+        }),
         shutdown_rx,
     ));
     Ok(RunningJuneProviderProxy { port, shutdown })
@@ -6468,7 +6693,7 @@ struct RunningJuneProviderProxy {
 
 async fn run_june_provider_proxy(
     listener: tokio::net::TcpListener,
-    token: Arc<String>,
+    state: Arc<ProviderProxyState>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     loop {
@@ -6477,9 +6702,9 @@ async fn run_june_provider_proxy(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
-                        let token = token.clone();
+                        let state = state.clone();
                         tauri::async_runtime::spawn(async move {
-                            let _ = handle_june_provider_connection(stream, token).await;
+                            let _ = handle_june_provider_connection(stream, state).await;
                         });
                     }
                     Err(error) => {
@@ -6498,7 +6723,7 @@ async fn run_june_provider_proxy(
 
 async fn handle_june_provider_connection(
     mut stream: tokio::net::TcpStream,
-    token: Arc<String>,
+    state: Arc<ProviderProxyState>,
 ) -> io::Result<()> {
     let request = match read_http_request(&mut stream).await {
         Ok(request) => request,
@@ -6512,7 +6737,7 @@ async fn handle_june_provider_connection(
             return Ok(());
         }
     };
-    if !provider_proxy_authorized(&request, &token) {
+    if !provider_proxy_authorized(&request, &state.token) {
         write_json_response(
             &mut stream,
             401,
@@ -6572,6 +6797,44 @@ async fn handle_june_provider_connection(
         }
         ("POST", "/v1/web/fetch") => {
             forward_web_tool(&mut stream, "/v1/web/fetch", &request.body).await?;
+        }
+        ("POST", "/v1/image/generate") => {
+            // The image MCP sends no model, so the user's selected image model
+            // is authoritative — inject it here (June API requires a model).
+            // safe_mode likewise comes from the on-device setting.
+            let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            ensure_image_generation_model(&mut body);
+            ensure_image_safe_mode(&mut body);
+            forward_image_tool(
+                &mut stream,
+                "/v1/image/generate",
+                &body,
+                &state.image_sources,
+            )
+            .await?;
+        }
+        ("POST", "/v1/image/edit") => {
+            // Edits use June API's default edit model (a separate catalog), so
+            // no model is injected here; safe_mode still comes from the setting.
+            // The MCP sends only an opaque sourceFilename. Resolve and validate
+            // it here, where the signing key is outside Hermes home.
+            let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if let Err(message) = prepare_image_edit_request(&mut body, &state.image_sources) {
+                write_json_response(
+                    &mut stream,
+                    400,
+                    serde_json::json!({
+                        "success": false,
+                        "message": message,
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+            ensure_image_safe_mode(&mut body);
+            forward_image_tool(&mut stream, "/v1/image/edit", &body, &state.image_sources).await?;
         }
         _ => {
             write_json_response(
@@ -6644,17 +6907,18 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
             }
         })
         .unwrap_or(0);
-    if content_length > JUNE_PROVIDER_PROXY_MAX_BODY_BYTES {
-        // The handler turns this into a 400 for the client. Phrase it as a
-        // context overflow (JUN-169): the wording carries the tokens Hermes'
-        // overflow patterns match ("maximum context length") and the frontend
-        // classifier keys on (`prompt_too_long`), so an over-cap body degrades
-        // into the recoverable context-overflow notice instead of a raw
-        // transport error that re-wedges or dead-ends the session.
+    if content_length > provider_proxy_max_body_bytes(&path) {
+        // The handler turns this into a 400 for the client. Chat bodies are
+        // phrased as a context overflow (JUN-169): the wording carries the
+        // tokens Hermes' overflow patterns match ("maximum context length") and
+        // the frontend classifier keys on (`prompt_too_long`), so an over-cap
+        // chat body degrades into the recoverable context-overflow notice
+        // instead of a raw transport error that re-wedges or dead-ends the
+        // session. Image bodies use an image-specific message because they are
+        // bounded by upload size, not model context.
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "prompt_too_long: the request body exceeds the model's maximum \
-             context length. Reduce the length of the messages and retry.",
+            provider_proxy_body_too_large_message(&path),
         ));
     }
     let mut body = buffer[header_end..].to_vec();
@@ -6672,6 +6936,26 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
         headers,
         body,
     })
+}
+
+fn provider_proxy_max_body_bytes(path: &str) -> usize {
+    match path {
+        "/v1/image/generate" | "/v1/image/edit" => JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
+        _ => JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES,
+    }
+}
+
+fn provider_proxy_body_too_large_message(path: &str) -> &'static str {
+    match path {
+        "/v1/image/generate" | "/v1/image/edit" => {
+            "image_request_too_large: the image request body is too large for June. \
+             Use a smaller image and retry."
+        }
+        _ => {
+            "prompt_too_long: the request body exceeds the model's maximum \
+             context length. Reduce the length of the messages and retry."
+        }
+    }
 }
 
 /// Rewrites the backend's `prompt_too_long` rejection into wording the agent
@@ -6809,6 +7093,496 @@ async fn forward_web_tool(
             )
             .await
         }
+    }
+}
+
+/// Forwards an image tool request (`/v1/image/generate` or `/v1/image/edit`) to
+/// June API with the user's token, passing the response envelope straight
+/// through so the MCP sees the same `{success, data|message}` shape (and its
+/// metering-derived 402/422 statuses) the desktop image path gets.
+async fn forward_image_tool(
+    stream: &mut tokio::net::TcpStream,
+    path: &str,
+    body: &serde_json::Value,
+    image_sources: &ImageSourceCapabilities,
+) -> io::Result<()> {
+    match crate::june_api::forward_image_request(path, body).await {
+        Ok(response) => {
+            let response = add_image_source_capability_to_response(response, image_sources);
+            write_raw_response(
+                stream,
+                response.status,
+                &response.content_type,
+                &response.body,
+            )
+            .await
+        }
+        Err(error) => {
+            write_json_response(
+                stream,
+                502,
+                serde_json::json!({
+                    "success": false,
+                    "message": format!("Image request failed: {}", error.message),
+                }),
+            )
+            .await
+        }
+    }
+}
+
+fn image_source_capability_secret_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join(IMAGE_SOURCE_CAPABILITY_SECRET_FILE)
+}
+
+fn load_or_create_image_source_capability_secret(
+    app_data_dir: &Path,
+) -> Result<[u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES], AppError> {
+    fs::create_dir_all(app_data_dir)
+        .map_err(|error| AppError::new("june_image_source_key_failed", error.to_string()))?;
+    let path = image_source_capability_secret_path(app_data_dir);
+    match fs::read_to_string(&path) {
+        Ok(value) => {
+            set_owner_only_permissions(&path).map_err(|error| {
+                AppError::new("june_image_source_key_failed", error.to_string())
+            })?;
+            parse_image_source_capability_secret(value.trim())
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let mut secret = [0u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES];
+            rand::thread_rng().fill_bytes(&mut secret);
+            match write_new_secret_file(&path, &hex_encode(&secret)) {
+                Ok(()) => {
+                    set_owner_only_permissions(&path).map_err(|error| {
+                        AppError::new("june_image_source_key_failed", error.to_string())
+                    })?;
+                    Ok(secret)
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let value = fs::read_to_string(&path).map_err(|error| {
+                        AppError::new("june_image_source_key_failed", error.to_string())
+                    })?;
+                    set_owner_only_permissions(&path).map_err(|error| {
+                        AppError::new("june_image_source_key_failed", error.to_string())
+                    })?;
+                    parse_image_source_capability_secret(value.trim())
+                }
+                Err(error) => Err(AppError::new(
+                    "june_image_source_key_failed",
+                    error.to_string(),
+                )),
+            }
+        }
+        Err(error) => Err(AppError::new(
+            "june_image_source_key_failed",
+            error.to_string(),
+        )),
+    }
+}
+
+fn write_new_secret_file(path: &Path, contents: &str) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+fn set_owner_only_permissions(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(path, permissions)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn parse_image_source_capability_secret(
+    value: &str,
+) -> Result<[u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES], AppError> {
+    let bytes = hex_decode(value).ok_or_else(|| {
+        AppError::new(
+            "june_image_source_key_failed",
+            "June image source capability key is invalid.",
+        )
+    })?;
+    if bytes.len() != IMAGE_SOURCE_CAPABILITY_SECRET_BYTES {
+        return Err(AppError::new(
+            "june_image_source_key_failed",
+            "June image source capability key is invalid.",
+        ));
+    }
+    let mut secret = [0u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES];
+    secret.copy_from_slice(&bytes);
+    Ok(secret)
+}
+
+fn add_image_source_capability_to_response(
+    mut response: crate::june_api::WebProxyResponse,
+    image_sources: &ImageSourceCapabilities,
+) -> crate::june_api::WebProxyResponse {
+    if !response.content_type.to_ascii_lowercase().contains("json") {
+        return response;
+    }
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&response.body) else {
+        return response;
+    };
+    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+        return response;
+    }
+    let Some(data) = value
+        .get_mut("data")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return response;
+    };
+    let image_base64 = data
+        .get("imageBase64")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if image_base64.trim().is_empty() {
+        return response;
+    }
+    let mime_type = data
+        .get("mimeType")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("image/png");
+    let Ok(image_bytes) = BASE64_STANDARD.decode(image_base64) else {
+        return response;
+    };
+    let storage_filename = generated_image_storage_filename(mime_type);
+    let source_filename = mint_image_source_reference(
+        image_sources,
+        &storage_filename,
+        &sha256_bytes(&image_bytes),
+    );
+    data.insert(
+        "storageFilename".to_string(),
+        serde_json::Value::String(storage_filename),
+    );
+    data.insert(
+        "sourceFilename".to_string(),
+        serde_json::Value::String(source_filename),
+    );
+    if let Ok(body) = serde_json::to_vec(&value) {
+        response.body = body;
+        response.content_type = "application/json".to_string();
+    }
+    response
+}
+
+fn prepare_image_edit_request(
+    body: &mut serde_json::Value,
+    image_sources: &ImageSourceCapabilities,
+) -> Result<(), String> {
+    let Some(object) = body.as_object_mut() else {
+        return Err("Image edit request must be a JSON object.".to_string());
+    };
+    let source_filename = object
+        .get("sourceFilename")
+        .or_else(|| object.get("source_filename"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "source_filename is required".to_string())?;
+    let source = validate_image_source_reference(image_sources, &source_filename)?;
+    object.remove("sourceFilename");
+    object.remove("source_filename");
+    object.insert(
+        "image".to_string(),
+        serde_json::Value::String(source.image_base64),
+    );
+    object.insert(
+        "mimeType".to_string(),
+        serde_json::Value::String(source.mime_type.to_string()),
+    );
+    Ok(())
+}
+
+fn validate_image_source_reference(
+    image_sources: &ImageSourceCapabilities,
+    source_filename: &str,
+) -> Result<ValidatedImageSource, String> {
+    let (signature, expected_name) =
+        parse_image_source_reference(source_filename).ok_or_else(|| {
+            "source_filename must be an edit-safe filename from this tool.".to_string()
+        })?;
+    let expected_mime = image_mime_type_for_filename(&expected_name).ok_or_else(|| {
+        "source_filename must refer to a PNG, JPEG, WebP, or GIF image.".to_string()
+    })?;
+    let images_root = fs::canonicalize(&image_sources.images_dir)
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    let candidate = image_sources.images_dir.join(&expected_name);
+    let canonical = fs::canonicalize(candidate)
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    if !canonical.starts_with(&images_root) {
+        return Err("source_filename must refer to an available June image source.".to_string());
+    }
+    let metadata = fs::metadata(&canonical)
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    if !metadata.is_file() {
+        return Err("source_filename must refer to an available June image source.".to_string());
+    }
+    if metadata.len() > HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES as u64 {
+        return Err("source_filename must be 50 MB or smaller.".to_string());
+    }
+    let mut file = fs::File::open(&canonical)
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    let mut signature_bytes = [0u8; HERMES_IMAGE_SIGNATURE_READ_BYTES];
+    let read = file
+        .read(&mut signature_bytes)
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    if sniff_image_mime_type(&signature_bytes[..read]) != Some(expected_mime) {
+        return Err(
+            "source_filename must refer to a real PNG, JPEG, WebP, or GIF image.".to_string(),
+        );
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    let mut data = Vec::new();
+    let mut limited = file.take(HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES as u64 + 1);
+    limited
+        .read_to_end(&mut data)
+        .map_err(|_| "source_filename must refer to an available June image source.".to_string())?;
+    if data.len() > HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES {
+        return Err("source_filename must be 50 MB or smaller.".to_string());
+    }
+    if sniff_image_mime_type(&data[..data.len().min(HERMES_IMAGE_SIGNATURE_READ_BYTES)])
+        != Some(expected_mime)
+    {
+        return Err(
+            "source_filename must refer to a real PNG, JPEG, WebP, or GIF image.".to_string(),
+        );
+    }
+    let expected_signature =
+        image_source_signature(&image_sources.secret, &expected_name, &sha256_bytes(&data));
+    if !constant_time_eq(&signature, &expected_signature) {
+        return Err("source_filename must match the image it was issued for.".to_string());
+    }
+    Ok(ValidatedImageSource {
+        image_base64: BASE64_STANDARD.encode(data),
+        mime_type: expected_mime,
+    })
+}
+
+fn mint_image_source_reference(
+    image_sources: &ImageSourceCapabilities,
+    storage_filename: &str,
+    content_hash: &[u8; 32],
+) -> String {
+    let signature = image_source_signature(&image_sources.secret, storage_filename, content_hash);
+    image_source_reference(storage_filename, &signature)
+}
+
+fn image_source_signature(
+    secret: &[u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
+    safe_name: &str,
+    content_hash: &[u8; 32],
+) -> String {
+    let mut payload = Vec::with_capacity(
+        IMAGE_SOURCE_CAPABILITY_HMAC_PREFIX.len() + safe_name.len() + 1 + content_hash.len(),
+    );
+    payload.extend_from_slice(IMAGE_SOURCE_CAPABILITY_HMAC_PREFIX);
+    payload.extend_from_slice(safe_name.as_bytes());
+    payload.push(0);
+    payload.extend_from_slice(content_hash);
+    hmac_sha256_hex(secret, &payload)
+}
+
+fn hmac_sha256_hex(secret: &[u8], payload: &[u8]) -> String {
+    const HMAC_BLOCK_BYTES: usize = 64;
+    let mut key = [0u8; HMAC_BLOCK_BYTES];
+    if secret.len() > HMAC_BLOCK_BYTES {
+        key[..32].copy_from_slice(&sha256_bytes(secret));
+    } else {
+        key[..secret.len()].copy_from_slice(secret);
+    }
+    let mut outer_key = [0u8; HMAC_BLOCK_BYTES];
+    let mut inner_key = [0u8; HMAC_BLOCK_BYTES];
+    for index in 0..HMAC_BLOCK_BYTES {
+        outer_key[index] = key[index] ^ 0x5c;
+        inner_key[index] = key[index] ^ 0x36;
+    }
+    let mut inner = Sha256::new();
+    inner.update(inner_key);
+    inner.update(payload);
+    let inner_hash = inner.finalize();
+
+    let mut outer = Sha256::new();
+    outer.update(outer_key);
+    outer.update(inner_hash);
+    hex_encode(&outer.finalize())
+}
+
+fn image_source_reference(safe_name: &str, signature: &str) -> String {
+    let (stem, extension) = split_filename_extension(safe_name);
+    let stem = if stem.is_empty() { "image" } else { stem };
+    format!("{stem}{IMAGE_SOURCE_MARKER}{signature}{extension}")
+}
+
+fn parse_image_source_reference(reference: &str) -> Option<(String, String)> {
+    let safe_name = bare_filename(reference.trim())?;
+    let (stem_with_signature, extension) = split_filename_extension(safe_name);
+    let marker_start = stem_with_signature.rfind(IMAGE_SOURCE_MARKER)?;
+    let stem = &stem_with_signature[..marker_start];
+    let signature = &stem_with_signature[marker_start + IMAGE_SOURCE_MARKER.len()..];
+    if stem.is_empty()
+        || signature.len() != IMAGE_SOURCE_SIGNATURE_HEX_LEN
+        || !signature.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    let expected_name = format!("{stem}{extension}");
+    Some((signature.to_ascii_lowercase(), expected_name))
+}
+
+fn generated_image_storage_filename(mime_type: &str) -> String {
+    let extension = match mime_type.trim().to_ascii_lowercase().as_str() {
+        "image/jpeg" => "jpg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        _ => "png",
+    };
+    format!(
+        "generated-image-{}.{}",
+        uuid::Uuid::new_v4().simple(),
+        extension
+    )
+}
+
+fn image_mime_type_for_filename(filename: &str) -> Option<&'static str> {
+    let extension = filename.rsplit_once('.')?.1.to_ascii_lowercase();
+    match extension.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+fn sniff_image_mime_type(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if data.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    None
+}
+
+fn split_filename_extension(filename: &str) -> (&str, &str) {
+    match filename.rsplit_once('.') {
+        Some((stem, extension)) => (stem, &filename[stem.len()..][..extension.len() + 1]),
+        None => (filename, ""),
+    }
+}
+
+fn bare_filename(value: &str) -> Option<&str> {
+    if value.is_empty()
+        || value.contains('/')
+        || value.contains('\\')
+        || Path::new(value).is_absolute()
+    {
+        return None;
+    }
+    let name = Path::new(value).file_name()?.to_str()?;
+    if name == value {
+        Some(name)
+    } else {
+        None
+    }
+}
+
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(data);
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&digest);
+    output
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(value: &str) -> Option<Vec<u8>> {
+    if value.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(value.len() / 2);
+    for pair in value.as_bytes().chunks_exact(2) {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        out.push((high << 4) | low);
+    }
+    Some(out)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Injects the user's selected image-generation model when the request omits it,
+/// mirroring how the chat-completions proxy injects the chat model. The image
+/// MCP intentionally sends no model so this setting stays authoritative.
+fn ensure_image_generation_model(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let has_model = object
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(|model| !model.is_empty())
+        .unwrap_or(false);
+    if !has_model {
+        object.insert(
+            "model".to_string(),
+            serde_json::Value::String(crate::providers::image_model()),
+        );
+    }
+}
+
+/// Injects the on-device image safe-mode setting when the request omits it, so
+/// MCP-driven generation/editing honors the user's Settings toggle (the MCP
+/// never sends `safeMode`). Uses the camelCase key June API expects.
+fn ensure_image_safe_mode(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if !object.contains_key("safeMode") {
+        object.insert(
+            "safeMode".to_string(),
+            serde_json::Value::Bool(crate::providers::image_safe_mode()),
+        );
     }
 }
 
@@ -7311,6 +8085,161 @@ mod tests {
     }
 
     #[test]
+    fn provider_proxy_uses_larger_body_cap_for_image_tools() {
+        assert_eq!(
+            JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
+            base64_encoded_len(HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES)
+                + JUNE_PROVIDER_PROXY_IMAGE_JSON_OVERHEAD_BYTES
+        );
+        assert_eq!(
+            provider_proxy_max_body_bytes("/v1/chat/completions"),
+            JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES
+        );
+        assert_eq!(
+            provider_proxy_max_body_bytes("/v1/image/edit"),
+            JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES
+        );
+        assert_eq!(
+            provider_proxy_max_body_bytes("/v1/image/generate"),
+            JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES
+        );
+        assert!(
+            provider_proxy_max_body_bytes("/v1/image/edit")
+                > provider_proxy_max_body_bytes("/v1/chat/completions")
+        );
+    }
+
+    #[test]
+    fn provider_proxy_uses_context_overflow_wording_only_for_chat_body_cap() {
+        assert!(
+            provider_proxy_body_too_large_message("/v1/chat/completions")
+                .contains("prompt_too_long")
+        );
+        assert!(
+            provider_proxy_body_too_large_message("/v1/chat/completions")
+                .contains("maximum context length")
+        );
+
+        let image_message = provider_proxy_body_too_large_message("/v1/image/edit");
+        assert!(image_message.contains("image_request_too_large"));
+        assert!(!image_message.contains("maximum context length"));
+    }
+
+    fn test_png_bytes(label: &[u8]) -> Vec<u8> {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.extend_from_slice(label);
+        bytes
+    }
+
+    fn write_test_png(path: &Path, label: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create png parent");
+        }
+        fs::write(path, test_png_bytes(label)).expect("write png");
+    }
+
+    fn test_image_sources(images_dir: PathBuf, secret: [u8; 32]) -> ImageSourceCapabilities {
+        ImageSourceCapabilities { images_dir, secret }
+    }
+
+    fn assert_no_image_source_secret_under(root: &Path) {
+        if !root.exists() {
+            return;
+        }
+        for entry in fs::read_dir(root).expect("read secret scan dir") {
+            let entry = entry.expect("secret scan entry");
+            let path = entry.path();
+            if path.is_dir() {
+                assert_no_image_source_secret_under(&path);
+            } else {
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                assert!(
+                    !name.contains("image-source") && !name.contains("june-image-source"),
+                    "image source signing secret stayed under Hermes home: {}",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_source_ref_rejects_changed_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let images_dir = temp.path().join("images");
+        let source_path = images_dir.join("generated-image-a.png");
+        let original = test_png_bytes(b"original");
+        write_test_png(&source_path, b"original");
+        let image_sources = test_image_sources(images_dir, [7u8; 32]);
+        let source_ref = mint_image_source_reference(
+            &image_sources,
+            "generated-image-a.png",
+            &sha256_bytes(&original),
+        );
+
+        write_test_png(&source_path, b"changed");
+
+        let error = validate_image_source_reference(&image_sources, &source_ref)
+            .expect_err("changed content must invalidate the ref");
+        assert!(error.contains("must match"));
+    }
+
+    #[test]
+    fn image_source_signing_secret_stays_outside_hermes_home() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = temp.path().join("June");
+        let hermes_home = app_data_dir.join("hermes");
+        fs::create_dir_all(&hermes_home).expect("hermes home");
+        fs::write(
+            hermes_home.join(LEGACY_IMAGE_SOURCE_SECRET_FILE),
+            "old-python-secret",
+        )
+        .expect("legacy secret");
+
+        let secret =
+            load_or_create_image_source_capability_secret(&app_data_dir).expect("secret key");
+        assert_ne!(secret, [0u8; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES]);
+        let secret_path = image_source_capability_secret_path(&app_data_dir);
+        assert!(secret_path.exists());
+        assert!(!secret_path.starts_with(&hermes_home));
+        remove_legacy_image_source_secret(&hermes_home).expect("remove legacy secret");
+
+        assert_no_image_source_secret_under(&hermes_home);
+    }
+
+    #[test]
+    fn image_source_ref_survives_key_reload() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_data_dir = temp.path().join("June");
+        let images_dir = app_data_dir.join("hermes").join("images");
+        let storage_filename = "generated-image-restart.png";
+        let source_path = images_dir.join(storage_filename);
+        let bytes = test_png_bytes(b"restart");
+        write_test_png(&source_path, b"restart");
+        let secret_before =
+            load_or_create_image_source_capability_secret(&app_data_dir).expect("secret before");
+        let before_restart = test_image_sources(images_dir.clone(), secret_before);
+        let source_ref =
+            mint_image_source_reference(&before_restart, storage_filename, &sha256_bytes(&bytes));
+
+        let secret_after =
+            load_or_create_image_source_capability_secret(&app_data_dir).expect("secret after");
+        let after_restart = test_image_sources(images_dir, secret_after);
+        let validated = validate_image_source_reference(&after_restart, &source_ref)
+            .expect("ref validates after key reload");
+
+        assert_eq!(validated.mime_type, "image/png");
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(validated.image_base64.as_bytes())
+                .expect("decode validated image"),
+            bytes
+        );
+    }
+
+    #[test]
     fn hidden_secret_filter_rejects_common_credential_paths() {
         for path in [
             "/workspace/.env.local",
@@ -7476,6 +8405,7 @@ mcp_servers:
             &[],
             Some(&test_june_context_mcp_config()),
             None,
+            None,
         );
         let merged = merge_hermes_config(&config_path, &rendered);
         let value: serde_yaml::Value = serde_yaml::from_str(&merged).expect("merged parses");
@@ -7531,6 +8461,7 @@ mcp_servers:
             &dirs,
             None,
             None,
+            None,
         );
 
         assert!(config.contains("model:\n  default: \"glm\""));
@@ -7550,6 +8481,7 @@ mcp_servers:
             &[],
             None,
             None,
+            None,
         );
 
         assert!(config.contains("skills:\n  external_dirs: []\n"));
@@ -7563,10 +8495,19 @@ mcp_servers:
         }
     }
 
+    fn test_june_image_mcp_config() -> JuneImageMcpConfig {
+        JuneImageMcpConfig {
+            command: "/tmp/hermes/venv/bin/python".to_string(),
+            script_path: PathBuf::from("/tmp/june/hermes-mcp/june_image_mcp.py"),
+            images_dir: PathBuf::from("/tmp/hermes-home/images"),
+        }
+    }
+
     #[test]
     fn render_hermes_config_registers_june_context_mcp_server() {
         let context = test_june_context_mcp_config();
         let web = test_june_web_mcp_config();
+        let image = test_june_image_mcp_config();
         let config = render_hermes_config(
             "glm",
             "http://127.0.0.1:9/v1",
@@ -7575,9 +8516,10 @@ mcp_servers:
             &[],
             Some(&context),
             Some(&web),
+            Some(&image),
         );
 
-        // Both built-in servers live under one mcp_servers map.
+        // All three built-in servers live under one mcp_servers map.
         assert!(config.contains("mcp_servers:\n  june_context:\n"));
         assert!(config.contains("  june_web:\n"));
         assert!(config.contains("    command: \"/tmp/hermes/venv/bin/python\"\n"));
@@ -7588,6 +8530,15 @@ mcp_servers:
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_web_mcp.py\"\n"));
         assert!(config.contains("      - \"http://127.0.0.1:9/v1\"\n"));
         assert!(config.contains("      JUNE_WEB_PROXY_TOKEN: \"proxy-tok\"\n"));
+        // The image server gets the loopback proxy URL and its images dir as
+        // args. Source-byte reads stay in Rust, so no upload/source directory
+        // is passed to the MCP.
+        assert!(config.contains("  june_image:\n"));
+        assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_image_mcp.py\"\n"));
+        assert!(config.contains("      - \"/tmp/hermes-home/images\"\n"));
+        assert!(!config.contains("workspace/uploads"));
+        assert!(config.contains("      JUNE_IMAGE_PROXY_TOKEN: \"proxy-tok\"\n"));
+        assert!(config.contains("    timeout: 660\n"));
     }
 
     #[test]
@@ -7598,6 +8549,7 @@ mcp_servers:
             "tok",
             "web",
             &[],
+            None,
             None,
             None,
         );
@@ -7891,7 +8843,9 @@ mcp_servers:
 
         let mcp = test_june_context_mcp_config();
         let web = test_june_web_mcp_config();
-        sync_hermes_config(home.path(), 4242, "proxy-token", &mcp, &web).expect("sync config");
+        let image = test_june_image_mcp_config();
+        sync_hermes_config(home.path(), 4242, "proxy-token", &mcp, &web, &image)
+            .expect("sync config");
 
         let config = std::fs::read_to_string(home.path().join("config.yaml")).expect("read config");
         assert!(config.contains("platform_toolsets:"));
@@ -8189,6 +9143,7 @@ mcp_servers:
             std::slice::from_ref(&workspace),
             &config_path,
             &config_temp_prefix,
+            &[],
             false,
         );
 
@@ -8243,6 +9198,7 @@ mcp_servers:
             std::slice::from_ref(&workspace),
             &config_path,
             &config_temp_prefix,
+            &[],
             true,
         );
 
@@ -8309,6 +9265,7 @@ mcp_servers:
             std::slice::from_ref(&workspace),
             &config_path,
             &config_temp_prefix,
+            &[],
             false,
         );
         let profile_path = home.join("test.sb");
@@ -8398,6 +9355,7 @@ mcp_servers:
             std::slice::from_ref(&workspace),
             &config_path,
             &config_temp_prefix,
+            &[],
             true,
         );
         let profile_path = home.join("test.sb");

@@ -14,6 +14,25 @@ const REDACTED: &str = "<redacted>";
 pub const LOCAL_DEV_BEARER_TOKEN_PLACEHOLDER: &str = "local-dev-token";
 pub const OPENAI_API_KEY_PLACEHOLDER: &str = "sk_REPLACE_ME";
 pub const VENICE_API_KEY_PLACEHOLDER: &str = "VENICE_API_KEY_REPLACE_ME";
+pub const IMAGE_EDIT_SOURCE_MAX_BYTES: usize = 50 * 1024 * 1024;
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 600;
+pub const IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS: u64 = 30;
+pub const DEFAULT_IMAGE_CLIENT_TIMEOUT_SECS: u64 =
+    DEFAULT_REQUEST_TIMEOUT_SECS - IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS;
+pub const IMAGE_HOLD_TTL_TIMEOUT_MARGIN_SECS: u64 = 30;
+pub const DEFAULT_IMAGE_HOLD_TTL_SECS: u64 =
+    DEFAULT_REQUEST_TIMEOUT_SECS + IMAGE_HOLD_TTL_TIMEOUT_MARGIN_SECS;
+const IMAGE_EDIT_JSON_OVERHEAD_BYTES: usize = 16 * 1024;
+pub const DEFAULT_MAX_IMAGE_EDIT_BYTES: usize =
+    base64_encoded_len(IMAGE_EDIT_SOURCE_MAX_BYTES) + IMAGE_EDIT_JSON_OVERHEAD_BYTES;
+
+const fn base64_encoded_len(byte_count: usize) -> usize {
+    byte_count.div_ceil(3) * 4
+}
+
+pub const fn image_client_timeout_secs(route_timeout_secs: u64) -> u64 {
+    route_timeout_secs - IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -35,6 +54,18 @@ pub struct AppConfig {
     /// charged 20).
     #[serde(default = "default_image_pricing")]
     pub image_pricing: BTreeMap<String, u64>,
+    /// Flat credits charged per EDITED image, keyed by edit model id. Editing is
+    /// a separate Venice model catalog from generation (default
+    /// `firered-image-edit`), so it has its own price map. A model absent here is
+    /// rejected at the `/image/edit` boundary (`model_not_priced`). Same units as
+    /// `image_pricing`: Venice per-image cost with margin, `$1 = 1000 credits`.
+    #[serde(default = "default_image_edit_pricing")]
+    pub image_edit_pricing: BTreeMap<String, u64>,
+    /// The edit model used when a request names none — the image MCP never sends
+    /// one, so this on-server default governs every edit. Must be a key in
+    /// `image_edit_pricing`, or edits fail `model_not_priced`.
+    #[serde(default = "default_image_edit_model")]
+    pub default_image_edit_model: String,
 }
 
 impl Debug for AppConfig {
@@ -49,6 +80,8 @@ impl Debug for AppConfig {
             .field("issue_reports", &self.issue_reports)
             .field("pricing", &self.pricing)
             .field("image_pricing", &self.image_pricing)
+            .field("image_edit_pricing", &self.image_edit_pricing)
+            .field("default_image_edit_model", &self.default_image_edit_model)
             .finish()
     }
 }
@@ -157,6 +190,9 @@ pub struct ServerConfig {
     pub request_timeout_secs: u64,
     pub max_audio_bytes: usize,
     pub max_json_bytes: usize,
+    /// JSON body cap for `/v1/image/edit`. It is sized for a 50 MiB source
+    /// image after base64 expansion plus fixed request overhead.
+    pub max_image_edit_bytes: usize,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -536,6 +572,20 @@ fn default_image_pricing() -> BTreeMap<String, u64> {
     ])
 }
 
+/// Flat per-edit prices, keyed by Venice edit model id. Edit models are a
+/// separate catalog from generation. `firered-image-edit` costs ~$0.04 -> 80 at
+/// the same ~2x margin as generation (`$1 = 1000 credits`). Additional edit
+/// models get added here (with their own verified price) when offered.
+fn default_image_edit_pricing() -> BTreeMap<String, u64> {
+    BTreeMap::from([("firered-image-edit".to_string(), 80)])
+}
+
+/// The default Venice edit model — cheapest of the edit catalog, and the one
+/// every MCP-driven edit uses (the tool never names a model).
+fn default_image_edit_model() -> String {
+    "firered-image-edit".to_string()
+}
+
 fn text_model_config(model: TextModelFallback) -> ModelPriceConfig {
     ModelPriceConfig {
         unit: PriceUnit::Tokens,
@@ -564,9 +614,10 @@ impl Default for AppConfig {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 8080,
-                request_timeout_secs: 600,
+                request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
                 max_audio_bytes: 26_214_400,
                 max_json_bytes: 524_288,
+                max_image_edit_bytes: DEFAULT_MAX_IMAGE_EDIT_BYTES,
             },
             local_dev: LocalDevConfig::default(),
             os_accounts: OsAccountsConfig {
@@ -585,7 +636,7 @@ impl Default for AppConfig {
                 web_search_credits: 20,
                 web_fetch_credits: 20,
                 authorize_hold_ttl_web_secs: 30,
-                authorize_hold_ttl_image_secs: 60,
+                authorize_hold_ttl_image_secs: DEFAULT_IMAGE_HOLD_TTL_SECS,
             },
             upstreams: UpstreamsConfig {
                 openai: UpstreamConfig {
@@ -608,6 +659,8 @@ impl Default for AppConfig {
             issue_reports: IssueReportsConfig::default(),
             pricing: default_pricing(),
             image_pricing: default_image_pricing(),
+            image_edit_pricing: default_image_edit_pricing(),
+            default_image_edit_model: default_image_edit_model(),
         }
     }
 }
@@ -670,10 +723,7 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
             OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS,
         )?;
     }
-    validate_positive_config(
-        "os_accounts.note_transcribe_preview_max_audio_secs",
-        config.os_accounts.note_transcribe_preview_max_audio_secs,
-    )?;
+    validate_request_limits(config)?;
 
     let uses_openai = config
         .pricing
@@ -752,16 +802,69 @@ fn validate(config: &AppConfig) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// A zero per-image price would silently generate for free — reject it like the
-/// per-model rate validation so a misconfigured price fails fast.
+fn validate_request_limits(config: &AppConfig) -> Result<(), ConfigError> {
+    validate_positive_config(
+        "os_accounts.note_transcribe_preview_max_audio_secs",
+        config.os_accounts.note_transcribe_preview_max_audio_secs,
+    )?;
+    validate_image_timeout_margin(config)?;
+    validate_positive_usize_config(
+        "server.max_image_edit_bytes",
+        config.server.max_image_edit_bytes,
+    )?;
+    validate_image_hold_ttl(config)?;
+    Ok(())
+}
+
+fn validate_image_hold_ttl(config: &AppConfig) -> Result<(), ConfigError> {
+    let minimum = config
+        .server
+        .request_timeout_secs
+        .saturating_add(IMAGE_HOLD_TTL_TIMEOUT_MARGIN_SECS);
+    if config.os_accounts.authorize_hold_ttl_image_secs < minimum {
+        return Err(ConfigError::InvalidRequired {
+            field: "os_accounts.authorize_hold_ttl_image_secs",
+            reason: "must be >= server.request_timeout_secs + image hold margin",
+        });
+    }
+    Ok(())
+}
+
+fn validate_image_timeout_margin(config: &AppConfig) -> Result<(), ConfigError> {
+    if config.server.request_timeout_secs <= IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS {
+        return Err(ConfigError::InvalidRequired {
+            field: "server.request_timeout_secs",
+            reason: "must be > image settlement margin",
+        });
+    }
+    Ok(())
+}
+
+/// A zero per-image price would silently generate/edit for free — reject it like
+/// the per-model rate validation so a misconfigured price fails fast. Also
+/// guards that the default edit model is actually priced, since every MCP-driven
+/// edit uses it and an unpriced model would fail every edit at runtime.
 fn validate_image_pricing(config: &AppConfig) -> Result<(), ConfigError> {
-    for (model_id, credits) in &config.image_pricing {
+    for (model_id, credits) in config
+        .image_pricing
+        .iter()
+        .chain(config.image_edit_pricing.iter())
+    {
         if *credits == 0 {
             return Err(ConfigError::InvalidPricing {
                 model: model_id.clone(),
                 reason: "credits_per_image must be > 0".to_string(),
             });
         }
+    }
+    if !config
+        .image_edit_pricing
+        .contains_key(&config.default_image_edit_model)
+    {
+        return Err(ConfigError::InvalidPricing {
+            model: config.default_image_edit_model.clone(),
+            reason: "default_image_edit_model must be present in image_edit_pricing".to_string(),
+        });
     }
     Ok(())
 }
@@ -832,6 +935,16 @@ fn validate_positive_config(field: &'static str, value: u64) -> Result<(), Confi
     Ok(())
 }
 
+fn validate_positive_usize_config(field: &'static str, value: usize) -> Result<(), ConfigError> {
+    if value == 0 {
+        return Err(ConfigError::InvalidRequired {
+            field,
+            reason: "must be > 0",
+        });
+    }
+    Ok(())
+}
+
 fn validate_positive_rate(
     model_id: &str,
     value: Option<u64>,
@@ -849,9 +962,12 @@ fn validate_positive_rate(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppConfig, ConfigError, ModelPriceConfig, ModelProvider, ModelType,
-        OPENAI_API_KEY_PLACEHOLDERS, OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS, PriceUnit,
-        VENICE_API_KEY_PLACEHOLDERS, validate,
+        AppConfig, ConfigError, DEFAULT_IMAGE_CLIENT_TIMEOUT_SECS, DEFAULT_IMAGE_HOLD_TTL_SECS,
+        DEFAULT_MAX_IMAGE_EDIT_BYTES, DEFAULT_REQUEST_TIMEOUT_SECS, IMAGE_EDIT_SOURCE_MAX_BYTES,
+        IMAGE_HOLD_TTL_TIMEOUT_MARGIN_SECS, IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS, ModelPriceConfig,
+        ModelProvider, ModelType, OPENAI_API_KEY_PLACEHOLDERS,
+        OS_ACCOUNTS_APP_API_KEY_PLACEHOLDERS, PriceUnit, VENICE_API_KEY_PLACEHOLDERS,
+        image_client_timeout_secs, validate,
     };
     use pretty_assertions::assert_eq;
     use std::collections::BTreeMap;
@@ -1083,6 +1199,80 @@ mod tests {
                 "missing image price for {model}"
             );
         }
+    }
+
+    #[test]
+    fn default_image_edit_body_limit_matches_source_image_cap() {
+        let expected_base64_len = IMAGE_EDIT_SOURCE_MAX_BYTES.div_ceil(3) * 4;
+        assert_eq!(
+            DEFAULT_MAX_IMAGE_EDIT_BYTES,
+            expected_base64_len + (16 * 1024)
+        );
+        assert_eq!(
+            AppConfig::default().server.max_image_edit_bytes,
+            DEFAULT_MAX_IMAGE_EDIT_BYTES
+        );
+    }
+
+    #[test]
+    fn default_image_hold_ttl_tracks_request_timeout_with_margin() {
+        let config = AppConfig::default();
+        assert_eq!(
+            config.os_accounts.authorize_hold_ttl_image_secs,
+            config.server.request_timeout_secs + IMAGE_HOLD_TTL_TIMEOUT_MARGIN_SECS
+        );
+        assert_eq!(
+            config.os_accounts.authorize_hold_ttl_image_secs,
+            DEFAULT_IMAGE_HOLD_TTL_SECS
+        );
+    }
+
+    #[test]
+    fn default_image_client_timeout_leaves_settlement_margin_before_route_timeout() {
+        let config = AppConfig::default();
+        let image_client_timeout = image_client_timeout_secs(config.server.request_timeout_secs);
+
+        assert_eq!(image_client_timeout, DEFAULT_IMAGE_CLIENT_TIMEOUT_SECS);
+        assert!(image_client_timeout < config.server.request_timeout_secs);
+        assert!(
+            image_client_timeout + IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS
+                <= config.server.request_timeout_secs
+        );
+    }
+
+    #[test]
+    fn validate_rejects_image_route_timeout_without_settlement_margin() {
+        let mut config = valid_config();
+        config.server.request_timeout_secs = IMAGE_SETTLEMENT_TIMEOUT_MARGIN_SECS;
+        config.os_accounts.authorize_hold_ttl_image_secs =
+            config.server.request_timeout_secs + IMAGE_HOLD_TTL_TIMEOUT_MARGIN_SECS;
+
+        let result = validate(&config);
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidRequired {
+                field: "server.request_timeout_secs",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_image_hold_ttl_below_request_timeout_margin() {
+        let mut config = valid_config();
+        config.server.request_timeout_secs = DEFAULT_REQUEST_TIMEOUT_SECS;
+        config.os_accounts.authorize_hold_ttl_image_secs = 60;
+
+        let result = validate(&config);
+
+        assert!(matches!(
+            result,
+            Err(ConfigError::InvalidRequired {
+                field: "os_accounts.authorize_hold_ttl_image_secs",
+                ..
+            })
+        ));
     }
 
     #[test]

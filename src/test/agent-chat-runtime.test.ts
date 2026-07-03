@@ -1440,6 +1440,146 @@ describe("Agent chat runtime", () => {
     expect(tool?.type === "tool" ? tool.text : "").toContain("src/App.tsx");
   });
 
+  it("renders an MCP image tool result as an inline image part (JUN-171 Phase B)", () => {
+    // The june_image MCP returns an image content block plus a JSON text block
+    // carrying the filename/label. The image must render in-thread (so it also
+    // enters the model's context) and its base64 must NOT leak into the
+    // collapsed tool row's text.
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        timestamp: "2026-06-04T10:00:00.000Z",
+        tool_calls: JSON.stringify([
+          {
+            id: "call-1",
+            function: {
+              name: "generate_image",
+              arguments: { prompt: "a red bicycle" },
+            },
+          },
+        ]),
+      },
+      {
+        id: "tool-1",
+        role: "tool",
+        tool_call_id: "call-1",
+        tool_name: "generate_image",
+        content: [
+          { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+          {
+            type: "text",
+            text: JSON.stringify({
+              filename: "generated-image-abc.png",
+              label: "a red bicycle",
+              model: "venice-sd35",
+            }),
+          },
+        ],
+        timestamp: "2026-06-04T10:00:01.000Z",
+      },
+    ]);
+
+    const image = turns[0]?.parts.find((part) => part.type === "image");
+    expect(image).toMatchObject({
+      type: "image",
+      status: "complete",
+      prompt: "a red bicycle",
+      dataUrl: "data:image/png;base64,aGVsbG8=",
+      name: "generated-image-abc.png",
+    });
+    const tool = turns[0]?.parts.find((part) => part.type === "tool");
+    expect(tool?.type === "tool" ? tool.text : "").not.toContain("aGVsbG8=");
+  });
+
+  it("renders Hermes MEDIA image references inline instead of as visible paths", () => {
+    const mediaPath =
+      "/Users/alex/Library/Application Support/co.opensoftware.june-dev/hermes/image_cache/img_ce347dc6e27a.png";
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          "Here is the regenerated wolf:",
+          "",
+          `MEDIA:${mediaPath}`,
+          "",
+          "A majestic wolf rendered in a misty forest at dawn.",
+        ].join("\n"),
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "text",
+        text: "Here is the regenerated wolf:\n\nA majestic wolf rendered in a misty forest at dawn.",
+        status: "complete",
+      },
+      {
+        type: "image",
+        status: "complete",
+        prompt: "Generated image",
+        path: mediaPath,
+        name: "img_ce347dc6e27a.png",
+      },
+    ]);
+  });
+
+  it("keeps user-authored MEDIA image references as text", () => {
+    const mediaPath =
+      "/Users/alex/Library/Application Support/co.opensoftware.june-dev/hermes/image_cache/img_ce347dc6e27a.png";
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "user-1",
+        role: "user",
+        content: `Please explain why this literal path matters: MEDIA:${mediaPath}`,
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "text",
+        text: `Please explain why this literal path matters: MEDIA:${mediaPath}`,
+        status: "complete",
+      },
+    ]);
+  });
+
+  it("normalizes live complete messages that contain Hermes MEDIA image references", () => {
+    const mediaPath =
+      "/Users/alex/Library/Application Support/co.opensoftware.june-dev/hermes/image_cache/img_live.png";
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:00.000Z",
+        }),
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          delta: `MEDIA:${mediaPath}`,
+        }),
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:02.000Z",
+          delta: `MEDIA:${mediaPath}`,
+          complete: true,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "image",
+        status: "complete",
+        prompt: "Generated image",
+        path: mediaPath,
+        name: "img_live.png",
+      },
+    ]);
+  });
+
   it("marks the in-flight turn errored even when the error has no text", () => {
     const turns = buildAgentChatTurns(
       [],

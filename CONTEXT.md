@@ -152,8 +152,9 @@ _Avoid_: textbox.
 
 **Slash command**:
 A `/name arg` handled client-side before submit — builtin `/model`, `/file`,
-and `/image` (the last gated off behind `IMAGE_GENERATION_ENABLED`), plus
-skill slash commands.
+and `/image`, plus skill slash commands. `/image <prompt>` starts June's
+image generation fast path without invoking the model (kill switch:
+`IMAGE_GENERATION_ENABLED`).
 _Avoid_: gateway command.
 
 **Steer**:
@@ -179,8 +180,8 @@ _Avoid_: upload (unqualified).
 
 **Skill / Toolset / MCP server**:
 A Skill is a bundled/installed capability pack; a Toolset is a togglable tool
-group; an MCP server is an external tool provider (June ships `june_context`
-and `june_web`).
+group; an MCP server is an external tool provider (June ships `june_context`,
+`june_web`, and `june_image`).
 _Avoid_: using "tool" for all three.
 
 **Admin surface**:
@@ -226,7 +227,7 @@ Producing a new image by transforming an *existing* image plus an instruction
 (image-to-image / inpaint), via Venice's separate edit models. Always references
 a prior image (a generated one, by filename); never starts from a blank canvas.
 Distinct from **image generation**.
-_Avoid_: img2img (jargon), regenerate (that's a fresh **image generation**).
+_Avoid_: image-to-image jargon, regenerate (that's a fresh **image generation**).
 
 **Credit price** (per upstream model):
 The number of OS Accounts credits June charges per unit of consumed work
