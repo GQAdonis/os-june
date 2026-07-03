@@ -2528,31 +2528,29 @@ fn validate_hermes_file_path(app: &AppHandle, path: &str) -> Result<PathBuf, App
     if !requested.is_file() {
         return Err(AppError::new(
             "hermes_file_download_failed",
-            "Only files in the Hermes workspace, memory, or generated image cache can be downloaded.",
+            "Only files in June's workspace, memory, or generated images can be downloaded.",
         ));
     }
     if is_hidden_secret_path(&requested) {
         return Err(AppError::new(
             "hermes_file_download_denied",
-            "This Hermes file is hidden or sensitive.",
+            "This June file is hidden or sensitive.",
         ));
     }
     let mut allowed_roots = filesystem_roots(&hermes_home)?
         .into_iter()
         .filter_map(|root| root.path.canonicalize().ok())
         .collect::<Vec<_>>();
-    allowed_roots.extend(
-        ["images", "image_cache"]
-            .into_iter()
-            .filter_map(|relative| hermes_home.join(relative).canonicalize().ok()),
-    );
+    allowed_roots.extend(["images"].into_iter().filter_map(|relative| {
+        hermes_home.join(relative).canonicalize().ok()
+    }));
     let allowed = allowed_roots
         .into_iter()
         .any(|root| requested.starts_with(root));
     if !allowed {
         return Err(AppError::new(
             "hermes_file_download_denied",
-            "Only files in this app's Hermes workspace, memory, or generated image cache can be downloaded.",
+            "Only files in June's workspace, memory, or generated images can be downloaded.",
         ));
     }
     Ok(requested)
@@ -2584,7 +2582,7 @@ fn unique_download_path(downloads_dir: &Path, source: &Path) -> Result<PathBuf, 
         .ok_or_else(|| {
             AppError::new(
                 "hermes_file_download_failed",
-                "The Hermes file does not have a downloadable filename.",
+                "The June file does not have a downloadable filename.",
             )
         })?;
     let candidate = downloads_dir.join(file_name);
