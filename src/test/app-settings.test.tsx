@@ -2618,6 +2618,10 @@ describe("AppSettings", () => {
     await user.click(screen.getByRole("button", { name: "Change image model" }));
     expect(await screen.findByRole("option", { name: /Venice SD3\.5/ })).toBeInTheDocument();
     expect(screen.getByRole("option", { name: /FLUX 2 Pro/ })).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Venice's default Stable Diffusion 3.5 image model.").length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("Model details unavailable")).not.toBeInTheDocument();
     // Image models are not fetched from the catalog.
     expect(mocks.listVeniceModels).not.toHaveBeenCalledWith("image");
 

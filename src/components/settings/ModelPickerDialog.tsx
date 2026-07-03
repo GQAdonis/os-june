@@ -25,6 +25,9 @@ export function ModelMeta({ model }: { model: VeniceModelDto }) {
   const items: ReactNode[] = [];
   if (price) items.push(<span className="model-meta-price">{price}</span>);
   if (context) items.push(<span>{context}</span>);
+  if (model.modelType === "image" && model.description) {
+    items.push(<span>{model.description}</span>);
+  }
   if (privacyBadge) {
     items.push(<ModelPrivacyChip badge={privacyBadge} />);
   }
