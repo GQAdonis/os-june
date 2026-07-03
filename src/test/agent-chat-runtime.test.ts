@@ -1554,21 +1554,18 @@ describe("Agent chat runtime", () => {
     const turns = buildHermesSessionChatTurns(
       [],
       [
-        {
-          type: "message.start",
+        transcriptEvent({
           receivedAt: "2026-06-04T10:00:00.000Z",
-          payload: {},
-        },
-        {
-          type: "message.delta",
+        }),
+        transcriptEvent({
           receivedAt: "2026-06-04T10:00:01.000Z",
-          payload: { delta: `MEDIA:${mediaPath}` },
-        },
-        {
-          type: "message.complete",
+          delta: `MEDIA:${mediaPath}`,
+        }),
+        transcriptEvent({
           receivedAt: "2026-06-04T10:00:02.000Z",
-          payload: { text: `MEDIA:${mediaPath}` },
-        },
+          delta: `MEDIA:${mediaPath}`,
+          complete: true,
+        }),
       ],
     );
 
