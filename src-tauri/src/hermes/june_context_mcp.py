@@ -26,17 +26,23 @@ FULL_TEXT_CHARS = 60_000
 # Keep this in sync with DICTATION_HISTORY_RETENTION_DAYS in db/repositories.rs.
 DICTATION_HISTORY_RETENTION_DAYS = 7
 
-# Turns land out of insertion order (dual-source recordings interleave by
-# start_ms; a note can stack several recording sessions), so any transcript
-# assembly must sort the way the app's canonical read path does — see
-# source_transcripts in db/repositories.rs and keep the two in sync.
-TRANSCRIPT_TEXT_SUBQUERY = """
+# The app's transcript view (transcriptToText in NoteEditor.tsx) shows the
+# turn-based rows when any exist and otherwise falls back to the latest
+# whole-file transcript — never a mix. Mirror both halves: `turns_text`
+# matches source_transcripts in db/repositories.rs (same filter, same
+# canonical order — turns land out of insertion order because dual-source
+# recordings interleave by start_ms and a note can stack several recording
+# sessions), and `latest_text` matches latest_transcript. Callers pick
+# turns_text first, latest_text as the fallback.
+TRANSCRIPT_TEXT_SUBQUERIES = """
     (
         SELECT group_concat(text, char(10)) FROM (
             SELECT t.text
             FROM transcripts t
             LEFT JOIN recording_sessions rs ON rs.id = t.recording_session_id
             WHERE t.note_id = n.id
+              AND t.recording_session_id IS NOT NULL
+              AND t.turn_index IS NOT NULL
               AND trim(coalesce(t.text, '')) != ''
             ORDER BY COALESCE(rs.started_at, t.created_at) ASC,
                      COALESCE(rs.rowid, 9223372036854775807) ASC,
@@ -45,8 +51,23 @@ TRANSCRIPT_TEXT_SUBQUERY = """
                      t.created_at ASC,
                      t.rowid ASC
         )
-    ) AS transcript_text
+    ) AS turns_text,
+    (
+        SELECT t.text
+        FROM transcripts t
+        WHERE t.note_id = n.id
+        ORDER BY t.created_at DESC
+        LIMIT 1
+    ) AS latest_text
 """
+
+
+def transcript_text_from_row(row: sqlite3.Row) -> str:
+    """The transcript the app itself would show: turns first, else latest."""
+    turns = row["turns_text"] or ""
+    if turns.strip():
+        return turns
+    return row["latest_text"] or ""
 
 
 TOOLS: list[dict[str, Any]] = [
@@ -284,7 +305,7 @@ def search_meeting_notes(db_path: Path, arguments: dict[str, Any]) -> dict[str, 
             n.processing_status,
             n.created_at,
             n.updated_at,
-            {TRANSCRIPT_TEXT_SUBQUERY}
+            {TRANSCRIPT_TEXT_SUBQUERIES}
         FROM notes n
         {where}
         ORDER BY n.updated_at DESC, n.created_at DESC, n.rowid DESC
@@ -298,7 +319,7 @@ def search_meeting_notes(db_path: Path, arguments: dict[str, Any]) -> dict[str, 
     items = []
     for row in rows:
         note_text = first_text(row["edited_content"], row["generated_content"])
-        transcript_text = row["transcript_text"] or ""
+        transcript_text = transcript_text_from_row(row)
         items.append(
             {
                 "id": row["id"],
@@ -334,7 +355,7 @@ def get_meeting_note(db_path: Path, arguments: dict[str, Any]) -> dict[str, Any]
             n.processing_status,
             n.created_at,
             n.updated_at,
-            {TRANSCRIPT_TEXT_SUBQUERY}
+            {TRANSCRIPT_TEXT_SUBQUERIES}
         FROM notes n
         WHERE n.id = ?
         LIMIT 1
@@ -352,7 +373,7 @@ def get_meeting_note(db_path: Path, arguments: dict[str, Any]) -> dict[str, Any]
 
     note_text = first_text(row["edited_content"], row["generated_content"])
     note_content, note_content_truncated = capped_text(note_text)
-    transcript_text = row["transcript_text"] or ""
+    transcript_text = transcript_text_from_row(row)
     transcript, transcript_truncated = capped_text(transcript_text)
 
     result = {

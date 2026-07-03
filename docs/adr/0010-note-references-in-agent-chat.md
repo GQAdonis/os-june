@@ -77,7 +77,8 @@ anywhere a prompt can be typed.
   repurposing (mirrors the June API compatibility boundary in AGENTS.md,
   though this server ships with the app and has no cross-version wire
   exposure).
-- Composer drafts persist as plain text, so a restored draft shows the
-  literal token instead of a live chip; accepted for v1.
+- Composer drafts persist as the serialized plain text; restoring a draft
+  rehydrates `@note:` tokens back into chips (`buildDoc`), which is lossless
+  precisely because the chip serializes to the token.
 - An inline chat surface inside the note view (the second half of JUN-186)
   remains open as a follow-up; it would reuse the same token + tool.

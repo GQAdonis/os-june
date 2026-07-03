@@ -4,7 +4,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { CATEGORY_CHIP_NODE, CategoryChip } from "../components/agent/composer/categoryChip";
-import { serializePlainText } from "../components/agent/composer/ComposerEditor";
+import { buildDoc, serializePlainText } from "../components/agent/composer/ComposerEditor";
 import {
   NOTE_REFERENCE_NODE,
   createNoteReference,
@@ -163,6 +163,38 @@ describe("note reference insertion", () => {
     expect(serializePlainText(editor.state.doc)).toBe(
       '@note:note-1 ("Launch plan") @note:note-2 ("Retro") ',
     );
+  });
+});
+
+describe("draft rehydration", () => {
+  it("rebuilds a note chip from a persisted token", () => {
+    editor = makeEditor();
+    editor.commands.setContent(
+      buildDoc('@note:note-1 ("Launch plan") what were the action items?'),
+    );
+
+    expect(nodeCount(editor.state.doc, NOTE_REFERENCE_NODE)).toBe(1);
+    editor.state.doc.descendants((node) => {
+      if (node.type.name !== NOTE_REFERENCE_NODE) return true;
+      expect(node.attrs.noteId).toBe("note-1");
+      expect(node.attrs.title).toBe("Launch plan");
+      return false;
+    });
+  });
+
+  it("round-trips a restored draft losslessly", () => {
+    const draft = 'before @note:note-1 ("Launch plan") between @note:note-2 after';
+    editor = makeEditor();
+    editor.commands.setContent(buildDoc(draft));
+
+    expect(nodeCount(editor.state.doc, NOTE_REFERENCE_NODE)).toBe(2);
+    expect(serializePlainText(editor.state.doc)).toBe(draft);
+  });
+
+  it("leaves plain text without tokens untouched", () => {
+    const doc = buildDoc("just a line\nand another");
+    expect(doc.content).toHaveLength(2);
+    expect(doc.content[0].content).toEqual([{ type: "text", text: "just a line" }]);
   });
 });
 

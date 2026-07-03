@@ -97,11 +97,35 @@ export function stripPlaceholder(text: string): { text: string; from: number; to
   };
 }
 
-function buildDoc(text: string, category?: ReportCategory | null) {
+/** Splits a line into text nodes and note-reference chips. Drafts persist as
+ * the serialized plain string, so a restored draft carries reference tokens
+ * as text; rebuilding the chip here keeps the pill UX across restores. The
+ * round-trip is lossless because serializePlainText re-emits the token. */
+function inlineContent(line: string) {
+  const nodes: Array<Record<string, unknown>> = [];
+  const tokenPattern = /@note:([\w-]+)(?: \("([^"]*)"\))?/g;
+  let consumed = 0;
+  for (const match of line.matchAll(tokenPattern)) {
+    if (match.index > consumed) {
+      nodes.push({ type: "text", text: line.slice(consumed, match.index) });
+    }
+    nodes.push({
+      type: NOTE_REFERENCE_NODE,
+      attrs: { noteId: match[1], title: match[2] ?? "" },
+    });
+    consumed = match.index + match[0].length;
+  }
+  if (consumed < line.length) {
+    nodes.push({ type: "text", text: line.slice(consumed) });
+  }
+  return nodes;
+}
+
+export function buildDoc(text: string, category?: ReportCategory | null) {
   const paragraphs = text.split("\n").map((line) => ({
     type: "paragraph",
     // A text node may not be empty, so a blank line is an empty paragraph.
-    content: line ? [{ type: "text", text: line }] : [],
+    content: inlineContent(line),
   }));
   if (paragraphs.length === 0) paragraphs.push({ type: "paragraph", content: [] });
   if (category) {
