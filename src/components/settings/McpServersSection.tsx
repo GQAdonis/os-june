@@ -26,6 +26,7 @@ import {
   hasAvailableTools,
   inlineSecurityLabels,
   isLocalSubprocess,
+  oauthNeedFromMessage,
   oauthStateFor,
   oauthStatusMeta,
   planServerEdit,
@@ -420,7 +421,10 @@ function ServerRow({
   const local = isLocalSubprocess(server);
   const labelId = `mcp-server-${cssId(server.name)}`;
   const tools = test?.result?.tools ?? server.tools ?? [];
-  const oauth = usesOauth(server);
+  // OAuth applies when the server is oauth-shaped, or when the last connection
+  // probe said so (Hermes' "run `hermes mcp login <name>` interactively" error)
+  // — the sign-in panel below IS that interactive login, run via the browser.
+  const oauth = usesOauth(server) || oauthNeedFromMessage(test?.result?.message ?? test?.error);
   const securityLabels = inlineSecurityLabels(securityLabelsFor(server));
   const risk = classifyServerRisk(server);
   // Recommend an allowlist only after the server has tested successfully, so the
@@ -876,7 +880,12 @@ function AddServerDialog({
             autoComplete="off"
             spellCheck={false}
             aria-invalid={Boolean(errors.name)}
-            onChange={(event) => setDraft((d) => ({ ...d, name: event.currentTarget.value }))}
+            onChange={(event) => {
+              // Read the value synchronously: React nulls event.currentTarget
+              // once the handler returns, and the setDraft updater runs later.
+              const value = event.currentTarget.value;
+              setDraft((d) => ({ ...d, name: value }));
+            }}
           />
           {errors.name ? <p className="mcp-add-error">{errors.name}</p> : null}
         </fieldset>
@@ -922,12 +931,10 @@ function AddServerDialog({
                 autoComplete="off"
                 spellCheck={false}
                 aria-invalid={Boolean(errors.command)}
-                onChange={(event) =>
-                  setDraft((d) => ({
-                    ...d,
-                    command: event.currentTarget.value,
-                  }))
-                }
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((d) => ({ ...d, command: value }));
+                }}
               />
               {errors.command ? <p className="mcp-add-error">{errors.command}</p> : null}
             </fieldset>
@@ -967,7 +974,10 @@ function AddServerDialog({
                 autoComplete="off"
                 spellCheck={false}
                 aria-invalid={Boolean(errors.url)}
-                onChange={(event) => setDraft((d) => ({ ...d, url: event.currentTarget.value }))}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setDraft((d) => ({ ...d, url: value }));
+                }}
               />
               {errors.url ? <p className="mcp-add-error">{errors.url}</p> : null}
             </fieldset>
@@ -980,12 +990,10 @@ function AddServerDialog({
                 id="mcp-add-auth"
                 className="mcp-add-input"
                 value={draft.auth}
-                onChange={(event) =>
-                  setDraft((d) => ({
-                    ...d,
-                    auth: event.currentTarget.value as McpServerDraft["auth"],
-                  }))
-                }
+                onChange={(event) => {
+                  const value = event.currentTarget.value as McpServerDraft["auth"];
+                  setDraft((d) => ({ ...d, auth: value }));
+                }}
               >
                 <option value="none">None</option>
                 <option value="bearer">Bearer token</option>

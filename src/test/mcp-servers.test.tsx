@@ -788,6 +788,69 @@ describe("McpServersView — component", () => {
     expect(screen.getByText(/enter a name/i)).toBeInTheDocument();
   });
 
+  // Regression: the add-form field handlers must read event.currentTarget.value
+  // synchronously, not inside the setDraft updater (React nulls currentTarget
+  // after the handler returns, which blanked the whole app). Typing into the
+  // fields exercises that path.
+  it("accepts a typed stdio server without crashing (currentTarget)", async () => {
+    const add = vi.fn(() => Promise.resolve(true));
+    render(<McpServersView state={stubState({ add })} />);
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(screen.getByText("Add MCP server")).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "fs" },
+    });
+    fireEvent.change(screen.getByLabelText("Command"), {
+      target: { value: "mcp-server-filesystem" },
+    });
+    const buttons = screen.getAllByRole("button", { name: /add server/i });
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() =>
+      expect(add).toHaveBeenCalledWith({
+        name: "fs",
+        command: "mcp-server-filesystem",
+      }),
+    );
+  });
+
+  it("accepts a typed http server with an auth header without crashing", async () => {
+    const add = vi.fn(() => Promise.resolve(true));
+    render(<McpServersView state={stubState({ add })} />);
+    fireEvent.click(screen.getByRole("button", { name: /add server/i }));
+    await waitFor(() => expect(screen.getByText("Add MCP server")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("radio", { name: /remote \(http\)/i }));
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "linear" },
+    });
+    fireEvent.change(screen.getByLabelText("URL"), {
+      target: { value: "https://mcp.linear.app/sse" },
+    });
+    // Changing the auth select is the exact interaction that blanked the app.
+    fireEvent.change(screen.getByLabelText("Auth"), {
+      target: { value: "oauth" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /add header/i }));
+    fireEvent.change(screen.getByLabelText(/headers 1 name/i), {
+      target: { value: "Authorization" },
+    });
+    fireEvent.change(screen.getByLabelText(/headers 1 value/i), {
+      target: { value: "Bearer tok_123" },
+    });
+
+    const buttons = screen.getAllByRole("button", { name: /add server/i });
+    fireEvent.click(buttons[buttons.length - 1]);
+    await waitFor(() =>
+      expect(add).toHaveBeenCalledWith({
+        name: "linear",
+        url: "https://mcp.linear.app/sse",
+        auth: "oauth",
+        headers: { Authorization: "Bearer tok_123" },
+      }),
+    );
+  });
+
   it("shows the Hermes-not-running surface when unavailable", () => {
     render(<McpServersView state={stubState({ status: "unavailable" })} />);
     expect(screen.getByText("Hermes is not running")).toBeInTheDocument();

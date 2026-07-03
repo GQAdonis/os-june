@@ -2718,10 +2718,12 @@ pub async fn hermes_admin_request(
 
 /// How long June waits for the `hermes mcp login` CLI to finish before
 /// returning. The browser sign-in is the USER's to complete; June never blocks
-/// indefinitely on it. A generous window covers the common "click approve"
-/// round-trip, after which June reports `timed_out` and the UI keeps showing the
-/// waiting state, refreshing status on its own.
-const MCP_OAUTH_LOGIN_TIMEOUT: Duration = Duration::from_secs(150);
+/// indefinitely on it. Matches Hermes' own OAuth flow timeout (300s): the kill
+/// on timeout also kills the CLI's localhost callback listener, so cutting the
+/// window shorter than Hermes' own would abort a slow-but-valid first sign-in
+/// (account picker, 2FA). After it, June reports `timed_out` and the UI keeps
+/// showing the waiting state, refreshing status on its own.
+const MCP_OAUTH_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// A name a CLI argument is allowed to be: the same slug the TS validator
 /// enforces (`/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`). This is defense in depth —
@@ -2742,23 +2744,43 @@ fn is_safe_mcp_server_name(name: &str) -> bool {
 }
 
 /// Builds the `hermes mcp login <server> [--profile <p>]` command, isolated to
-/// the connection's home/token, non-interactive, in the connection's mode. Pure
-/// (no spawn) so a test can assert the exact argument vector and that the server
-/// name is a discrete argument rather than shell-interpolated.
+/// the connection's home/token, in the connection's mode. Pure (no spawn) so a
+/// test can assert the exact argument vector and that the server name is a
+/// discrete argument rather than shell-interpolated.
+///
+/// Hermes gates its OAuth login on `sys.stdin.isatty()` and refuses with
+/// "non-interactive environment and no cached tokens found" when spawned with a
+/// piped/null stdin — the pinned runtime has no URL-printing fallback before
+/// that gate. On macOS the CLI is therefore wrapped in
+/// `/usr/bin/script -q /dev/null <cmd> ...`, which lends it a real PTY: the
+/// gate passes and Hermes runs its own flow (prints the authorization URL,
+/// which June still parses out of the output, opens the browser, and captures
+/// the localhost callback itself). `script` merges the child's stderr into the
+/// PTY stream and propagates its exit status.
 fn build_hermes_mcp_login_command(
     connection: &HermesBridgeConnection,
     server: &str,
     profile: Option<&str>,
 ) -> Command {
     let hermes_home = PathBuf::from(&connection.hermes_home);
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut wrapped = Command::new("/usr/bin/script");
+        wrapped.args(["-q", "/dev/null", &connection.command]);
+        wrapped
+    };
+    #[cfg(not(target_os = "macos"))]
     let mut cmd = Command::new(&connection.command);
     cmd.args(["mcp", "login", server]);
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
     apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
-    // Non-interactive: the CLI must print the authorization URL and not block on
-    // a terminal prompt June cannot answer. June opens the URL in the browser.
+    // Off macOS there is no PTY wrapper: keep the explicit non-interactive
+    // marker so a future Hermes that honors it prints the URL instead of
+    // blocking on a prompt June cannot answer. On macOS the PTY carries the
+    // interactive intent, so the contradictory marker is omitted.
+    #[cfg(not(target_os = "macos"))]
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(&hermes_home);
     cmd.stdin(Stdio::null());
@@ -2902,10 +2924,16 @@ fn redact_cli_word(word: &str) -> String {
 /// success; otherwise it is a non-success (the caller may have timed out waiting
 /// for the browser step). Pure so a test pins the signal parsing.
 fn mcp_login_succeeded(exit_success: bool, output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    // Hermes' `mcp login` exits 0 even when it prints "Authentication failed"
+    // (the CLI reports the error and returns), so an explicit failure marker in
+    // the output must win over the exit status.
+    if lower.contains("authentication failed") || lower.contains("no oauth token was obtained") {
+        return false;
+    }
     if exit_success {
         return true;
     }
-    let lower = output.to_ascii_lowercase();
     (lower.contains("authorized") || lower.contains("logged in") || lower.contains("success"))
         && !lower.contains("fail")
         && !lower.contains("error")
@@ -2982,10 +3010,15 @@ pub async fn hermes_mcp_oauth_login(
     let auth_url = extract_authorization_url(&combined);
     // Open the authorization URL in the OS browser so the user can complete the
     // sign-in. macOS only; on other platforms June surfaces the URL for a manual
-    // open. The URL is a navigation target, not a credential, but it is still
-    // redacted before display on the TS side.
+    // open. Skipped when Hermes already opened it itself (it prints "Browser
+    // opened automatically" under the PTY), so the user does not get a second
+    // tab racing the same OAuth state. The URL is a navigation target, not a
+    // credential, but it is still redacted before display on the TS side.
+    let hermes_opened_browser = combined.contains("Browser opened automatically");
     if let Some(url) = auth_url.as_deref() {
-        open_url_in_browser(url);
+        if !hermes_opened_browser {
+            open_url_in_browser(url);
+        }
     }
 
     Ok(HermesMcpOauthLoginResult {
@@ -6752,8 +6785,31 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
-        assert_eq!(program, "/usr/local/bin/hermes");
-        assert_eq!(args, vec!["mcp", "login", "linear", "--profile", "work"]);
+        // On macOS the CLI runs under `script -q /dev/null` so Hermes' OAuth
+        // login sees a real PTY (its gate is `sys.stdin.isatty()`); the hermes
+        // command becomes the first argument. Elsewhere it runs directly.
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(program, "/usr/bin/script");
+            assert_eq!(
+                args,
+                vec![
+                    "-q",
+                    "/dev/null",
+                    "/usr/local/bin/hermes",
+                    "mcp",
+                    "login",
+                    "linear",
+                    "--profile",
+                    "work"
+                ]
+            );
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(program, "/usr/local/bin/hermes");
+            assert_eq!(args, vec!["mcp", "login", "linear", "--profile", "work"]);
+        }
     }
 
     #[test]
@@ -6764,6 +6820,19 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
             .collect();
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            args,
+            vec![
+                "-q",
+                "/dev/null",
+                "/usr/local/bin/hermes",
+                "mcp",
+                "login",
+                "linear"
+            ]
+        );
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(args, vec!["mcp", "login", "linear"]);
     }
 
@@ -6941,6 +7010,16 @@ mod tests {
         assert!(mcp_login_succeeded(false, "Successfully authorized linear"));
         assert!(!mcp_login_succeeded(false, "error: authorization failed"));
         assert!(!mcp_login_succeeded(false, "waiting for browser"));
+        // Hermes' `mcp login` exits 0 even when authentication failed — the
+        // output marker must win over the exit status.
+        assert!(!mcp_login_succeeded(
+            true,
+            "Starting OAuth flow for 'Todoist'... Authentication failed: MCP OAuth for 'Todoist'"
+        ));
+        assert!(!mcp_login_succeeded(
+            true,
+            "Server responded, but no OAuth token was obtained"
+        ));
     }
 
     fn request_with_authorization(value: &str) -> HttpRequest {

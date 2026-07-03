@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   McpOauthController,
   oauthClientConfig,
+  oauthNeedFromMessage,
   oauthStateFor,
   oauthStatusMeta,
   needsClientCredentials,
@@ -55,6 +56,47 @@ describe("mcp oauth — view logic", () => {
     });
     expect(usesOauth(stdio)).toBe(false);
     expect(usesOauth(http)).toBe(false);
+  });
+
+  // Regression (Todoist): Hermes can label the transport plain `http` and
+  // report no auth status even though the server was created with
+  // `auth: "oauth"` and its probe demands an interactive login. Both fallbacks
+  // must surface the sign-in flow.
+  it("treats a plain-http server with a config oauth marker as OAuth", () => {
+    const byAuthField = serverFromWire({
+      name: "todoist",
+      transport: "http",
+      url: "https://ai.todoist.net/mcp",
+      auth: "oauth",
+    });
+    const byOauthBlock = serverFromWire({
+      name: "todoist",
+      transport: "http",
+      url: "https://ai.todoist.net/mcp",
+      oauth: { dynamic_registration: true },
+    });
+    expect(usesOauth(byAuthField)).toBe(true);
+    expect(usesOauth(byOauthBlock)).toBe(true);
+  });
+
+  it("treats an OAuth-shaped status message as OAuth, but not a generic 401", () => {
+    const oauthMessage = serverFromWire({
+      name: "todoist",
+      transport: "http",
+      url: "https://ai.todoist.net/mcp",
+      status_message:
+        "MCP OAuth for 'Todoist': non-interactive environment and no cached tokens found. Run `hermes mcp login Todoist` interactively first to complete initial authorization.",
+    });
+    const generic401 = serverFromWire({
+      name: "internal",
+      transport: "http",
+      url: "https://api.example.com/mcp",
+      status_message: "Connection failed: 401 unauthorized.",
+    });
+    expect(usesOauth(oauthMessage)).toBe(true);
+    expect(usesOauth(generic401)).toBe(false);
+    expect(oauthNeedFromMessage("Run `hermes mcp login x` first")).toBe(true);
+    expect(oauthNeedFromMessage(undefined)).toBe(false);
   });
 
   it("classifies each token status to a state with no dashes in copy", () => {
@@ -352,6 +394,52 @@ describe("mcp oauth — McpServersView", () => {
       button.click();
     });
     expect(signIn).toHaveBeenCalledWith("linear");
+  });
+
+  // Regression (Todoist): a plain-http server whose TEST PROBE reports the
+  // OAuth-needed error must grow the interactive sign-in, even though the
+  // listing carries no oauth marker at all.
+  it("offers Sign in when a failed test reports an OAuth-needed error", async () => {
+    const base = oauthServersState();
+    const todoist = serverFromWire({
+      name: "todoist",
+      enabled: true,
+      transport: "http",
+      url: "https://ai.todoist.net/mcp",
+    });
+    const state: McpServersState = {
+      ...base,
+      servers: [todoist],
+      tests: new Map([
+        [
+          "todoist",
+          {
+            pending: false,
+            result: {
+              name: "todoist",
+              ok: false,
+              message:
+                "MCP OAuth for 'Todoist': non-interactive environment and no cached tokens found. Run `hermes mcp login Todoist` interactively first to complete initial authorization.",
+              raw: {},
+            },
+          },
+        ],
+      ]),
+    };
+    const signIn = vi.fn();
+    const oauth: McpOauthState = {
+      logins: new Map(),
+      signIn,
+      clear: () => {},
+      busy: false,
+    };
+    render(<McpServersView state={state} oauth={oauth} />);
+
+    const button = await screen.findByRole("button", { name: "Sign in" });
+    await act(async () => {
+      button.click();
+    });
+    expect(signIn).toHaveBeenCalledWith("todoist");
   });
 
   it("shows the waiting state and a manual sign-in link while signing in", () => {
