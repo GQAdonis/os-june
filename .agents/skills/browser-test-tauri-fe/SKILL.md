@@ -65,6 +65,11 @@ Recipe — a dev-only HTML entry (e.g. `app-preview.html`) NOT listed in `vite.c
 
 ## Recording walkthroughs (video / GIF)
 
+Scope note: this pipeline produces lightweight, PR-embeddable GIFs of a
+browser session. For QA-grade evidence — full walkthrough charter, compressed
+MP4, os-platform upload, PASS/FAIL report — use the `agent-e2e-qa` skill,
+which owns that process and its scripts.
+
 **Recording needs more than screenshots do, so if the user asks for a recording, first prompt to install every tool it needs** — check each, and install only with the user's go-ahead (one of these failing midway wastes the slow recording pass):
 
 - **Playwright + Chromium** (drives the page, captures the `.webm`): check `pnpm exec playwright --version` → `pnpm add -D playwright && pnpm exec playwright install chromium`

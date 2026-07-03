@@ -127,8 +127,9 @@ symlink to `../../.agents/skills/<name>` — never a real directory. Add a new
 skill under `.agents/skills/<name>/` and create the `.claude/skills/<name>`
 symlink in the same change. Current project skills: `os-platform`,
 `os-accounts-integration`, `os-rust-backend`, `os-rust-backend-ci`,
-`os-task-prep`, `repo-build-pr`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus
-the Spec Kit workflow skills (`speckit-*`). `make skills-update` /
+`os-task-prep`, `repo-build-pr`, `repo-review`, `repo-delegate`,
+`repo-orchestrate`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus the Spec
+Kit workflow skills (`speckit-*`). `make skills-update` /
 `skills-restore` / `skills-sync` (thin wrappers over `npx skills`) refresh,
 restore from the lockfile, or re-link them.
 
@@ -151,6 +152,13 @@ labels; "ready-for-agent" = status `todo` + os-task-prep enrichment; "wontfix"
 
 Single-context: one root `CONTEXT.md` (canonical glossary, binding _Avoid_
 lists) + `docs/adr/`. See `docs/agents/domain.md`.
+
+### Collaboration (build, delegate, review)
+
+`repo-build-pr` is the entry-point skill; implementation can be delegated
+across harnesses (`with codex`), reviews always run on a harness that did not
+write the diff, and trust levels are explicit (OS sandbox vs policy-level).
+See `docs/agents/collaboration.md` for the map.
 
 ## Build, test, lint
 
