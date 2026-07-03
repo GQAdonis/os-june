@@ -6377,8 +6377,8 @@ fn render_web_mcp_entry(config: &JuneWebMcpConfig, base_url: &str, proxy_token: 
 
 /// The image MCP gets the loopback proxy base URL plus generated-image and
 /// workspace-upload directories as arguments, and the proxy token via the
-/// environment (kept out of argv). The longer timeout matches image generation,
-/// which is far slower than a text tool call.
+/// environment (kept out of argv). The timeout stays above June API's image
+/// route timeout so a retry with the same request id can replay a settled call.
 fn render_image_mcp_entry(
     config: &JuneImageMcpConfig,
     base_url: &str,
@@ -6396,7 +6396,7 @@ fn render_image_mcp_entry(
     env:
       PYTHONUNBUFFERED: "1"
       {token_env}: {token}
-    timeout: 600
+    timeout: 660
     connect_timeout: 10
 "#,
         server_name = JUNE_IMAGE_MCP_SERVER_NAME,
@@ -7922,7 +7922,7 @@ mcp_servers:
         assert!(config.contains("      - \"/tmp/hermes-home/images\"\n"));
         assert!(config.contains("      - \"/tmp/hermes-home/workspace/uploads\"\n"));
         assert!(config.contains("      JUNE_IMAGE_PROXY_TOKEN: \"proxy-tok\"\n"));
-        assert!(config.contains("    timeout: 600\n"));
+        assert!(config.contains("    timeout: 660\n"));
     }
 
     #[test]

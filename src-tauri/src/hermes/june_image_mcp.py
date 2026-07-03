@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import base64
 import builtins
+import email.utils
 import hashlib
 import hmac
+import io
 import json
 import mimetypes
 import os
@@ -34,6 +36,7 @@ import socket
 import stat
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -42,8 +45,9 @@ from typing import Any
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_INFO = {"name": "june-image", "version": "0.1.0"}
-REQUEST_TIMEOUT_SECONDS = 600
-REQUEST_MAX_ATTEMPTS = 2
+REQUEST_TIMEOUT_SECONDS = 660
+REQUEST_MAX_ATTEMPTS = 3
+REQUEST_RETRY_DELAY_SECONDS = 0.25
 TOKEN_ENV_VAR = "JUNE_IMAGE_PROXY_TOKEN"
 MAX_EDIT_SOURCE_IMAGE_BYTES = 50 * 1024 * 1024
 IMAGE_SIGNATURE_READ_BYTES = 32
@@ -557,6 +561,7 @@ def call_proxy(
     payload: dict[str, Any],
     timeout_seconds: float = REQUEST_TIMEOUT_SECONDS,
     max_attempts: int = REQUEST_MAX_ATTEMPTS,
+    retry_delay_seconds: float = REQUEST_RETRY_DELAY_SECONDS,
 ) -> dict[str, Any]:
     data = json.dumps(payload).encode("utf-8")
     attempts = max(1, max_attempts)
@@ -569,12 +574,18 @@ def call_proxy(
                 body = resp.read().decode("utf-8")
             break
         except urllib.error.HTTPError as exc:
-            # The envelope still carries {success, message} on 4xx/5xx (e.g. 402 out
-            # of credits, 422 model_not_priced), so read it for a usable error.
+            # The envelope still carries {success, message} on application
+            # errors (e.g. 402 out of credits, 422 model_not_priced), so read it
+            # for a usable terminal error. Only retry statuses whose replay can
+            # complete safely with the same requestId.
             body = exc.read().decode("utf-8", "replace")
+            if retryable_http_status(exc.code) and attempt + 1 < attempts:
+                time.sleep(retry_after_seconds(exc.headers) or retry_delay_seconds)
+                continue
             break
         except (TimeoutError, ConnectionError, socket.timeout, urllib.error.URLError) as exc:
             if attempt + 1 < attempts:
+                time.sleep(retry_delay_seconds)
                 continue
             raise RuntimeError(
                 f"Could not reach the June image proxy: {transport_error_reason(exc)}"
@@ -591,6 +602,30 @@ def call_proxy(
     raise RuntimeError(str(envelope.get("message") or "Image request failed."))
 
 
+def retryable_http_status(status: int) -> bool:
+    return status in {429, 503, 504}
+
+
+def retry_after_seconds(headers: Any) -> float | None:
+    if headers is None:
+        return None
+    value = headers.get("Retry-After") if hasattr(headers, "get") else None
+    if not value:
+        return None
+    value = str(value).strip()
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+    try:
+        retry_at = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, retry_at.timestamp() - time.time())
+
+
 def transport_error_reason(exc: BaseException) -> str:
     if isinstance(exc, urllib.error.URLError):
         return str(exc.reason)
@@ -599,6 +634,7 @@ def transport_error_reason(exc: BaseException) -> str:
 
 def run_smoke_tests() -> None:
     smoke_test_proxy_retry_reuses_request_id()
+    smoke_test_proxy_retryable_http_reuses_request_id()
     smoke_test_registered_edit_source_resolves_and_reads()
     smoke_test_edit_source_survives_registry_restart()
     smoke_test_tampered_edit_source_is_rejected_before_read()
@@ -812,6 +848,7 @@ def smoke_test_proxy_retry_reuses_request_id() -> None:
             {"prompt": "a cat", "requestId": request_id},
             timeout_seconds=0.05,
             max_attempts=2,
+            retry_delay_seconds=0,
         )
     finally:
         urllib.request.urlopen = original_urlopen
@@ -822,6 +859,77 @@ def smoke_test_proxy_retry_reuses_request_id() -> None:
         raise AssertionError("retry smoke test did not reuse one requestId")
     if state["side_effects"] != 1:
         raise AssertionError("retry smoke test produced more than one side effect")
+
+
+def smoke_test_proxy_retryable_http_reuses_request_id() -> None:
+    state: dict[str, Any] = {
+        "requests": [],
+        "side_effects": 0,
+        "seen_request_ids": set(),
+    }
+
+    class FakeResponse:
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return json.dumps(
+                {
+                    "success": True,
+                    "data": {
+                        "imageBase64": base64.b64encode(b"ok").decode("ascii"),
+                        "mimeType": "image/png",
+                    },
+                }
+            ).encode("utf-8")
+
+    original_urlopen = urllib.request.urlopen
+
+    def fake_urlopen(request: urllib.request.Request, timeout: float) -> FakeResponse:
+        payload = json.loads((request.data or b"{}").decode("utf-8"))
+        request_id = payload.get("requestId")
+        state["requests"].append(request_id)
+        if request_id not in state["seen_request_ids"]:
+            state["seen_request_ids"].add(request_id)
+            state["side_effects"] += 1
+        if len(state["requests"]) == 1:
+            raise urllib.error.HTTPError(
+                request.full_url,
+                503,
+                "service unavailable",
+                {"Retry-After": "0"},
+                io.BytesIO(
+                    json.dumps(
+                        {"success": False, "message": "metering_provider_failed"}
+                    ).encode("utf-8")
+                ),
+            )
+        return FakeResponse()
+
+    try:
+        urllib.request.urlopen = fake_urlopen
+        request_id = new_request_id()
+        envelope = call_proxy(
+            "http://127.0.0.1",
+            "token",
+            "/image/generate",
+            {"prompt": "a cat", "requestId": request_id},
+            timeout_seconds=0.05,
+            max_attempts=2,
+            retry_delay_seconds=0,
+        )
+    finally:
+        urllib.request.urlopen = original_urlopen
+
+    if envelope.get("mimeType") != "image/png":
+        raise AssertionError("http retry smoke test returned the wrong envelope")
+    if state["requests"] != [request_id, request_id]:
+        raise AssertionError("http retry smoke test did not reuse one requestId")
+    if state["side_effects"] != 1:
+        raise AssertionError("http retry smoke test produced more than one side effect")
 
 
 def response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
