@@ -38,9 +38,23 @@ Treat everything after `/repo-build-pr` (or `$repo-build-pr` in Codex) as the bu
 5. Fetch the target base branch. Use `origin/main` unless the user explicitly names another base.
 6. Search the codebase with `rg` and read the narrowest relevant files before deciding on the implementation.
 
+### Grill the plan against the docs
+
+Before asking the user anything, interrogate the draft plan against the repo's own documentation. Two goals: consume questions the docs already settle, and surface where the docs are stale or silent so this build can fix them.
+
+Sources, in order: `CONTEXT.md` (every term the plan uses must match the glossary; check the `_Avoid_` lists), `docs/adr/` for the touched area (does the plan re-litigate an accepted decision? will it need a new ADR per the AGENTS.md three-part test?), the subsystem doc via `docs/index.md`, `spec/` rules in scope, and any `specs/NNN-*/` feature spec.
+
+For each load-bearing decision in the plan, classify:
+
+- **Docs decide it** — adopt the documented answer and cite it in the plan; not a question.
+- **Docs contradict the plan** — one of them is wrong. Decide which with evidence; if the doc is stale, queue the doc fix. If the plan is wrong, fix the plan.
+- **Docs are silent** — that is a real clarifying question. Carry the "checked X, Y — silent" note into the question so the user sees why it is genuinely open.
+
+Queue every doc delta found here into the build itself: CONTEXT.md term updates ride in the same change (AGENTS.md convention), ADR-worthy decisions get an ADR, stale subsystem-doc claims get corrected. Small doc fixes belong in this PR; large rewrites become a linked follow-up issue.
+
 ### Clarifying questions
 
-Before writing any code, ask the questions whose answers change what gets built. A wrong guess at this stage costs an entire build-review cycle; a question costs the user seconds. Ask them as ONE batch up front (AskUserQuestion in Claude Code, a single numbered list in Codex), with a recommended option per question so the user can mostly confirm.
+Before writing any code, ask the questions whose answers change what gets built — the survivors of the docs grill. A wrong guess at this stage costs an entire build-review cycle; a question costs the user seconds. Ask them as ONE batch up front (AskUserQuestion in Claude Code, a single numbered list in Codex), with a recommended option per question so the user can mostly confirm.
 
 Worth asking:
 
@@ -52,7 +66,7 @@ Worth asking:
 
 Not worth asking:
 
-- anything the repo, issue, or git history already answers - look first
+- anything the repo, issue, or git history already answers - the docs grill above should have consumed these
 - choices with an obvious conventional default - pick it and note it in the PR
 - details that do not change the diff
 
