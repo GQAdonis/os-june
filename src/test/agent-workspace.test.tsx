@@ -7025,14 +7025,12 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
 
-    mocks.generateImage
-      .mockRejectedValueOnce(new Error("gateway timeout"))
-      .mockResolvedValueOnce({
-        imageBase64: "aGVsbG8=",
-        mimeType: "image/png",
-        model: "venice-sd35",
-        provider: "venice",
-      });
+    mocks.generateImage.mockRejectedValueOnce(new Error("gateway timeout")).mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
     mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
       name: "generated-image.png",
       path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",

@@ -3609,7 +3609,10 @@ export function AgentWorkspace({
         requestId,
       );
       if (result.status !== "ok") {
-        updateImageSlashPart(sessionId, assistantTurnId, { status: "error", error: result.message });
+        updateImageSlashPart(sessionId, assistantTurnId, {
+          status: "error",
+          error: result.message,
+        });
         return;
       }
       updateImageSlashPart(sessionId, assistantTurnId, {
@@ -9674,10 +9677,7 @@ function AgentChatTurnRow({
    * the dev gallery can render image rows without the live bridge. */
   onDownloadImage?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
   onOpenImage?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
-  onRetryImage?: (
-    assistantTurnId: string,
-    part: Extract<AgentChatPart, { type: "image" }>,
-  ) => void;
+  onRetryImage?: (assistantTurnId: string, part: Extract<AgentChatPart, { type: "image" }>) => void;
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
   topUpLabel?: string;
