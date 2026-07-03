@@ -153,8 +153,11 @@ adversarial, not verified:
    ("verify that..."), pre-existing parity, or restatements of documented
    trade-offs count as "nothing worth fixing"; say so explicitly with
    evidence.
-5. Finish with one last Standards + Spec pass.
-6. Close the cycle in [CALIBRATION.md](CALIBRATION.md): one row per reviewer
+5. Hard cap: if the loop has not converged after ~5 rounds, stop and report
+   the residual findings with dispositions instead of grinding — a loop
+   that will not converge is itself a signal the change needs a human look.
+6. Finish with one last Standards + Spec pass.
+7. Close the cycle in [CALIBRATION.md](CALIBRATION.md): one row per reviewer
    (findings / true / pattern notes). This is what keeps the battery
    improving — skip-rules and harness choices get made from this table, not
    from memory. If the cycle taught a lesson the skill text doesn't carry
