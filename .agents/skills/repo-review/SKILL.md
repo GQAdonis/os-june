@@ -109,10 +109,12 @@ orchestrating side's sub-agents entirely and dispatch every axis through
 the implementer harness's runner (single-harness convention; see
 docs/agents/collaboration.md).
 
-**Cross-harness dispatch** — prefer sending at least the adversarial axis to
-the *other* harness, so the review never comes from the model that wrote the
-change. One runner script per harness, same interface as `fill-prompt.sh`
-plus `-o <out>` and `--dry-run`:
+**Cross-harness dispatch** — for in-session (native) builds, prefer sending
+at least the adversarial axis to the *other* harness, so the review never
+comes from the model that wrote the change; builds with a cross-harness
+implementer instead route every axis to the implementer harness (the
+single-harness convention above). One runner script per harness, same
+interface as `fill-prompt.sh` plus `-o <out>` and `--dry-run`:
 
 - **→ Codex**: `scripts/run-codex.sh -a <axis> ...` — `codex exec` in an
   OS-level read-only sandbox; needs the `codex` CLI logged in, no plugin
