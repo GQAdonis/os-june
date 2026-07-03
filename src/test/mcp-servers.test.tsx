@@ -989,6 +989,33 @@ describe("McpServersView — component", () => {
     expect(refresh).toHaveBeenCalled();
   });
 
+  // Regression (review): a failed restart can leave the runtime DOWN (stop
+  // landed, start failed) — the page goes unavailable, but the failure banner
+  // and its Try again button must survive or the user has no retry path.
+  it("keeps the restart-failed banner and Try again visible when the runtime is down", () => {
+    const restartGateway = vi.fn();
+    render(
+      <McpServersView
+        state={stubState({
+          status: "unavailable",
+          servers: [],
+          restartGateway,
+          lifecycle: {
+            state: "restart-failed",
+            label: "Restart failed",
+            detail: "The agent did not restart. You can try again.",
+            canRestart: true,
+          },
+        })}
+      />,
+    );
+    expect(screen.getByText("Restart failed")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /try again/i }));
+    expect(restartGateway).toHaveBeenCalled();
+    // The runtime-down empty state still renders beneath the banner.
+    expect(screen.getByText("Hermes is not running")).toBeInTheDocument();
+  });
+
   it("renders the restart banner as a friendly prompt with a working Restart now button", () => {
     const restartGateway = vi.fn();
     render(

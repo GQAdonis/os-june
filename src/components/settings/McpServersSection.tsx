@@ -127,6 +127,16 @@ export function McpServersSection({ mode = "sandboxed" }: McpServersSectionProps
       setBridge(status);
       setRestart({ phase: "idle" });
     } catch (error) {
+      // Reality may have changed under us (the stop landed, the start
+      // failed): re-read the bridge status so the engine is rebuilt against
+      // what is ACTUALLY running and never keeps calling a stopped runtime.
+      // If even the status read fails, drop to the unavailable state rather
+      // than keep a dead connection.
+      try {
+        setBridge(await hermesBridgeStatus());
+      } catch {
+        setBridge(undefined);
+      }
       setRestart({
         phase: "failed",
         error: error instanceof Error ? error.message : String(error),
@@ -432,7 +442,10 @@ function ModeNote({
  * this surfaces the restart state once a change is pending. */
 function LifecycleBanner({ state }: { state: McpServersState }) {
   const snapshot = state.lifecycle;
-  if (state.status === "unavailable") return null;
+  // A failed restart must stay visible (with its Try again button) even when
+  // the runtime is down: that is exactly the state a failed restart leaves,
+  // and hiding the banner would strand the user with no retry affordance.
+  if (state.status === "unavailable" && snapshot.state !== "restart-failed") return null;
   if (snapshot.state === "clean") return null;
   // A pending restart is a normal, expected step (info tone with an action),
   // not a warning: the user saved a change and just needs to apply it. Only a
