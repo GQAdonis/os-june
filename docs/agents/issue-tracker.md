@@ -17,7 +17,8 @@ Defaults (org `june`, limit 20) come from `os-platform.json` at the repo root.
 - **Search**: `python3 scripts/os_platform.py issues search june "<query>"`
 - **Read an issue**: `python3 scripts/os_platform.py issues show june <number>`
   (comments: `comments list issue june <number>`)
-- **Take an issue** (todo → in_progress, assigns you): `issues take june <number>`
+- **Take an issue** (todo → in_progress, assigns you):
+  `python3 scripts/os_platform.py issues take june <number>`
   — confirm with the user before passing `--yes`.
 
 ## Write conventions (direct API)

@@ -11,8 +11,7 @@ This is a **single-context** repo: one glossary covers the React frontend
 - **`CONTEXT.md`** at the repo root — the canonical glossary / ubiquitous
   language. Glossary sections: Platform, Notes, Audio & recording, Agent
   runtime (Hermes), AI work & billing, Desktop shell & updates. The `_Avoid_`
-  lines
-  are **binding**. Its **Flagged ambiguities** section is the quick
+  lines are **binding**. Its **Flagged ambiguities** section is the quick
   disambiguation table for the six overloaded terms: proxy, transcribe,
   credits, session id, "the model", channel — check it before naming anything.
 - **`docs/adr/`** — read the ADRs touching the area you're about to work in.
