@@ -213,4 +213,34 @@ describe("composer note reference trigger", () => {
     expect(await screen.findByRole("listbox", { name: "Reference a note" })).toBeInTheDocument();
     expect(await screen.findByRole("option", { name: "Launch plan" })).toBeInTheDocument();
   });
+
+  it("pads the trigger with a space when the caret follows text", async () => {
+    // The suggestion plugin only matches "@" after whitespace or a line
+    // start, so the attach-menu entry point pads it; a bare "@" after text
+    // must NOT open the palette (this is the regression the padding fixes).
+    let editor: Editor | null = null;
+
+    render(
+      createElement(ComposerEditor, {
+        placeholder: "Message June",
+        onChange: vi.fn(),
+        onSubmit: vi.fn(),
+        onReady: (readyEditor: Editor) => {
+          editor = readyEditor;
+        },
+      }),
+    );
+
+    await waitFor(() => expect(editor).not.toBeNull());
+    act(() => {
+      editor?.chain().focus().insertContent("What were the action items?@").run();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByRole("listbox", { name: "Reference a note" })).not.toBeInTheDocument();
+
+    act(() => {
+      editor?.chain().focus().insertContent(" @").run();
+    });
+    expect(await screen.findByRole("listbox", { name: "Reference a note" })).toBeInTheDocument();
+  });
 });

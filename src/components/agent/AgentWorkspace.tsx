@@ -6915,7 +6915,17 @@ export function AgentWorkspace({
                 setAttachMenuOpen(false);
                 const editor = composerTiptapEditorRef.current;
                 if (editor && !editor.isDestroyed) {
-                  editor.chain().focus().insertContent("@").run();
+                  // The suggestion plugin only matches a trigger preceded by
+                  // whitespace or a line start, so pad the "@" when the caret
+                  // sits right after text or an atom chip.
+                  const nodeBefore = editor.state.selection.$from.nodeBefore;
+                  const lastChar = nodeBefore?.isText ? (nodeBefore.text?.slice(-1) ?? "") : "";
+                  const needsSpace = nodeBefore != null && !/\s/.test(lastChar || "x");
+                  editor
+                    .chain()
+                    .focus()
+                    .insertContent(needsSpace ? " @" : "@")
+                    .run();
                 } else {
                   composerEditorRef.current?.focus();
                 }
