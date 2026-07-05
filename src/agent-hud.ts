@@ -362,14 +362,31 @@ function renderPill(entries: HudEntry[], expanded: boolean) {
   if (!pill || !mark || !pillLabel) return;
   const { label, status, runningCount, waitingCount } = pillSummary(entries);
   const activeCount = runningCount + waitingCount;
-  const countOnly = status === "running" && runningCount > 1 && waitingCount === 0;
+  // Notch placement is count-only in every state: just the number of
+  // sessions, with the mark's color carrying running/attention/terminal.
+  // The wings are far too narrow for status text, and a glanceable digit is
+  // the point of living in the notch. Applies to the notchless fallback
+  // pill too, so the placement reads the same on every display.
+  const notchMode = state.placement === "notch";
+  const countOnly = notchMode || (status === "running" && runningCount > 1 && waitingCount === 0);
   mark.dataset.status = status;
   pill.dataset.countOnly = countOnly ? "true" : "false";
-  pillLabel.textContent = label;
+  pillLabel.textContent = notchMode
+    ? String(activeCount > 0 ? activeCount : entries.length)
+    : label;
+  if (notchMode) {
+    // The label is terse on purpose; keep the full summary for AT and hover.
+    pillLabel.setAttribute("aria-label", label);
+    pillLabel.title = label;
+  } else {
+    pillLabel.removeAttribute("aria-label");
+    pillLabel.removeAttribute("title");
+  }
   if (pillBadge) {
     // Mixed state: the label leads with what needs the user; the badge
-    // keeps the total active agent count visible at a glance.
-    const showBadge = waitingCount > 0 && runningCount > 0;
+    // keeps the total active agent count visible at a glance. Redundant in
+    // notch mode, where the label already is the count.
+    const showBadge = !notchMode && waitingCount > 0 && runningCount > 0;
     pillBadge.hidden = !showBadge;
     if (showBadge) {
       pillBadge.textContent = String(activeCount);

@@ -547,12 +547,12 @@ body {
 
 /* The bar spans housing height plus chin in every state (the rows drop out
  * below it), and the flexing spacer column spans the housing so the label
- * stays in the left wing and the badge/chevron cluster in the right one.
- * The label cap is the wing (132px, mirrors NOTCH_WING_WIDTH in
- * agent_hud.rs) minus the pill inset, mark column, and gap before the
- * label, so text ellipsizes before it can run under the bezel. */
+ * stays in the left wing and the chevron in the right one. The label cap
+ * is the wing (56px, mirrors NOTCH_WING_WIDTH in agent_hud.rs) minus the
+ * pill inset, mark column, and gap before the label, so the count-only
+ * digits ellipsize before they can run under the bezel. */
 .agent-hud[data-placement="notch"] .agent-hud-pill[data-count-only] {
-  --notch-wing: 132px;
+  --notch-wing: 56px;
 
   height: var(--agent-hud-notch-bar-height, 44px);
   padding: 0 14px;

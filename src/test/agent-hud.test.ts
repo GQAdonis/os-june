@@ -602,6 +602,26 @@ describe("agent HUD", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("agent_hud_set_layout", {
       request: { expanded: false, cardCount: 0, placement: "notch" },
     });
+
+    // Docked, the pill is count-only: a digit in the wing, never status
+    // prose. The full label survives for assistive tech and hover.
+    expect(pillLabelElement()).toHaveTextContent("1");
+    expect(pillLabelElement()).not.toHaveTextContent("running");
+    expect(pillElement().dataset.countOnly).toBe("true");
+    expect(pillLabelElement()).toHaveAttribute("aria-label", "1 running");
+
+    emitStatus({
+      status: "waitingForUser",
+      title: "Need approval",
+      summary: "Review this step.",
+    });
+    await flushPromises();
+
+    expect(pillLabelElement()).toHaveTextContent("2");
+    expect(pillLabelElement()).not.toHaveTextContent("input");
+    expect(markElement().dataset.status).toBe("waitingForUser");
+    // The label is already the count, so the badge stays hidden.
+    expect(document.querySelector<HTMLElement>("#agent-hud-pill-badge")?.hidden).toBe(true);
   });
 
   it("falls back to a floating pill when notch placement finds no notch", async () => {
@@ -625,6 +645,11 @@ describe("agent HUD", () => {
     expect(mocks.invoke).toHaveBeenCalledWith("agent_hud_set_layout", {
       request: { expanded: false, cardCount: 0, placement: "notch" },
     });
+    // The fallback pill is count-only too, so the placement reads the same
+    // on every display.
+    expect(pillLabelElement()).toHaveTextContent("1");
+    expect(pillLabelElement()).not.toHaveTextContent("running");
+    expect(pillElement().dataset.countOnly).toBe("true");
   });
 
   it("re-docks when the placement preference changes at runtime", async () => {

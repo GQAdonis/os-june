@@ -14,11 +14,14 @@ const AGENT_HUD_CONTEXT_MENU_EVENT: &str = "june:agent-hud:context-menu";
 const AGENT_HUD_WINDOW_WIDTH: f64 = 304.0;
 const AGENT_HUD_COLLAPSED_WINDOW_HEIGHT: f64 = 58.0;
 // Notch dock geometry (logical points). The window spans the camera housing
-// plus a wing on either side for the pill content; the bar extends a chin
-// below the housing so the surface's rounded bottom corners read as the
-// notch flowing out, not a rectangle taped over it. The webview mirrors the
-// chin in NOTCH_CHIN_HEIGHT (src/agent-hud.ts) to size the bar in CSS.
-const NOTCH_WING_WIDTH: f64 = 132.0;
+// plus a narrow wing on either side: the docked pill is count-only (the
+// mark and a digit left of the housing, the chevron right of it), so the
+// wings only need room for those glyphs. The bar extends a chin below the
+// housing so the surface's rounded bottom corners read as the notch flowing
+// out, not a rectangle taped over it. The webview mirrors the chin in
+// NOTCH_CHIN_HEIGHT (src/agent-hud.ts) to size the bar in CSS, and the wing
+// in --notch-wing (agent-hud.css) to cap the label column.
+const NOTCH_WING_WIDTH: f64 = 56.0;
 const NOTCH_CHIN_HEIGHT: f64 = 10.0;
 // Height floor while the context menu is open in notch mode, mirroring the
 // 104px minimum of the top-right placement below the bar.
