@@ -700,11 +700,17 @@ fn default_image_edit_model() -> String {
 /// image margin). Every id must be a current Venice text-to-video model, and its
 /// worst-case run at the supported durations must fit `DEFAULT_VIDEO_JOB_MAX_SECS`
 /// so the hold covers the whole job (ADR 0012). `credits = ceil(quote_usd * markup)`.
+///
+/// First-cut curation: every model here must accept the desktop fast-path's fixed
+/// default duration/resolution (5s / 720p) that the proxy injects when the client
+/// names none, so a `/video` shot or an MCP `generate_video` call never queues an
+/// invalid Venice combination. `ltx-2-fast` is deliberately excluded — it only
+/// accepts >=6s and >=1080p, so no global default serves it; per-model
+/// duration/resolution selection (which re-admits it) is a follow-up.
 fn default_video_pricing() -> BTreeMap<String, u32> {
     BTreeMap::from([
         ("wan-2.2-a14b-text-to-video".to_string(), 2000),
         ("seedance-2-0-fast-text-to-video".to_string(), 2000),
-        ("ltx-2-fast-text-to-video".to_string(), 2000),
     ])
 }
 
@@ -1582,7 +1588,6 @@ mod tests {
         for model in [
             "wan-2.2-a14b-text-to-video",
             "seedance-2-0-fast-text-to-video",
-            "ltx-2-fast-text-to-video",
         ] {
             assert!(
                 config.video_pricing.get(model).is_some_and(|m| *m > 0),
