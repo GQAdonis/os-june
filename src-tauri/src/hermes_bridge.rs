@@ -93,6 +93,10 @@ const JUNE_IMAGE_MCP_SCRIPT: &str = include_str!("hermes/june_image_mcp.py");
 /// Rust loopback proxy; edit-source validation and source-byte reads stay in
 /// Rust.
 const JUNE_IMAGE_MCP_IMAGES_DIR_NAME: &str = "images";
+const JUNE_VIDEO_MCP_VIDEOS_DIR_NAME: &str = "videos";
+const JUNE_VIDEO_DEFAULT_ANIMATE_MODEL: &str = "wan-2.6-image-to-video";
+const JUNE_VIDEO_DEFAULT_DURATION: &str = "5s";
+const JUNE_VIDEO_DEFAULT_RESOLUTION: &str = "720p";
 const JUNE_WORKSPACE_UPLOADS_DIR_NAME: &str = "uploads";
 /// Environment variable the `june_image` MCP reads its loopback proxy token
 /// from. Kept out of argv so it does not appear in process listings.
@@ -324,6 +328,7 @@ struct SharedProviderProxy {
 struct ProviderProxyState {
     token: String,
     image_sources: ImageSourceCapabilities,
+    videos_dir: PathBuf,
 }
 
 #[derive(Clone)]
@@ -1015,7 +1020,8 @@ async fn ensure_provider_proxy(
         images_dir: hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
         secret: load_or_create_image_source_capability_secret(&app_data_dir)?,
     };
-    let started = start_june_provider_proxy(token.clone(), image_sources).await?;
+    let videos_dir = hermes_home.join(JUNE_VIDEO_MCP_VIDEOS_DIR_NAME);
+    let started = start_june_provider_proxy(token.clone(), image_sources, videos_dir).await?;
     let mut guard = bridge
         .provider_proxy
         .lock()
@@ -2420,6 +2426,7 @@ pub async fn download_hermes_bridge_file(
     request: DownloadHermesFileRequest,
 ) -> Result<String, AppError> {
     let requested = validate_hermes_file_path(&app, &request.path)?;
+    let _content_type = hermes_file_mime_type(&requested);
     let downloads_dir = app
         .path()
         .download_dir()
@@ -2598,9 +2605,11 @@ fn validate_hermes_file_path(app: &AppHandle, path: &str) -> Result<PathBuf, App
         .collect::<Vec<_>>();
     // "image_cache" is where the Hermes runtime copies tool-result images;
     // assistant MEDIA: references point at those copies, so dropping it breaks
-    // inline rendering and download of every tool-generated image.
+    // inline rendering and download of every tool-generated image. Add both
+    // video dirs now; QA must confirm the exact runtime cache dir for inline
+    // generated-video rendering once the frontend/MCP chunks land.
     allowed_roots.extend(
-        ["images", "image_cache"]
+        ["images", "image_cache", "videos", "video_cache"]
             .into_iter()
             .filter_map(|relative| hermes_home.join(relative).canonicalize().ok()),
     );
@@ -2779,6 +2788,20 @@ fn image_mime_type(path: &Path) -> Option<&'static str> {
         "webp" => Some("image/webp"),
         _ => None,
     }
+}
+
+fn video_mime_type(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "mp4" => Some("video/mp4"),
+        "webm" => Some("video/webm"),
+        "mov" => Some("video/quicktime"),
+        _ => None,
+    }
+}
+
+fn hermes_file_mime_type(path: &Path) -> Option<&'static str> {
+    image_mime_type(path).or_else(|| video_mime_type(path))
 }
 
 pub fn shutdown(app: &tauri::AppHandle) {
@@ -6759,6 +6782,7 @@ fn yaml_string(value: &str) -> String {
 async fn start_june_provider_proxy(
     token: String,
     image_sources: ImageSourceCapabilities,
+    videos_dir: PathBuf,
 ) -> Result<RunningJuneProviderProxy, AppError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
@@ -6777,6 +6801,7 @@ async fn start_june_provider_proxy(
         Arc::new(ProviderProxyState {
             token,
             image_sources,
+            videos_dir,
         }),
         shutdown_rx,
     ));
@@ -6933,6 +6958,37 @@ async fn handle_june_provider_connection(
             ensure_image_safe_mode(&mut body);
             forward_image_tool(&mut stream, "/v1/image/edit", &body, &state.image_sources).await?;
         }
+        ("POST", "/v1/video/generate") => {
+            let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            ensure_video_generation_model(&mut body);
+            ensure_video_safe_mode(&mut body);
+            ensure_video_defaults(&mut body);
+            forward_video_create(&mut stream, "/v1/video/generate", &body).await?;
+        }
+        ("POST", "/v1/video/animate") => {
+            let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if let Err(message) = prepare_image_edit_request(&mut body, &state.image_sources) {
+                write_json_response(
+                    &mut stream,
+                    400,
+                    serde_json::json!({
+                        "success": false,
+                        "message": message,
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+            ensure_video_animation_model(&mut body);
+            ensure_video_safe_mode(&mut body);
+            ensure_video_defaults(&mut body);
+            forward_video_create(&mut stream, "/v1/video/animate", &body).await?;
+        }
+        ("GET", path) if path.starts_with("/v1/video/status/") => {
+            forward_video_status(&mut stream, path, &state.videos_dir).await?;
+        }
         _ => {
             write_json_response(
                 &mut stream,
@@ -7038,13 +7094,15 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> io::Result<Htt
 fn provider_proxy_max_body_bytes(path: &str) -> usize {
     match path {
         "/v1/image/generate" | "/v1/image/edit" => JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
+        "/v1/video/animate" => JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES,
+        "/v1/video/generate" => JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES,
         _ => JUNE_PROVIDER_PROXY_MAX_CHAT_BODY_BYTES,
     }
 }
 
 fn provider_proxy_body_too_large_message(path: &str) -> &'static str {
     match path {
-        "/v1/image/generate" | "/v1/image/edit" => {
+        "/v1/image/generate" | "/v1/image/edit" | "/v1/video/animate" => {
             "image_request_too_large: the image request body is too large for June. \
              Use a smaller image and retry."
         }
@@ -7226,6 +7284,216 @@ async fn forward_image_tool(
             .await
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ProviderApiEnvelope {
+    success: bool,
+    data: Option<serde_json::Value>,
+}
+
+/// Forwards a video create request and normalizes June API's success envelope
+/// to the bare `{jobId}` shape the video MCP contract uses. Error envelopes are
+/// relayed unchanged so metering/auth failures retain their backend status and
+/// message.
+async fn forward_video_create(
+    stream: &mut tokio::net::TcpStream,
+    path: &str,
+    body: &serde_json::Value,
+) -> io::Result<()> {
+    match crate::june_api::forward_video_request(path, Some(body)).await {
+        Ok(response) => {
+            if response.status < 400 && response.content_type.to_ascii_lowercase().contains("json")
+            {
+                if let Ok(envelope) = serde_json::from_slice::<ProviderApiEnvelope>(&response.body)
+                {
+                    if envelope.success {
+                        if let Some(data) = envelope.data {
+                            return write_json_response(stream, response.status, data).await;
+                        }
+                    }
+                }
+            }
+            write_raw_response(
+                stream,
+                response.status,
+                &response.content_type,
+                &response.body,
+            )
+            .await
+        }
+        Err(error) => {
+            write_json_response(
+                stream,
+                502,
+                serde_json::json!({
+                    "success": false,
+                    "message": format!("Video request failed: {}", error.message),
+                }),
+            )
+            .await
+        }
+    }
+}
+
+async fn forward_video_status(
+    stream: &mut tokio::net::TcpStream,
+    path: &str,
+    videos_dir: &Path,
+) -> io::Result<()> {
+    match crate::june_api::forward_video_request(path, None).await {
+        Ok(response) => {
+            if response.status < 400
+                && response
+                    .content_type
+                    .to_ascii_lowercase()
+                    .contains("video/mp4")
+            {
+                let filename = write_proxy_video_bytes(videos_dir, &response.body)?;
+                return write_json_response(
+                    stream,
+                    response.status,
+                    serde_json::json!({
+                        "status": "completed",
+                        "filename": filename,
+                        "mimeType": "video/mp4",
+                        "sizeBytes": response.body.len() as u64,
+                    }),
+                )
+                .await;
+            }
+            if response.status < 400 && response.content_type.to_ascii_lowercase().contains("json")
+            {
+                if let Ok(envelope) = serde_json::from_slice::<ProviderApiEnvelope>(&response.body)
+                {
+                    if envelope.success {
+                        if let Some(data) = envelope.data {
+                            return write_video_status_json(stream, videos_dir, data).await;
+                        }
+                    }
+                }
+            }
+            write_raw_response(
+                stream,
+                response.status,
+                &response.content_type,
+                &response.body,
+            )
+            .await
+        }
+        Err(error) => {
+            write_json_response(
+                stream,
+                502,
+                serde_json::json!({
+                    "success": false,
+                    "message": format!("Video status failed: {}", error.message),
+                }),
+            )
+            .await
+        }
+    }
+}
+
+async fn write_video_status_json(
+    stream: &mut tokio::net::TcpStream,
+    videos_dir: &Path,
+    data: serde_json::Value,
+) -> io::Result<()> {
+    let status = data
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if status != "completed" {
+        return write_json_response(stream, 200, data).await;
+    }
+    let download_url = data
+        .get("downloadUrl")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let Some(download_url) = download_url else {
+        return write_json_response(
+            stream,
+            502,
+            serde_json::json!({
+                "success": false,
+                "message": "Video status completed without downloadable media.",
+            }),
+        )
+        .await;
+    };
+    match download_proxy_video_bytes(&download_url).await {
+        Ok(bytes) => {
+            let filename = write_proxy_video_bytes(videos_dir, &bytes)?;
+            let mime_type = data
+                .get("mimeType")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("video/mp4")
+                .to_string();
+            let size_bytes = data
+                .get("sizeBytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(bytes.len() as u64);
+            write_json_response(
+                stream,
+                200,
+                serde_json::json!({
+                    "status": "completed",
+                    "filename": filename,
+                    "mimeType": mime_type,
+                    "sizeBytes": size_bytes,
+                }),
+            )
+            .await
+        }
+        Err(error) => {
+            write_json_response(
+                stream,
+                502,
+                serde_json::json!({
+                    "success": false,
+                    "message": format!("Video download failed: {error}"),
+                }),
+            )
+            .await
+        }
+    }
+}
+
+async fn download_proxy_video_bytes(url: &str) -> Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(600))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("download returned status {}", status.as_u16()));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| error.to_string())
+}
+
+fn write_proxy_video_bytes(videos_dir: &Path, bytes: &[u8]) -> io::Result<String> {
+    fs::create_dir_all(videos_dir)?;
+    let filename = generated_video_storage_filename();
+    fs::write(videos_dir.join(&filename), bytes)?;
+    Ok(filename)
+}
+
+fn generated_video_storage_filename() -> String {
+    format!("generated-video-{}.mp4", uuid::Uuid::new_v4().simple())
 }
 
 fn image_source_capability_secret_path(app_data_dir: &Path) -> PathBuf {
@@ -7679,6 +7947,84 @@ fn ensure_image_safe_mode(body: &mut serde_json::Value) {
         object.insert(
             "safeMode".to_string(),
             serde_json::Value::Bool(crate::providers::image_safe_mode()),
+        );
+    }
+}
+
+fn ensure_video_generation_model(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let has_model = object
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(|model| !model.is_empty())
+        .unwrap_or(false);
+    if !has_model {
+        object.insert(
+            "model".to_string(),
+            serde_json::Value::String(crate::providers::video_model()),
+        );
+    }
+}
+
+fn ensure_video_animation_model(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let has_model = object
+        .get("model")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(|model| !model.is_empty())
+        .unwrap_or(false);
+    if !has_model {
+        object.insert(
+            "model".to_string(),
+            serde_json::Value::String(JUNE_VIDEO_DEFAULT_ANIMATE_MODEL.to_string()),
+        );
+    }
+}
+
+fn ensure_video_safe_mode(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    if !object.contains_key("safeMode") {
+        object.insert(
+            "safeMode".to_string(),
+            serde_json::Value::Bool(crate::providers::video_safe_mode()),
+        );
+    }
+}
+
+fn ensure_video_defaults(body: &mut serde_json::Value) {
+    let Some(object) = body.as_object_mut() else {
+        return;
+    };
+    let has_duration = object
+        .get("duration")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(|duration| !duration.is_empty())
+        .unwrap_or(false);
+    if !has_duration {
+        object.insert(
+            "duration".to_string(),
+            serde_json::Value::String(JUNE_VIDEO_DEFAULT_DURATION.to_string()),
+        );
+    }
+    let has_resolution = object
+        .get("resolution")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .map(|resolution| !resolution.is_empty())
+        .unwrap_or(false);
+    if !has_resolution {
+        object.insert(
+            "resolution".to_string(),
+            serde_json::Value::String(JUNE_VIDEO_DEFAULT_RESOLUTION.to_string()),
         );
     }
 }

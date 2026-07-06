@@ -257,6 +257,8 @@ pub fn run() {
             providers::set_image_safe_mode,
             providers::generate_image,
             providers::edit_image,
+            providers::video_generate,
+            providers::video_status,
             providers::save_local_generation_settings,
             providers::set_local_generation_enabled,
             providers::probe_local_generation_endpoint,

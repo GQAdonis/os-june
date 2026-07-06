@@ -21,6 +21,9 @@ pub const PROVIDER_LOCAL: &str = "local";
 pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "nvidia/parakeet-tdt-0.6b-v3";
 pub const DEFAULT_GENERATION_MODEL: &str = "zai-org-glm-5-2";
 pub const DEFAULT_IMAGE_MODEL: &str = "venice-sd35";
+pub const DEFAULT_VIDEO_MODEL: &str = "seedance-2-0-fast-text-to-video";
+pub const DEFAULT_VIDEO_DURATION: &str = "5s";
+pub const DEFAULT_VIDEO_RESOLUTION: &str = "720p";
 const VENICE_API_KEY_PREFIX: &str = "VENICE_INFERENCE_KEY_";
 const VENICE_API_BASE_URL: &str = "https://api.venice.ai/api/v1";
 const VENICE_API_KEY_VERIFY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -56,6 +59,8 @@ pub struct ProviderModelSettings {
     // generation existed still deserialize (they predate this field).
     #[serde(default = "default_image_model")]
     pub image_model: String,
+    #[serde(default = "default_video_model")]
+    pub video_model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub venice_api_key: Option<String>,
     #[serde(default)]
@@ -66,6 +71,8 @@ pub struct ProviderModelSettings {
     /// settings files predating this field still deserialize (to `false`).
     #[serde(default)]
     pub image_safe_mode: bool,
+    #[serde(default)]
+    pub video_safe_mode: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,9 +96,11 @@ pub struct ProviderModelSettingsDto {
     pub generation_model: String,
     pub remote_generation_model: String,
     pub image_model: String,
+    pub video_model: String,
     pub venice_api_key_configured: bool,
     pub local_generation: LocalGenerationSettings,
     pub image_safe_mode: bool,
+    pub video_safe_mode: bool,
 }
 
 impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
@@ -103,12 +112,14 @@ impl From<&ProviderModelSettings> for ProviderModelSettingsDto {
             generation_model: settings.generation_model.clone(),
             remote_generation_model: settings.remote_generation_model.clone(),
             image_model: settings.image_model.clone(),
+            video_model: settings.video_model.clone(),
             venice_api_key_configured: settings
                 .venice_api_key
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty()),
             local_generation: settings.local_generation.clone(),
             image_safe_mode: settings.image_safe_mode,
+            video_safe_mode: settings.video_safe_mode,
         }
     }
 }
@@ -271,6 +282,10 @@ pub fn image_model() -> String {
     current_settings().image_model
 }
 
+pub fn video_model() -> String {
+    current_settings().video_model
+}
+
 pub fn venice_api_key() -> Option<String> {
     current_settings().venice_api_key
 }
@@ -280,6 +295,12 @@ pub fn venice_api_key() -> Option<String> {
 /// the user's own image work; the user can turn it on in Settings.
 pub fn image_safe_mode() -> bool {
     current_settings().image_safe_mode
+}
+
+/// Whether safe mode is on for video generation/animation. Mirrored from image
+/// safe mode so the first video layer has the same privacy-first default.
+pub fn video_safe_mode() -> bool {
+    current_settings().video_safe_mode
 }
 
 /// Context window (tokens) of the configured generation model, looked up in
@@ -372,6 +393,7 @@ pub fn set_venice_model(
             settings.remote_generation_model = model_id.to_string();
         }
         ModelMode::Image => settings.image_model = model_id.to_string(),
+        ModelMode::Video => settings.video_model = model_id.to_string(),
     })
 }
 
@@ -410,6 +432,32 @@ pub struct GenerateImageRequest {
     /// Absent falls back to the live saved setting.
     #[serde(default)]
     pub safe_mode: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateVideoRequest {
+    pub prompt: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub duration: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub aspect_ratio: Option<String>,
+    #[serde(default)]
+    pub audio: Option<bool>,
+    #[serde(default)]
+    pub safe_mode: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoStatusRequest {
+    pub job_id: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -492,6 +540,66 @@ pub async fn edit_image(
         request_id,
     )
     .await
+}
+
+#[tauri::command]
+pub async fn video_generate(
+    request: GenerateVideoRequest,
+) -> Result<crate::june_api::VideoJobDto, AppError> {
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err(AppError::new("video_prompt_required", "Enter a prompt."));
+    }
+    let model = request
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .unwrap_or_else(video_model);
+    let request_id = request
+        .request_id
+        .map(|request_id| request_id.trim().to_string())
+        .filter(|request_id| !request_id.is_empty());
+    let duration = request
+        .duration
+        .map(|duration| duration.trim().to_string())
+        .filter(|duration| !duration.is_empty())
+        .unwrap_or_else(|| DEFAULT_VIDEO_DURATION.to_string());
+    let resolution = request
+        .resolution
+        .map(|resolution| resolution.trim().to_string())
+        .filter(|resolution| !resolution.is_empty())
+        .or_else(|| Some(DEFAULT_VIDEO_RESOLUTION.to_string()));
+    let aspect_ratio = request
+        .aspect_ratio
+        .map(|aspect_ratio| aspect_ratio.trim().to_string())
+        .filter(|aspect_ratio| !aspect_ratio.is_empty());
+    let safe_mode = request.safe_mode.unwrap_or_else(video_safe_mode);
+    crate::june_api::video_generate(crate::june_api::VideoGenerateParams {
+        prompt,
+        model,
+        request_id,
+        duration,
+        resolution,
+        aspect_ratio,
+        audio: request.audio,
+        safe_mode: Some(safe_mode),
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn video_status(
+    app: AppHandle,
+    request: VideoStatusRequest,
+) -> Result<crate::june_api::VideoStatusDto, AppError> {
+    let job_id = request.job_id.trim().to_string();
+    if job_id.is_empty() {
+        return Err(AppError::new(
+            "video_job_required",
+            "Video job id is required.",
+        ));
+    }
+    crate::june_api::video_status(&app, job_id).await
 }
 
 #[tauri::command]
@@ -773,9 +881,11 @@ fn default_settings() -> ProviderModelSettings {
         generation_model: DEFAULT_GENERATION_MODEL.to_string(),
         remote_generation_model: DEFAULT_GENERATION_MODEL.to_string(),
         image_model: DEFAULT_IMAGE_MODEL.to_string(),
+        video_model: DEFAULT_VIDEO_MODEL.to_string(),
         venice_api_key: None,
         local_generation: LocalGenerationSettings::default(),
         image_safe_mode: false,
+        video_safe_mode: false,
     }
 }
 
@@ -797,6 +907,10 @@ fn default_generation_model() -> String {
 
 fn default_image_model() -> String {
     DEFAULT_IMAGE_MODEL.to_string()
+}
+
+fn default_video_model() -> String {
+    DEFAULT_VIDEO_MODEL.to_string()
 }
 
 fn provider_settings_path(app: &AppHandle) -> Option<PathBuf> {
@@ -860,9 +974,11 @@ fn sanitize_settings(
         generation_model,
         remote_generation_model,
         image_model: non_empty_or(settings.image_model, &defaults.image_model),
+        video_model: non_empty_or(settings.video_model, &defaults.video_model),
         venice_api_key: normalize_api_key_option(settings.venice_api_key),
         local_generation,
         image_safe_mode: settings.image_safe_mode,
+        video_safe_mode: settings.video_safe_mode,
     }
 }
 
@@ -1057,6 +1173,7 @@ fn selected_model_for_mode(
         ModelMode::Transcription => settings.transcription_model.clone(),
         ModelMode::Generation => settings.generation_model.clone(),
         ModelMode::Image => settings.image_model.clone(),
+        ModelMode::Video => settings.video_model.clone(),
     })
 }
 
@@ -1066,6 +1183,7 @@ pub enum ModelMode {
     Transcription,
     Generation,
     Image,
+    Video,
 }
 
 impl<'de> Deserialize<'de> for ModelMode {
@@ -1084,6 +1202,7 @@ impl ModelMode {
             Self::Transcription => "asr",
             Self::Generation => "text",
             Self::Image => "image",
+            Self::Video => "video",
         }
     }
 
@@ -1092,6 +1211,7 @@ impl ModelMode {
             "transcription" | "dictation" | "asr" => Some(Self::Transcription),
             "generation" | "notes" | "text" => Some(Self::Generation),
             "image" | "images" => Some(Self::Image),
+            "video" | "videos" => Some(Self::Video),
             _ => None,
         }
     }
@@ -1134,8 +1254,11 @@ mod tests {
     }
 
     #[test]
-    fn model_mode_rejects_unknown_values() {
-        assert!(serde_json::from_value::<ModelMode>(serde_json::json!("video")).is_err());
+    fn model_mode_deserializes_video() {
+        assert_eq!(
+            serde_json::from_value::<ModelMode>(serde_json::json!("video")).unwrap(),
+            ModelMode::Video
+        );
     }
 
     #[test]

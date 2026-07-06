@@ -10,10 +10,13 @@ use crate::{
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
+    fs,
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
+use tauri::AppHandle;
 
 // The deployed production API (Phala dstack; see june-api/deploy/
 // docker-compose.production.yml). NOT .network — that hostname has no DNS
@@ -54,6 +57,7 @@ stalkerware, or other malicious code.";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static AGENT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static VIDEO_JOB_MODELS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct TranscriptionRequest {
@@ -422,6 +426,88 @@ struct ImageEditBody {
     safe_mode: Option<bool>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoJobDto {
+    pub job_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct VideoGenerateParams {
+    pub prompt: String,
+    pub model: String,
+    pub request_id: Option<String>,
+    pub duration: String,
+    pub resolution: Option<String>,
+    pub aspect_ratio: Option<String>,
+    pub audio: Option<bool>,
+    pub safe_mode: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoGenerateBody {
+    prompt: String,
+    model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
+    duration: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolution: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    aspect_ratio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safe_mode: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub enum VideoStatusDto {
+    Processing {
+        average_execution_ms: u64,
+        execution_ms: u64,
+    },
+    Completed {
+        path: String,
+        mime_type: String,
+        size_bytes: u64,
+        model: String,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum VideoStatusApiDto {
+    Processing {
+        average_execution_ms: u64,
+        execution_ms: u64,
+    },
+    Completed {
+        download_url: Option<String>,
+        mime_type: String,
+        model: String,
+        #[allow(dead_code)]
+        provider: String,
+        size_bytes: Option<u64>,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
 /// Forwards a prompt to June API image generation with the user's access token.
 /// `safe_mode` carries the on-device setting (blur adult content); `None` leaves
 /// it unset so June API applies its own default.
@@ -472,6 +558,150 @@ pub async fn edit_image(
 
 fn new_image_request_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+pub async fn video_generate(params: VideoGenerateParams) -> Result<VideoJobDto, AppError> {
+    let model = params.model.clone();
+    let job: VideoJobDto = post_json(
+        "/v1/video/generate",
+        &VideoGenerateBody {
+            prompt: params.prompt,
+            model: params.model,
+            request_id: params.request_id,
+            duration: params.duration,
+            resolution: params.resolution,
+            aspect_ratio: params.aspect_ratio,
+            audio: params.audio,
+            safe_mode: params.safe_mode,
+        },
+        false,
+    )
+    .await?;
+    remember_video_job_model(&job.job_id, &model);
+    Ok(job)
+}
+
+pub async fn video_status(app: &AppHandle, job_id: String) -> Result<VideoStatusDto, AppError> {
+    let path = format!("/v1/video/status/{job_id}");
+    let response = authed_send(&path, false, |client, url, token| {
+        client.get(url).bearer_auth(token)
+    })
+    .await?;
+    video_status_from_response(app, &path, response).await
+}
+
+async fn video_status_from_response(
+    app: &AppHandle,
+    path: &str,
+    response: reqwest::Response,
+) -> Result<VideoStatusDto, AppError> {
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    if status.is_success() && content_type.to_ascii_lowercase().contains("video/mp4") {
+        let bytes = response.bytes().await.map_err(network_error)?.to_vec();
+        let (local_path, size_bytes) = write_video_bytes(app, &bytes).await?;
+        let model = remembered_video_job_model(job_id_from_status_path(path));
+        return Ok(VideoStatusDto::Completed {
+            path: local_path,
+            mime_type: "video/mp4".to_string(),
+            size_bytes,
+            model,
+        });
+    }
+
+    let retry_after_ms = response_retry_after_ms(&response);
+    let body = response.text().await.map_err(network_error)?;
+    let status: VideoStatusApiDto = parse_response_body(path, status, retry_after_ms, &body)?;
+    match status {
+        VideoStatusApiDto::Processing {
+            average_execution_ms,
+            execution_ms,
+        } => Ok(VideoStatusDto::Processing {
+            average_execution_ms,
+            execution_ms,
+        }),
+        VideoStatusApiDto::Failed { reason } => Ok(VideoStatusDto::Failed { reason }),
+        VideoStatusApiDto::Completed {
+            download_url,
+            mime_type,
+            model,
+            size_bytes,
+            ..
+        } => {
+            let url = download_url.ok_or_else(|| {
+                AppError::new(
+                    "video_download_missing",
+                    "June returned a completed video without downloadable media.",
+                )
+            })?;
+            let bytes = download_video_bytes(&url).await?;
+            let (path, written_size_bytes) = write_video_bytes(app, &bytes).await?;
+            Ok(VideoStatusDto::Completed {
+                path,
+                mime_type,
+                size_bytes: size_bytes.unwrap_or(written_size_bytes),
+                model,
+            })
+        }
+    }
+}
+
+async fn download_video_bytes(url: &str) -> Result<Vec<u8>, AppError> {
+    let response = http_client().get(url).send().await.map_err(network_error)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AppError::new(
+            "video_download_failed",
+            format!("Video download returned status {}.", status.as_u16()),
+        ));
+    }
+    Ok(response.bytes().await.map_err(network_error)?.to_vec())
+}
+
+async fn write_video_bytes(app: &AppHandle, bytes: &[u8]) -> Result<(String, u64), AppError> {
+    let videos_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("video_write_failed", error.to_string()))?
+        .join("hermes")
+        .join("videos");
+    fs::create_dir_all(&videos_dir)
+        .map_err(|error| AppError::new("video_write_failed", error.to_string()))?;
+    let path = videos_dir.join(generated_video_filename());
+    fs::write(&path, bytes)
+        .map_err(|error| AppError::new("video_write_failed", error.to_string()))?;
+    Ok((path.to_string_lossy().into_owned(), bytes.len() as u64))
+}
+
+fn generated_video_filename() -> String {
+    format!("generated-video-{}.mp4", uuid::Uuid::new_v4().simple())
+}
+
+fn video_job_models() -> &'static Mutex<HashMap<String, String>> {
+    VIDEO_JOB_MODELS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn remember_video_job_model(job_id: &str, model: &str) {
+    if let Ok(mut models) = video_job_models().lock() {
+        models.insert(job_id.to_string(), model.to_string());
+    }
+}
+
+fn remembered_video_job_model(job_id: &str) -> String {
+    video_job_models()
+        .lock()
+        .ok()
+        .and_then(|models| models.get(job_id).cloned())
+        .unwrap_or_default()
+}
+
+fn job_id_from_status_path(path: &str) -> &str {
+    path.rsplit_once('/')
+        .map(|(_, job_id)| job_id)
+        .unwrap_or(path)
 }
 
 pub async fn proxy_agent_chat_completions(
@@ -722,6 +952,33 @@ pub async fn forward_image_request(
     body: &serde_json::Value,
 ) -> Result<WebProxyResponse, AppError> {
     forward_web_request(path, body).await
+}
+
+/// Forwards a video tool request to June API with the user's token. Video is
+/// June-key-only in the first cut, so this path deliberately never forwards a
+/// locally configured Venice inference key.
+pub async fn forward_video_request(
+    path: &str,
+    body: Option<&serde_json::Value>,
+) -> Result<WebProxyResponse, AppError> {
+    let response = authed_send(path, false, |client, url, token| match body {
+        Some(body) => client.post(url).bearer_auth(token).json(body),
+        None => client.get(url).bearer_auth(token),
+    })
+    .await?;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    let bytes = response.bytes().await.map_err(network_error)?;
+    Ok(WebProxyResponse {
+        status,
+        content_type,
+        body: bytes.to_vec(),
+    })
 }
 
 fn limit_agent_chat_messages_for_proxy(body: &mut serde_json::Value) {
