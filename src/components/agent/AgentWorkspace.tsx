@@ -105,7 +105,10 @@ import {
   osAccountsUpgrade,
   providerModelSettings,
   retryAgentTask,
+  imagePromptMayBeExplicit,
   setHermesAgentCliAccess,
+  setImageSafeMode,
+  setImageSafeModePromptDismissed,
   setLocalGenerationEnabled,
   setVeniceModel,
   startHermesBridge,
@@ -258,6 +261,7 @@ import {
 } from "../../lib/agent-composer-slash-commands";
 import { generateChatImage, newImageRequestId } from "../../lib/chat-image-generation";
 import { IMAGE_GENERATION_ENABLED } from "../../lib/feature-flags";
+import { ImageSafeModeConsentDialog } from "./ImageSafeModeConsentDialog";
 import {
   ComposerEditor,
   type ComposerEditorHandle,
@@ -807,6 +811,16 @@ type AgentWorkspaceErrorOptions = {
 type AgentWorkspaceNotice = {
   message: string;
   sessionId: string | null;
+};
+
+type ImageSafeModeConsentChoice =
+  | { action: "keep"; dontAskAgain: boolean }
+  | { action: "turnOff"; dontAskAgain: boolean }
+  | { action: "dismiss" };
+
+type ImageSafeModeConsentRequest = {
+  variant: "slash" | "agent";
+  resolve: (choice: ImageSafeModeConsentChoice) => void;
 };
 
 export function agentWorkspaceErrorStateForMessage(
@@ -1698,6 +1712,8 @@ export function AgentWorkspace({
   const [composerSizeWarning, setComposerSizeWarning] = useState<ComposerInputSizeWarning | null>(
     null,
   );
+  const [imageSafeModeConsentRequest, setImageSafeModeConsentRequest] =
+    useState<ImageSafeModeConsentRequest | null>(null);
   const composerSizeProceedSignatureRef = useRef<string | null>(null);
   const composerSizeProceedInputSignatureRef = useRef<string | null>(null);
   // Honest result of the last model switch (feature 10): scoped to the session
@@ -3800,6 +3816,21 @@ export function AgentWorkspace({
     });
   }
 
+  function requestImageSafeModeConsent(
+    variant: "slash" | "agent",
+  ): Promise<ImageSafeModeConsentChoice> {
+    return new Promise((resolve) => {
+      setImageSafeModeConsentRequest({ variant, resolve });
+    });
+  }
+
+  function resolveImageSafeModeConsent(choice: ImageSafeModeConsentChoice) {
+    const request = imageSafeModeConsentRequest;
+    if (!request) return;
+    setImageSafeModeConsentRequest(null);
+    request.resolve(choice);
+  }
+
   // `/image <prompt>` renders the generated image inline in the chat as an
   // assistant turn (loader -> image, with view + download), NOT as a composer
   // attachment chip. It creates/uses a real session and the prompt becomes a
@@ -3815,6 +3846,58 @@ export function AgentWorkspace({
       return;
     }
 
+    // Busy-gate the consent + generation flow before any async IPC. This keeps
+    // a second /image submission from starting while the prompt screen or
+    // dialog is pending, but still lets dismiss leave the draft untouched.
+    setImportingFiles(true);
+
+    // Pin the image model and safe mode before the paid turn starts: June API's
+    // replay ledger hashes them into the requestId's key, so a retry after a
+    // settings change must send the values this turn started with or it becomes
+    // a second charge. If the settings read fails, leave them unpinned (server
+    // resolves live, matching the pre-pinning behavior) and skip consent.
+    let settings: ProviderModelSettingsDto | undefined;
+    let pinnedModel: string | undefined;
+    let pinnedSafeMode: boolean | undefined;
+    try {
+      const settingsResponse = await providerModelSettings();
+      settings = settingsResponse.settings;
+      pinnedModel = settings.imageModel || undefined;
+      pinnedSafeMode = settings.imageSafeMode;
+    } catch {
+      // Non-fatal: generation proceeds with server-resolved settings.
+    }
+
+    if (settings?.imageSafeMode && !settings.imageSafeModePromptDismissed) {
+      let mayBeExplicit = false;
+      try {
+        mayBeExplicit = await imagePromptMayBeExplicit(prompt);
+      } catch {
+        mayBeExplicit = false;
+      }
+      if (mayBeExplicit) {
+        const choice = await requestImageSafeModeConsent("slash");
+        if (choice.action === "dismiss") {
+          setImportingFiles(false);
+          return;
+        }
+        if (choice.action === "keep") {
+          if (choice.dontAskAgain) void setImageSafeModePromptDismissed(true);
+          pinnedSafeMode = true;
+        } else {
+          try {
+            await setImageSafeMode(false);
+          } catch (err) {
+            setImportingFiles(false);
+            setError(messageFromError(err));
+            return;
+          }
+          if (choice.dontAskAgain) void setImageSafeModePromptDismissed(true);
+          pinnedSafeMode = false;
+        }
+      }
+    }
+
     // The prompt is about to become a user turn — clear the draft up front and,
     // on a fresh session, play the hero teardown so the conversation view takes
     // over while the session is created.
@@ -3822,11 +3905,9 @@ export function AgentWorkspace({
     if (heroMode) setHeroLeaving(true);
     clearComposerCommandDraft(commandText);
     setError(null);
-    // Busy-gate the WHOLE flow (session create + generation) via the same
-    // importingFiles flag submit() and the send button already check, so a
-    // second Enter or /image can't launch another billable generation while this
-    // one is in flight. generatingImage only tailors the placeholder copy.
-    setImportingFiles(true);
+    // importingFiles already busy-gates the WHOLE flow (consent + session
+    // create + generation) via the same flag submit() and the send button check.
+    // generatingImage only tailors the placeholder copy once generation starts.
     setGeneratingImage(true);
 
     let targetSessionId: string | undefined;
@@ -3859,21 +3940,6 @@ export function AgentWorkspace({
     const createdAt = new Date(turnStartedAt).toISOString();
     const imageCreatedAt = new Date(turnStartedAt + 1).toISOString();
     const requestId = newImageRequestId();
-    // Pin the image model and safe mode NOW: June API's replay ledger hashes
-    // them into the requestId's key, so a retry after a settings change must
-    // send the values this turn started with or it becomes a second charge.
-    // If the settings read fails, leave them unpinned (server resolves live,
-    // matching the pre-pinning behavior).
-    let pinnedModel: string | undefined;
-    let pinnedSafeMode: boolean | undefined;
-    try {
-      const settingsResponse = await providerModelSettings();
-      pinnedModel = settingsResponse.settings.imageModel || undefined;
-      pinnedSafeMode = settingsResponse.settings.imageSafeMode;
-    } catch {
-      // Non-fatal: generation proceeds with server-resolved settings.
-    }
-
     setImageTurnsBySession((current) => ({
       ...current,
       [sessionId]: [
@@ -8187,6 +8253,18 @@ export function AgentWorkspace({
           ) : null}
         </>
       )}
+      {imageSafeModeConsentRequest ? (
+        <ImageSafeModeConsentDialog
+          variant={imageSafeModeConsentRequest.variant}
+          onKeepSafeMode={(dontAskAgain) =>
+            resolveImageSafeModeConsent({ action: "keep", dontAskAgain })
+          }
+          onTurnOffSafeMode={(dontAskAgain) =>
+            resolveImageSafeModeConsent({ action: "turnOff", dontAskAgain })
+          }
+          onDismiss={() => resolveImageSafeModeConsent({ action: "dismiss" })}
+        />
+      ) : null}
     </section>
   );
 }
