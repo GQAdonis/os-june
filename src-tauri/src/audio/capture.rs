@@ -769,10 +769,20 @@ impl ActiveRecording {
             &self.last_callback_at,
         );
         latch_stall(&self.stall_latch, microphone_stream_issue.as_ref());
-        let level = AudioLevelDto {
-            peak,
-            rms,
-            recent_peaks: recent_peaks.clone(),
+        // A dead stream must not keep animating the last healthy peaks: the
+        // waveform reads level, not silence_warning, so zero it on an issue.
+        let level = if microphone_stream_issue.is_some() {
+            AudioLevelDto {
+                peak: 0.0,
+                rms: 0.0,
+                recent_peaks: Vec::new(),
+            }
+        } else {
+            AudioLevelDto {
+                peak,
+                rms,
+                recent_peaks: recent_peaks.clone(),
+            }
         };
         RecordingStatusDto {
             session_id: self.session_id.clone(),
