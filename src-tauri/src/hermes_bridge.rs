@@ -16,7 +16,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::oneshot,
@@ -71,6 +71,8 @@ const JUNE_PROVIDER_PROXY_IMAGE_JSON_OVERHEAD_BYTES: usize = 16 * 1024;
 const JUNE_PROVIDER_PROXY_MAX_IMAGE_BODY_BYTES: usize =
     base64_encoded_len(HERMES_IMAGE_EDIT_SOURCE_MAX_BYTES)
         + JUNE_PROVIDER_PROXY_IMAGE_JSON_OVERHEAD_BYTES;
+const IMAGE_SAFE_MODE_CONSENT_EVENT: &str = "image-safe-mode-consent";
+const IMAGE_SAFE_MODE_CONSENT_PROMPT_MAX_CHARS: usize = 120;
 
 const fn base64_encoded_len(byte_count: usize) -> usize {
     byte_count.div_ceil(3) * 4
@@ -327,6 +329,14 @@ struct SharedProviderProxy {
 struct ProviderProxyState {
     token: String,
     image_sources: ImageSourceCapabilities,
+    app: Option<AppHandle>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageSafeModeConsentPayload {
+    source: &'static str,
+    prompt: String,
 }
 
 #[derive(Clone)]
@@ -1018,7 +1028,8 @@ async fn ensure_provider_proxy(
         images_dir: hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
         secret: load_or_create_image_source_capability_secret(&app_data_dir)?,
     };
-    let started = start_june_provider_proxy(token.clone(), image_sources).await?;
+    let started =
+        start_june_provider_proxy(token.clone(), image_sources, Some(app.clone())).await?;
     let mut guard = bridge
         .provider_proxy
         .lock()
@@ -6770,6 +6781,7 @@ fn yaml_string(value: &str) -> String {
 async fn start_june_provider_proxy(
     token: String,
     image_sources: ImageSourceCapabilities,
+    app: Option<AppHandle>,
 ) -> Result<RunningJuneProviderProxy, AppError> {
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
@@ -6788,6 +6800,7 @@ async fn start_june_provider_proxy(
         Arc::new(ProviderProxyState {
             token,
             image_sources,
+            app,
         }),
         shutdown_rx,
     ));
@@ -6914,6 +6927,12 @@ async fn handle_june_provider_connection(
                 .unwrap_or_else(|_| serde_json::json!({}));
             ensure_image_generation_model(&mut body);
             ensure_image_safe_mode(&mut body);
+            if should_offer_safe_mode_consent(
+                &body,
+                crate::providers::image_safe_mode_prompt_dismissed(),
+            ) {
+                emit_image_safe_mode_consent(&state, &body);
+            }
             forward_image_tool(
                 &mut stream,
                 "/v1/image/generate",
@@ -6942,6 +6961,12 @@ async fn handle_june_provider_connection(
                 return Ok(());
             }
             ensure_image_safe_mode(&mut body);
+            if should_offer_safe_mode_consent(
+                &body,
+                crate::providers::image_safe_mode_prompt_dismissed(),
+            ) {
+                emit_image_safe_mode_consent(&state, &body);
+            }
             forward_image_tool(&mut stream, "/v1/image/edit", &body, &state.image_sources).await?;
         }
         _ => {
@@ -7694,6 +7719,52 @@ fn ensure_image_safe_mode(body: &mut serde_json::Value) {
     }
 }
 
+/// Consent event fires only when this generation runs with safe mode on,
+/// the user hasn't dismissed the prompt, and the text looks explicit.
+fn should_offer_safe_mode_consent(body: &serde_json::Value, prompt_dismissed: bool) -> bool {
+    let safe_mode = body
+        .get("safeMode")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !safe_mode || prompt_dismissed {
+        return false;
+    }
+    let Some(prompt) = image_safe_mode_consent_text(body) else {
+        return false;
+    };
+    crate::image_safety::may_request_explicit_content(prompt)
+}
+
+fn image_safe_mode_consent_text(body: &serde_json::Value) -> Option<&str> {
+    body.get("prompt")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+}
+
+fn emit_image_safe_mode_consent(state: &ProviderProxyState, body: &serde_json::Value) {
+    let Some(app) = state.app.as_ref() else {
+        return;
+    };
+    let Some(prompt) = image_safe_mode_consent_text(body) else {
+        return;
+    };
+    let _ = app.emit(
+        IMAGE_SAFE_MODE_CONSENT_EVENT,
+        ImageSafeModeConsentPayload {
+            source: "agent",
+            prompt: truncate_image_safe_mode_consent_prompt(
+                prompt,
+                IMAGE_SAFE_MODE_CONSENT_PROMPT_MAX_CHARS,
+            ),
+        },
+    );
+}
+
+fn truncate_image_safe_mode_consent_prompt(prompt: &str, max_chars: usize) -> String {
+    prompt.chars().take(max_chars).collect()
+}
+
 async fn write_raw_response(
     stream: &mut tokio::net::TcpStream,
     status: u16,
@@ -8231,6 +8302,66 @@ mod tests {
         let image_message = provider_proxy_body_too_large_message("/v1/image/edit");
         assert!(image_message.contains("image_request_too_large"));
         assert!(!image_message.contains("maximum context length"));
+    }
+
+    #[test]
+    fn offers_safe_mode_consent_for_explicit_safe_mode_prompt() {
+        let body = serde_json::json!({
+            "safeMode": true,
+            "prompt": "portrait of a nude figure",
+        });
+
+        assert!(should_offer_safe_mode_consent(&body, false));
+    }
+
+    #[test]
+    fn skips_safe_mode_consent_when_safe_mode_is_off() {
+        let body = serde_json::json!({
+            "safeMode": false,
+            "prompt": "portrait of a nude figure",
+        });
+
+        assert!(!should_offer_safe_mode_consent(&body, false));
+    }
+
+    #[test]
+    fn skips_safe_mode_consent_when_prompt_was_dismissed() {
+        let body = serde_json::json!({
+            "safeMode": true,
+            "prompt": "portrait of a nude figure",
+        });
+
+        assert!(!should_offer_safe_mode_consent(&body, true));
+    }
+
+    #[test]
+    fn skips_safe_mode_consent_for_benign_prompt() {
+        let body = serde_json::json!({
+            "safeMode": true,
+            "prompt": "sunset over Sussex",
+        });
+
+        assert!(!should_offer_safe_mode_consent(&body, false));
+    }
+
+    #[test]
+    fn skips_safe_mode_consent_when_prompt_is_missing() {
+        let body = serde_json::json!({
+            "safeMode": true,
+            "instruction": "portrait of a nude figure",
+        });
+
+        assert!(!should_offer_safe_mode_consent(&body, false));
+    }
+
+    #[test]
+    fn truncates_safe_mode_consent_prompt_on_char_boundary() {
+        let prompt = "é".repeat(121);
+
+        assert_eq!(
+            truncate_image_safe_mode_consent_prompt(&prompt, 120),
+            "é".repeat(120)
+        );
     }
 
     fn test_png_bytes(label: &[u8]) -> Vec<u8> {

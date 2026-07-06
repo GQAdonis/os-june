@@ -290,6 +290,10 @@ pub fn image_safe_mode() -> bool {
     current_settings().image_safe_mode
 }
 
+pub fn image_safe_mode_prompt_dismissed() -> bool {
+    current_settings().image_safe_mode_prompt_dismissed
+}
+
 /// Context window (tokens) of the configured generation model, looked up in
 /// the backend's model catalog and cached per model id. The agent provider
 /// proxy advertises it on `/v1/models` so Hermes sizes its history to the
