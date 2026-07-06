@@ -448,7 +448,23 @@ export function NoteEditor({
         ) : (
           <div className="record-dock">
             <AnimatePresence>
-              {recordingForNote && consentReminderVisible ? (
+              {recordingForNote?.warnings?.length ? (
+                <motion.div
+                  key="source-warning"
+                  className="record-consent-note"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.22, ease: "easeOut" }}
+                >
+                  <InlineNotice
+                    className="record-consent-note-surface"
+                    aria-label="Recording source warning"
+                    body={recordingForNote.warnings[0].message}
+                  />
+                </motion.div>
+              ) : null}
+              {recordingForNote && consentReminderVisible && !recordingForNote.warnings?.length ? (
                 <motion.div
                   key="consent"
                   className="record-consent-note"

@@ -347,6 +347,40 @@ describe("NoteEditor", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Listening for transcript preview...");
   });
 
+  it("floats a source warning notice over the recorder and hides the consent hint", () => {
+    render(
+      <NoteEditor
+        {...props}
+        note={note({ activeTab: "transcription" })}
+        recordingStatus={{
+          sessionId: "session-1",
+          state: "recording" as const,
+          elapsedMs: 8000,
+          level: { peak: 0.5, rms: 0.2, recentPeaks: [0.1, 0.3] },
+          silenceWarning: true,
+          bytesWritten: 4096,
+          warnings: [
+            {
+              source: "microphone" as const,
+              code: "microphone_stream_stalled",
+              message:
+                "Microphone input stopped unexpectedly. Audio after this point may be missing.",
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "Microphone input stopped unexpectedly. Audio after this point may be missing.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Make sure everyone has agreed to be recorded."),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows transcript progress while retrying over existing turns", () => {
     render(
       <NoteEditor
