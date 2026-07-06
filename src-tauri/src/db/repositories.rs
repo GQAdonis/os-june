@@ -3,7 +3,7 @@ use crate::domain::types::{
     AgentTaskStatus, AgentToolEventDto, AgentToolEventStatus, AppError, AudioArtifactDto,
     DictationHistoryItemDto, DictionaryEntryDto, FolderDto, ListDictationHistoryResponse,
     ListNotesResponse, NoteDto, NoteListItemDto, ProcessingStatus, RecordingSourceMode,
-    RecordingState, SessionFolderDto, TranscriptDto,
+    RecordingState, SessionFolderDto, TranscriptCoverageDto, TranscriptDto,
 };
 use chrono::{Duration, SecondsFormat, Utc};
 use sqlx::query::query;
@@ -12,6 +12,8 @@ use sqlx_sqlite::SqlitePool;
 use uuid::Uuid;
 
 const DICTATION_HISTORY_RETENTION_DAYS: i64 = 7;
+const TRANSCRIPT_COVERAGE_WARN_RATIO: f64 = 0.8;
+const TRANSCRIPT_COVERAGE_WARN_MIN_MISSING_MS: i64 = 60_000;
 
 #[derive(Clone)]
 pub struct Repositories {
@@ -164,6 +166,7 @@ impl Repositories {
             generated_content: row.get("generated_content"),
             edited_content: row.get("edited_content"),
             transcript: self.latest_transcript(note_id).await?,
+            transcript_coverage: self.transcript_coverage(note_id).await?,
             source_transcripts: self.source_transcripts(note_id).await?,
             recording: None,
             audio: self.latest_audio_artifact(note_id).await?,
@@ -1849,6 +1852,74 @@ impl Repositories {
             .collect())
     }
 
+    async fn transcript_coverage(
+        &self,
+        note_id: &str,
+    ) -> Result<Option<TranscriptCoverageDto>, sqlx::error::Error> {
+        let rows = query(
+            "SELECT rc.details
+             FROM recording_sessions rs
+             INNER JOIN recording_checkpoints rc ON rc.recording_session_id = rs.id
+             WHERE rs.note_id = ?
+               AND rc.kind = 'transcript_coverage'
+               AND NOT EXISTS (
+                 SELECT 1
+                 FROM recording_checkpoints newer
+                 WHERE newer.recording_session_id = rc.recording_session_id
+                   AND newer.kind = rc.kind
+                   AND (
+                     newer.created_at > rc.created_at
+                     OR (newer.created_at = rc.created_at AND newer.rowid > rc.rowid)
+                   )
+               )",
+        )
+        .bind(note_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut detected_speech_ms = 0_i64;
+        let mut transcribed_ms = 0_i64;
+        let mut any_warning = false;
+        let mut found = false;
+        for row in rows {
+            let Some(details) = row.get::<Option<String>, _>("details") else {
+                continue;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&details) else {
+                continue;
+            };
+            found = true;
+            detected_speech_ms = detected_speech_ms.saturating_add(
+                value
+                    .get("totalDetectedSpeechMs")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_default()
+                    .max(0),
+            );
+            transcribed_ms = transcribed_ms.saturating_add(
+                value
+                    .get("totalTranscribedMs")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_default()
+                    .max(0),
+            );
+            any_warning |= value
+                .get("warning")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+        }
+        if !found {
+            return Ok(None);
+        }
+        let warning =
+            transcript_coverage_warning(detected_speech_ms, transcribed_ms) || any_warning;
+        Ok(Some(TranscriptCoverageDto {
+            detected_speech_ms,
+            transcribed_ms,
+            warning,
+        }))
+    }
+
     pub async fn successful_source_turn_transcripts_for_session(
         &self,
         session_id: &str,
@@ -2578,6 +2649,15 @@ pub struct SourceArtifactPath {
 
 pub fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn transcript_coverage_warning(detected_speech_ms: i64, transcribed_ms: i64) -> bool {
+    let detected_speech_ms = detected_speech_ms.max(0);
+    let transcribed_ms = transcribed_ms.max(0);
+    detected_speech_ms > 0
+        && (transcribed_ms as f64) < TRANSCRIPT_COVERAGE_WARN_RATIO * (detected_speech_ms as f64)
+        && detected_speech_ms.saturating_sub(transcribed_ms)
+            >= TRANSCRIPT_COVERAGE_WARN_MIN_MISSING_MS
 }
 
 fn folder_from_row(row: sqlx_sqlite::SqliteRow) -> FolderDto {

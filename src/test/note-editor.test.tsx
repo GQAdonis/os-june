@@ -117,6 +117,78 @@ describe("NoteEditor", () => {
     expect(screen.getByText("Exact raw transcript")).toBeInTheDocument();
   });
 
+  it("shows transcript coverage notice with whole-minute missing speech", () => {
+    render(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          transcriptCoverage: {
+            detectedSpeechMs: 26 * 60_000,
+            transcribedMs: 2 * 60_000,
+            warning: true,
+          },
+          sourceTranscripts: [
+            {
+              id: "turn-1",
+              text: "Partial transcript text",
+              source: "microphone",
+              startMs: 0,
+              endMs: 120_000,
+              turnIndex: 0,
+              status: "succeeded",
+            },
+          ],
+        })}
+      />,
+    );
+
+    expect(
+      screen.getByText(
+        "Parts of this recording could not be transcribed. About 24 of 26 minutes of detected speech are missing from this transcript.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show transcript coverage notice without a warning", () => {
+    const { rerender } = render(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          transcript: {
+            id: "transcript-1",
+            text: "Exact raw transcript",
+            status: "succeeded",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.queryByText(/could not be transcribed/)).not.toBeInTheDocument();
+
+    rerender(
+      <NoteEditor
+        {...props}
+        note={note({
+          activeTab: "transcription",
+          transcriptCoverage: {
+            detectedSpeechMs: 26 * 60_000,
+            transcribedMs: 26 * 60_000,
+            warning: false,
+          },
+          transcript: {
+            id: "transcript-1",
+            text: "Exact raw transcript",
+            status: "succeeded",
+          },
+        })}
+      />,
+    );
+
+    expect(screen.queryByText(/could not be transcribed/)).not.toBeInTheDocument();
+  });
+
   it("shows source transcript turns with labels and timing", () => {
     render(
       <NoteEditor
