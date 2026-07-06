@@ -97,6 +97,9 @@ struct ActiveRecording {
     stats: Arc<Mutex<CaptureStats>>,
     stream_error: Arc<Mutex<Option<MicrophoneStreamIssue>>>,
     last_callback_at: Arc<Mutex<Option<Instant>>>,
+    // First stall ever observed, kept until finish: a transient stall whose
+    // callbacks later resume must still leave a capture_stream_error trail.
+    stall_latch: Arc<Mutex<Option<MicrophoneStreamIssue>>>,
     last_recovery_snapshot_elapsed_ms: i64,
     live_preview: Option<LivePreviewController>,
     system_live_preview: Option<SystemLivePreviewController>,
@@ -207,6 +210,7 @@ pub fn start_capture(
     let stats = Arc::new(Mutex::new(CaptureStats::default()));
     let stream_error = Arc::new(Mutex::new(None));
     let last_callback_at = Arc::new(Mutex::new(None));
+    let stall_latch = Arc::new(Mutex::new(None));
     let paused_flag = Arc::new(AtomicBool::new(false));
     let mic_duck_flag = Arc::new(AtomicBool::new(false));
     let writer_for_callback = Arc::clone(&writer);
@@ -398,6 +402,7 @@ pub fn start_capture(
         stats,
         stream_error,
         last_callback_at,
+        stall_latch,
         last_recovery_snapshot_elapsed_ms: 0,
         live_preview,
         system_live_preview,
@@ -546,6 +551,7 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         system_final_path,
         stream_error,
         last_callback_at,
+        stall_latch,
         writer,
         paused_flag,
         live_preview,
@@ -588,7 +594,8 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
             RecordingState::Validating,
             &stream_error,
             &last_callback_at,
-        ),
+        )
+        .or_else(|| stall_latch.lock().ok().and_then(|latch| latch.clone())),
     }];
     if let Some(system_path) = system_stopped {
         let system_path = system_path?;
@@ -761,6 +768,7 @@ impl ActiveRecording {
             &self.stream_error,
             &self.last_callback_at,
         );
+        latch_stall(&self.stall_latch, microphone_stream_issue.as_ref());
         let level = AudioLevelDto {
             peak,
             rms,
@@ -890,6 +898,18 @@ fn source_statuses(
         });
     }
     sources
+}
+
+fn latch_stall(
+    latch: &Arc<Mutex<Option<MicrophoneStreamIssue>>>,
+    issue: Option<&MicrophoneStreamIssue>,
+) {
+    let Some(issue) = issue else { return };
+    if let Ok(mut latch) = latch.lock() {
+        if latch.is_none() {
+            *latch = Some(issue.clone());
+        }
+    }
 }
 
 fn microphone_stream_issue(
@@ -1052,6 +1072,36 @@ mod tests {
         state: RecordingState,
     ) -> Option<MicrophoneStreamIssue> {
         issue_state_at(12_345, issue, last_callback_at, state)
+    }
+
+    #[test]
+    fn stall_latch_keeps_first_stall_after_callbacks_resume() {
+        let latch = Arc::new(Mutex::new(None));
+        let stale_callback = Instant::now() - (MICROPHONE_STALL_THRESHOLD + Duration::from_secs(1));
+
+        // A stall is observed and latched.
+        let stalled = issue_state(None, Some(stale_callback), RecordingState::Recording)
+            .expect("stale callback reports a stall");
+        latch_stall(&latch, Some(&stalled));
+
+        // Callbacks resume: the live issue clears, the latch does not.
+        let recovered = issue_state(None, Some(Instant::now()), RecordingState::Recording);
+        assert_eq!(recovered, None);
+        latch_stall(&latch, recovered.as_ref());
+        let latched = latch.lock().unwrap().clone().expect("latch persists");
+        assert_eq!(latched.code, "microphone_stream_stalled");
+
+        // A later different issue does not overwrite the first.
+        let later = MicrophoneStreamIssue {
+            code: "microphone_stream_error".to_string(),
+            message: "later".to_string(),
+            elapsed_ms: 99,
+        };
+        latch_stall(&latch, Some(&later));
+        assert_eq!(
+            latch.lock().unwrap().clone().unwrap().code,
+            "microphone_stream_stalled"
+        );
     }
 
     #[test]
