@@ -602,9 +602,12 @@ async fn video_status_from_response(
         .unwrap_or("application/json")
         .to_string();
     if status.is_success() && content_type.to_ascii_lowercase().contains("video/mp4") {
+        // Terminal status observed: forget the job before the fallible read/write
+        // so an oversized, unreadable, or unwritable video still leaves the map
+        // bounded (matching the JSON-completed and failed paths below).
+        let model = take_video_job_model(job_id_from_status_path(path));
         let bytes = read_video_response_bytes(response).await?;
         let (local_path, size_bytes) = write_video_bytes(app, &bytes).await?;
-        let model = take_video_job_model(job_id_from_status_path(path));
         return Ok(VideoStatusDto::Completed {
             path: local_path,
             mime_type: "video/mp4".to_string(),

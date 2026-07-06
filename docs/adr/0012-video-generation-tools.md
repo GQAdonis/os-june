@@ -221,12 +221,10 @@ Trade-offs and risks:
   axum `StreamBody` plus reqwest streaming) so even accepted videos are never
   fully buffered in memory.
 - Desktop downloads of provider-supplied video URLs validate `https` and reject
-  hosts that are IP literals or resolve to non-public addresses before fetching,
-  then pin the download client to those pre-validated addresses via
-  `resolve_to_addrs` with redirects disabled (`redirect::none`), so it never
-  re-resolves DNS at connect time or follows a redirect to an unvalidated host.
-  This closes the DNS-rebinding TOCTOU (resolve once, then re-resolve) that a
-  single-resolution path would leave open.
+  hosts that are IP literals or resolve to non-public addresses before fetching.
+  Follow-up: close DNS-rebinding TOCTOU by resolving and connecting to the
+  validated IP through a pinned custom resolver instead of resolving once and
+  letting the HTTP client resolve again.
 
 Reference: Venice video API - `https://api.venice.ai/api/v1/swagger.yaml`
 (paths `/video/queue`, `/video/retrieve`, `/video/quote`, `/video/complete`).
@@ -244,10 +242,23 @@ Changes: default text-to-video model moved to `wan-2.2-a14b-text-to-video` (the
 other curated model, confirmed live and constrained to 5s / 720p-580p-480p /
 16:9-9:16-1:1, audio unsupported — a match for the fixed 5s/720p default);
 `seedance-2-0-fast-text-to-video` dropped from `DEFAULT_VIDEO_MODEL` (frontend +
-desktop), the `VIDEO_MODELS` picker list, and the `video_pricing` allowlist; and
-the video provider now logs a bounded upstream error-body snippet so the next
-catalog drift is self-diagnosing. This is a concrete instance of the already
-flagged "per-model options from live catalog" follow-up: a hardcoded model list
-drifts against a moving upstream, and the durable fix is to source the allowlist
-and per-model duration/resolution constraints from Venice's `/models` at
-build/deploy time rather than pinning IDs by hand.
+desktop), the `VIDEO_MODELS` picker list, and the `video_pricing` allowlist.
+`wan-2.2-a14b` additionally *requires* `aspect_ratio`, which neither desktop
+default-injection site set, so both now default it to `16:9` (the MCP path under
+the camelCase `aspectRatio` key June API deserializes). And the video provider
+now logs a privacy-safe structured diagnostic — error codes and schema field
+paths only, never the raw body — so the next drift is self-diagnosing without
+writing prompt-adjacent upstream text to June API's logs. This is a concrete
+instance of the already flagged "per-model options from live catalog" follow-up:
+a hardcoded model list drifts against a moving upstream, and the durable fix is
+to source the allowlist and per-model duration/resolution/aspect constraints
+from Venice's `/models` at build/deploy time rather than pinning IDs by hand.
+
+## Addendum (2026-07-06): DNS-rebinding TOCTOU closed
+
+The download-hardening follow-up above ("close DNS-rebinding TOCTOU ... through a
+pinned custom resolver") has since been implemented: the desktop download client
+pins to the pre-validated addresses via `resolve_to_addrs` with redirects
+disabled (`redirect::none`), so it never re-resolves DNS at connect time or
+follows a redirect to an unvalidated host. The original follow-up bullet is left
+in place per the append-only rule; this note supersedes its open status.

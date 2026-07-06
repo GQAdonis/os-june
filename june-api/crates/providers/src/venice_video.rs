@@ -73,7 +73,7 @@ impl VeniceVideoProvider {
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), body = %error_body_snippet(&body_text), "venice video: queue non-success response");
+            tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), error = %error_body_diagnostic(&body_text), "venice video: queue non-success response");
             return Err(venice_video_error(status, "video_generation_rejected"));
         }
         let parsed = response.json::<VeniceVideoQueueResponse>().await.map_err(|error| {
@@ -128,7 +128,7 @@ impl VideoProvider for VeniceVideoProvider {
         let status = response.status();
         if !status.is_success() {
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model = %request.model.0, body_bytes = body_text.len(), body = %error_body_snippet(&body_text), "venice video: quote non-success response");
+            tracing::error!(%status, %url, model = %request.model.0, body_bytes = body_text.len(), error = %error_body_diagnostic(&body_text), "venice video: quote non-success response");
             return Err(venice_video_error(status, "video_quote_rejected"));
         }
         let parsed = response.json::<VeniceVideoQuoteResponse>().await.map_err(|error| {
@@ -229,7 +229,7 @@ impl VideoProvider for VeniceVideoProvider {
                 });
             }
             let body_text = response.text().await.unwrap_or_default();
-            tracing::error!(%status, %url, model, body_bytes = body_text.len(), body = %error_body_snippet(&body_text), "venice video: retrieve non-success response");
+            tracing::error!(%status, %url, model, body_bytes = body_text.len(), error = %error_body_diagnostic(&body_text), "venice video: retrieve non-success response");
             return Err(venice_video_error(status, "video_retrieve_rejected"));
         }
         let content_type = response
@@ -307,14 +307,61 @@ fn video_too_large() -> DomainError {
     }
 }
 
-/// Bounds an upstream error body for logging. Venice's 4xx bodies are short
-/// JSON naming the rejected parameter (for example an unknown model), carry no
-/// user prompt, and telling the operator *why* Venice refused is the difference
-/// between a one-line log and a live-catalog investigation. Cap the snippet so a
-/// pathological body cannot flood the logs.
-fn error_body_snippet(body: &str) -> String {
-    const MAX_CHARS: usize = 1000;
-    body.chars().take(MAX_CHARS).collect()
+/// Builds a privacy-safe diagnostic from a Venice error body for logging.
+///
+/// June API runs in a TEE and must not write prompt-adjacent content to its
+/// logs. A video queue request carries `prompt`/`negative_prompt`, and a
+/// rejected response — a content-policy 422 especially — can echo or describe
+/// them, so the raw body is never logged. Instead we parse Venice's error JSON
+/// and keep only structural metadata: error codes and the schema field paths
+/// that failed validation. Both are fixed API identifiers (for example
+/// `invalid_type@aspect_ratio`), never user input, which is what let this find
+/// the delisted-model and missing-aspect_ratio failures without leaking prompts.
+fn error_body_diagnostic(body: &str) -> String {
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(body) else {
+        return "unparseable error body".to_string();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    // Zod-style validation errors: keep `code` and the field `path`, drop the
+    // free-form `message`/`expected`/`received` (any of which could echo input).
+    if let Some(issues) = json.get("issues").and_then(serde_json::Value::as_array) {
+        for issue in issues {
+            let code = issue
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let path = issue
+                .get("path")
+                .and_then(serde_json::Value::as_array)
+                .map(|segments| {
+                    segments
+                        .iter()
+                        .filter_map(|segment| match segment {
+                            serde_json::Value::String(key) => Some(key.clone()),
+                            serde_json::Value::Number(index) => Some(index.to_string()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join(".")
+                })
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| "?".to_string());
+            parts.push(format!("{code}@{path}"));
+        }
+    }
+    // Structured error envelopes: keep only the enum-like `code`.
+    for code in [json.get("error").and_then(|error| error.get("code")), json.get("code")]
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+    {
+        parts.push(format!("code={code}"));
+    }
+    if parts.is_empty() {
+        "no structured error fields".to_string()
+    } else {
+        parts.join(", ")
+    }
 }
 
 fn content_type_is_json(content_type: &str) -> bool {
@@ -456,6 +503,25 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{body_string_contains, header, method, path},
     };
+
+    #[test]
+    fn error_body_diagnostic_keeps_structure_and_drops_free_form_text() {
+        // Real Venice validation error, with a prompt-like free-form message.
+        let body = r#"{"issues":[{"expected":"'16:9' | '9:16' | '1:1'","received":"undefined","code":"invalid_type","path":["aspect_ratio"],"message":"a calm lake at dusk"}]}"#;
+        let diagnostic = super::error_body_diagnostic(body);
+        assert_eq!(diagnostic, "invalid_type@aspect_ratio");
+        // The free-form message (which could echo prompt content) never leaks.
+        assert!(!diagnostic.contains("calm lake"));
+        assert!(!diagnostic.contains("undefined"));
+    }
+
+    #[test]
+    fn error_body_diagnostic_keeps_error_code_only() {
+        let body = r#"{"error":{"code":"model_not_found","message":"prompt: a calm lake"}}"#;
+        let diagnostic = super::error_body_diagnostic(body);
+        assert_eq!(diagnostic, "code=model_not_found");
+        assert!(!diagnostic.contains("calm lake"));
+    }
 
     fn provider(server: &MockServer) -> VeniceVideoProvider {
         VeniceVideoProvider::from_config(
