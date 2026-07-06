@@ -350,10 +350,13 @@ fn error_body_diagnostic(body: &str) -> String {
         }
     }
     // Structured error envelopes: keep only the enum-like `code`.
-    for code in [json.get("error").and_then(|error| error.get("code")), json.get("code")]
-        .into_iter()
-        .flatten()
-        .filter_map(serde_json::Value::as_str)
+    for code in [
+        json.get("error").and_then(|error| error.get("code")),
+        json.get("code"),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(serde_json::Value::as_str)
     {
         parts.push(format!("code={code}"));
     }

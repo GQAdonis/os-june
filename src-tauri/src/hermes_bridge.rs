@@ -8357,7 +8357,10 @@ mod tests {
     fn ensure_video_defaults_injects_missing_knobs_under_the_keys_june_api_reads() {
         let mut body = serde_json::json!({ "prompt": "a calm lake" });
         ensure_video_defaults(&mut body);
-        assert_eq!(body["duration"], serde_json::json!(JUNE_VIDEO_DEFAULT_DURATION));
+        assert_eq!(
+            body["duration"],
+            serde_json::json!(JUNE_VIDEO_DEFAULT_DURATION)
+        );
         assert_eq!(
             body["resolution"],
             serde_json::json!(JUNE_VIDEO_DEFAULT_RESOLUTION)
