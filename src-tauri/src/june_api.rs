@@ -604,7 +604,7 @@ async fn video_status_from_response(
     if status.is_success() && content_type.to_ascii_lowercase().contains("video/mp4") {
         let bytes = read_video_response_bytes(response).await?;
         let (local_path, size_bytes) = write_video_bytes(app, &bytes).await?;
-        let model = remembered_video_job_model(job_id_from_status_path(path));
+        let model = take_video_job_model(job_id_from_status_path(path));
         return Ok(VideoStatusDto::Completed {
             path: local_path,
             mime_type: "video/mp4".to_string(),
@@ -624,7 +624,11 @@ async fn video_status_from_response(
             average_execution_ms,
             execution_ms,
         }),
-        VideoStatusApiDto::Failed { reason } => Ok(VideoStatusDto::Failed { reason }),
+        VideoStatusApiDto::Failed { reason } => {
+            // Terminal: this job will never be polled again, so drop its label.
+            take_video_job_model(job_id_from_status_path(path));
+            Ok(VideoStatusDto::Failed { reason })
+        }
         VideoStatusApiDto::Completed {
             download_url,
             mime_type,
@@ -632,6 +636,9 @@ async fn video_status_from_response(
             size_bytes,
             ..
         } => {
+            // Terminal: the model comes from the response here, so the remembered
+            // fallback is no longer needed — forget it to keep the map bounded.
+            take_video_job_model(job_id_from_status_path(path));
             let url = download_url.ok_or_else(|| {
                 AppError::new(
                     "video_download_missing",
@@ -744,11 +751,15 @@ fn remember_video_job_model(job_id: &str, model: &str) {
     }
 }
 
-fn remembered_video_job_model(job_id: &str) -> String {
+/// Removes and returns the model remembered for `job_id`, if any.
+///
+/// Called on every terminal status (completed or failed) so the map stays
+/// bounded to in-flight jobs rather than growing once per generated video.
+fn take_video_job_model(job_id: &str) -> String {
     video_job_models()
         .lock()
         .ok()
-        .and_then(|models| models.get(job_id).cloned())
+        .and_then(|mut models| models.remove(job_id))
         .unwrap_or_default()
 }
 
