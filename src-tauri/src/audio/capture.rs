@@ -9,7 +9,7 @@ use crate::{
     },
     domain::types::{
         AppError, AudioLevelDto, RecordingSessionDto, RecordingSource, RecordingSourceMode,
-        RecordingState, RecordingStatusDto, SourceState, SourceStatusDto,
+        RecordingState, RecordingStatusDto, SourceState, SourceStatusDto, SourceWarningDto,
     },
 };
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -29,6 +29,9 @@ use uuid::Uuid;
 
 pub const DEFAULT_SILENCE_THRESHOLD: f32 = 0.012;
 const RECOVERY_SNAPSHOT_INTERVAL_MS: i64 = 500;
+const MICROPHONE_STALL_THRESHOLD: Duration = Duration::from_secs(3);
+const MICROPHONE_STREAM_WARNING_MESSAGE: &str =
+    "Microphone input stopped unexpectedly. Audio after this point may be missing.";
 
 static ACTIVE_RECORDING: LazyLock<Mutex<Option<ActiveRecording>>> =
     LazyLock::new(|| Mutex::new(None));
@@ -64,6 +67,7 @@ pub struct FinishedSource {
     pub source: RecordingSource,
     pub final_path: PathBuf,
     pub elapsed_ms: i64,
+    pub capture_issue: Option<MicrophoneStreamIssue>,
 }
 
 pub struct CaptureRecoverySnapshot {
@@ -91,11 +95,20 @@ struct ActiveRecording {
     mic_duck_flag: Arc<AtomicBool>,
     writer: Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>,
     stats: Arc<Mutex<CaptureStats>>,
+    stream_error: Arc<Mutex<Option<MicrophoneStreamIssue>>>,
+    last_callback_at: Arc<Mutex<Option<Instant>>>,
     last_recovery_snapshot_elapsed_ms: i64,
     live_preview: Option<LivePreviewController>,
     system_live_preview: Option<SystemLivePreviewController>,
     live_preview_enabled: bool,
     _stream: cpal::Stream,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneStreamIssue {
+    pub code: String,
+    pub message: String,
+    pub elapsed_ms: i64,
 }
 
 // The MVP permits only one active recording and guards it behind a process-wide
@@ -192,10 +205,13 @@ pub fn start_capture(
 
     let writer = Arc::new(Mutex::new(Some(writer)));
     let stats = Arc::new(Mutex::new(CaptureStats::default()));
+    let stream_error = Arc::new(Mutex::new(None));
+    let last_callback_at = Arc::new(Mutex::new(None));
     let paused_flag = Arc::new(AtomicBool::new(false));
     let mic_duck_flag = Arc::new(AtomicBool::new(false));
     let writer_for_callback = Arc::clone(&writer);
     let stats_for_callback = Arc::clone(&stats);
+    let last_callback_for_callback = Arc::clone(&last_callback_at);
     let paused_for_callback = Arc::clone(&paused_flag);
     let mic_duck_for_callback = Arc::clone(&mic_duck_flag);
     let live_preview_available =
@@ -214,7 +230,19 @@ pub fn start_capture(
         None
     };
     let preview_for_callback = live_preview.as_ref().map(LivePreviewController::sink);
-    let err_fn = |error| eprintln!("audio stream error: {error}");
+    let started = Instant::now();
+    let stream_error_for_callback = Arc::clone(&stream_error);
+    let err_fn = move |error| {
+        if let Ok(mut issue) = stream_error_for_callback.try_lock() {
+            if issue.is_none() {
+                *issue = Some(MicrophoneStreamIssue {
+                    code: "microphone_stream_error".to_string(),
+                    message: format!("Microphone input stopped unexpectedly: {error}"),
+                    elapsed_ms: started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                });
+            }
+        }
+    };
 
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => device.build_input_stream(
@@ -224,6 +252,7 @@ pub fn start_capture(
                     data.iter().copied(),
                     &writer_for_callback,
                     &stats_for_callback,
+                    &last_callback_for_callback,
                     &paused_for_callback,
                     &mic_duck_for_callback,
                     preview_for_callback.as_ref(),
@@ -239,6 +268,7 @@ pub fn start_capture(
                     data.iter().map(|sample| *sample as f32 / i16::MAX as f32),
                     &writer_for_callback,
                     &stats_for_callback,
+                    &last_callback_for_callback,
                     &paused_for_callback,
                     &mic_duck_for_callback,
                     preview_for_callback.as_ref(),
@@ -255,6 +285,7 @@ pub fn start_capture(
                         .map(|sample| (*sample as f32 - 32768.0) / 32768.0),
                     &writer_for_callback,
                     &stats_for_callback,
+                    &last_callback_for_callback,
                     &paused_for_callback,
                     &mic_duck_for_callback,
                     preview_for_callback.as_ref(),
@@ -307,8 +338,6 @@ pub fn start_capture(
     stream
         .play()
         .map_err(|error| AppError::new("audio_writer_failed", error.to_string()))?;
-    let started = Instant::now();
-
     let status = RecordingStatusDto {
         session_id: session_id.clone(),
         note_id: Some(note_id.clone()),
@@ -331,6 +360,7 @@ pub fn start_capture(
             0,
             system_capture.as_ref(),
             false,
+            None,
         ),
         warnings: Vec::new(),
     };
@@ -351,6 +381,8 @@ pub fn start_capture(
         mic_duck_flag,
         writer,
         stats,
+        stream_error,
+        last_callback_at,
         last_recovery_snapshot_elapsed_ms: 0,
         live_preview,
         system_live_preview,
@@ -497,6 +529,8 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         source_mode,
         system_capture,
         system_final_path,
+        stream_error,
+        last_callback_at,
         writer,
         paused_flag,
         live_preview,
@@ -534,6 +568,12 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
         source: RecordingSource::Microphone,
         final_path: final_path.clone(),
         elapsed_ms: recording_dto.elapsed_ms,
+        capture_issue: microphone_stream_issue(
+            recording_dto.elapsed_ms,
+            RecordingState::Validating,
+            &stream_error,
+            &last_callback_at,
+        ),
     }];
     if let Some(system_path) = system_stopped {
         let system_path = system_path?;
@@ -541,6 +581,7 @@ fn finalize_recording(recording: ActiveRecording) -> Result<FinishedRecording, A
             source: RecordingSource::System,
             final_path: system_final_path.unwrap_or(system_path.clone()),
             elapsed_ms: recording_dto.elapsed_ms,
+            capture_issue: None,
         });
     }
     Ok(FinishedRecording {
@@ -558,12 +599,16 @@ fn write_input_data<I>(
     data: I,
     writer: &Arc<Mutex<Option<WavWriter<BufWriter<File>>>>>,
     stats: &Arc<Mutex<CaptureStats>>,
+    last_callback_at: &Arc<Mutex<Option<Instant>>>,
     paused: &Arc<AtomicBool>,
     mic_ducked: &Arc<AtomicBool>,
     preview: Option<&LivePreviewSink>,
 ) where
     I: Iterator<Item = f32>,
 {
+    if let Ok(mut last_callback_at) = last_callback_at.try_lock() {
+        *last_callback_at = Some(Instant::now());
+    }
     if paused.load(Ordering::Acquire) {
         return;
     }
@@ -695,6 +740,12 @@ impl ActiveRecording {
             (0.0, 0.0, Vec::new(), 0)
         };
         let elapsed_ms = self.elapsed().as_millis() as i64;
+        let microphone_stream_issue = microphone_stream_issue(
+            elapsed_ms,
+            state,
+            &self.stream_error,
+            &self.last_callback_at,
+        );
         let level = AudioLevelDto {
             peak,
             rms,
@@ -720,8 +771,9 @@ impl ActiveRecording {
                 self.system_capture.as_ref(),
                 self.started.elapsed() >= Duration::from_secs(10)
                     && rms < DEFAULT_SILENCE_THRESHOLD,
+                microphone_stream_issue.clone(),
             ),
-            warnings: Vec::new(),
+            warnings: source_warnings(microphone_stream_issue.as_ref()),
         }
     }
 
@@ -786,6 +838,7 @@ fn source_statuses(
     microphone_bytes: i64,
     system_capture: Option<&SystemAudioCapture>,
     microphone_silence_warning: bool,
+    microphone_stream_issue: Option<MicrophoneStreamIssue>,
 ) -> Vec<SourceStatusDto> {
     let source_state = match state {
         RecordingState::Paused => SourceState::Paused,
@@ -801,9 +854,9 @@ fn source_statuses(
         elapsed_ms,
         bytes_written: microphone_bytes,
         level: microphone_level,
-        silence_warning: microphone_silence_warning,
+        silence_warning: microphone_silence_warning || microphone_stream_issue.is_some(),
         path_finalized: false,
-        last_error: None,
+        last_error: microphone_stream_issue.map(|issue| issue.message),
     }];
     if source_mode == RecordingSourceMode::MicrophonePlusSystem {
         let (level, bytes_written, last_error) = system_capture
@@ -822,6 +875,44 @@ fn source_statuses(
         });
     }
     sources
+}
+
+fn microphone_stream_issue(
+    elapsed_ms: i64,
+    state: RecordingState,
+    stream_error: &Arc<Mutex<Option<MicrophoneStreamIssue>>>,
+    last_callback_at: &Arc<Mutex<Option<Instant>>>,
+) -> Option<MicrophoneStreamIssue> {
+    if let Ok(issue) = stream_error.lock() {
+        if issue.is_some() {
+            return issue.clone();
+        }
+    }
+    if state == RecordingState::Paused {
+        return None;
+    }
+    let last_callback_at = last_callback_at.lock().ok().and_then(|instant| *instant)?;
+    if last_callback_at.elapsed() <= MICROPHONE_STALL_THRESHOLD {
+        return None;
+    }
+    Some(MicrophoneStreamIssue {
+        code: "microphone_stream_stalled".to_string(),
+        message: MICROPHONE_STREAM_WARNING_MESSAGE.to_string(),
+        elapsed_ms,
+    })
+}
+
+fn source_warnings(
+    microphone_stream_issue: Option<&MicrophoneStreamIssue>,
+) -> Vec<SourceWarningDto> {
+    let Some(issue) = microphone_stream_issue else {
+        return Vec::new();
+    };
+    vec![SourceWarningDto {
+        source: RecordingSource::Microphone,
+        code: issue.code.clone(),
+        message: MICROPHONE_STREAM_WARNING_MESSAGE.to_string(),
+    }]
 }
 
 #[cfg(test)]
@@ -857,6 +948,7 @@ mod tests {
             [0.5_f32, -0.25, 0.9].into_iter(),
             &writer,
             &stats,
+            &Arc::new(Mutex::new(None)),
             &paused,
             &ducked,
             None,
@@ -885,6 +977,7 @@ mod tests {
             [0.5_f32, -0.25].into_iter(),
             &writer,
             &stats,
+            &Arc::new(Mutex::new(None)),
             &paused,
             &ducked,
             None,
@@ -909,11 +1002,89 @@ mod tests {
             [0.5_f32].into_iter(),
             &writer,
             &stats,
+            &Arc::new(Mutex::new(None)),
             &paused,
             &ducked,
             None,
         );
 
         assert_eq!(stats.lock().expect("stats lock").samples, 0);
+    }
+
+    fn issue_state(
+        issue: Option<MicrophoneStreamIssue>,
+        last_callback_at: Option<Instant>,
+        state: RecordingState,
+    ) -> Option<MicrophoneStreamIssue> {
+        microphone_stream_issue(
+            12_345,
+            state,
+            &Arc::new(Mutex::new(issue)),
+            &Arc::new(Mutex::new(last_callback_at)),
+        )
+    }
+
+    #[test]
+    fn microphone_stream_error_appears_in_status_source_and_warnings() {
+        let issue = MicrophoneStreamIssue {
+            code: "microphone_stream_error".to_string(),
+            message: "Microphone input stopped unexpectedly: device disconnected".to_string(),
+            elapsed_ms: 2_000,
+        };
+
+        let sources = source_statuses(
+            RecordingSourceMode::MicrophoneOnly,
+            RecordingState::Recording,
+            2_000,
+            AudioLevelDto::default(),
+            1_024,
+            None,
+            false,
+            Some(issue.clone()),
+        );
+        let warnings = source_warnings(Some(&issue));
+
+        let microphone = sources
+            .iter()
+            .find(|source| source.source == RecordingSource::Microphone)
+            .expect("microphone source status exists");
+        assert_eq!(microphone.last_error, Some(issue.message));
+        assert!(microphone.silence_warning);
+        assert_eq!(
+            warnings,
+            vec![SourceWarningDto {
+                source: RecordingSource::Microphone,
+                code: "microphone_stream_error".to_string(),
+                message: MICROPHONE_STREAM_WARNING_MESSAGE.to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn microphone_stall_requires_unpaused_recording_past_threshold_after_callback() {
+        let recent_callback = Instant::now() - (MICROPHONE_STALL_THRESHOLD / 2);
+        let stale_callback = Instant::now() - (MICROPHONE_STALL_THRESHOLD + Duration::from_secs(1));
+
+        assert_eq!(issue_state(None, None, RecordingState::Recording), None);
+        assert_eq!(
+            issue_state(None, Some(recent_callback), RecordingState::Recording),
+            None
+        );
+
+        let stalled = issue_state(None, Some(stale_callback), RecordingState::Recording)
+            .expect("stale active stream should report a stall");
+        assert_eq!(stalled.code, "microphone_stream_stalled");
+        assert_eq!(stalled.message, MICROPHONE_STREAM_WARNING_MESSAGE);
+        assert_eq!(stalled.elapsed_ms, 12_345);
+    }
+
+    #[test]
+    fn paused_recording_suppresses_microphone_stall_warning() {
+        let stale_callback = Instant::now() - (MICROPHONE_STALL_THRESHOLD + Duration::from_secs(1));
+
+        assert_eq!(
+            issue_state(None, Some(stale_callback), RecordingState::Paused),
+            None
+        );
     }
 }
