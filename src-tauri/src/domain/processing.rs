@@ -278,6 +278,7 @@ pub async fn process_saved_audio(
     title: String,
     existing_generated_note: Option<String>,
     manual_notes: Option<String>,
+    recorded_silence: bool,
 ) -> Result<NoteDto, AppError> {
     repos
         .set_note_status(note_id, ProcessingStatus::Transcribing, None)
@@ -313,14 +314,27 @@ pub async fn process_saved_audio(
     {
         Ok(transcription) => transcription,
         Err(error) => {
+            let user_message = user_facing_transcription_failure_message(
+                &error.code,
+                &error.message,
+                recorded_silence,
+                "microphone",
+            );
+            // A no-speech outcome is a coverage decision, not just a failure:
+            // persist the zero-detected-speech checkpoint so the call is
+            // documented the same way a chunked pass would document it.
+            if is_no_speech_error(&error) {
+                persist_microphone_only_transcript_coverage(repos, session_id, "microphone", &[])
+                    .await;
+            }
             repos
                 .set_note_status(
                     note_id,
                     ProcessingStatus::Failed,
-                    Some(error.message.clone()),
+                    Some(user_message.clone()),
                 )
                 .await?;
-            return Err(error);
+            return Err(AppError::new(&error.code, user_message));
         }
     };
     persist_microphone_only_transcript_coverage(
@@ -3246,6 +3260,14 @@ mod tests {
             serde_json::from_str(&details).expect("checkpoint json");
         assert_eq!(checkpoint["totalFailedTurns"], 1);
         assert_eq!(checkpoint["sources"][0]["failedTurns"], 1);
+    }
+
+    #[test]
+    fn microphone_only_coverage_with_no_chunks_documents_zero_detected_speech() {
+        let coverage = compute_chunk_transcript_coverage("microphone", &[]);
+        assert_eq!(coverage.total_detected_speech_ms, 0);
+        assert_eq!(coverage.total_transcribed_ms, 0);
+        assert!(!coverage.warning);
     }
 
     #[test]

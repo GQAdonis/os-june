@@ -1323,7 +1323,7 @@ async fn finish_recording_session(
         let result = if valid_sources.len() == 1
             && task_source_mode == RecordingSourceMode::MicrophoneOnly
         {
-            let (artifact_id, _source, path, _recorded_silence) = valid_sources
+            let (artifact_id, _source, path, recorded_silence) = valid_sources
                 .into_iter()
                 .next()
                 .expect("valid source was checked before starting processing");
@@ -1336,6 +1336,7 @@ async fn finish_recording_session(
                 title,
                 existing_generated_note,
                 manual_notes,
+                recorded_silence,
             )
             .await
         } else {
@@ -1491,7 +1492,7 @@ pub async fn retry_processing(
         let existing_generated_note = note.generated_content.clone();
         let manual_notes = manual_notes_for_generation(&note);
         let result = if sources.len() == 1 {
-            let (audio_artifact_id, _source, audio_path, session_id) = sources
+            let (audio_artifact_id, _source, audio_path, session_id, recorded_silence) = sources
                 .into_iter()
                 .next()
                 .expect("retry sources were checked before starting processing");
@@ -1504,12 +1505,13 @@ pub async fn retry_processing(
                 title,
                 existing_generated_note,
                 manual_notes,
+                recorded_silence,
             )
             .await
         } else {
             let session_id = sources
                 .first()
-                .map(|(_id, _source, _path, session_id)| session_id.clone())
+                .map(|(_id, _source, _path, session_id, _recorded_silence)| session_id.clone())
                 .unwrap_or_default();
             process_saved_source_audio(
                 &task_repos,
@@ -1518,7 +1520,9 @@ pub async fn retry_processing(
                 RecordingSourceMode::MicrophonePlusSystem,
                 sources
                     .into_iter()
-                    .map(|(id, source, path, _session_id)| (id, source, path, false))
+                    .map(|(id, source, path, _session_id, recorded_silence)| {
+                        (id, source, path, recorded_silence)
+                    })
                     .collect(),
                 title,
                 existing_generated_note,
@@ -1540,16 +1544,16 @@ async fn retry_audio_sources(
     repos: &Repositories,
     paths: &AppPaths,
     note_id: &str,
-) -> Result<Vec<(String, String, PathBuf, String)>, AppError> {
+) -> Result<Vec<(String, String, PathBuf, String, bool)>, AppError> {
     let sources = repos
         .latest_valid_audio_artifact_paths(note_id)
         .await?
         .into_iter()
-        .filter_map(|(id, source, path, session_id)| {
+        .filter_map(|(id, source, path, session_id, recorded_silence)| {
             paths
                 .contained_recording_file(path)
                 .ok()
-                .map(|path| (id, source, path, session_id))
+                .map(|path| (id, source, path, session_id, recorded_silence))
         })
         .collect::<Vec<_>>();
     if sources.is_empty() {
@@ -1747,6 +1751,7 @@ pub async fn recover_recording(
         note.title,
         existing_generated_note,
         manual_notes,
+        validation.recorded_silence,
     )
     .await
 }
@@ -2226,8 +2231,12 @@ mod tests {
         let cleanup_called_for_thread = Arc::clone(&cleanup_called);
 
         let result = start_capture_with_timeout_and_cleanup(
-            move |_abandoned| {
-                std::thread::sleep(Duration::from_millis(60));
+            move |abandoned| {
+                // Return only after the timeout has demonstrably fired; a
+                // fixed sleep races the timeout under machine load.
+                while !abandoned.load(Ordering::Acquire) {
+                    std::thread::sleep(Duration::from_millis(2));
+                }
                 let started = fake_started_recording("late-session");
                 *active_session_for_builder
                     .lock()

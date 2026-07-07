@@ -1715,7 +1715,7 @@ impl Repositories {
     pub async fn latest_valid_audio_artifact_paths(
         &self,
         note_id: &str,
-    ) -> Result<Vec<(String, String, String, String)>, sqlx::error::Error> {
+    ) -> Result<Vec<(String, String, String, String, bool)>, sqlx::error::Error> {
         let session = query(
             "SELECT recording_session_id
              FROM audio_artifacts
@@ -1731,7 +1731,7 @@ impl Repositories {
         };
         let session_id: String = session.get("recording_session_id");
         let rows = query(
-            "SELECT id, source, path, recording_session_id
+            "SELECT id, source, path, recording_session_id, validation_summary
              FROM audio_artifacts
              WHERE note_id = ? AND recording_session_id = ? AND status = 'valid'
              ORDER BY CASE source WHEN 'microphone' THEN 0 WHEN 'system' THEN 1 ELSE 2 END",
@@ -1748,6 +1748,10 @@ impl Repositories {
                     row.get("source"),
                     row.get("path"),
                     row.get("recording_session_id"),
+                    validation_summary_recorded_silence(
+                        row.get::<Option<String>, _>("validation_summary")
+                            .as_deref(),
+                    ),
                 )
             })
             .collect())
