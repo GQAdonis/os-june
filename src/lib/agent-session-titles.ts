@@ -1,5 +1,5 @@
 /**
- * Per-session record of manual title edits. Keyed by stored session id (not
+ * Per-session record of settled title edits. Keyed by stored session id (not
  * runtime session id) because June's session list and persistence use the
  * durable id, while live Hermes processes may resume under a different
  * runtime id. Absence means auto-titling is allowed, so sessions from before
@@ -12,7 +12,9 @@
 
 const STORAGE_KEY = "june.agent.manuallyTitledSessions";
 
-function readStore(): Record<string, true> {
+export type AgentSessionSettledTitleKind = "manual" | "exchange";
+
+function readStore(): Record<string, AgentSessionSettledTitleKind> {
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
@@ -20,13 +22,21 @@ function readStore(): Record<string, true> {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       return {};
     }
-    return parsed as Record<string, true>;
+    const store: Record<string, AgentSessionSettledTitleKind> = {};
+    for (const [sessionId, value] of Object.entries(parsed)) {
+      if (value === true || value === "manual") {
+        store[sessionId] = "manual";
+      } else if (value === "exchange") {
+        store[sessionId] = "exchange";
+      }
+    }
+    return store;
   } catch {
     return {};
   }
 }
 
-function writeStore(store: Record<string, true>) {
+function writeStore(store: Record<string, AgentSessionSettledTitleKind>) {
   try {
     if (Object.keys(store).length === 0) {
       window.localStorage.removeItem(STORAGE_KEY);
@@ -34,18 +44,27 @@ function writeStore(store: Record<string, true>) {
     }
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
   } catch {
-    // Ignore; worst case a manually titled session can be auto-titled again.
+    // Ignore; worst case a settled session can be auto-titled again.
   }
 }
 
-/** Whether this session has an explicit user-authored title. */
-export function sessionManuallyTitled(sessionId: string | undefined): boolean {
-  if (!sessionId) return false;
-  return readStore()[sessionId] === true;
+/** Why this session's title is settled, or null when auto-titling is allowed. */
+export function sessionSettledTitleKind(
+  sessionId: string | undefined,
+): AgentSessionSettledTitleKind | null {
+  if (!sessionId) return null;
+  return readStore()[sessionId] ?? null;
 }
 
 export function rememberSessionManuallyTitled(sessionId: string) {
   const store = readStore();
-  store[sessionId] = true;
+  store[sessionId] = "manual";
+  writeStore(store);
+}
+
+export function rememberSessionExchangeTitled(sessionId: string) {
+  const store = readStore();
+  if (store[sessionId] === "manual") return;
+  store[sessionId] = "exchange";
   writeStore(store);
 }

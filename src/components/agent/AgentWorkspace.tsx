@@ -177,8 +177,9 @@ import {
 } from "../../lib/hermes-image-attach";
 import { parseSessionUsage, type SessionUsage } from "../../lib/hermes-session-usage";
 import {
+  rememberSessionExchangeTitled,
   rememberSessionManuallyTitled,
-  sessionManuallyTitled,
+  sessionSettledTitleKind,
 } from "../../lib/agent-session-titles";
 import {
   parseCompressSessionResult,
@@ -1889,6 +1890,7 @@ export function AgentWorkspace({
   const [hermesSessionMessages, setHermesSessionMessages] = useState<
     Record<string, HermesSessionMessage[]>
   >({});
+  const hermesSessionMessagesRef = useRef<Record<string, HermesSessionMessage[]>>({});
   const [pendingHermesMessages, setPendingHermesMessages] = useState<
     Record<string, HermesSessionMessage[]>
   >(() => continuity?.pendingMessages ?? {});
@@ -2297,9 +2299,11 @@ export function AgentWorkspace({
     workingSessionIdsRef.current = workingSessionIds;
     toolCallSessionIdsRef.current = toolCallSessionIds;
     waitingSessionIdsRef.current = waitingSessionIds;
+    hermesSessionMessagesRef.current = hermesSessionMessages;
     pendingHermesMessagesRef.current = pendingHermesMessages;
     hermesSessionItemsRef.current = hermesSessionItems;
   }, [
+    hermesSessionMessages,
     hermesSessionItems,
     pendingHermesMessages,
     selectedHermesSessionId,
@@ -2349,7 +2353,11 @@ export function AgentWorkspace({
   // Both delete paths (sidebar event and session-bar menu) run this so neither
   // leaves a phantom "working" session with a leaked listener behind.
   const scrubHermesSessionState = useCallback((sessionId: string) => {
-    setHermesSessionMessages((current) => omitRecordKey(current, sessionId));
+    setHermesSessionMessages((current) => {
+      const next = omitRecordKey(current, sessionId);
+      hermesSessionMessagesRef.current = next;
+      return next;
+    });
     setPendingHermesMessages((current) => {
       const next = omitRecordKey(current, sessionId);
       pendingHermesMessagesRef.current = next;
@@ -3410,10 +3418,14 @@ export function AgentWorkspace({
           pendingHermesMessagesRef.current[selectedHermesSessionId] ?? [],
           messages,
         );
-        setHermesSessionMessages((current) => ({
-          ...current,
-          [selectedHermesSessionId]: messages,
-        }));
+        setHermesSessionMessages((current) => {
+          const next = {
+            ...current,
+            [selectedHermesSessionId]: messages,
+          };
+          hermesSessionMessagesRef.current = next;
+          return next;
+        });
         setPendingHermesMessages((current) => {
           const next = {
             ...current,
@@ -4905,7 +4917,11 @@ export function AgentWorkspace({
       });
       return replaced ? next : [replacement, ...next];
     });
-    setHermesSessionMessages((current) => moveRecordKey(current, fromSessionId, toSessionId));
+    setHermesSessionMessages((current) => {
+      const next = moveRecordKey(current, fromSessionId, toSessionId);
+      hermesSessionMessagesRef.current = next;
+      return next;
+    });
     setPendingHermesMessages((current) => {
       const next = moveRecordKey(current, fromSessionId, toSessionId);
       pendingHermesMessagesRef.current = next;
@@ -4929,6 +4945,7 @@ export function AgentWorkspace({
     setHermesSessionMessages((current) => {
       let next = current;
       for (const id of ids) next = omitRecordKey(next, id);
+      hermesSessionMessagesRef.current = next;
       return next;
     });
     setPendingHermesMessages((current) => {
@@ -5789,10 +5806,14 @@ export function AgentWorkspace({
         pendingHermesMessagesRef.current[sessionId] ?? [],
         messages,
       );
-      setHermesSessionMessages((current) => ({
-        ...current,
-        [sessionId]: messages,
-      }));
+      setHermesSessionMessages((current) => {
+        const next = {
+          ...current,
+          [sessionId]: messages,
+        };
+        hermesSessionMessagesRef.current = next;
+        return next;
+      });
       setPendingHermesMessages((current) => {
         const next = {
           ...current,
@@ -6229,10 +6250,14 @@ export function AgentWorkspace({
       setDraft(branchComposerText);
       setCategory(null);
       setAttachments([]);
-      setHermesSessionMessages((current) => ({
-        ...current,
-        [result.sessionId]: branchSeedMessages,
-      }));
+      setHermesSessionMessages((current) => {
+        const next = {
+          ...current,
+          [result.sessionId]: branchSeedMessages,
+        };
+        hermesSessionMessagesRef.current = next;
+        return next;
+      });
       setPendingHermesMessages((current) => {
         const next = {
           ...current,
@@ -6852,8 +6877,20 @@ export function AgentWorkspace({
     sessionId: string,
     messages: HermesSessionMessage[],
   ) {
+    hermesSessionMessagesRef.current = {
+      ...hermesSessionMessagesRef.current,
+      [sessionId]: messages,
+    };
     const source = sessionTitleSourceRef.current[sessionId];
-    if (source === "manual" || source === "exchange" || sessionManuallyTitled(sessionId)) return;
+    const settledTitleKind = sessionSettledTitleKind(sessionId);
+    if (
+      source === "manual" ||
+      source === "exchange" ||
+      settledTitleKind === "manual" ||
+      settledTitleKind === "exchange"
+    ) {
+      return;
+    }
     if (
       titleSuggestionSessionIdsRef.current.has(sessionId) ||
       titleSuggestionInFlightSessionIdsRef.current.has(sessionId)
@@ -6886,23 +6923,36 @@ export function AgentWorkspace({
       if (!session || !isReplaceableAgentSessionTitle(session.title)) return;
     }
     titleSuggestionInFlightSessionIdsRef.current.add(sessionId);
+    let shouldRecheckLatestMessages = false;
     try {
       const title = await agentSessionTitleForPrompt(prompt, hasReply ? reply : undefined);
       if (titleSuggestionSessionIdsRef.current.has(sessionId)) return;
+      const nextSource: AgentSessionTitleSource = hasReply ? "exchange" : "prompt";
       sessionTitleOverridesRef.current = {
         ...sessionTitleOverridesRef.current,
         [sessionId]: title,
       };
       sessionTitleSourceRef.current = {
         ...sessionTitleSourceRef.current,
-        [sessionId]: hasReply ? "exchange" : "prompt",
+        [sessionId]: nextSource,
       };
+      if (nextSource === "exchange") {
+        rememberSessionExchangeTitled(sessionId);
+      } else {
+        shouldRecheckLatestMessages = true;
+      }
       setHermesSessionItems((current) =>
         current.map((item) => (item.id === sessionId ? { ...item, title } : item)),
       );
       void ensureHermesBridgeSession({ sessionId, title }).catch(() => {});
     } finally {
       titleSuggestionInFlightSessionIdsRef.current.delete(sessionId);
+    }
+    if (shouldRecheckLatestMessages) {
+      const latestMessages = hermesSessionMessagesRef.current[sessionId];
+      if (latestMessages) {
+        void suggestTitleForUntitledSession(sessionId, latestMessages);
+      }
     }
   }
 

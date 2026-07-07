@@ -3236,6 +3236,75 @@ describe("AgentWorkspace", () => {
     expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(2);
   }, 10_000);
 
+  it("rechecks latest messages when a fresh prompt-only suggestion resolves after the reply loads", async () => {
+    const rawTitle = "I want you to summarize latest failures";
+    const userMessage = {
+      id: "u1",
+      role: "user",
+      content: "summarize latest failures",
+      timestamp: "2026-06-04T12:00:00Z",
+    };
+    const assistantMessage = {
+      id: "a1",
+      role: "assistant",
+      content: "I found the failing path and isolated the missing persistence call.",
+      timestamp: "2026-06-04T12:00:01Z",
+    };
+    const secondSession = {
+      id: "session-other",
+      title: "Other session",
+      preview: "Other preview",
+      last_active: "2026-06-04T12:05:00Z",
+    };
+    let resolvePromptTitle: (value: { title: string }) => void = () => {};
+    const promptTitle = new Promise<{ title: string }>((resolve) => {
+      resolvePromptTitle = resolve;
+    });
+    const targetSession = {
+      id: "session-upgrade-pending",
+      title: rawTitle,
+      preview: rawTitle,
+      last_active: "2026-06-04T12:00:00Z",
+    };
+    mocks.listHermesSessions.mockResolvedValue([targetSession, secondSession]);
+    mocks.listHermesSessionMessages
+      .mockResolvedValueOnce([userMessage])
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([userMessage, assistantMessage]);
+    mocks.suggestAgentSessionTitle
+      .mockImplementationOnce(() => promptTitle)
+      .mockResolvedValueOnce({ title: "Persistence Fix" });
+
+    const { rerender } = render(<AgentWorkspace initialSession={targetSession} />);
+
+    await waitFor(() => expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(1));
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenLastCalledWith(
+      "summarize latest failures",
+      undefined,
+    );
+
+    rerender(<AgentWorkspace initialSession={secondSession} />);
+    expect(await screen.findByText("Other session")).toBeInTheDocument();
+    rerender(<AgentWorkspace initialSession={targetSession} />);
+
+    await waitFor(() =>
+      expect(mocks.listHermesSessionMessages.mock.calls.length).toBeGreaterThanOrEqual(3),
+    );
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolvePromptTitle({ title: "Failure Summary" });
+      await promptTitle;
+    });
+
+    await waitFor(() => expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(2));
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenLastCalledWith(
+      "summarize latest failures",
+      "I found the failing path and isolated the missing persistence call.",
+    );
+    expect(await screen.findByText("Persistence Fix")).toBeInTheDocument();
+  }, 10_000);
+
   it("upgrades a prompt-only title from the first non-empty assistant reply", async () => {
     const rawTitle = "I want you to summarize latest failures";
     const userMessage = {
@@ -3474,6 +3543,48 @@ describe("AgentWorkspace", () => {
     expect(mocks.suggestAgentSessionTitle).not.toHaveBeenCalled();
     expect(mocks.ensureHermesBridgeSession).not.toHaveBeenCalledWith({
       sessionId: "session-durable-manual",
+      title: "Staging Deploy Setup",
+    });
+    expect(screen.getByText("Set up staging deploy")).toBeInTheDocument();
+  });
+
+  it("keeps a durable exchange title marker from being overwritten on fresh mount", async () => {
+    const userMessage = {
+      id: "u1",
+      role: "user",
+      content: "set up staging deploy",
+      timestamp: "2026-06-04T12:00:00Z",
+    };
+    const assistantMessage = {
+      id: "a1",
+      role: "assistant",
+      content: "I checked the deployment steps and found the staging settings.",
+      timestamp: "2026-06-04T12:00:01Z",
+    };
+    window.localStorage.setItem(
+      "june.agent.manuallyTitledSessions",
+      JSON.stringify({ "session-durable-exchange": "exchange" }),
+    );
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-durable-exchange",
+        title: "Set up staging deploy",
+        preview: "set up staging deploy",
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([userMessage, assistantMessage]);
+    mocks.suggestAgentSessionTitle.mockResolvedValue({ title: "Staging Deploy Setup" });
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Set up staging deploy")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-durable-exchange"),
+    );
+    expect(mocks.suggestAgentSessionTitle).not.toHaveBeenCalled();
+    expect(mocks.ensureHermesBridgeSession).not.toHaveBeenCalledWith({
+      sessionId: "session-durable-exchange",
       title: "Staging Deploy Setup",
     });
     expect(screen.getByText("Set up staging deploy")).toBeInTheDocument();
