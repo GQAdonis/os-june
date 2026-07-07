@@ -452,6 +452,28 @@ describe("skill detail — component", () => {
     expect(screen.getByText(/instructions/i)).toBeInTheDocument();
   });
 
+  it("disables the detail switch for read-only external skills", () => {
+    const toggle = vi.fn();
+    const info = externalSkill();
+    render(
+      <SkillDetailView
+        state={baseState({
+          skill: "company-style",
+          info,
+          policy: skillEditPolicy({ source: "external", readOnly: true }),
+        })}
+        enabled={true}
+        canToggle={true}
+        onToggleEnabled={toggle}
+      />,
+    );
+
+    const switchControl = screen.getByRole("switch", { name: "Disable company-style" });
+    expect(switchControl).toBeDisabled();
+    fireEvent.click(switchControl);
+    expect(toggle).not.toHaveBeenCalled();
+  });
+
   it("renders an editor for a writable skill and a pre-edit warning", () => {
     render(<SkillDetailView state={baseState({})} />);
     expect(screen.getByLabelText(/skill instructions and metadata/i)).toBeInTheDocument();

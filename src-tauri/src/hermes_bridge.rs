@@ -1182,10 +1182,8 @@ pub fn update_hermes_bridge_skill(
             let external_dirs = external_skill_dirs(&app);
             let externals: Vec<(PathBuf, bool)> = external_dirs
                 .iter()
-                .filter_map(|dir| {
-                    external_skill_dir_scan_path_from_base(dir, Some(&hermes_home))
-                        .map(|path| (path, true))
-                })
+                .filter_map(|dir| external_skill_root_from_dir(dir, Some(&hermes_home)))
+                .map(|path| (path, true))
                 .collect();
             if resolve_skill_in_roots(&externals, &request.name).is_ok() {
                 return Err(AppError::new(
@@ -1754,7 +1752,7 @@ fn skill_search_roots_for_hermes_home(
         roots.push((managed, false));
     }
     for dir in external_skill_dirs {
-        if let Some(resolved) = external_skill_dir_scan_path_from_base(dir, Some(hermes_home)) {
+        if let Some(resolved) = external_skill_root_from_dir(dir, Some(hermes_home)) {
             roots.push((resolved, true));
         }
     }
@@ -6784,6 +6782,10 @@ fn external_skill_dir_scan_path_from_base(
     }
 }
 
+fn external_skill_root_from_dir(dir: &Path, relative_base: Option<&Path>) -> Option<PathBuf> {
+    external_skill_dir_scan_path_from_base(dir, relative_base).filter(|path| path.is_dir())
+}
+
 fn normalize_path_lexically(path: PathBuf) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -9262,6 +9264,25 @@ mcp_servers:
         let (root, path, read_only) =
             resolve_skill_in_roots(&roots, "custom-skill").expect("resolve custom skill");
         assert_eq!(root, relative_skill_dir);
+        assert!(path.ends_with(Path::new("custom-skill").join("SKILL.md")));
+        assert!(read_only);
+    }
+
+    #[test]
+    fn skill_search_roots_skip_missing_external_roots() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let missing = home.path().join("missing-skills");
+        let external = home.path().join("team-skills");
+        let custom_skill = external.join("custom-skill");
+        std::fs::create_dir_all(&custom_skill).expect("custom skill dir");
+        std::fs::write(custom_skill.join("SKILL.md"), "# Custom\n").expect("custom skill");
+
+        let roots = skill_search_roots_for_hermes_home(home.path(), &[missing, external.clone()]);
+        assert_eq!(roots, vec![(external.clone(), true)]);
+
+        let (root, path, read_only) =
+            resolve_skill_in_roots(&roots, "custom-skill").expect("resolve custom skill");
+        assert_eq!(root, external);
         assert!(path.ends_with(Path::new("custom-skill").join("SKILL.md")));
         assert!(read_only);
     }

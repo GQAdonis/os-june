@@ -149,7 +149,7 @@ export function SkillDetailView({
             {onToggleEnabled ? (
               <Switch
                 checked={enabled ?? false}
-                disabled={!canToggle || toggling}
+                disabled={!canToggle || !policy.editable || toggling}
                 onCheckedChange={onToggleEnabled}
                 aria-label={`${enabled ? "Disable" : "Enable"} ${title}`}
               />
