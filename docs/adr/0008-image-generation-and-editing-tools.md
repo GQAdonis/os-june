@@ -82,6 +82,14 @@ never see it:
   re-enabling safe mode resets it, so re-opting into safety re-arms the
   dialog.
 
+The prompt check uses **no intelligence, by design**: no LLM, no classifier
+model, no Venice or June API call, no metering. It is a deterministic
+on-device wordlist + phrase match (`image_safety::may_request_explicit_content`),
+so the prompt never leaves the device for screening and the check costs
+nothing. A model-based classifier was considered and rejected: it would add
+a billable call per generation and an extra network round trip carrying the
+user's prompt, against June's privacy-by-architecture stance.
+
 Trade-offs accepted: the heuristic is a conservative wordlist (misses
 euphemisms, some false positives) - acceptable because it only gates the
 dialog; Venice `safe_mode` remains the enforcement, and a false negative just
