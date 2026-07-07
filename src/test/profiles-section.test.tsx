@@ -1,10 +1,15 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useMemo, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createHermesAdminClient,
   emptyProfileForm,
+  nextStep,
   useProfileManagerController,
+  type ProfileBuilderModel,
   type ProfileBuilderState,
+  type ProfileBuilderStep,
   type ProfileManagerEngine,
   type ProfileManagerState,
 } from "../lib/hermes-admin";
@@ -74,6 +79,53 @@ function stubManager(overrides: Partial<ProfileManagerState> = {}): ProfileManag
 function Harness({ engine }: { engine: ProfileManagerEngine }) {
   const managerState = useProfileManagerController(engine);
   return <ProfilesSurfaceView managerState={managerState} builderState={stubBuilder()} />;
+}
+
+const TOOL_MODEL: ProfileBuilderModel = {
+  provider: "venice",
+  id: "tool-model",
+  name: "Tool Model",
+  capabilities: ["supportsFunctionCalling"],
+};
+
+function StatefulBuilderHarness() {
+  const [step, setStep] = useState<ProfileBuilderStep>("identity");
+  const [form, setForm] = useState(() => ({
+    ...emptyProfileForm(),
+    provider: "venice",
+    model: "tool-model",
+  }));
+  const [create, setCreate] = useState<ProfileBuilderState["create"]>({ phase: "idle" });
+
+  const builderState = useMemo(
+    () =>
+      stubBuilder({
+        step,
+        form,
+        models: [TOOL_MODEL],
+        create,
+        setStep,
+        goNext: () => setStep((current) => nextStep(current)),
+        update: (patch) => setForm((current) => ({ ...current, ...patch })),
+        reset: () => {
+          setStep("identity");
+          setForm({ ...emptyProfileForm(), provider: "venice", model: "tool-model" });
+          setCreate({ phase: "idle" });
+        },
+        createProfile: () => {
+          setCreate({
+            phase: "created",
+            createdSlug: "research-assistant",
+            testSessionStarted: false,
+            message:
+              'Created "research-assistant". The test session did not start: Something went wrong.',
+          });
+        },
+      }),
+    [create, form, step],
+  );
+
+  return <ProfilesSurfaceView managerState={stubManager()} builderState={builderState} />;
 }
 
 describe("profiles settings surface", () => {
@@ -159,6 +211,97 @@ describe("profiles settings surface", () => {
 
     await waitFor(() => expect(managerState.refresh).toHaveBeenCalled());
     expect(screen.getByRole("list", { name: "Profiles" })).toBeInTheDocument();
+  });
+
+  it("stays on the created panel when a profile is created but the test session fails", async () => {
+    const user = userEvent.setup();
+    render(<StatefulBuilderHarness />);
+
+    await user.click(screen.getByRole("button", { name: "New profile" }));
+    await user.type(screen.getByLabelText("Profile name"), "Research assistant");
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Next" }));
+    await user.click(screen.getByRole("button", { name: "Create and start test session" }));
+
+    expect(
+      screen.getByText(/the test session did not start: something went wrong/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Profile created")).toBeInTheDocument();
+    expect(screen.queryByRole("list", { name: "Profiles" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the delete dialog open with an error when removal fails", async () => {
+    const user = userEvent.setup();
+    const harness = makeAdminHarness({
+      profiles: [
+        { name: "default", active: true },
+        { name: "writing", active: false },
+      ],
+      activeProfile: "default",
+    });
+    const deleteAttempts: string[] = [];
+    const client = createHermesAdminClient(harness.target, {
+      fetch: async (input, init) => {
+        const path = new URL(input).pathname;
+        if (
+          (init?.method ?? "GET").toUpperCase() === "DELETE" &&
+          path === "/api/profiles/writing"
+        ) {
+          deleteAttempts.push(path);
+          return new Response(JSON.stringify({ code: "not_found", error: "missing" }), {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        return harness.server.fetch(input, init);
+      },
+    });
+    const engine: ProfileManagerEngine = { target: harness.target, client, cache: harness.cache };
+
+    render(<Harness engine={engine} />);
+
+    await screen.findByText("writing");
+    await user.click(screen.getByRole("button", { name: "Delete writing" }));
+    await user.click(screen.getByRole("button", { name: "Delete profile" }));
+
+    const dialog = screen.getByRole("dialog", { name: 'Delete "writing"?' });
+    expect(dialog).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Could not delete the profile. Refresh and try again."),
+    ).toBeInTheDocument();
+    expect(deleteAttempts).toEqual(["/api/profiles/writing"]);
+  });
+
+  it("closes a stale delete dialog when the selected profile disappears", async () => {
+    const user = userEvent.setup();
+    const remove = vi.fn().mockResolvedValue(true);
+    const { rerender } = render(
+      <ProfilesSurfaceView managerState={stubManager({ remove })} builderState={stubBuilder()} />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Delete writing" }));
+    expect(screen.getByRole("dialog", { name: 'Delete "writing"?' })).toBeInTheDocument();
+
+    rerender(
+      <ProfilesSurfaceView
+        managerState={stubManager({
+          profiles: [
+            { name: "default", description: "June default", raw: {} },
+            { name: "research", description: "Research profile", raw: {} },
+          ],
+          remove,
+        })}
+        builderState={stubBuilder()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog", { name: 'Delete "writing"?' })).not.toBeInTheDocument(),
+    );
+    expect(remove).not.toHaveBeenCalled();
   });
 
   it("keeps the Hermes-not-running empty state", () => {

@@ -75,6 +75,7 @@ export function ProfilesSurfaceView({
 
   useEffect(() => {
     if (view !== "wizard" || builderState.create.phase !== "created") return;
+    if (hasCreatedFailureMessage(builderState.create)) return;
     managerState.refresh();
     builderState.reset();
     setView("list");
@@ -104,6 +105,11 @@ export function ProfilesSurfaceView({
       }}
     />
   );
+}
+
+function hasCreatedFailureMessage(create: ProfileBuilderState["create"]): boolean {
+  if (create.phase !== "created" || !create.message || !create.createdSlug) return false;
+  return create.message !== `Created "${create.createdSlug}".`;
 }
 
 export function ProfileBuilderView({
@@ -256,11 +262,31 @@ function ProfilesListView({
   onNewProfile: () => void;
 }) {
   const [toDelete, setToDelete] = useState<string | undefined>();
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const isUnavailable = state.status === "unavailable";
   const isErrored = state.status === "error";
   const isLoadingFirst = state.status === "loading";
   const hasProfiles = state.profiles.length > 0;
   const onlyDefault = state.profiles.length === 1 && state.profiles[0]?.name === "default";
+
+  useEffect(() => {
+    if (!toDelete) return;
+    const profile = state.profiles.find((candidate) => candidate.name === toDelete);
+    if (!profile) {
+      setToDelete(undefined);
+      setDeleteError(null);
+      return;
+    }
+    const guard = canRemoveProfile(toDelete, state.activeName, state.activeConfirmed);
+    if (!guard.ok) {
+      setToDelete(undefined);
+      setDeleteError(null);
+    }
+  }, [state.activeConfirmed, state.activeName, state.profiles, toDelete]);
+
+  useEffect(() => {
+    if (toDelete && state.error) setDeleteError(state.error);
+  }, [state.error, toDelete]);
 
   if (isUnavailable) {
     return (
@@ -321,7 +347,10 @@ function ProfilesListView({
                   activeConfirmed={state.activeConfirmed}
                   pending={state.pendingAction}
                   onActivate={state.activate}
-                  onDelete={setToDelete}
+                  onDelete={(name) => {
+                    setDeleteError(null);
+                    setToDelete(name);
+                  }}
                 />
               ))}
             </ul>
@@ -337,9 +366,24 @@ function ProfilesListView({
 
       <DeleteProfileDialog
         name={toDelete}
-        onClose={() => setToDelete(undefined)}
+        error={deleteError}
+        onClose={() => {
+          setToDelete(undefined);
+          setDeleteError(null);
+        }}
         onConfirm={async () => {
-          if (toDelete) await state.remove(toDelete);
+          if (!toDelete) throw new Error("No profile selected.");
+          const profile = state.profiles.find((candidate) => candidate.name === toDelete);
+          const guard = canRemoveProfile(toDelete, state.activeName, state.activeConfirmed);
+          if (!profile || !guard.ok) {
+            setDeleteError(guard.ok ? "That profile is no longer available." : guard.reason);
+            throw new Error("Profile removal is no longer available.");
+          }
+          const removed = await state.remove(toDelete);
+          if (!removed) {
+            setDeleteError(state.error ?? "Could not delete the profile. Refresh and try again.");
+            throw new Error("Profile removal failed.");
+          }
         }}
       />
     </ProfilesShell>
@@ -442,13 +486,18 @@ function ProfileRow({
 
 function DeleteProfileDialog({
   name,
+  error,
   onClose,
   onConfirm,
 }: {
   name?: string;
+  error?: string | null;
   onClose: () => void;
   onConfirm: () => Promise<void>;
 }) {
+  const description = name
+    ? `Remove ${name}? New sessions will no longer load it. This cannot be undone.`
+    : undefined;
   return (
     <ConfirmDialog
       open={Boolean(name)}
@@ -456,9 +505,17 @@ function DeleteProfileDialog({
       onConfirm={onConfirm}
       title={name ? `Delete "${name}"?` : "Delete profile?"}
       description={
-        name
-          ? `Remove ${name}? New sessions will no longer load it. This cannot be undone.`
-          : undefined
+        description ? (
+          <>
+            <span>{description}</span>
+            {error ? (
+              <span className="settings-row-error profiles-inline-error" role="alert">
+                <IconExclamationCircle size={14} ariaHidden />
+                {error}
+              </span>
+            ) : null}
+          </>
+        ) : undefined
       }
       confirmLabel="Delete profile"
       confirmBusyLabel="Deleting"
