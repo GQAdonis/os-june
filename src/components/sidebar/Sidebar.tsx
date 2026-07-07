@@ -328,7 +328,6 @@ export const HIDDEN_SETTINGS_TABS: ReadonlySet<SettingsTab> = new Set<SettingsTa
   "taps",
   "toolsets",
   "bundles",
-  "profile-builder",
   "integrations-health",
   "import-export",
 ]);
