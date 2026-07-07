@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   setVeniceModel: vi.fn(),
   setVeniceApiKey: vi.fn(),
   clearVeniceApiKey: vi.fn(),
+  setImageSafeMode: vi.fn(),
+  setImageSafeModePromptDismissed: vi.fn(),
   saveLocalGenerationSettings: vi.fn(),
   setLocalGenerationEnabled: vi.fn(),
   probeLocalGenerationEndpoint: vi.fn(),
@@ -79,6 +81,8 @@ vi.mock("../lib/tauri", () => ({
   setVeniceModel: mocks.setVeniceModel,
   setVeniceApiKey: mocks.setVeniceApiKey,
   clearVeniceApiKey: mocks.clearVeniceApiKey,
+  setImageSafeMode: mocks.setImageSafeMode,
+  setImageSafeModePromptDismissed: mocks.setImageSafeModePromptDismissed,
   saveLocalGenerationSettings: mocks.saveLocalGenerationSettings,
   setLocalGenerationEnabled: mocks.setLocalGenerationEnabled,
   probeLocalGenerationEndpoint: mocks.probeLocalGenerationEndpoint,
@@ -185,6 +189,8 @@ function buildProviderSettings() {
       modelId: localState.modelId,
       apiKey: localState.apiKey,
     },
+    imageSafeMode: true,
+    imageSafeModePromptDismissed: false,
   };
 }
 
@@ -249,6 +255,8 @@ describe("AppSettings", () => {
           modelId: "",
           apiKey: "",
         },
+        imageSafeMode: true,
+        imageSafeModePromptDismissed: false,
       },
     });
     mocks.listVeniceModels.mockImplementation(async (mode) => ({
@@ -391,6 +399,12 @@ describe("AppSettings", () => {
         modelId: localState.modelId,
         apiKey: localState.apiKey,
       },
+      imageSafeMode: true,
+      imageSafeModePromptDismissed: false,
+    }));
+    mocks.setImageSafeMode.mockImplementation(async (enabled: boolean) => ({
+      ...buildProviderSettings(),
+      imageSafeMode: enabled,
     }));
     mocks.setVeniceApiKey.mockResolvedValue({
       ...buildProviderSettings(),
@@ -2632,9 +2646,21 @@ describe("AppSettings", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Models" }));
 
-    // The section renders and the saved default is shown.
-    expect(screen.getByRole("heading", { name: "Image generation" })).toBeInTheDocument();
-    expect(screen.getByText("Venice SD3.5")).toBeInTheDocument();
+    // Our dedicated Image generation section (kept over main's inline row).
+    const imageSection = screen
+      .getByRole("heading", { name: "Image generation" })
+      .closest("section");
+    expect(imageSection).not.toBeNull();
+    expect(
+      within(imageSection as HTMLElement).getByRole("button", { name: "Change image model" }),
+    ).toBeInTheDocument();
+    expect(within(imageSection as HTMLElement).getByText("Venice SD3.5")).toBeInTheDocument();
+    // Safe mode lives in the image section and defaults on (JUN-209).
+    expect(
+      within(imageSection as HTMLElement).getByRole("switch", {
+        name: "Blur adult content in images",
+      }),
+    ).toBeInTheDocument();
 
     // The picker opens with the curated image options (no backend fetch).
     await user.click(screen.getByRole("button", { name: "Change image model" }));

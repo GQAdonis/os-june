@@ -79,7 +79,6 @@ import { Dialog } from "../ui/Dialog";
 import { EmptyState } from "../ui/EmptyState";
 import { HoverTip } from "../ui/HoverTip";
 import { InlineNotice } from "../ui/InlineNotice";
-import { ModelPrivacyChip } from "../ui/ModelPrivacyChip";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Spinner } from "../ui/Spinner";
 import {
@@ -109,8 +108,11 @@ import {
   osAccountsUpgrade,
   providerModelSettings,
   retryAgentTask,
+  imagePromptMayBeExplicit,
   revealPath,
   setHermesAgentCliAccess,
+  setImageSafeMode,
+  setImageSafeModePromptDismissed,
   setLocalGenerationEnabled,
   setVeniceModel,
   startHermesBridge,
@@ -203,6 +205,13 @@ import { AgentActivityDrawer, AgentArtifactsSection } from "./AgentActivityDrawe
 import { hermesTraceBuffer } from "../../lib/hermes-trace-buffer";
 import { UnsupportedEventNotice } from "./UnsupportedEventNotice";
 import { HermesTracePanel } from "./HermesTracePanel";
+import { MarkdownContent, highlightText } from "./MarkdownContent";
+import {
+  ComposerModelPicker,
+  PrivacyModeBadge,
+  UnrestrictedBadge,
+  heroPrivacyFootnote,
+} from "./composer/ModelPicker";
 import {
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
   dispatchProviderModelSettingsChanged,
@@ -255,6 +264,7 @@ import {
 } from "../../lib/agent-composer-slash-commands";
 import { generateChatImage, newImageRequestId } from "../../lib/chat-image-generation";
 import { IMAGE_GENERATION_ENABLED } from "../../lib/feature-flags";
+import { ImageSafeModeConsentDialog } from "./ImageSafeModeConsentDialog";
 import {
   ComposerEditor,
   type ComposerEditorHandle,
@@ -286,7 +296,6 @@ import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
   displayedComposerUserMessageText,
-  repairContractionSpacing,
   textFromHermesContent,
   type AgentApprovalChoice,
   type AgentChatPart,
@@ -805,6 +814,21 @@ type AgentWorkspaceErrorOptions = {
 type AgentWorkspaceNotice = {
   message: string;
   sessionId: string | null;
+};
+
+type ImageSafeModeConsentChoice =
+  | { action: "keep"; dontAskAgain: boolean }
+  | { action: "turnOff"; dontAskAgain: boolean }
+  | { action: "dismiss" };
+
+type ImageSafeModeConsentRequest = {
+  variant: "slash" | "agent";
+  resolve: (choice: ImageSafeModeConsentChoice) => void;
+};
+
+type ImageSafeModeConsentEventPayload = {
+  source?: string;
+  prompt?: string;
 };
 
 export function agentWorkspaceErrorStateForMessage(
@@ -1696,6 +1720,9 @@ export function AgentWorkspace({
   const [composerSizeWarning, setComposerSizeWarning] = useState<ComposerInputSizeWarning | null>(
     null,
   );
+  const [imageSafeModeConsentRequest, setImageSafeModeConsentRequest] =
+    useState<ImageSafeModeConsentRequest | null>(null);
+  const imageSafeModeConsentRequestRef = useRef<ImageSafeModeConsentRequest | null>(null);
   const composerSizeProceedSignatureRef = useRef<string | null>(null);
   const composerSizeProceedInputSignatureRef = useRef<string | null>(null);
   // Honest result of the last model switch (feature 10): scoped to the session
@@ -3512,7 +3539,7 @@ export function AgentWorkspace({
   useEffect(() => {
     let disposed = false;
     const unlisteners: Array<() => void> = [];
-    const installListener = async (eventName: string) => {
+    const installFileDropListener = async (eventName: string) => {
       const unlisten = await listen<TauriFileDropPayload>(eventName, (event) => {
         const paths = event.payload?.paths ?? [];
         if (paths.length) {
@@ -3525,8 +3552,22 @@ export function AgentWorkspace({
       }
       unlisteners.push(unlisten);
     };
-    void installListener("tauri://drag-drop");
-    void installListener("tauri://file-drop");
+    const installImageSafeModeConsentListener = async () => {
+      const unlisten = await listen<ImageSafeModeConsentEventPayload>(
+        "image-safe-mode-consent",
+        (event) => {
+          void handleAgentImageSafeModeConsentEvent(event.payload);
+        },
+      );
+      if (disposed) {
+        unlisten();
+        return;
+      }
+      unlisteners.push(unlisten);
+    };
+    void installFileDropListener("tauri://drag-drop");
+    void installFileDropListener("tauri://file-drop");
+    void installImageSafeModeConsentListener();
     return () => {
       disposed = true;
       for (const unlisten of unlisteners) unlisten();
@@ -3798,6 +3839,53 @@ export function AgentWorkspace({
     });
   }
 
+  function requestImageSafeModeConsent(
+    variant: "slash" | "agent",
+  ): Promise<ImageSafeModeConsentChoice> {
+    return new Promise((resolve) => {
+      const request = { variant, resolve };
+      imageSafeModeConsentRequestRef.current = request;
+      setImageSafeModeConsentRequest(request);
+    });
+  }
+
+  function resolveImageSafeModeConsent(choice: ImageSafeModeConsentChoice) {
+    const request = imageSafeModeConsentRequestRef.current;
+    if (!request) return;
+    imageSafeModeConsentRequestRef.current = null;
+    setImageSafeModeConsentRequest(null);
+    request.resolve(choice);
+  }
+
+  async function handleAgentImageSafeModeConsentEvent(payload?: ImageSafeModeConsentEventPayload) {
+    if (payload?.source !== "agent") return;
+    if (imageSafeModeConsentRequestRef.current) return;
+
+    let settings: ProviderModelSettingsDto | undefined;
+    try {
+      settings = (await providerModelSettings()).settings;
+    } catch {
+      return;
+    }
+    if (!settings.imageSafeMode || settings.imageSafeModePromptDismissed) return;
+    if (imageSafeModeConsentRequestRef.current) return;
+
+    const choice = await requestImageSafeModeConsent("agent");
+    if (choice.action === "dismiss") return;
+    if (choice.action === "keep") {
+      if (choice.dontAskAgain) void setImageSafeModePromptDismissed(true);
+      return;
+    }
+
+    try {
+      await setImageSafeMode(false);
+    } catch (err) {
+      setError(messageFromError(err));
+      return;
+    }
+    if (choice.dontAskAgain) void setImageSafeModePromptDismissed(true);
+  }
+
   // `/image <prompt>` renders the generated image inline in the chat as an
   // assistant turn (loader -> image, with view + download), NOT as a composer
   // attachment chip. It creates/uses a real session and the prompt becomes a
@@ -3813,6 +3901,58 @@ export function AgentWorkspace({
       return;
     }
 
+    // Busy-gate the consent + generation flow before any async IPC. This keeps
+    // a second /image submission from starting while the prompt screen or
+    // dialog is pending, but still lets dismiss leave the draft untouched.
+    setImportingFiles(true);
+
+    // Pin the image model and safe mode before the paid turn starts: June API's
+    // replay ledger hashes them into the requestId's key, so a retry after a
+    // settings change must send the values this turn started with or it becomes
+    // a second charge. If the settings read fails, leave them unpinned (server
+    // resolves live, matching the pre-pinning behavior) and skip consent.
+    let settings: ProviderModelSettingsDto | undefined;
+    let pinnedModel: string | undefined;
+    let pinnedSafeMode: boolean | undefined;
+    try {
+      const settingsResponse = await providerModelSettings();
+      settings = settingsResponse.settings;
+      pinnedModel = settings.imageModel || undefined;
+      pinnedSafeMode = settings.imageSafeMode;
+    } catch {
+      // Non-fatal: generation proceeds with server-resolved settings.
+    }
+
+    if (settings?.imageSafeMode && !settings.imageSafeModePromptDismissed) {
+      let mayBeExplicit = false;
+      try {
+        mayBeExplicit = await imagePromptMayBeExplicit(prompt);
+      } catch {
+        mayBeExplicit = false;
+      }
+      if (mayBeExplicit) {
+        const choice = await requestImageSafeModeConsent("slash");
+        if (choice.action === "dismiss") {
+          setImportingFiles(false);
+          return;
+        }
+        if (choice.action === "keep") {
+          if (choice.dontAskAgain) void setImageSafeModePromptDismissed(true);
+          pinnedSafeMode = true;
+        } else {
+          try {
+            await setImageSafeMode(false);
+          } catch (err) {
+            setImportingFiles(false);
+            setError(messageFromError(err));
+            return;
+          }
+          if (choice.dontAskAgain) void setImageSafeModePromptDismissed(true);
+          pinnedSafeMode = false;
+        }
+      }
+    }
+
     // The prompt is about to become a user turn — clear the draft up front and,
     // on a fresh session, play the hero teardown so the conversation view takes
     // over while the session is created.
@@ -3820,11 +3960,9 @@ export function AgentWorkspace({
     if (heroMode) setHeroLeaving(true);
     clearComposerCommandDraft(commandText);
     setError(null);
-    // Busy-gate the WHOLE flow (session create + generation) via the same
-    // importingFiles flag submit() and the send button already check, so a
-    // second Enter or /image can't launch another billable generation while this
-    // one is in flight. generatingImage only tailors the placeholder copy.
-    setImportingFiles(true);
+    // importingFiles already busy-gates the WHOLE flow (consent + session
+    // create + generation) via the same flag submit() and the send button check.
+    // generatingImage only tailors the placeholder copy once generation starts.
     setGeneratingImage(true);
 
     let targetSessionId: string | undefined;
@@ -3857,21 +3995,6 @@ export function AgentWorkspace({
     const createdAt = new Date(turnStartedAt).toISOString();
     const imageCreatedAt = new Date(turnStartedAt + 1).toISOString();
     const requestId = newImageRequestId();
-    // Pin the image model and safe mode NOW: June API's replay ledger hashes
-    // them into the requestId's key, so a retry after a settings change must
-    // send the values this turn started with or it becomes a second charge.
-    // If the settings read fails, leave them unpinned (server resolves live,
-    // matching the pre-pinning behavior).
-    let pinnedModel: string | undefined;
-    let pinnedSafeMode: boolean | undefined;
-    try {
-      const settingsResponse = await providerModelSettings();
-      pinnedModel = settingsResponse.settings.imageModel || undefined;
-      pinnedSafeMode = settingsResponse.settings.imageSafeMode;
-    } catch {
-      // Non-fatal: generation proceeds with server-resolved settings.
-    }
-
     setImageTurnsBySession((current) => ({
       ...current,
       [sessionId]: [
@@ -8186,94 +8309,19 @@ export function AgentWorkspace({
           ) : null}
         </>
       )}
+      {imageSafeModeConsentRequest ? (
+        <ImageSafeModeConsentDialog
+          variant={imageSafeModeConsentRequest.variant}
+          onKeepSafeMode={(dontAskAgain) =>
+            resolveImageSafeModeConsent({ action: "keep", dontAskAgain })
+          }
+          onTurnOffSafeMode={(dontAskAgain) =>
+            resolveImageSafeModeConsent({ action: "turnOff", dontAskAgain })
+          }
+          onDismiss={() => resolveImageSafeModeConsent({ action: "dismiss" })}
+        />
+      ) : null}
     </section>
-  );
-}
-
-function ComposerModelPicker({
-  open,
-  model,
-  triggerRef,
-  onToggleOpen,
-}: {
-  open: boolean;
-  model?: VeniceModelDto;
-  triggerRef: RefObject<HTMLButtonElement>;
-  onToggleOpen: () => void;
-}) {
-  if (!model) return null;
-  return (
-    <div className="agent-composer-model" data-open={open || undefined}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="agent-composer-model-trigger"
-        aria-label={`Model: ${model.name}`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={onToggleOpen}
-      >
-        <span>{model.name}</span>
-        <IconChevronDownSmall size={12} aria-hidden />
-      </button>
-    </div>
-  );
-}
-
-// Footnote under the hero composer. June's agent runs on the user's Mac, but
-// model calls go out to the provider, so the privacy claim has to match the
-// active model: encrypted into the enclave (E2EE), private (zero retention),
-// or anonymized (identity stripped, prompts may be retained). Name the model
-// so it's clear what's running; fall back to the plain line when none is known.
-function heroPrivacyFootnote(
-  model: VeniceModelDto | undefined,
-  badge: ModelPrivacyBadge | undefined,
-): string {
-  if (!model) return "June runs locally.";
-  switch (badge?.mode) {
-    case "e2ee":
-      return `June runs locally. Calls to ${model.name} are end-to-end encrypted.`;
-    case "private":
-      return `June runs locally. Calls to ${model.name} are private.`;
-    case "anonymous":
-      return `June runs locally. Calls to ${model.name} are anonymized.`;
-    default:
-      return `June runs locally. You're running ${model.name}.`;
-  }
-}
-
-// The current model's privacy mode as a pill — Private, Anonymous, or E2EE,
-// with the same icons the composer model popover uses. The model itself is
-// switched from the composer's picker; this badge just keeps the privacy
-// claim visible while the conversation scrolls. The claims stay verifiable:
-// the attestation walkthrough lives in Settings (Models and About) and
-// onboarding.
-function PrivacyModeBadge({ badge }: { badge?: ModelPrivacyBadge }) {
-  if (!badge) return null;
-  // Delegates to the shared chip in the themed (brand-tinted pill) family so the
-  // session bar and the usage panel render the same component. The look is
-  // unchanged: themed-md keeps the 13px icon and the `.agent-safety-badge`
-  // recipe; the aria-label now unifies to the shared "label: description" form.
-  return <ModelPrivacyChip badge={badge} variant="themed" />;
-}
-
-// Indicator of the selected session's opt-in. The jail itself is
-// per-process, but every send restarts the runtime into the target session's
-// recorded mode, so the session — not the runtime's current state — is the
-// honest unit to label.
-function UnrestrictedBadge() {
-  const description =
-    "This session runs without the file sandbox: June can change any file your account can. Sandboxed sessions keep their jail and run alongside on a separate, jailed runtime.";
-  return (
-    <HoverTip
-      tip={description}
-      className="agent-safety-badge agent-sandbox-badge"
-      tabIndex={0}
-      aria-label={`Unrestricted - ${description}`}
-    >
-      <IconShieldCrossed size={13} aria-hidden />
-      Unrestricted
-    </HoverTip>
   );
 }
 
@@ -11640,261 +11688,6 @@ function isPreviewableImagePath(path: string) {
 
 function isMarkdownPath(path: string) {
   return /\.(md|markdown|mdx)$/i.test(path);
-}
-
-function MarkdownContent({
-  markdown,
-  highlight,
-  // Repairs the gateway's dropped-space-after-contraction artifact ("it'snot"
-  // -> "it's not"). Only set for assistant prose: it must never touch code or
-  // a user's own text. See repairContractionSpacing.
-  repairProse = false,
-}: {
-  markdown: string;
-  highlight?: string;
-  repairProse?: boolean;
-}) {
-  return (
-    <div className="agent-markdown">{renderMarkdownBlocks(markdown, highlight, repairProse)}</div>
-  );
-}
-
-/** Wraps case-insensitive matches of `highlight` in <mark>, leaving the text
- * untouched when there's nothing to find. Every text emission point in the
- * markdown renderer funnels through here so find-in-file can light up
- * rendered documents, not just raw source. */
-function highlightText(text: string, highlight: string | undefined, keySeed: string): ReactNode[] {
-  const needle = highlight?.toLowerCase();
-  if (!needle) return [text];
-  const lower = text.toLowerCase();
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  let count = 0;
-  for (;;) {
-    const at = lower.indexOf(needle, cursor);
-    if (at < 0) break;
-    if (at > cursor) nodes.push(text.slice(cursor, at));
-    nodes.push(<mark key={`hl-${keySeed}-${count++}`}>{text.slice(at, at + needle.length)}</mark>);
-    cursor = at + needle.length;
-  }
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return nodes;
-}
-
-function renderMarkdownBlocks(markdown: string, highlight?: string, repairProse = false) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-  const blocks: ReactNode[] = [];
-  let paragraph: string[] = [];
-  let key = 0;
-
-  const flushParagraph = () => {
-    const text = paragraph.join("\n").trim();
-    paragraph = [];
-    if (!text) return;
-    blocks.push(
-      <p key={`p-${key++}`}>{renderInlineMarkdown(text, key, highlight, repairProse)}</p>,
-    );
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flushParagraph();
-      continue;
-    }
-
-    if (trimmed.startsWith("```")) {
-      flushParagraph();
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      // Skip empty fences — including a stray trailing ``` while streaming —
-      // so we don't flash an empty code block (a bare padded gray bar).
-      const body = code.join("\n");
-      if (body.trim()) {
-        blocks.push(
-          <pre key={`code-${key++}`}>
-            <code>{highlightText(body, highlight, `code-${key}`)}</code>
-          </pre>,
-        );
-      }
-      continue;
-    }
-
-    // Thematic break (---, ***, ___) → a quiet rule instead of literal dashes.
-    if (/^([-*_])\1{2,}$/.test(trimmed)) {
-      flushParagraph();
-      blocks.push(<hr key={`hr-${key++}`} className="agent-md-rule" />);
-      continue;
-    }
-
-    // Blockquote: strip the > prefix and re-render the inner lines, so quotes
-    // can hold paragraphs, lists, or code like any other block.
-    if (trimmed.startsWith(">")) {
-      flushParagraph();
-      const quoted: string[] = [];
-      while (index < lines.length && lines[index].trim().startsWith(">")) {
-        quoted.push(lines[index].trim().replace(/^>\s?/, ""));
-        index += 1;
-      }
-      index -= 1;
-      blocks.push(
-        <blockquote key={`quote-${key++}`}>
-          {renderMarkdownBlocks(quoted.join("\n"), highlight, repairProse)}
-        </blockquote>,
-      );
-      continue;
-    }
-
-    // Pipe table: a |…| row followed by a |---|---| separator.
-    const isTableRow = (value: string) =>
-      value.startsWith("|") && value.endsWith("|") && value.length > 1;
-    if (
-      isTableRow(trimmed) &&
-      index + 1 < lines.length &&
-      /^\|(\s*:?-+:?\s*\|)+$/.test(lines[index + 1].trim())
-    ) {
-      flushParagraph();
-      const splitRow = (value: string) =>
-        value
-          .slice(1, -1)
-          .split("|")
-          .map((cell) => cell.trim());
-      const header = splitRow(trimmed);
-      index += 2;
-      const rows: string[][] = [];
-      while (index < lines.length && isTableRow(lines[index].trim())) {
-        rows.push(splitRow(lines[index].trim()));
-        index += 1;
-      }
-      index -= 1;
-      blocks.push(
-        <div key={`table-${key++}`} className="agent-md-table">
-          <table>
-            <thead>
-              <tr>
-                {header.map((cell, cellIndex) => (
-                  <th key={cellIndex}>{renderInlineMarkdown(cell, key, highlight, repairProse)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {row.map((cell, cellIndex) => (
-                    <td key={cellIndex}>
-                      {renderInlineMarkdown(cell, key, highlight, repairProse)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      continue;
-    }
-
-    const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed);
-    if (heading) {
-      flushParagraph();
-      const level = Math.min(heading[1].length, 3);
-      const content = renderInlineMarkdown(heading[2], key, highlight, repairProse);
-      blocks.push(
-        level === 1 ? <h2 key={`h-${key++}`}>{content}</h2> : <h3 key={`h-${key++}`}>{content}</h3>,
-      );
-      continue;
-    }
-
-    const unordered = /^[-*]\s+(.+)$/.exec(trimmed);
-    const ordered = /^\d+\.\s+(.+)$/.exec(trimmed);
-    if (unordered || ordered) {
-      flushParagraph();
-      const orderedList = Boolean(ordered);
-      const items: string[] = [];
-      while (index < lines.length) {
-        const candidate = lines[index].trim();
-        const match = orderedList
-          ? /^\d+\.\s+(.+)$/.exec(candidate)
-          : /^[-*]\s+(.+)$/.exec(candidate);
-        if (!match) break;
-        items.push(match[1]);
-        index += 1;
-      }
-      index -= 1;
-      const listItems = items.map((item, itemIndex) => (
-        <li key={`li-${key}-${itemIndex}`}>
-          {renderInlineMarkdown(item, key + itemIndex, highlight, repairProse)}
-        </li>
-      ));
-      blocks.push(
-        orderedList ? (
-          <ol key={`list-${key++}`}>{listItems}</ol>
-        ) : (
-          <ul key={`list-${key++}`}>{listItems}</ul>
-        ),
-      );
-      continue;
-    }
-
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  return blocks;
-}
-
-function renderInlineMarkdown(
-  text: string,
-  keySeed: number,
-  highlight?: string,
-  repairProse = false,
-): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const mark = (value: string, slot: string) =>
-    highlightText(value, highlight, `${keySeed}-${slot}`);
-  // Prose runs (plain text, emphasis, link text) get the contraction-spacing
-  // repair; code spans and URLs go through `mark` untouched.
-  const markProse = (value: string, slot: string) =>
-    mark(repairProse ? repairContractionSpacing(value) : value, slot);
-  const pattern =
-    /(\*\*([^*]+)\*\*|\*([^*]+)\*|~~([^~]+)~~|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))/g;
-  let lastIndex = 0;
-  let index = 0;
-  let match = pattern.exec(text);
-  while (match !== null) {
-    if (match.index > lastIndex) {
-      nodes.push(...markProse(text.slice(lastIndex, match.index), `g${index}`));
-    }
-    if (match[2]) {
-      nodes.push(
-        <strong key={`strong-${keySeed}-${index}`}>{markProse(match[2], `s${index}`)}</strong>,
-      );
-    } else if (match[3]) {
-      nodes.push(<em key={`em-${keySeed}-${index}`}>{markProse(match[3], `e${index}`)}</em>);
-    } else if (match[4]) {
-      nodes.push(<del key={`del-${keySeed}-${index}`}>{markProse(match[4], `d${index}`)}</del>);
-    } else if (match[5]) {
-      nodes.push(<code key={`code-${keySeed}-${index}`}>{mark(match[5], `c${index}`)}</code>);
-    } else if (match[6] && match[7]) {
-      nodes.push(
-        <a key={`link-${keySeed}-${index}`} href={match[7]} rel="noreferrer" target="_blank">
-          {markProse(match[6], `a${index}`)}
-        </a>,
-      );
-    }
-    lastIndex = pattern.lastIndex;
-    index += 1;
-    match = pattern.exec(text);
-  }
-  if (lastIndex < text.length) {
-    nodes.push(...markProse(text.slice(lastIndex), "t"));
-  }
-  return nodes;
 }
 
 function capabilityMatches(
