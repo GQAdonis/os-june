@@ -886,6 +886,9 @@ type PersistedVideoSlashTurn = {
   jobId?: string;
   averageExecutionMs?: number;
   executionMs?: number;
+  /** True once the generation completed but its context has not yet ridden a
+   * follow-up prompt (the video fold; see storedPendingVideoSlashContexts). */
+  contextPending?: boolean;
 };
 
 function imageSlashUserTurn(turn: Pick<PersistedImageSlashTurn, "createdAt" | "id" | "prompt">) {
@@ -1310,6 +1313,11 @@ function persistedVideoSlashTurn(
     name: candidate.name,
     createdAt: candidate.createdAt,
     videoCreatedAt: candidate.videoCreatedAt,
+    // A pending turn has no completed video to describe on the follow-up.
+    // Defaults true for completed turns stored before this field existed, so
+    // sessions with an already-generated video get the fold on their next
+    // message too.
+    contextPending: pending ? false : candidate.contextPending !== false,
     ...(pending
       ? {
           pending: true,
@@ -1365,6 +1373,50 @@ function removeStoredVideoSlashSession(sessionId: string) {
   if (!turns[sessionId]) return;
   delete turns[sessionId];
   writeStoredVideoSlashTurns(turns);
+}
+
+/** Completed `/video` fast-path turns whose context has not yet ridden a
+ * follow-up prompt. The fast path never invokes the model (skipPrompt), so
+ * without this fold a follow-up reads as the first message of the conversation
+ * and the model does not know a video was ever generated. Mirrors the JUN-171
+ * held-image fold, but as text: no model takes an mp4 as input, so the context
+ * is described rather than attached. */
+function storedPendingVideoSlashContexts(sessionId: string): PersistedVideoSlashTurn[] {
+  return (storedVideoSlashTurns()[sessionId] ?? []).filter(
+    (turn) => turn.contextPending && !turn.pending && turn.path.trim() !== "",
+  );
+}
+
+function markStoredVideoSlashContextsSent(sessionId: string, ids: string[]) {
+  if (!ids.length) return;
+  const idSet = new Set(ids);
+  const turns = storedVideoSlashTurns();
+  const sessionTurns = turns[sessionId] ?? [];
+  if (!sessionTurns.length) return;
+  turns[sessionId] = sessionTurns.map((turn) =>
+    idSet.has(turn.id) ? { ...turn, contextPending: false } : turn,
+  );
+  writeStoredVideoSlashTurns(turns);
+}
+
+/** Appends the pending `/video` context under the `--- Attached Context ---`
+ * marker, which every user-bubble render path already strips - the model sees
+ * it, the user never does (same convention as unsupportedImageInputPrompt). */
+function withVideoFastPathContext(content: string, turns: PersistedVideoSlashTurn[]): string {
+  if (!turns.length) return content;
+  return [
+    content,
+    "",
+    "--- Attached Context ---",
+    "Earlier in this session the user generated video(s) with the /video command. Those turns ran outside this transcript; the videos already play inline for the user:",
+    ...turns.map(
+      (turn) =>
+        `- prompt: "${turn.prompt}" -> ${turn.name || "video"}${
+          turn.model ? ` (model: ${turn.model})` : ""
+        }, saved at ${turn.path}`,
+    ),
+    "Generated videos cannot be edited in place. If the user asks to change, extend, or redo a video, call the june_video generate_video tool with a revised full prompt (or animate_image to animate a source image).",
+  ].join("\n");
 }
 
 function filenameFromWorkspacePath(path: string, fallback: string) {
@@ -4316,6 +4368,9 @@ export function AgentWorkspace({
         requestId,
         model: result.model ?? input.model,
         jobId: result.jobId,
+        // Hold this turn's context for the video fold: the next real prompt in
+        // this session carries it to the model (storedPendingVideoSlashContexts).
+        contextPending: true,
       });
       hermesArtifactStore.recordArtifact(
         {
@@ -5626,6 +5681,12 @@ export function AgentWorkspace({
             ...(pendingFastPathImagesRef.current[targetSessionId] ?? []),
             ...storedPendingImageSlashAttachments(targetSessionId),
           ]);
+    // The video counterpart of the fold above, gated the same way (never on
+    // the skipPrompt fast path itself, only on a real follow-up prompt).
+    const heldVideoContexts =
+      options?.skipPrompt || !targetSessionId
+        ? []
+        : storedPendingVideoSlashContexts(targetSessionId);
     const turnAttachments = [...(options?.attachments ?? []), ...heldFastPathImages];
     const pendingImages = pendingImageAttachments(
       turnAttachments.map((attachment) => attachment.attach),
@@ -5653,7 +5714,10 @@ export function AgentWorkspace({
             runtimeContent: content,
           })
         : undefined;
-    const promptSubmitContent = imageInputFallbackContent ?? content;
+    const promptSubmitContent = withVideoFastPathContext(
+      imageInputFallbackContent ?? content,
+      heldVideoContexts,
+    );
     // Issue reports skip title suggestion: the content is the wrapped
     // investigation prompt, which would title the session after the wrapper.
     const titlePromise =
@@ -5899,6 +5963,12 @@ export function AgentWorkspace({
       // the message, so a rejected submit can be retried with the same image
       // context.
       clearHeldFastPathImages(storedSessionId, heldFastPathImages);
+      // Same contract for the video fold: clear only after prompt.submit
+      // accepts, so a rejected submit retries with the same video context.
+      markStoredVideoSlashContextsSent(
+        storedSessionId,
+        heldVideoContexts.map((turn) => turn.id),
+      );
       await loadHermesSessions({
         suppressStartupRequestError: !hermesSessionsHydratedRef.current,
       });
