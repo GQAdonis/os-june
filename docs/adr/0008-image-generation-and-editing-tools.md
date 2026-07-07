@@ -82,23 +82,32 @@ never see it:
   re-enabling safe mode resets it, so re-opting into safety re-arms the
   dialog.
 
-The dialog gate costs **no extra inference and no extra charge**, but the
-two surfaces get there differently:
+The dialog gate works differently per surface:
 
-- `/image` fast path: deterministic on-device wordlist + phrase match only
-  (`image_safety::may_request_explicit_content`) - no LLM, no classifier, no
-  Venice or June API call, no metering. A model-based check was considered
-  and rejected here: it would add a billable call per generation, and it
-  would upload the prompt for screening BEFORE the user consents - today a
-  cancelled dialog means nothing ever left the device.
-- Agent tool path: the model is already in the loop (it is the one calling
-  the tool), so it self-classifies for free via a required
-  `may_be_explicit` boolean on `generate_image`/`edit_image`. The proxy ORs
-  that self-report with the same wordlist to decide the consent event, and
-  strips the field before forwarding upstream. Self-report is filled by the
-  very model the user is steering, so it can under-report - the failure mode
-  is bounded exactly like a wordlist miss: no dialog, and Venice `safe_mode`
-  still enforces the blur.
+- Agent tool path: **free**. The model is already in the loop (it is the one
+  calling the tool), so it self-classifies via a required `may_be_explicit`
+  boolean on `generate_image`/`edit_image`. The proxy ORs that self-report
+  with the on-device wordlist to decide the consent event, and strips the
+  field before forwarding upstream. Self-report is filled by the very model
+  the user is steering, so it can under-report - the failure mode is bounded
+  exactly like a wordlist miss: no dialog, and Venice `safe_mode` still
+  enforces the blur.
+- `/image` fast path: wordlist first, then a **model check**. The on-device
+  wordlist (`image_safety::may_request_explicit_content`) short-circuits the
+  obvious cases for free; when it is silent AND safe mode is on AND the
+  consent prompt is not dismissed, June asks the user's text model whether
+  the prompt requests explicit content (a one-shot temperature-0 YES/NO
+  chat completion through the same June API path as agent session titles,
+  metered as a normal agent-chat call). Classifier failure or timeout falls
+  back to the wordlist verdict; the check can delay but never block or fail
+  a generation. Originally this surface was wordlist-only, but the wordlist
+  is English-only and a Polish prompt reproduced the systematic miss
+  (blurred result, no consent offer) - a model check is the only
+  language-agnostic gate available on a path with no model in the loop.
+  Accepted trade-offs, decided with the user: a small metered call per
+  flagged-state generation, ~1-3s added latency before the dialog, and the
+  prompt travels to June API for screening BEFORE consent whenever safe
+  mode is on (it previously left the device only on actual generation).
 
 Trade-offs accepted: the heuristic is a conservative wordlist (misses
 euphemisms, some false positives) - acceptable because it only gates the

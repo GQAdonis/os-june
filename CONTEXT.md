@@ -264,10 +264,13 @@ _Avoid_: image-to-image jargon, regenerate (that's a fresh **image generation**)
 The per-device toggle that asks Venice to blur adult content on generated and
 edited images (`safe_mode`). On by default; the user turns it off in Settings
 or via the **safe-mode consent dialog** June shows before or during a
-potentially explicit generation. Enforcement is Venice's; the dialog gate -
-June's on-device wordlist heuristic, plus on the agent path the model's own
-`may_be_explicit` self-report in the tool call - only decides when to *offer*
-the dialog, never what gets generated, and never costs an extra call.
+potentially explicit generation. Enforcement is Venice's; the dialog gate
+only decides when to *offer* the dialog, never what gets generated. On the
+agent path the gate is free (on-device wordlist plus the model's own
+`may_be_explicit` self-report in the tool call); on the /image path the
+wordlist short-circuits and otherwise a small metered model check classifies
+the prompt (language-agnostic, added after the English-only wordlist missed
+non-English prompts).
 See [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md).
 _Avoid_: NSFW filter/toggle (say **safe mode**), censorship.
 
