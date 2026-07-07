@@ -10,6 +10,10 @@ import {
   useProfileManagerController,
   type ProfileManagerEngine,
 } from "../lib/hermes-admin";
+import {
+  getActiveHermesProfileName,
+  resetActiveHermesProfileForTests,
+} from "../lib/active-hermes-profile";
 import { makeAdminHarness } from "./fixtures/hermes-admin-harness";
 
 // ---------------------------------------------------------------------------
@@ -258,6 +262,24 @@ describe("profile manager - hook flows", () => {
       ),
     ).toBe(false);
     controller.dispose();
+  });
+
+  it("feeds the app-global store from a confirmed active read on load", async () => {
+    resetActiveHermesProfileForTests();
+    const harness = makeAdminHarness({
+      profiles: [
+        { name: "default", active: false },
+        { name: "research", active: true },
+      ],
+      activeProfile: "research",
+    });
+    const controller = new ProfileManagerController(harness as ProfileManagerEngine);
+
+    await controller.load();
+
+    expect(getActiveHermesProfileName()).toBe("research");
+    controller.dispose();
+    resetActiveHermesProfileForTests();
   });
 
   it("startTestSession still activates the profile and opens a terminal", async () => {

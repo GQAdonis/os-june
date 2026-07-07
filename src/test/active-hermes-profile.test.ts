@@ -4,6 +4,7 @@ import { act, renderHook } from "@testing-library/react";
 import {
   getActiveHermesProfileName,
   refreshActiveHermesProfile,
+  resetActiveHermesProfileForTests,
   setActiveHermesProfileName,
   subscribe,
   useActiveHermesProfileName,
@@ -35,7 +36,7 @@ const sandboxedConnection = {
 describe("active Hermes profile store", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    setActiveHermesProfileName("default");
+    resetActiveHermesProfileForTests();
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: true,
       connection: sandboxedConnection,
@@ -62,8 +63,16 @@ describe("active Hermes profile store", () => {
     });
   });
 
-  it("falls back to default when refresh fails", async () => {
+  it("keeps a confirmed profile when a later refresh fails", async () => {
     setActiveHermesProfileName("research");
+    mocks.invoke.mockRejectedValue(new Error("bridge unavailable"));
+
+    await expect(refreshActiveHermesProfile()).resolves.toBe("research");
+
+    expect(getActiveHermesProfileName()).toBe("research");
+  });
+
+  it("stays on default when a refresh fails before anything was confirmed", async () => {
     mocks.invoke.mockRejectedValue(new Error("bridge unavailable"));
 
     await expect(refreshActiveHermesProfile()).resolves.toBe("default");

@@ -21810,7 +21810,7 @@ input:focus-visible,
   display: inline-flex;
   align-items: center;
   padding: 1px var(--sp-2);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: color-mix(in oklch, var(--ring-focus) 18%, transparent);
   color: var(--foreground);
   font-size: var(--fs-xs);
@@ -21926,7 +21926,7 @@ input:focus-visible,
   justify-content: center;
   width: 18px;
   height: 18px;
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--muted);
   color: var(--muted-foreground);
   font-size: var(--fs-xs);
@@ -22072,7 +22072,7 @@ input:focus-visible,
   display: inline-flex;
   align-items: center;
   padding: 1px var(--sp-2);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--surface-subtle);
   font-size: var(--fs-xs);
   font-weight: 400;
@@ -22129,7 +22129,7 @@ input:focus-visible,
   align-items: center;
   flex: 0 0 auto;
   padding: 1px var(--sp-2);
-  border-radius: 999px;
+  border-radius: var(--r-pill);
   background: var(--surface-subtle);
   color: var(--muted-foreground);
   font-size: var(--fs-xs);

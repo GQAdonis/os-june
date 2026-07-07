@@ -138,6 +138,11 @@ export class ProfileManagerController {
     if (activeResult.status === "fulfilled") {
       this.activeName = activeResult.value.active || "default";
       this.activeConfirmed = true;
+      // Feed the app-global store on every confirmed read, not only on an
+      // in-app switch: with a sticky non-default profile from a prior run,
+      // the settings surfaces must scope correctly before any gateway
+      // connect has refreshed the store.
+      setActiveHermesProfileName(this.activeName);
     } else {
       this.activeConfirmed = false;
     }

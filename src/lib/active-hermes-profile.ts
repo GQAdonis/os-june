@@ -16,6 +16,11 @@ export type ActiveHermesProfileRefreshOptions = {
   mode?: HermesAdminMode;
 };
 
+/** Last-known active profile. Starts at `default` and is only ever moved by a
+ * confirmed source (a successful active read or an in-app switch) — a failed
+ * refresh keeps the current value, because a transient read failure must not
+ * silently rebind new sessions to `default` when the sticky active profile is
+ * known to be something else. */
 let activeProfileName = DEFAULT_HERMES_PROFILE;
 const listeners = new Set<Listener>();
 
@@ -43,6 +48,11 @@ export function setActiveHermesProfileName(name: string): void {
   emit();
 }
 
+/** Test-only: resets the store to default so cases stay isolated. */
+export function resetActiveHermesProfileForTests(): void {
+  activeProfileName = DEFAULT_HERMES_PROFILE;
+}
+
 export function subscribe(listener: Listener): () => void {
   listeners.add(listener);
   return () => {
@@ -60,10 +70,7 @@ export async function refreshActiveHermesProfile(
       preferredMode === "sandboxed" ? "unrestricted" : "sandboxed";
     const target =
       adminTargetForMode(status, preferredMode) ?? adminTargetForMode(status, fallbackMode);
-    if (!target) {
-      setActiveHermesProfileName(DEFAULT_HERMES_PROFILE);
-      return activeProfileName;
-    }
+    if (!target) return activeProfileName;
 
     const client = createHermesAdminClient(target, {
       fetch: createRustAdminFetch(target.mode),
@@ -72,7 +79,8 @@ export async function refreshActiveHermesProfile(
     setActiveHermesProfileName(active.active);
     return activeProfileName;
   } catch {
-    setActiveHermesProfileName(DEFAULT_HERMES_PROFILE);
+    // Keep the last-known value: `default` when nothing was ever confirmed,
+    // the previously confirmed name otherwise (see activeProfileName's doc).
     return activeProfileName;
   }
 }
