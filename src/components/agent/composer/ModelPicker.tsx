@@ -14,7 +14,7 @@ import {
 import { suggestedModelsForMode } from "../../../lib/suggested-models";
 import type { VeniceModelDto } from "../../../lib/tauri";
 import { HoverTip } from "../../ui/HoverTip";
-import { ModelPrivacyChip } from "../../ui/ModelPrivacyChip";
+import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../../ui/ModelPrivacyChip";
 import { contextLabel, pricingLabel } from "../../settings/ModelPickerDialog";
 
 /** The composer's model picker: the trigger pill and its two-layer popover
@@ -280,6 +280,7 @@ export function ComposerModelPopover({
               onClick={() => onSelect(option.id)}
             >
               <span className="agent-composer-model-row-name">{option.name}</span>
+              <ModelRowPrivacyBadge model={option} />
               {option.id === model.id ? (
                 <IconCheckmark1Small
                   size={14}
@@ -512,6 +513,7 @@ function ComposerModelOption({
       onClick={() => onSelect(model.id)}
     >
       <span className="agent-composer-model-row-name">{model.name}</span>
+      <ModelRowPrivacyBadge model={model} />
       {selected ? (
         <IconCheckmark1Small size={14} aria-hidden className="agent-composer-model-row-check" />
       ) : null}

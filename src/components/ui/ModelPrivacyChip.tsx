@@ -1,8 +1,18 @@
 import { IconAnonymous } from "central-icons/IconAnonymous";
 import { IconGhost2 } from "central-icons/IconGhost2";
 import { IconLock } from "central-icons/IconLock";
-import type { ModelPrivacyBadge } from "../../lib/model-privacy";
+import { modelPrivacyBadge, type ModelPrivacyBadge } from "../../lib/model-privacy";
+import type { VeniceModelDto } from "../../lib/tauri";
 import { HoverTip } from "./HoverTip";
+
+/** The privacy mode's mascot: the lock for E2EE, the ghost for private, the
+ * anonymized figure otherwise. Shared so every surface draws the same glyph
+ * for a given mode. */
+function privacyModeIcon(mode: ModelPrivacyBadge["mode"], size: number) {
+  if (mode === "e2ee") return <IconLock size={size} aria-hidden />;
+  if (mode === "private") return <IconGhost2 size={size} aria-hidden />;
+  return <IconAnonymous size={size} aria-hidden />;
+}
 
 /**
  * The single chip for a model's privacy badge — the icon-by-mode (lock / ghost /
@@ -52,14 +62,7 @@ export function ModelPrivacyChip({
   // its shorter height; every other placement keeps the 13/14px icon.
   const iconSize = size === "sm" ? 12 : variant === "themed" ? 13 : 14;
 
-  const icon =
-    badge.mode === "e2ee" ? (
-      <IconLock size={iconSize} aria-hidden />
-    ) : badge.mode === "private" ? (
-      <IconGhost2 size={iconSize} aria-hidden />
-    ) : (
-      <IconAnonymous size={iconSize} aria-hidden />
-    );
+  const icon = privacyModeIcon(badge.mode, iconSize);
 
   if (!withTip) {
     return (
@@ -81,5 +84,22 @@ export function ModelPrivacyChip({
       {icon}
       <span>{label}</span>
     </HoverTip>
+  );
+}
+
+/**
+ * Icon-only privacy marker for the model-picker rows — the mode's mascot (ghost
+ * for private, lock for E2EE, anonymized figure otherwise) in a small
+ * brand-tinted squircle pinned to the row's trailing edge. Renders nothing for
+ * a model with no privacy stance. The full label lives in the row's hover card,
+ * so here the squircle only carries a native `title` for a quick pointer hint.
+ */
+export function ModelRowPrivacyBadge({ model }: { model: VeniceModelDto }) {
+  const badge = modelPrivacyBadge(model);
+  if (!badge) return null;
+  return (
+    <span className="model-row-privacy" data-mode={badge.mode} title={badge.label}>
+      {privacyModeIcon(badge.mode, 13)}
+    </span>
   );
 }

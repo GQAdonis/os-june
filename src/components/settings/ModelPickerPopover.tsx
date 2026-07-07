@@ -7,7 +7,7 @@ import { modelAvailableForMode, modelPrivacyBadge } from "../../lib/model-privac
 import { suggestedModelsForMode } from "../../lib/suggested-models";
 import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
 import { HoverTip } from "../ui/HoverTip";
-import { ModelPrivacyChip } from "../ui/ModelPrivacyChip";
+import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../ui/ModelPrivacyChip";
 import { contextLabel, pricingLabel } from "./ModelPickerDialog";
 import { ProviderLogo } from "./ProviderLogo";
 
@@ -106,6 +106,20 @@ export function ModelPickerPopover({
       return prev.top === top && prev.bottom === bottom ? prev : { top, bottom };
     });
   }, []);
+
+  // The direct catalog renders the searchable list straight inside the popover
+  // (no flyout panel), so nothing else caps its height and a long catalog (the
+  // image models) would run off the bottom of the window. Anchored below the
+  // trigger and growing downward, so cap it to the room beneath its own top —
+  // clearing the viewport floor — up to a fixed ceiling. The inner list then
+  // scrolls instead of the panel overflowing.
+  useLayoutEffect(() => {
+    if (!directCatalog) return;
+    const el = popoverRef.current;
+    if (!el) return;
+    const room = window.innerHeight - el.getBoundingClientRect().top - 16;
+    el.style.maxHeight = `${Math.max(200, Math.min(room, 460))}px`;
+  }, [directCatalog, options, search, popoverRef]);
 
   useLayoutEffect(() => {
     const el = flyoutRef.current;
@@ -307,6 +321,7 @@ export function ModelPickerPopover({
                   onClick={() => onSelect(option.id)}
                 >
                   <ModelPickerOptionText model={option} />
+                  <ModelRowPrivacyBadge model={option} />
                   {option.id === model.id ? (
                     <IconCheckmark2Small
                       size={14}
@@ -463,6 +478,7 @@ function ModelPickerOption({
       onClick={() => onSelect(model.id)}
     >
       <ModelPickerOptionText model={model} />
+      <ModelRowPrivacyBadge model={model} />
       {selected ? (
         <IconCheckmark2Small size={14} aria-hidden className="agent-composer-model-row-check" />
       ) : null}

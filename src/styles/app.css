@@ -5027,6 +5027,30 @@ input:focus-visible,
   color: var(--muted-foreground);
 }
 
+/* Trailing privacy marker: the mode's mascot in a small brand-tinted squircle,
+ * same clay tint recipe as .agent-safety-badge so it reads as the same family.
+ * Pinned to the row's trailing edge; when a row is also selected the checkmark
+ * follows it (its own margin auto is dropped so the two sit together). */
+.model-row-privacy {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--brand) 14%, transparent);
+  color: var(--warm-strong);
+}
+
+.model-row-privacy svg {
+  color: var(--warm-strong);
+}
+
+.model-row-privacy ~ .agent-composer-model-row-check {
+  margin-left: 0;
+}
+
 /* Sits below the suggested rows with the same breathing room, so its hover
  * pill matches theirs without needing a divider. */
 .agent-composer-model-all {
@@ -5175,6 +5199,7 @@ input:focus-visible,
 
 .agent-composer-model-direct {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 2px;
   min-height: 0;
