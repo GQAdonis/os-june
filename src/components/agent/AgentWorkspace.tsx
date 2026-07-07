@@ -5664,17 +5664,33 @@ export function AgentWorkspace({
         continue;
       }
       misses.delete(sessionId);
-      const activityCounts = clearSessionActivity(sessionId);
-      // "completed" (not "failed") keeps the status quiet: its title falls back
-      // to lastStatus when nothing is active, and a stale "running" there
-      // would still render "Working…".
+      const freshMessages = await refreshHermesSession(sessionId);
+      if (!freshMessages) continue;
+      const title =
+        hermesSessionItems.find((session) => session.id === sessionId)?.title ?? "Agent session";
+      if (sessionHasAssistantAfterLatestUser(freshMessages)) {
+        const activityCounts = clearSessionActivity(sessionId);
+        // "completed" (not "failed") keeps the status quiet: its title falls back
+        // to lastStatus when nothing is active, and a stale "running" there
+        // would still render "Working…".
+        dispatchAgentSessionStatus({
+          sessionId,
+          title,
+          status: "completed",
+          summary: "June stopped.",
+          ...activityCounts,
+        });
+        continue;
+      }
+      const summary = "June stopped before replying.";
+      recordSessionErrorActivity(sessionId, summary);
+      setError(summary, { sessionId });
       dispatchAgentSessionStatus({
         sessionId,
-        title:
-          hermesSessionItems.find((session) => session.id === sessionId)?.title ?? "Agent session",
-        status: "completed",
-        summary: "June stopped.",
-        ...activityCounts,
+        title,
+        status: "failed",
+        summary,
+        ...agentActivityCountsFromStore(),
       });
     }
   }
@@ -5702,11 +5718,12 @@ export function AgentWorkspace({
   async function refreshHermesSession(sessionId: string) {
     try {
       const messages = await listSessionMessagesOrdered(sessionId);
-      if (!messages) return;
+      if (!messages) return undefined;
       const retainedPending = retainUnpersistedPendingMessages(
         pendingHermesMessagesRef.current[sessionId] ?? [],
         messages,
       );
+      const combined = [...messages, ...retainedPending];
       setHermesSessionMessages((current) => ({
         ...current,
         [sessionId]: messages,
@@ -5720,7 +5737,7 @@ export function AgentWorkspace({
         return next;
       });
       void suggestTitleForUntitledSession(sessionId, messages);
-      if (sessionHasAssistantAfterLatestUser([...messages, ...retainedPending])) {
+      if (sessionHasAssistantAfterLatestUser(combined)) {
         promotePendingIssueReportToReview(sessionId, {
           queueDiagnosisRefresh: false,
         });
@@ -5746,13 +5763,15 @@ export function AgentWorkspace({
         setLiveEvents(liveEventsRef.current);
       }
       await loadHermesSessions();
+      return combined;
     } catch (err) {
       const message = messageFromError(err);
       // Background refresh racing a just-created session: a transient
       // "Session not found" 404 resolves on the next poll, so don't surface
       // it as an error banner (JUN-116).
-      if (isSessionGoneError(message)) return;
+      if (isSessionGoneError(message)) return undefined;
       setError(describeHermesError(err), reportableAgentErrorOptions(err, { sessionId }));
+      return undefined;
     }
   }
 
