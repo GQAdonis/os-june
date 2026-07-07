@@ -35,17 +35,35 @@ export function setAgentHudEnabled(enabled: boolean) {
 export const AGENT_HUD_PLACEMENT_KEY = "june:agent-hud:placement";
 export const AGENT_HUD_PLACEMENT_CHANGED_EVENT = "june:agent-hud:placement-changed";
 
-/** Where the HUD window parks: the classic top-right notification spot, or
- * docked into the camera housing (notch) of the built-in display. Notch
- * placement floats a top-center pill on displays without a housing. */
-export type AgentHudPlacement = "top-right" | "notch";
+/** Where the HUD window parks: any of the four screen corners, or docked into
+ * the camera housing (notch) of the built-in display. Notch placement floats a
+ * top-center pill on displays without a housing. */
+export type AgentHudPlacement = "notch" | "top-left" | "top-right" | "bottom-left" | "bottom-right";
 
 export type AgentHudPlacementChangedDetail = {
   placement: AgentHudPlacement;
 };
 
+const AGENT_HUD_PLACEMENTS: readonly AgentHudPlacement[] = [
+  "notch",
+  "top-left",
+  "top-right",
+  "bottom-left",
+  "bottom-right",
+];
+
+/** Coerces any stored/incoming value to a known placement. The five valid
+ * values pass through; anything else (legacy keys, garbage, an older build's
+ * value we later removed) falls back to the top-right default. Existing
+ * "notch"/"top-right" stores keep working unchanged. */
+export function parseAgentHudPlacement(value: string | null | undefined): AgentHudPlacement {
+  return AGENT_HUD_PLACEMENTS.includes(value as AgentHudPlacement)
+    ? (value as AgentHudPlacement)
+    : "top-right";
+}
+
 export function getAgentHudPlacement(): AgentHudPlacement {
-  return localStorage.getItem(AGENT_HUD_PLACEMENT_KEY) === "notch" ? "notch" : "top-right";
+  return parseAgentHudPlacement(localStorage.getItem(AGENT_HUD_PLACEMENT_KEY));
 }
 
 export function setAgentHudPlacement(placement: AgentHudPlacement) {

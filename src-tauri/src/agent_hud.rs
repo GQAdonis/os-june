@@ -20,9 +20,14 @@ const AGENT_HUD_COLLAPSED_WINDOW_HEIGHT: f64 = 58.0;
 // housing so the surface's rounded bottom corners read as the notch flowing
 // out, not a rectangle taped over it. The webview mirrors the chin in
 // NOTCH_CHIN_HEIGHT (src/agent-hud.ts) to size the bar in CSS, and the wing
-// in --notch-wing (agent-hud.css) to cap the label column.
+// in --notch-wing (agent-hud.css) to cap the label column. The side and
+// bottom gutters give the CSS shadow room to paint inside the transparent
+// native window; the webview mirrors them as --notch-gutter-x
+// (agent-hud.css) and NOTCH_SHADOW_GUTTER_BOTTOM (src/agent-hud.ts).
 const NOTCH_WING_WIDTH: f64 = 56.0;
-const NOTCH_CHIN_HEIGHT: f64 = 10.0;
+const NOTCH_CHIN_HEIGHT: f64 = 6.0;
+const NOTCH_SHADOW_GUTTER_X: f64 = 24.0;
+const NOTCH_SHADOW_GUTTER_BOTTOM: f64 = 36.0;
 // Height floor while the context menu is open in notch mode, mirroring the
 // 104px minimum of the top-right placement below the bar.
 const NOTCH_MENU_MIN_DROP: f64 = 104.0;
@@ -45,8 +50,11 @@ pub struct AgentHudLayoutRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentHudPlacement {
+    TopLeft,
     #[default]
     TopRight,
+    BottomLeft,
+    BottomRight,
     Notch,
 }
 
@@ -104,19 +112,22 @@ fn order_agent_hud_front_without_key(window: &WebviewWindow) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
 
-    let Ok(handle) = window.ns_window() else {
-        return;
-    };
-    if handle.is_null() {
-        return;
-    }
-    unsafe {
-        let win = handle as *mut AnyObject;
-        let nil: *mut AnyObject = std::ptr::null_mut();
-        // orderFront: makes the panel visible and frontmost without making it
-        // key (unlike makeKeyAndOrderFront:), so focus stays put.
-        let _: () = msg_send![win, orderFront: nil];
-    }
+    let window_for_main = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        let Ok(handle) = window_for_main.ns_window() else {
+            return;
+        };
+        if handle.is_null() {
+            return;
+        }
+        unsafe {
+            let win = handle as *mut AnyObject;
+            let nil: *mut AnyObject = std::ptr::null_mut();
+            // orderFront: makes the panel visible and frontmost without making it
+            // key (unlike makeKeyAndOrderFront:), so focus stays put.
+            let _: () = msg_send![win, orderFront: nil];
+        }
+    });
 }
 
 #[tauri::command]
@@ -144,21 +155,31 @@ pub fn agent_hud_set_layout(
     } else {
         current_placement(&state)
     };
+    let notch = notch_metrics();
     let (width, height) = agent_hud_layout_size(
         placement,
-        notch_metrics(),
+        notch,
         request.expanded,
         request.card_count.unwrap_or(0),
         request.context_menu_open.unwrap_or(false),
     );
+    #[cfg(target_os = "macos")]
+    {
+        if placement == AgentHudPlacement::Notch
+            && notch.is_some()
+            && apply_agent_hud_notch_layout(&window, (width, height))?
+        {
+            return Ok(());
+        }
+    }
     window
         .set_size(Size::Logical(LogicalSize::new(width, height)))
         .map_err(|error| error.to_string())?;
-    // Both placements keep a fixed width per screen and grow downward from a
-    // pinned top edge, so resizing alone cannot move the anchor; still
-    // reposition with the size just requested (not outer_size(), which can
-    // lag behind set_size() on macOS) so a placement change lands in the
-    // same call that resized for it.
+    // Top-right and notchless top-center use Tauri's size and position
+    // dispatcher. Reposition with the size just requested (not outer_size(),
+    // which can lag behind set_size() on macOS) so a placement change lands in
+    // the same call that resized for it. The macOS notch path avoids this
+    // queue entirely and applies one AppKit frame atomically.
     position_agent_hud_window_with_logical_size(&window, placement, (width, height))
 }
 
@@ -238,15 +259,14 @@ fn agent_hud_notch_window_size(
     card_count: u32,
     context_menu_open: bool,
 ) -> (f64, f64) {
-    let width = notch.notch_width + 2.0 * NOTCH_WING_WIDTH;
+    let surface_width = notch.notch_width + 2.0 * NOTCH_WING_WIDTH;
+    let width = surface_width + 2.0 * NOTCH_SHADOW_GUTTER_X;
     let bar_height = notch.notch_height + NOTCH_CHIN_HEIGHT;
-    // The +14 is the transparent gutter below the surface that the CSS
-    // shadow paints into, matching the top-right geometry.
     let height = if !expanded || card_count == 0 {
-        bar_height + 14.0
+        bar_height + NOTCH_SHADOW_GUTTER_BOTTOM
     } else {
         let rows = f64::from(card_count.min(3));
-        bar_height + rows * 46.0 + 14.0
+        bar_height + rows * 46.0 + NOTCH_SHADOW_GUTTER_BOTTOM
     };
 
     if context_menu_open {
@@ -304,8 +324,7 @@ fn position_agent_hud_window_with_logical_size(
     if placement == AgentHudPlacement::Notch {
         #[cfg(target_os = "macos")]
         {
-            if position_agent_hud_over_notch(window, logical_size) {
-                set_agent_hud_docked(window, true);
+            if apply_agent_hud_notch_layout(window, logical_size)? {
                 return Ok(());
             }
             // No notched display attached (external-only setup, older Mac):
@@ -317,11 +336,21 @@ fn position_agent_hud_window_with_logical_size(
     }
     #[cfg(target_os = "macos")]
     set_agent_hud_docked(window, false);
-    position_agent_hud_window_top_right(window, logical_size)
+    position_agent_hud_window_corner(window, placement, logical_size)
 }
 
-fn position_agent_hud_window_top_right(
+/// Parks the HUD in one of the four screen corners of the primary monitor's
+/// work area (below the menu bar, inside the Dock). The bottom corners anchor
+/// the window's BOTTOM edge: expand/collapse changes the window height, so the
+/// origin y is recomputed here from the height passed in
+/// (position_agent_hud_window_with_logical_size feeds the size it just
+/// requested), keeping the bottom edge pinned while the window grows upward.
+/// Unlike the notch path this stays on Tauri's size/position dispatcher, which
+/// applies set_size then set_position in FIFO order, so there is no race to
+/// route through raw AppKit for.
+fn position_agent_hud_window_corner(
     window: &WebviewWindow,
+    placement: AgentHudPlacement,
     logical_size: (f64, f64),
 ) -> Result<(), String> {
     const MARGIN_X: f64 = 16.0;
@@ -342,10 +371,23 @@ fn position_agent_hud_window_top_right(
 
     let work_area = monitor.work_area();
     let width = (logical_size.0 * scale).round() as i32;
+    let height = (logical_size.1 * scale).round() as i32;
     let margin_x = (MARGIN_X * scale).round() as i32;
     let margin_y = (MARGIN_Y * scale).round() as i32;
-    let x = work_area.position.x + work_area.size.width as i32 - width - margin_x;
-    let y = work_area.position.y + margin_y;
+    let left = work_area.position.x + margin_x;
+    let right = work_area.position.x + work_area.size.width as i32 - width - margin_x;
+    let top = work_area.position.y + margin_y;
+    // Bottom placements anchor the window's bottom edge: since the window grows
+    // upward on expand, the origin y must drop as the height rises so the
+    // bottom stays put.
+    let bottom = work_area.position.y + work_area.size.height as i32 - height - margin_y;
+    let (x, y) = match placement {
+        AgentHudPlacement::TopLeft => (left, top),
+        AgentHudPlacement::BottomLeft => (left, bottom),
+        AgentHudPlacement::BottomRight => (right, bottom),
+        // TopRight is the default; Notch never reaches here.
+        AgentHudPlacement::TopRight | AgentHudPlacement::Notch => (right, top),
+    };
     window
         .set_position(PhysicalPosition::new(x, y))
         .map_err(|error| error.to_string())
@@ -444,31 +486,53 @@ fn notched_screen() -> Option<(AgentHudNotchInfo, objc2_foundation::NSRect)> {
 }
 
 /// Docks the window over the camera housing: horizontally centered on the
-/// notched screen, flush with its top edge. Positions in Cocoa global points
-/// via setFrameOrigin: so no Tauri/AppKit coordinate conversion is involved.
+/// notched screen, flush with its top edge. The notch path applies origin and
+/// size as one AppKit frame mutation on the main thread, so expand/collapse
+/// cannot race Tauri's asynchronous size queue and move the pinned top edge.
 /// Returns false when no notched display is attached.
 #[cfg(target_os = "macos")]
-fn position_agent_hud_over_notch(window: &WebviewWindow, logical_size: (f64, f64)) -> bool {
+fn apply_agent_hud_notch_layout(
+    window: &WebviewWindow,
+    logical_size: (f64, f64),
+) -> Result<bool, String> {
+    if notched_screen().is_none() {
+        return Ok(false);
+    }
+    let window_for_main = window.clone();
+    window
+        .run_on_main_thread(move || {
+            apply_agent_hud_notch_layout_on_main(&window_for_main, logical_size);
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[cfg(target_os = "macos")]
+fn apply_agent_hud_notch_layout_on_main(window: &WebviewWindow, logical_size: (f64, f64)) {
     use objc2::msg_send;
     use objc2::runtime::AnyObject;
-    use objc2_foundation::NSPoint;
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let Some((_, frame)) = notched_screen() else {
-        return false;
+        return;
     };
     let Ok(handle) = window.ns_window() else {
-        return false;
+        return;
     };
     if handle.is_null() {
-        return false;
+        return;
     }
     let x = frame.origin.x + (frame.size.width - logical_size.0) / 2.0;
     let y = frame.origin.y + frame.size.height - logical_size.1;
     unsafe {
         let win = handle as *mut AnyObject;
-        let _: () = msg_send![win, setFrameOrigin: NSPoint::new(x, y)];
+        set_agent_hud_docked_for_window(win, true);
+        let target_frame = NSRect::new(
+            NSPoint::new(x, y),
+            NSSize::new(logical_size.0, logical_size.1),
+        );
+        let _: () = msg_send![win, setFrame: target_frame, display: true];
     }
-    true
 }
 
 /// Raises the panel above the menu bar while docked in the notch (Tauri's
@@ -477,8 +541,25 @@ fn position_agent_hud_over_notch(window: &WebviewWindow, logical_size: (f64, f64
 /// restores the floating level so the HUD behaves like the other overlays.
 #[cfg(target_os = "macos")]
 fn set_agent_hud_docked(window: &WebviewWindow, docked: bool) {
-    use objc2::msg_send;
     use objc2::runtime::AnyObject;
+
+    let window_for_main = window.clone();
+    let _ = window.run_on_main_thread(move || {
+        let Ok(handle) = window_for_main.ns_window() else {
+            return;
+        };
+        if handle.is_null() {
+            return;
+        }
+        unsafe {
+            set_agent_hud_docked_for_window(handle as *mut AnyObject, docked);
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn set_agent_hud_docked_for_window(win: *mut objc2::runtime::AnyObject, docked: bool) {
+    use objc2::msg_send;
 
     // AppKit window levels: NSFloatingWindowLevel = 3 (what Tauri's
     // set_always_on_top applies), NSStatusWindowLevel = 25 (above
@@ -491,24 +572,15 @@ fn set_agent_hud_docked(window: &WebviewWindow, docked: bool) {
     const STATIONARY: usize = 1 << 4;
     const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
 
-    let Ok(handle) = window.ns_window() else {
-        return;
+    let level: isize = if docked { STATUS_LEVEL } else { FLOATING_LEVEL };
+    let _: () = msg_send![win, setLevel: level];
+    let behavior: usize = msg_send![win, collectionBehavior];
+    let behavior = if docked {
+        behavior | STATIONARY | FULL_SCREEN_AUXILIARY
+    } else {
+        behavior & !(STATIONARY | FULL_SCREEN_AUXILIARY)
     };
-    if handle.is_null() {
-        return;
-    }
-    unsafe {
-        let win = handle as *mut AnyObject;
-        let level: isize = if docked { STATUS_LEVEL } else { FLOATING_LEVEL };
-        let _: () = msg_send![win, setLevel: level];
-        let behavior: usize = msg_send![win, collectionBehavior];
-        let behavior = if docked {
-            behavior | STATIONARY | FULL_SCREEN_AUXILIARY
-        } else {
-            behavior & !(STATIONARY | FULL_SCREEN_AUXILIARY)
-        };
-        let _: () = msg_send![win, setCollectionBehavior: behavior];
-    }
+    let _: () = msg_send![win, setCollectionBehavior: behavior];
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -656,9 +728,10 @@ mod tests {
     }
 
     #[test]
-    fn notch_layout_spans_the_housing_plus_wings_at_a_stable_width() {
+    fn notch_layout_spans_the_housing_plus_wings_and_shadow_gutters() {
         let notch = notch_fixture();
-        let expected_width = 200.0 + 2.0 * NOTCH_WING_WIDTH;
+        let surface_width = 200.0 + 2.0 * NOTCH_WING_WIDTH;
+        let expected_width = surface_width + 2.0 * NOTCH_SHADOW_GUTTER_X;
         assert_eq!(
             agent_hud_notch_window_size(notch, false, 0, false).0,
             expected_width
@@ -671,6 +744,7 @@ mod tests {
             agent_hud_notch_window_size(notch, false, 0, true).0,
             expected_width
         );
+        assert!(expected_width > surface_width);
     }
 
     #[test]
@@ -680,7 +754,10 @@ mod tests {
         let expanded = agent_hud_notch_window_size(notch, true, 1, false);
         let expanded_more = agent_hud_notch_window_size(notch, true, 3, false);
 
-        assert_eq!(collapsed.1, 32.0 + NOTCH_CHIN_HEIGHT + 14.0);
+        assert_eq!(
+            collapsed.1,
+            32.0 + NOTCH_CHIN_HEIGHT + NOTCH_SHADOW_GUTTER_BOTTOM
+        );
         assert!(expanded.1 > collapsed.1);
         assert!(expanded_more.1 > expanded.1);
     }

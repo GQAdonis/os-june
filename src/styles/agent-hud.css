@@ -89,6 +89,8 @@ body {
   --hud-expanded-w: 248px;
 
   position: absolute;
+  /* Default anchoring is top-right; the data-placement rules below re-anchor
+   * the surface for the other three corners (and the notch dock). */
   top: var(--sp-3);
   right: var(--sp-4);
   display: grid;
@@ -502,6 +504,57 @@ body {
   outline-offset: -2px;
 }
 
+/* Corner placements ------------------------------------------------------- */
+
+/* The surface anchors to whichever corner the placement names. The native
+ * window (agent_hud.rs) parks itself in that corner of the screen and the
+ * bottom placements pin the window's bottom edge, so anchoring the surface to
+ * the window's bottom here keeps --shadow-md (bottom-heavy) painting into the
+ * transparent gutter below the surface, exactly as the top placements do above
+ * it. Left/right insets match --sp-4; the bottom gutter is 14px, the same
+ * composition the window height math (8px + surface + 14px) reserves. */
+.agent-hud[data-placement="top-left"] .agent-hud-surface {
+  right: auto;
+  left: var(--sp-4);
+}
+
+.agent-hud[data-placement="bottom-left"] .agent-hud-surface,
+.agent-hud[data-placement="bottom-right"] .agent-hud-surface {
+  top: auto;
+  bottom: 14px;
+}
+
+.agent-hud[data-placement="bottom-left"] .agent-hud-surface {
+  right: auto;
+  left: var(--sp-4);
+}
+
+/* Bottom placements slide UP into place instead of down, so the reveal comes
+ * from below the resting spot. */
+.agent-hud[data-placement="bottom-left"] .agent-hud-surface,
+.agent-hud[data-placement="bottom-right"] .agent-hud-surface {
+  transform: translateY(3px) scale(0.98);
+}
+
+.agent-hud[data-placement="bottom-left"][data-visible="true"] .agent-hud-surface,
+.agent-hud[data-placement="bottom-right"][data-visible="true"] .agent-hud-surface {
+  transform: translateY(0) scale(1);
+}
+
+/* Bottom placements open the context menu ABOVE the pill so it stays inside
+ * the (upward-growing) window instead of running off the bottom edge. */
+.agent-hud[data-placement="bottom-left"] .agent-hud-menu,
+.agent-hud[data-placement="bottom-right"] .agent-hud-menu {
+  top: auto;
+  bottom: 44px;
+}
+
+.agent-hud[data-placement="top-left"] .agent-hud-menu,
+.agent-hud[data-placement="bottom-left"] .agent-hud-menu {
+  right: auto;
+  left: var(--sp-4);
+}
+
 /* Notch dock -------------------------------------------------------------- */
 
 /* agent-hud.ts sets data-placement from the placement preference plus the
@@ -530,8 +583,12 @@ body {
 }
 
 .agent-hud[data-placement="notch"] .agent-hud-surface {
+  /* Mirrors NOTCH_SHADOW_GUTTER_X in agent_hud.rs; the transparent side room
+   * lets the shadow paint inside the native window. */
+  --notch-gutter-x: 24px;
+
   top: 0;
-  width: 100%;
+  width: calc(100% - 2 * var(--notch-gutter-x));
   max-width: none;
   /* Flush with the screen's top edge; only the bottom corners round, so the
    * bar reads as the notch flowing out rather than a card taped over it. */
@@ -541,7 +598,7 @@ body {
 }
 
 .agent-hud[data-placement="notch"][data-expanded="true"] .agent-hud-surface {
-  width: 100%;
+  width: calc(100% - 2 * var(--notch-gutter-x));
   border-radius: 0 0 var(--r-xl) var(--r-xl);
 }
 

@@ -773,7 +773,7 @@ export async function agentHudSetLayout(input: {
   expanded: boolean;
   cardCount?: number;
   contextMenuOpen?: boolean;
-  placement?: "topRight" | "notch";
+  placement?: "notch" | "topLeft" | "topRight" | "bottomLeft" | "bottomRight";
 }) {
   return invoke<void>("agent_hud_set_layout", { request: input });
 }

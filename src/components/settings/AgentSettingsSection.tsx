@@ -25,7 +25,7 @@ import {
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS,
 } from "../../lib/hermes-messaging";
-import { SegmentedControl } from "../ui/SegmentedControl";
+import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 
 type AgentSettingsPanel = "messaging" | "files";
@@ -215,7 +215,7 @@ export function AgentSettingsSection() {
             <div className="settings-row-info">
               <h3 className="settings-row-title">Sessions HUD</h3>
               <p className="settings-row-description">
-                Show a small pill at the top right of your screen with live session status.
+                Show a small pill on your screen with live session status.
               </p>
             </div>
             <div className="settings-row-control">
@@ -235,14 +235,18 @@ export function AgentSettingsSection() {
               </p>
             </div>
             <div className="settings-row-control">
-              <SegmentedControl
+              <Select
                 value={agentHudPlacement}
-                onValueChange={handleAgentHudPlacementChange}
                 options={[
-                  { value: "top-right", label: "Top right" },
                   { value: "notch", label: "Notch" },
+                  { value: "top-left", label: "Top left" },
+                  { value: "top-right", label: "Top right" },
+                  { value: "bottom-left", label: "Bottom left" },
+                  { value: "bottom-right", label: "Bottom right" },
                 ]}
-                aria-label="Sessions HUD position"
+                placeholder="Top right"
+                ariaLabel="Sessions HUD position"
+                onChange={(value) => handleAgentHudPlacementChange(value as AgentHudPlacement)}
               />
             </div>
           </div>

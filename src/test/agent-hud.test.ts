@@ -589,8 +589,8 @@ describe("agent HUD", () => {
 
     expect(hudElement().dataset.placement).toBe("notch");
     expect(hudElement().style.getPropertyValue("--agent-hud-notch-width")).toBe("200px");
-    // Bar height = housing height plus the 10px chin.
-    expect(hudElement().style.getPropertyValue("--agent-hud-notch-bar-height")).toBe("42px");
+    // Bar height = housing height plus the 6px chin.
+    expect(hudElement().style.getPropertyValue("--agent-hud-notch-bar-height")).toBe("38px");
 
     emitStatus({
       status: "running",
@@ -650,6 +650,54 @@ describe("agent HUD", () => {
     expect(pillLabelElement()).toHaveTextContent("1");
     expect(pillLabelElement()).not.toHaveTextContent("running");
     expect(pillElement().dataset.countOnly).toBe("true");
+  });
+
+  it("parks in a corner and wires the camelCase placement to the native side", async () => {
+    localStorage.setItem("june:agent-hud:placement", "bottom-left");
+    await loadAgentHud();
+
+    expect(hudElement().dataset.placement).toBe("bottom-left");
+
+    emitStatus({
+      status: "running",
+      title: "Summarize this",
+      summary: "Working",
+    });
+    await flushPromises();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("agent_hud_set_layout", {
+      request: { expanded: false, cardCount: 0, placement: "bottomLeft" },
+    });
+
+    window.dispatchEvent(
+      new CustomEvent("june:agent-hud:placement-changed", {
+        detail: { placement: "top-left" },
+      }),
+    );
+    await flushPromises();
+
+    expect(hudElement().dataset.placement).toBe("top-left");
+    expect(mocks.invoke).toHaveBeenCalledWith("agent_hud_set_layout", {
+      request: { expanded: false, cardCount: 0, placement: "topLeft" },
+    });
+  });
+
+  it("falls back to top-right for an unknown stored placement", async () => {
+    localStorage.setItem("june:agent-hud:placement", "somewhere-weird");
+    await loadAgentHud();
+
+    expect(hudElement().dataset.placement).toBe("top-right");
+
+    emitStatus({
+      status: "running",
+      title: "Summarize this",
+      summary: "Working",
+    });
+    await flushPromises();
+
+    expect(mocks.invoke).toHaveBeenCalledWith("agent_hud_set_layout", {
+      request: { expanded: false, cardCount: 0, placement: "topRight" },
+    });
   });
 
   it("re-docks when the placement preference changes at runtime", async () => {

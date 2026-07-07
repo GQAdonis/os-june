@@ -21,6 +21,7 @@ import {
   AGENT_HUD_VISIBILITY_CHANGED_EVENT,
   getAgentHudEnabled,
   getAgentHudPlacement,
+  parseAgentHudPlacement,
   setAgentHudEnabled,
   type AgentHudPlacement,
   type AgentHudPlacementChangedDetail,
@@ -74,7 +75,22 @@ const WINDOW_FADE_MS = 300;
 const COLLAPSE_RESIZE_DELAY_MS = 200;
 // Rounded lip the docked bar extends below the camera housing. Mirrors
 // NOTCH_CHIN_HEIGHT in agent_hud.rs, which owns the native window size.
-const NOTCH_CHIN_HEIGHT = 10;
+const NOTCH_CHIN_HEIGHT = 6;
+// Transparent bottom room for the docked bar shadow. Mirrors
+// NOTCH_SHADOW_GUTTER_BOTTOM in agent_hud.rs; the corner placements keep
+// their existing 14px bottom gutter.
+const NOTCH_SHADOW_GUTTER_BOTTOM = 36;
+
+// The placement preference (kebab-case in localStorage / the settings UI) to
+// the serde camelCase variant the native AgentHudPlacement enum expects
+// (agent_hud.rs). Keep both sides of this map in step.
+const PLACEMENT_TO_WIRE = {
+  notch: "notch",
+  "top-left": "topLeft",
+  "top-right": "topRight",
+  "bottom-left": "bottomLeft",
+  "bottom-right": "bottomRight",
+} as const satisfies Record<AgentHudPlacement, string>;
 
 const hud = document.querySelector<HTMLElement>("#agent-hud");
 const pill = document.querySelector<HTMLButtonElement>("#agent-hud-pill");
@@ -233,10 +249,11 @@ async function fetchNotchInfo() {
 
 function applyPlacementToDom() {
   if (!hud) return;
-  // Three visual modes: the top-right notification pill, the notch-docked
-  // bar, and the top-center floating pill that notch placement degrades to
-  // on displays without a camera housing.
-  const mode = state.placement === "notch" ? (notchInfo ? "notch" : "notch-fallback") : "top-right";
+  // Visual modes: the four corner notification pills (data-placement is the
+  // placement string), the notch-docked bar, and the top-center floating pill
+  // that notch placement degrades to on displays without a camera housing.
+  const mode =
+    state.placement === "notch" ? (notchInfo ? "notch" : "notch-fallback") : state.placement;
   hud.dataset.placement = mode;
   if (notchInfo) {
     hud.style.setProperty("--agent-hud-notch-width", `${notchInfo.notchWidth}px`);
@@ -780,7 +797,7 @@ async function syncWindowLayout(expanded: boolean, rowCount: number, hasEntries:
       expanded,
       cardCount: rowCount,
       ...(menuOpen ? { contextMenuOpen: menuOpen } : {}),
-      placement: state.placement === "notch" ? "notch" : "topRight",
+      placement: PLACEMENT_TO_WIRE[state.placement],
     }).catch(() => {});
     if (!windowShown) {
       await agentHudShow().catch(() => {});
@@ -812,7 +829,10 @@ async function syncWindowLayout(expanded: boolean, rowCount: number, hasEntries:
 function nativeWindowHeight(expanded: boolean, rowCount: number, menuOpen: boolean) {
   if (notchInfo) {
     const bar = notchInfo.notchHeight + NOTCH_CHIN_HEIGHT;
-    const height = !expanded || rowCount === 0 ? bar + 14 : bar + Math.min(rowCount, 3) * 46 + 14;
+    const height =
+      !expanded || rowCount === 0
+        ? bar + NOTCH_SHADOW_GUTTER_BOTTOM
+        : bar + Math.min(rowCount, 3) * 46 + NOTCH_SHADOW_GUTTER_BOTTOM;
     return menuOpen ? Math.max(height, bar + 104) : height;
   }
   const height = !expanded || rowCount === 0 ? 58 : 8 + 36 + Math.min(rowCount, 3) * 46 + 6 + 14;
@@ -1072,7 +1092,7 @@ window.addEventListener("storage", (event) => {
     applyVisibility(event.newValue !== "false");
   }
   if (event.key === AGENT_HUD_PLACEMENT_KEY) {
-    applyPlacement(event.newValue === "notch" ? "notch" : "top-right");
+    applyPlacement(parseAgentHudPlacement(event.newValue));
   }
 });
 
