@@ -16,6 +16,7 @@ import { IconClipboard } from "central-icons/IconClipboard";
 import { IconCrossMedium } from "central-icons/IconCrossMedium";
 import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { IconExclamationTriangle } from "central-icons/IconExclamationTriangle";
+import { IconFinder } from "central-icons/IconFinder";
 import { IconFolder1 } from "central-icons/IconFolder1";
 import { IconFolders } from "central-icons/IconFolders";
 import { IconConsole } from "central-icons/IconConsole";
@@ -30,6 +31,7 @@ import { IconArrowCornerDownRight } from "central-icons/IconArrowCornerDownRight
 import { IconArrowUp } from "central-icons/IconArrowUp";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
+import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconConsoleSimple } from "central-icons/IconConsoleSimple";
 import { IconWallet3 } from "central-icons/IconWallet3";
 import { IconDeepSearch } from "central-icons/IconDeepSearch";
@@ -107,6 +109,7 @@ import {
   osAccountsUpgrade,
   providerModelSettings,
   retryAgentTask,
+  revealPath,
   setHermesAgentCliAccess,
   setLocalGenerationEnabled,
   setVeniceModel,
@@ -8753,6 +8756,7 @@ export function MessagingPanel({
   onRefresh,
   onSaveEnv,
   onSelectPlatform,
+  onBack,
   onToggle,
 }: {
   envEdits: Record<string, string>;
@@ -8766,16 +8770,45 @@ export function MessagingPanel({
   onRefresh: () => void;
   onSaveEnv: (platform: HermesMessagingPlatformInfo) => void;
   onSelectPlatform: (platform: HermesMessagingPlatformInfo) => void;
+  /** Returns from a platform's configuration to the platform list. */
+  onBack?: () => void;
   onToggle: (platform: HermesMessagingPlatformInfo, enabled: boolean) => void;
 }) {
   const q = query.trim().toLowerCase();
   const visible = (platforms ?? [])
     .filter((platform) => capabilityMatches(platform, q))
     .sort((a, b) => safeText(a.name).localeCompare(safeText(b.name)));
-  const selected =
-    visible.find((platform) => platform.id === selectedPlatformId) ?? visible[0] ?? null;
+  // Selection is a drill-in: no platform is open until the user picks one.
+  const selected = (platforms ?? []).find((platform) => platform.id === selectedPlatformId) ?? null;
+
+  if (selected) {
+    return (
+      <section className="agent-management-panel" aria-label="Messaging platforms">
+        <div className="agent-platform-topbar">
+          <button
+            type="button"
+            className="icon-button"
+            aria-label="Back to messaging platforms"
+            onClick={onBack}
+          >
+            <IconChevronLeftSmall size={14} ariaHidden />
+          </button>
+          <span className="agent-platform-topbar-title">{selected.name}</span>
+        </div>
+        <MessagingPlatformDetail
+          envEdits={envEdits}
+          platform={selected}
+          saving={saving}
+          onEditEnv={onEditEnv}
+          onSaveEnv={onSaveEnv}
+          onToggle={onToggle}
+        />
+      </section>
+    );
+  }
+
   return (
-    <section className="agent-management-panel" aria-label="Messaging">
+    <section className="agent-management-panel" aria-label="Messaging platforms">
       <ManagementToolbar
         loading={loading}
         placeholder="Search messaging platforms"
@@ -8788,48 +8821,43 @@ export function MessagingPanel({
           <Spinner />
         </div>
       ) : (
-        <div className="agent-messaging-layout">
-          <div className="agent-messaging-list" aria-label="Messaging channels">
-            <CapabilityGroup title="Platforms" count={visible.length} empty="No matching platforms">
-              {visible.map((platform) => {
-                const envVars = platform.envVars ?? platform.env_vars ?? [];
-                const requiredSet = envVars.filter(
-                  (field) => field.required && envFieldSet(field),
-                ).length;
-                const requiredTotal = envVars.filter((field) => field.required).length;
-                const state = platform.state ?? "unknown";
-                const configured =
-                  platform.configured || (requiredTotal > 0 && requiredSet === requiredTotal);
-                return (
-                  <CapabilityRow
-                    key={platform.id}
-                    title={platform.name}
-                    description={platform.description}
-                    meta={`${stateLabel(state)}${
-                      requiredTotal
-                        ? ` · ${requiredSet}/${requiredTotal} required set`
-                        : configured
-                          ? " · configured"
-                          : ""
-                    }`}
-                    enabled={Boolean(platform.enabled)}
-                    selected={platform.id === selected?.id}
-                    saving={saving === `messaging:${platform.id}`}
-                    onSelect={() => onSelectPlatform(platform)}
-                    onToggle={(enabled) => onToggle(platform, enabled)}
-                  />
-                );
-              })}
-            </CapabilityGroup>
-          </div>
-          <MessagingPlatformDetail
-            envEdits={envEdits}
-            platform={selected}
-            saving={saving}
-            onEditEnv={onEditEnv}
-            onSaveEnv={onSaveEnv}
-            onToggle={onToggle}
-          />
+        <div className="agent-messaging-list" aria-label="Messaging channels">
+          <CapabilityGroup
+            title="Platforms"
+            count={visible.length}
+            empty="No matching platforms"
+            hideTitle
+          >
+            {visible.map((platform) => {
+              const envVars = platform.envVars ?? platform.env_vars ?? [];
+              const requiredSet = envVars.filter(
+                (field) => field.required && envFieldSet(field),
+              ).length;
+              const requiredTotal = envVars.filter((field) => field.required).length;
+              const state = platform.state ?? "unknown";
+              const configured =
+                platform.configured || (requiredTotal > 0 && requiredSet === requiredTotal);
+              return (
+                <CapabilityRow
+                  key={platform.id}
+                  title={platform.name}
+                  description={platform.description}
+                  meta={`${stateLabel(state)}${
+                    requiredTotal
+                      ? ` · ${requiredSet}/${requiredTotal} required set`
+                      : configured
+                        ? " · configured"
+                        : ""
+                  }`}
+                  enabled={Boolean(platform.enabled)}
+                  selected={false}
+                  saving={saving === `messaging:${platform.id}`}
+                  onSelect={() => onSelectPlatform(platform)}
+                  onToggle={(enabled) => onToggle(platform, enabled)}
+                />
+              );
+            })}
+          </CapabilityGroup>
         </div>
       )}
     </section>
@@ -8929,6 +8957,20 @@ function FilesystemEntryRow({ entry, level }: { entry: HermesFilesystemEntry; le
           {isDirectory ? "Folder" : formatBytes(entry.size)}
           {entry.modifiedAt ? ` · ${relativeDate(entry.modifiedAt)}` : ""}
         </span>
+        {/* Reveal-in-Finder: an interactive icon-button shown on row hover/focus
+         * that opens the entry's absolute path in the OS file manager. Hidden
+         * for any entry the snapshot reports without an absolute path. */}
+        {isAbsolutePath(entry.path) ? (
+          <button
+            type="button"
+            className="icon-button agent-files-entry-reveal"
+            title="Reveal in Finder"
+            aria-label={`Reveal ${entry.name} in Finder`}
+            onClick={() => void revealPath(entry.path)}
+          >
+            <IconFinder size={13} ariaHidden />
+          </button>
+        ) : null}
       </div>
       {children.length ? (
         <div className="agent-files-children">
@@ -8941,10 +8983,11 @@ function FilesystemEntryRow({ entry, level }: { entry: HermesFilesystemEntry; le
   );
 }
 
-function MessagingPlatformDetail({
+export function MessagingPlatformDetail({
   envEdits,
   platform,
   saving,
+  hideFooter,
   onEditEnv,
   onSaveEnv,
   onToggle,
@@ -8952,6 +8995,10 @@ function MessagingPlatformDetail({
   envEdits: Record<string, string>;
   platform: HermesMessagingPlatformInfo | null;
   saving: string | null;
+  /** When the host renders the Save / enable actions itself (e.g. in the pinned
+   * breadcrumb bar of the settings drill-in), suppress this component's own
+   * footer so the actions aren't duplicated. */
+  hideFooter?: boolean;
   onEditEnv: (key: string, value: string) => void;
   onSaveEnv: (platform: HermesMessagingPlatformInfo) => void;
   onToggle: (platform: HermesMessagingPlatformInfo, enabled: boolean) => void;
@@ -9036,23 +9083,25 @@ function MessagingPlatformDetail({
           </section>
         ) : null}
       </div>
-      <footer className="agent-messaging-footer">
-        <button
-          type="button"
-          className="agent-messaging-enable"
-          disabled={saving === `messaging:${platform.id}`}
-          onClick={() => onToggle(platform, !platform.enabled)}
-        >
-          {platform.enabled ? "Enabled" : "Disabled"}
-        </button>
-        <button
-          type="button"
-          disabled={!hasEdits || isSavingEnv}
-          onClick={() => onSaveEnv(platform)}
-        >
-          {isSavingEnv ? "Saving..." : "Save changes"}
-        </button>
-      </footer>
+      {hideFooter ? null : (
+        <footer className="agent-messaging-footer">
+          <button
+            type="button"
+            className="agent-messaging-enable"
+            disabled={saving === `messaging:${platform.id}`}
+            onClick={() => onToggle(platform, !platform.enabled)}
+          >
+            {platform.enabled ? "Enabled" : "Disabled"}
+          </button>
+          <button
+            type="button"
+            disabled={!hasEdits || isSavingEnv}
+            onClick={() => onSaveEnv(platform)}
+          >
+            {isSavingEnv ? "Saving..." : "Save changes"}
+          </button>
+        </footer>
+      )}
     </div>
   );
 }
@@ -9153,17 +9202,23 @@ function CapabilityGroup({
   count,
   empty,
   title,
+  hideTitle = false,
 }: {
   children: ReactNode;
   count: number;
   empty: string;
   title: string;
+  /** Hides the in-list heading when the group's title lives above the card as
+   * the group heading (the messaging platforms group). */
+  hideTitle?: boolean;
 }) {
   return (
     <section className="agent-capability-group">
-      <h3>
-        {title} <span>{count}</span>
-      </h3>
+      {hideTitle ? null : (
+        <h3>
+          {title} <span>{count}</span>
+        </h3>
+      )}
       {count ? children : <p className="agent-capability-empty">{empty}</p>}
     </section>
   );
@@ -9191,7 +9246,7 @@ function CapabilityRow({
   onToggle: (enabled: boolean) => void;
 }) {
   return (
-    <article className="agent-capability-row" data-selected={selected}>
+    <article className="agent-capability-row" data-selected={selected} data-clickable={!!onSelect}>
       <button type="button" disabled={!onSelect} onClick={onSelect}>
         <div className="agent-capability-title">
           <span>{title}</span>
@@ -9200,15 +9255,20 @@ function CapabilityRow({
         {description ? <p>{description}</p> : null}
         {children}
       </button>
-      <button
-        type="button"
-        className="agent-switch"
-        aria-pressed={enabled}
-        disabled={saving}
-        onClick={() => onToggle(!enabled)}
-      >
-        <span />
-      </button>
+      <div className="agent-capability-actions">
+        <button
+          type="button"
+          className="agent-switch"
+          aria-pressed={enabled}
+          disabled={saving}
+          onClick={() => onToggle(!enabled)}
+        >
+          <span />
+        </button>
+        {onSelect ? (
+          <IconChevronRightSmall size={14} aria-hidden className="agent-capability-chevron" />
+        ) : null}
+      </div>
     </article>
   );
 }
@@ -12315,6 +12375,13 @@ function stripHermesVisibleContext(value: string) {
 
 function compactPath(path: string) {
   return path.replace(/^\/Users\/[^/]+/, "~");
+}
+
+/** Whether a snapshot entry carries an absolute path we can reveal in Finder
+ * (posix "/…" or a Windows drive/UNC path). Reveal is hidden otherwise. */
+function isAbsolutePath(path: string | undefined | null): path is string {
+  if (!path) return false;
+  return path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("\\\\");
 }
 
 function formatBytes(value: number | null | undefined) {

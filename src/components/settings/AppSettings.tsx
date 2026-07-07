@@ -84,13 +84,18 @@ import {
   withLocalGenerationOption,
 } from "../../lib/local-generation";
 import { ProviderLogo } from "./ProviderLogo";
-import { ModelMeta, modelOptions, selectedModel } from "./ModelPickerDialog";
-import { ModelPickerPopover, type ModelPickerFlyout } from "./ModelPickerPopover";
+import { modelOptions, selectedModel } from "./ModelPickerDialog";
+import {
+  ModelPickerCardContent,
+  ModelPickerPopover,
+  type ModelPickerFlyout,
+} from "./ModelPickerPopover";
 import { DEFAULT_IMAGE_MODEL, IMAGE_MODELS } from "../../lib/image-models";
 import { IMAGE_GENERATION_ENABLED } from "../../lib/feature-flags";
 import { AgentSettingsSection } from "./AgentSettingsSection";
 import { ExternalDirsSection } from "./ExternalDirsSection";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
+import { SkillDetailSection } from "./SkillDetailSection";
 import { SkillReviewSection } from "./SkillReviewSection";
 import { McpCatalogSection } from "./McpCatalogSection";
 import { McpDiagnosticsSection } from "./McpDiagnosticsSection";
@@ -267,6 +272,33 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "about", label: "About" },
 ];
 
+/**
+ * The shared settings page header (Codex-app style): a large serif page title
+ * with one muted one-line blurb beneath, and generous space before the content.
+ * Every settings panel opens with this so the page announces what it is; panels
+ * with multiple sub-groups keep their small `.settings-group-heading` labels
+ * below it.
+ */
+export function SettingsPageHeader({
+  id,
+  title,
+  blurb,
+}: {
+  /** Ties the panel's `aria-labelledby` to the visible page title. */
+  id?: string;
+  title: ReactNode;
+  blurb?: ReactNode;
+}) {
+  return (
+    <header className="settings-page-header">
+      <h2 id={id} className="settings-page-title">
+        {title}
+      </h2>
+      {blurb ? <p className="settings-page-blurb">{blurb}</p> : null}
+    </header>
+  );
+}
+
 type AppSettingsProps = {
   account: AccountStatus;
   accountLoading: boolean;
@@ -287,6 +319,11 @@ type AppSettingsProps = {
   // own nav — the standalone path exercised by app-settings tests.
   activeTab?: SettingsTab;
   onTabChange?: (tab: SettingsTab) => void;
+  // Reports when a drill-in detail (skill detail) is open so the host can hand
+  // this view the scroll container, notes-style: the shell sets
+  // data-note-detail-scroller on .main-panel-body and the detail owns its own
+  // scroll region under a pinned breadcrumb bar.
+  onDetailPinnedChange?: (pinned: boolean) => void;
   // Runs the app updater's manual check flow.
   onCheckForUpdates?: () => void;
   // True when an update is downloaded and waiting for a relaunch. The bundle
@@ -320,6 +357,7 @@ export function AppSettings({
   onEnableSystemAudio,
   activeTab: controlledTab,
   onTabChange,
+  onDetailPinnedChange,
   onCheckForUpdates,
   updateReadyToRelaunch,
   onRelaunch,
@@ -393,6 +431,25 @@ export function AppSettings({
   const [micTestPlaying, setMicTestPlaying] = useState(false);
   const controlled = controlledTab !== undefined && onTabChange !== undefined;
   const activeTab = controlled ? controlledTab : internalTab;
+  // The skill opened from Installed skills. While set (and the skills tab is
+  // active) the whole settings page swaps for the notes-style detail shell:
+  // pinned breadcrumb bar on top, its own scroll region beneath.
+  const [openSkill, setOpenSkill] = useState<string | null>(null);
+  const skillDetailOpen = activeTab === "skills" && openSkill !== null;
+  // The agent tab's messaging platform drill-in pins the SAME notes-style detail
+  // shell as skill detail, and lifts its selection here (mirroring `openSkill`)
+  // so the detail can replace the whole settings page at the top level rather
+  // than render nested — that top-level placement is what pins the breadcrumb
+  // bar. Placement is decided synchronously from this id, so there's no effect
+  // lag. Both signals feed the same host hook so only one reaches App.tsx.
+  const [agentPlatformId, setAgentPlatformId] = useState<string>();
+  const agentDetailOpen = activeTab === "agent" && agentPlatformId != null;
+  const detailPinned = skillDetailOpen || agentDetailOpen;
+  useEffect(() => {
+    onDetailPinnedChange?.(detailPinned);
+  }, [detailPinned, onDetailPinnedChange]);
+  // Never leave the host thinking a detail scroller is active after unmount.
+  useEffect(() => () => onDetailPinnedChange?.(false), [onDetailPinnedChange]);
   const settingsTabs = account.localDev
     ? SETTINGS_TABS.filter((tab) => tab.id !== "billing")
     : SETTINGS_TABS;
@@ -1218,7 +1275,23 @@ export function AppSettings({
     return selectPopoverStyle(languagePopoverPlacement, selectedLanguageIndex);
   }
 
-  return (
+  return skillDetailOpen && openSkill ? (
+    // Notes-parity drill-in: the detail shell replaces the settings page
+    // entirely (pinned breadcrumb bar + its own scroll container), the same
+    // way opening a meeting note swaps in note-shell.
+    <SkillDetailSection skill={openSkill} onBack={() => setOpenSkill(null)} />
+  ) : agentDetailOpen ? (
+    // The agent messaging drill-in sits exactly where SkillDetailSection sits
+    // (top level, replacing the settings page) so its BreadcrumbBar pins the
+    // same way. It renders the SAME AgentSettingsSection with the SAME
+    // controlled props as the nested placement below — only the position in the
+    // tree differs, chosen synchronously from agentPlatformId.
+    <AgentSettingsSection
+      selectedPlatformId={agentPlatformId}
+      onSelectPlatform={setAgentPlatformId}
+      onBackFromPlatform={() => setAgentPlatformId(undefined)}
+    />
+  ) : (
     <div className="settings-page" data-controlled={controlled || undefined}>
       {controlled ? null : (
         <>
@@ -1255,6 +1328,10 @@ export function AppSettings({
       >
         {activeTab === "general" ? (
           <>
+            <SettingsPageHeader
+              title="General"
+              blurb="Your account, appearance, and everyday June preferences."
+            />
             <AccountSettingsSection
               account={account}
               loading={accountLoading}
@@ -1337,9 +1414,11 @@ export function AppSettings({
 
         {activeTab === "shortcuts" ? (
           <section className="settings-group" aria-labelledby="shortcuts-heading">
-            <h2 id="shortcuts-heading" className="settings-group-heading">
-              Shortcuts
-            </h2>
+            <SettingsPageHeader
+              id="shortcuts-heading"
+              title="Shortcuts"
+              blurb="Set the keyboard shortcuts that start dictation and control June."
+            />
             {helperUnavailable ? (
               <InlineNotice
                 role="alert"
@@ -1409,9 +1488,11 @@ export function AppSettings({
         {activeTab === "dictation" ? (
           <>
             <section className="settings-group" aria-labelledby="dictation-heading">
-              <h2 id="dictation-heading" className="settings-group-heading">
-                Dictation
-              </h2>
+              <SettingsPageHeader
+                id="dictation-heading"
+                title="Dictation"
+                blurb="Choose the language, microphone, and behavior for dictation."
+              />
               <div className="settings-card">
                 <div className="settings-rows">
                   <div className="settings-row">
@@ -1475,9 +1556,11 @@ export function AppSettings({
 
         {activeTab === "audio" ? (
           <section className="settings-group" aria-labelledby="audio-heading">
-            <h2 id="audio-heading" className="settings-group-heading">
-              Audio
-            </h2>
+            <SettingsPageHeader
+              id="audio-heading"
+              title="Audio"
+              blurb="Control how June captures meeting and system audio on this Mac."
+            />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row">
@@ -1592,6 +1675,10 @@ export function AppSettings({
 
         {activeTab === "models" ? (
           <>
+            <SettingsPageHeader
+              title="Models"
+              blurb="Choose the models June uses for transcription, notes, and agent responses."
+            />
             <section
               className="settings-group settings-models-group"
               aria-labelledby="models-heading"
@@ -1888,9 +1975,15 @@ export function AppSettings({
           </>
         ) : null}
 
-        {activeTab === "agent" ? <AgentSettingsSection /> : null}
+        {activeTab === "agent" ? (
+          <AgentSettingsSection
+            selectedPlatformId={agentPlatformId}
+            onSelectPlatform={setAgentPlatformId}
+            onBackFromPlatform={() => setAgentPlatformId(undefined)}
+          />
+        ) : null}
 
-        {activeTab === "skills" ? <InstalledSkillsSection /> : null}
+        {activeTab === "skills" ? <InstalledSkillsSection onOpenSkill={setOpenSkill} /> : null}
         {activeTab === "external-dirs" ? <ExternalDirsSection /> : null}
         {activeTab === "skill-review" ? <SkillReviewSection /> : null}
 
@@ -1914,9 +2007,11 @@ export function AppSettings({
 
         {activeTab === "about" ? (
           <section className="settings-group" aria-labelledby="about-heading">
-            <h2 id="about-heading" className="settings-group-heading">
-              About
-            </h2>
+            <SettingsPageHeader
+              id="about-heading"
+              title="About"
+              blurb="Version, release channel, and other details about this copy of June."
+            />
             <div className="settings-card">
               <div className="settings-rows">
                 <div className="settings-row settings-row-meta">
@@ -2350,10 +2445,11 @@ function ModelRow({
 }
 
 function ModelSummaryHoverDetails({ model }: { model: VeniceModelDto }) {
+  // Reuse the popover's model hovercard surface (name line + muted metadata line
+  // + description) so the summary tip reads exactly like the picker hovercard.
   return (
-    <span className="model-summary-tip">
-      <span className="model-summary-tip-name">{model.name}</span>
-      <ModelMeta model={model} />
+    <span className="agent-composer-model-detail model-summary-hovercard">
+      <ModelPickerCardContent model={model} withDescription />
     </span>
   );
 }

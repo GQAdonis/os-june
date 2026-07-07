@@ -32,7 +32,7 @@ import type { GlobalRecorderDemoApi } from "../lib/global-recorder-demo";
 import type { UpdateCardDemoApi } from "../lib/update-card-demo";
 import { NotesList, type NotesListHandle } from "../components/notes-list/NotesList";
 import { PermissionBanner } from "../components/permissions/PermissionBanner";
-import { AppSettings, type SettingsTab } from "../components/settings/AppSettings";
+import { AppSettings, SETTINGS_TABS, type SettingsTab } from "../components/settings/AppSettings";
 import { Sidebar, type SidebarView } from "../components/sidebar/Sidebar";
 import { TabBar, type TabItem } from "../components/tabs/TabBar";
 import { defaultNav, makeTabId, navEquals, type Tab, type TabNav } from "./tabs/tabs";
@@ -227,6 +227,7 @@ function tabMeta(
   notes: NoteListItemDto[],
   folders: FolderDto[],
   sessions: HermesSessionInfo[],
+  settingsSectionLabel?: string,
 ): { title: string; icon: ReactNode } {
   switch (nav.view) {
     case "meetings": {
@@ -274,7 +275,9 @@ function tabMeta(
       };
     case "settings":
       return {
-        title: "Settings",
+        // Surface the active settings section (e.g. "MCP servers") in the tab
+        // strip so the label says what you are looking at, not just "Settings".
+        title: settingsSectionLabel?.trim() || "Settings",
         icon: <IconSettingsGear4 size={TAB_ICON_SIZE} />,
       };
     case "notes":
@@ -967,13 +970,27 @@ export function App() {
     return intent;
   }, []);
 
+  // The label of the active settings section, so a tab parked on the Settings
+  // view reads e.g. "MCP servers" instead of the generic "Settings". Only the
+  // active tab is on the live settings view, so the section label applies to it.
+  const settingsSectionLabel = useMemo(
+    () => SETTINGS_TABS.find((tab) => tab.id === settingsTab)?.label,
+    [settingsTab],
+  );
+
   const tabItems = useMemo<TabItem[]>(
     () =>
       tabs.map((tab) => ({
         id: tab.id,
-        ...tabMeta(tab.nav, state.notes, state.folders, agentSessions),
+        ...tabMeta(
+          tab.nav,
+          state.notes,
+          state.folders,
+          agentSessions,
+          tab.id === activeTabId ? settingsSectionLabel : undefined,
+        ),
       })),
-    [tabs, state.notes, state.folders, agentSessions],
+    [tabs, state.notes, state.folders, agentSessions, activeTabId, settingsSectionLabel],
   );
 
   function handleRecovery(sessionId: string, action: "validate" | "discard") {

@@ -391,7 +391,7 @@ export function ModelPickerPopover({
   );
 }
 
-function ModelPickerCardContent({
+export function ModelPickerCardContent({
   model,
   withDescription,
 }: {

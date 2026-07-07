@@ -427,10 +427,11 @@ describe("InstalledSkillsView — component", () => {
     expect(screen.queryByText("pdf")).not.toBeInTheDocument();
   });
 
-  it("filters by category chip", () => {
+  it("filters by category from the category select", () => {
     render(<InstalledSkillsView state={stubState({ skills: VIEW_SKILLS })} />);
-    // Click the "Documents" category chip.
-    fireEvent.click(screen.getByRole("button", { name: /Documents/ }));
+    // Open the category select, then pick the "Documents" option.
+    fireEvent.click(screen.getByRole("button", { name: /filter by category/i }));
+    fireEvent.click(screen.getByRole("option", { name: /Documents/ }));
     expect(screen.getByText("pdf")).toBeInTheDocument();
     expect(screen.queryByText("research")).not.toBeInTheDocument();
   });

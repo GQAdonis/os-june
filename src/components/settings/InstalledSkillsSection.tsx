@@ -1,5 +1,6 @@
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
+import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
 import { IconExclamationCircle } from "central-icons/IconExclamationCircle";
 import { IconLock } from "central-icons/IconLock";
@@ -25,8 +26,10 @@ import {
   type SkillSetupBadge as SkillSetupBadgeModel,
   type SkillsSetupOverview,
 } from "../../lib/hermes-admin";
+import { Select } from "../ui/Select";
 import { Switch } from "../ui/Switch";
 import { AdminNotifications } from "./AdminNotifications";
+import { SettingsPageHeader } from "./AppSettings";
 import { SkillDetailSection } from "./SkillDetailSection";
 import { SkillLifecycleActions } from "./SkillLifecycleActions";
 import { SetupStatusBadge, SkillSetupSection } from "./SkillSetupSection";
@@ -169,14 +172,17 @@ export function InstalledSkillsView({
 
   return (
     <section className="settings-group installed-skills" aria-labelledby="installed-skills-heading">
-      <h2 id="installed-skills-heading" className="settings-group-heading">
-        Installed skills
-      </h2>
-      <p className="settings-group-description">
-        Browse the skills Hermes has installed and choose which ones future sessions can use.
-        Changes apply to new sessions.{" "}
-        <ModeNote mode={state.mode ?? mode} profile={state.profile} show={!isUnavailable} />
-      </p>
+      <SettingsPageHeader
+        id="installed-skills-heading"
+        title="Installed skills"
+        blurb={
+          <>
+            Browse the skills Hermes has installed and choose which ones future sessions can use.
+            Changes apply to new sessions.{" "}
+            <ModeNote mode={state.mode ?? mode} profile={state.profile} show={!isUnavailable} />
+          </>
+        }
+      />
 
       <LifecycleBanner state={state} />
       <AdminNotifications
@@ -201,6 +207,23 @@ export function InstalledSkillsView({
               onChange={(event) => setQuery(event.currentTarget.value)}
             />
           </div>
+          {categories.length > 1 && !isUnavailable ? (
+            <Select
+              className="installed-skills-category-select"
+              ariaLabel="Filter by category"
+              placeholder="All categories"
+              value={activeCategory}
+              onChange={setCategory}
+              options={[
+                { value: ALL_CATEGORIES, label: "All categories", count: state.skills.length },
+                ...categories.map((name) => ({
+                  value: name,
+                  label: name,
+                  count: state.skills.filter((skill) => skillCategory(skill) === name).length,
+                })),
+              ]}
+            />
+          ) : null}
           {lifecycle && updatableCount > 0 ? (
             <button
               type="button"
@@ -234,26 +257,6 @@ export function InstalledSkillsView({
             <IconExclamationCircle size={14} ariaHidden />
             {lifecycle.sweepError}
           </p>
-        ) : null}
-
-        {categories.length > 1 && !isUnavailable ? (
-          <div className="installed-skills-filters" role="group" aria-label="Filter by category">
-            <CategoryChip
-              label="All"
-              count={state.skills.length}
-              active={activeCategory === ALL_CATEGORIES}
-              onSelect={() => setCategory(ALL_CATEGORIES)}
-            />
-            {categories.map((name) => (
-              <CategoryChip
-                key={name}
-                label={name}
-                count={state.skills.filter((skill) => skillCategory(skill) === name).length}
-                active={activeCategory === name}
-                onSelect={() => setCategory(name)}
-              />
-            ))}
-          </div>
         ) : null}
 
         {state.error && hasSkills ? (
@@ -367,31 +370,6 @@ function LifecycleBanner({ state }: { state: InstalledSkillsState }) {
       </span>
       <span className="installed-skills-lifecycle-body">{detail}</span>
     </div>
-  );
-}
-
-/** A category filter chip. */
-function CategoryChip({
-  label,
-  count,
-  active,
-  onSelect,
-}: {
-  label: string;
-  count: number;
-  active: boolean;
-  onSelect: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="installed-skills-chip"
-      aria-pressed={active}
-      onClick={onSelect}
-    >
-      {label}
-      <span className="installed-skills-chip-count">{count}</span>
-    </button>
   );
 }
 
@@ -527,6 +505,9 @@ function SkillRow({
             </span>
           ) : null}
         </span>
+        {onOpen ? (
+          <IconChevronRightSmall size={14} aria-hidden className="installed-skill-chevron" />
+        ) : null}
       </div>
 
       {canSetUp && setupOpen ? (

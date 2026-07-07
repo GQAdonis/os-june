@@ -71,6 +71,9 @@ export type SelectOption = {
   /** Optional leading color chip (e.g. the accent picker). Omit for text
    * selects like Language/Microphone and no swatch renders. */
   color?: string;
+  /** Optional trailing count, rendered as a small muted number badge rather than
+   * inline in the label text (e.g. the skills category filter counts). */
+  count?: number;
 };
 
 /**
@@ -148,6 +151,9 @@ export function Select({
           <span className="select-swatch" style={{ background: selected.color }} aria-hidden />
         ) : null}
         <span>{selected?.label ?? placeholder}</span>
+        {typeof selected?.count === "number" ? (
+          <span className="select-count">{selected.count}</span>
+        ) : null}
         <IconChevronDownSmall size={14} />
       </button>
       {open ? (
@@ -179,7 +185,12 @@ export function Select({
                       aria-hidden
                     />
                   ) : null}
-                  <span>{option.label}</span>
+                  <span className="select-label">
+                    {option.label}
+                    {typeof option.count === "number" ? (
+                      <span className="select-count">{option.count}</span>
+                    ) : null}
+                  </span>
                   <span className="select-check" aria-hidden>
                     {isSelected ? <IconCheckmark2Small size={14} /> : null}
                   </span>

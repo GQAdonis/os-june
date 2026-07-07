@@ -799,19 +799,38 @@ input:focus-visible,
   grid-template-rows: minmax(0, 1fr) auto;
 }
 
+/* The search caps at the same width as the Installed skills filter (240px) so
+ * the two settings searches read identically, with the refresh pinned right
+ * (the second column is a 1fr spacer that pushes it to the edge). */
 .agent-management-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
   gap: var(--sp-3);
   padding: var(--sp-4) var(--sp-5);
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* Aligns with the shared .settings-search treatment: a borderless card-filled
+ * field with a layered inset ring and the same two-step focus ring — no gray
+ * background. */
 .agent-management-search {
   position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
+  border-radius: var(--r-md);
+  background: var(--card);
+  box-shadow:
+    inset 0 1px 0 0 oklch(100% 0 none / 60%),
+    0 1px 2px 0 oklch(0% 0 none / 4%),
+    0 0 0 1px oklch(0% 0 none / 6%);
+  transition: box-shadow var(--t-fast) var(--ease-out);
+}
+
+.agent-management-search:focus-within {
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 4px var(--focus-ring);
 }
 
 .agent-management-search-icon {
@@ -823,18 +842,18 @@ input:focus-visible,
 
 .agent-management-toolbar input {
   width: 100%;
-  min-height: var(--control-md);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
+  min-height: var(--control-lg);
+  border: 0;
+  border-radius: var(--r-md);
   padding: 0 var(--sp-3) 0 calc(var(--sp-3) * 2 + 15px);
-  background: var(--background);
+  background: transparent;
   color: var(--foreground);
   font-size: var(--fs-md);
   outline: none;
 }
 
 .agent-management-toolbar input:focus {
-  border-color: var(--ring-focus);
+  outline: none;
 }
 
 .agent-management-toolbar button:not(.icon-button) {
@@ -853,11 +872,13 @@ input:focus-visible,
   opacity: 0.55;
 }
 
-/* The refresh control aligns with the search field height in the toolbar's
- * second column. */
+/* The refresh control matches the search field height (--control-lg) so the two
+ * toolbar controls line up, not a shorter icon button beside a taller field. */
 .agent-management-refresh {
   justify-self: end;
   align-self: center;
+  width: var(--control-lg);
+  height: var(--control-lg);
 }
 
 .agent-management-scroll {
@@ -938,6 +959,20 @@ input:focus-visible,
 
 .agent-capability-row:last-child {
   border-bottom: 0;
+}
+
+/* The trailing controls: the toggle (its own target, never triggers the
+ * drill-in) plus a chevron that echoes the whole-row click affordance, matching
+ * the installed-skill rows. */
+.agent-capability-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.agent-capability-chevron {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
 }
 
 .agent-capability-title {
@@ -1028,15 +1063,10 @@ input:focus-visible,
   box-shadow: inset 0 0 0 1px var(--ring-focus);
 }
 
-.agent-files-root {
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  background: var(--surface-subtle);
-  overflow: hidden;
-}
-
+/* A clean file tree: quiet section rows with a folder icon, indented children,
+ * muted counts/sizes, and neutral row hovers — no rough borders or chrome. */
 .agent-files-root + .agent-files-root {
-  margin-top: var(--sp-4);
+  margin-top: var(--sp-5);
 }
 
 .agent-files-root > header {
@@ -1044,16 +1074,14 @@ input:focus-visible,
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--sp-4);
-  padding: var(--sp-4);
-  border-bottom: 1px solid var(--border-subtle);
-  background: var(--card);
+  padding: 0 var(--sp-2) var(--sp-2);
 }
 
 .agent-files-root h3 {
   margin: 0;
   color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: 500;
   letter-spacing: 0;
   text-transform: none;
 }
@@ -1071,17 +1099,16 @@ input:focus-visible,
 .agent-files-root p {
   margin: var(--sp-1) 0 0;
   color: var(--muted-foreground);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-xs);
   line-height: 1.35;
 }
 
 .agent-files-root code {
   max-width: 44%;
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
   border-radius: var(--r-xs);
   padding: 2px var(--sp-2);
-  background: var(--background);
+  background: var(--surface-subtle);
   color: var(--muted-foreground);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
@@ -1090,23 +1117,42 @@ input:focus-visible,
 }
 
 .agent-files-tree {
-  padding: var(--sp-2) 0;
+  padding: 0;
 }
 
 .agent-files-entry {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--sp-2);
-  min-height: 30px;
-  padding: 0 var(--sp-3);
-  padding-left: calc(var(--sp-3) + var(--agent-file-depth, 0) * 18px);
+  min-height: 32px;
+  margin: 0 calc(var(--sp-1) * -1);
+  padding: 0 var(--sp-2);
+  padding-left: calc(var(--sp-2) + var(--agent-file-depth, 0) * 18px);
+  border-radius: var(--r-sm);
   color: var(--foreground);
   font-size: var(--fs-sm);
+  transition: background-color var(--t-fast) var(--ease-out);
 }
 
 .agent-files-entry:hover {
-  background: var(--card);
+  background: var(--secondary);
+}
+
+/* The reveal-in-Finder icon-button sits at the row's trailing edge and fades in
+ * on row hover or when it takes keyboard focus, echoing the drill-in affordances
+ * on the other settings rows. Clicking it opens the entry's path in Finder. */
+.agent-files-entry-reveal {
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition:
+    opacity var(--t-fast) var(--ease-out),
+    background-color var(--t-fast) var(--ease-out);
+}
+
+.agent-files-entry:hover .agent-files-entry-reveal,
+.agent-files-entry-reveal:focus-visible {
+  opacity: 1;
 }
 
 .agent-files-entry-icon {
@@ -1177,17 +1223,28 @@ input:focus-visible,
   background: var(--primary-foreground);
 }
 
-.agent-messaging-layout {
-  display: grid;
-  grid-template-columns: minmax(260px, 0.8fr) minmax(360px, 1.4fr);
-  min-height: 0;
-}
-
 .agent-messaging-list {
   min-height: 0;
   overflow: auto;
   padding: var(--sp-5);
-  border-right: 1px solid var(--border-subtle);
+}
+
+/* The drilled-in platform header: back button + platform name, reading like
+ * the card's header row above the configuration fields. */
+.agent-platform-topbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.agent-platform-topbar-title {
+  overflow: hidden;
+  font-weight: 500;
+  font-size: var(--fs-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-messaging-list .agent-capability-row {
@@ -1199,6 +1256,21 @@ input:focus-visible,
   grid-template-rows: minmax(0, 1fr) auto;
   min-height: 0;
   overflow: hidden;
+}
+
+/* In the pinned drill-in shell the detail flows inside the shared skill-detail
+ * scroll region rather than owning a fixed-height card, so the inner scroller
+ * and overflow clipping are released and the content flows naturally. The
+ * Save / enable actions live in the pinned breadcrumb bar, so there is no
+ * footer here. Reuses the shared shell; only the flow is retargeted. */
+.agent-messaging-detail-page .agent-messaging-detail {
+  display: block;
+  overflow: visible;
+}
+
+.agent-messaging-detail-page .agent-messaging-detail-scroll {
+  overflow: visible;
+  padding: 0;
 }
 
 .agent-messaging-detail-scroll {
@@ -7819,7 +7891,8 @@ input:focus-visible,
 /* Wrapper gives the editor a real viewport-height box inside the card. Long
  * note content contributes to the card scroller while the recorder is fixed
  * to the card bottom. */
-.note-shell {
+.note-shell,
+.skill-detail-shell {
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -7827,7 +7900,8 @@ input:focus-visible,
   height: 100%;
 }
 
-.note-detail-scroll {
+.note-detail-scroll,
+.skill-detail-scroll {
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -7841,16 +7915,19 @@ input:focus-visible,
   scrollbar-color: auto;
 }
 
-.note-detail-scroll[data-has-detail-bar="true"] {
+.note-detail-scroll[data-has-detail-bar="true"],
+.skill-detail-scroll[data-has-detail-bar="true"] {
   margin-top: calc(-1 * var(--detail-bar-h));
   padding-top: var(--detail-bar-h);
 }
 
-.note-detail-scroll::-webkit-scrollbar-track {
+.note-detail-scroll::-webkit-scrollbar-track,
+.skill-detail-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.note-detail-scroll[data-has-detail-bar="true"]::-webkit-scrollbar-track {
+.note-detail-scroll[data-has-detail-bar="true"]::-webkit-scrollbar-track,
+.skill-detail-scroll[data-has-detail-bar="true"]::-webkit-scrollbar-track {
   margin-top: var(--detail-bar-h);
 }
 
@@ -9989,6 +10066,46 @@ input:focus-visible,
   letter-spacing: 0;
 }
 
+/* The platforms group heading carries a quiet muted count beside it (the count
+ * that used to live on the in-list h3). */
+.agent-messaging-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* Renders as a quiet .status-pill number badge next to the "Platforms" heading
+ * (see the .status-pill class) so the count reads as a badge, not heavy body
+ * text. Layout comes from the heading's flex gap; the pill needs no extra
+ * spacing of its own. */
+
+/* The shared settings page header (Codex-app style): a large serif page title
+ * with a single muted one-line blurb beneath and generous space before the
+ * content. Used at the top of every settings panel so each page announces what
+ * it is. Distinct from the small `.settings-group-heading` which now reads as a
+ * sub-group label below the header. */
+.settings-page-header {
+  padding-left: var(--sp-3);
+  margin-bottom: var(--sp-5);
+}
+
+.settings-page-title {
+  margin: 0;
+  color: var(--foreground);
+  font-family: var(--font-serif);
+  font-size: var(--fs-2xl);
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+.settings-page-blurb {
+  margin: var(--sp-2) 0 0;
+  max-width: 60ch;
+  color: var(--muted-foreground);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+}
+
 .settings-group-description {
   margin: 0 0 var(--sp-1);
   padding-left: var(--sp-3);
@@ -10044,16 +10161,8 @@ input:focus-visible,
   );
 }
 
-.settings-agent-card .agent-messaging-layout {
-  min-height: 540px;
-}
-
-/* The agent card's view switcher: the shared segmented control in a padded bar
- * with a hairline divider, so it reads like the card's header row. */
-.settings-agent-tabs-bar {
-  display: flex;
-  padding: var(--sp-3) var(--sp-5);
-  border-bottom: 1px solid var(--border-subtle);
+.settings-agent-card .agent-messaging-detail {
+  min-height: 420px;
 }
 
 .settings-rows {
@@ -10098,6 +10207,28 @@ input:focus-visible,
   color: var(--muted-foreground);
   font-size: var(--fs-md);
   line-height: 1.5;
+}
+
+/* A row title with a trailing info affordance: the caveats that used to bloat
+ * the description live in a HoverTip on this small muted glyph. */
+.settings-row-title-with-info {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.settings-row-info-affordance {
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--r-pill);
+  color: var(--muted-foreground);
+  cursor: help;
+  transition: color var(--t-fast) var(--ease-out);
+}
+
+.settings-row-info-affordance:hover,
+.settings-row-info-affordance:focus-visible {
+  color: var(--foreground);
 }
 
 .settings-row-control {
@@ -10472,16 +10603,26 @@ input:focus-visible,
 
 /* Quiet "More options" disclosure row: looks like a settings row but acts as
  * a toggle, keeping advanced controls out of the default view. */
+/* The whole row is one clickable expander: a contained rounded rectangle whose
+ * neutral hover fill sits inset from the card edges (like sidebar nav items /
+ * the external-dir summary hover), not a full-bleed edge-to-edge band. Content
+ * stays left-aligned; the bottom border is dropped so the rounded fill reads as
+ * a single rectangle. */
+.settings-rows .settings-more-options-trigger,
 .settings-more-options-trigger {
-  width: 100%;
-  border-left: 0;
-  border-right: 0;
-  border-top: 0;
+  width: auto;
+  /* Teensy top inset so the rounded hover fill doesn't run flush into the
+   * row/border directly above it. */
+  margin: var(--sp-1) calc(var(--sp-3) * -1) 0;
+  padding: var(--sp-3);
+  border: 0;
+  border-radius: var(--r-md);
   background: transparent;
   font: inherit;
   text-align: left;
   cursor: pointer;
   color: inherit;
+  transition: background-color var(--t-fast) var(--ease-out);
 }
 
 .settings-more-options-trigger:hover {
@@ -10573,12 +10714,52 @@ input:focus-visible,
 }
 
 .installed-skills-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  display: flex;
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-4) var(--sp-5);
   border-bottom: 1px solid var(--border-subtle);
+}
+
+/* A shortened search on the left; the category filter and the trailing controls
+ * float to the right of the toolbar. */
+.installed-skills-toolbar .installed-skills-search {
+  flex: 0 1 240px;
+}
+
+/* The category filter floats right (search left, filter right). Everything after
+ * it — update-all, refresh — follows to the trailing edge. */
+.installed-skills-toolbar .installed-skills-category-select {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* When there is no category select, the trailing controls still float right. */
+.installed-skills-toolbar .installed-skills-update-all,
+.installed-skills-toolbar .installed-skills-refresh {
+  margin-left: auto;
+}
+
+.installed-skills-toolbar .installed-skills-category-select ~ .installed-skills-update-all,
+.installed-skills-toolbar .installed-skills-category-select ~ .installed-skills-refresh,
+.installed-skills-toolbar .installed-skills-update-all ~ .installed-skills-refresh {
+  margin-left: 0;
+}
+
+/* A quieter, lighter category trigger for this settings filter: ghost by default
+ * (no resting border), a soft neutral hover fill, tighter minimum width. */
+.installed-skills-category-select .select-trigger {
+  min-width: 0;
+  border-color: transparent;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    border-color var(--t-fast) var(--ease-out);
+}
+
+.installed-skills-category-select .select-trigger:hover,
+.installed-skills-category-select .select-trigger[aria-expanded="true"] {
+  border-color: transparent;
+  background: var(--secondary);
 }
 
 /* The shared settings search field: a quiet input with a leading magnifier
@@ -10602,15 +10783,36 @@ input:focus-visible,
   pointer-events: none;
 }
 
+/* Match the model picker dialog search (.model-picker-search): comfortable
+ * height, borderless card fill with a layered inset shadow ring, and the same
+ * two-step focus ring — never a cramped border-color swap. The wrapper carries
+ * the surface + ring so the icon and input sit inside one field. */
+.settings-search {
+  min-height: var(--control-lg);
+  border-radius: var(--r-md);
+  background: var(--card);
+  box-shadow:
+    inset 0 1px 0 0 oklch(100% 0 none / 60%),
+    0 1px 2px 0 oklch(0% 0 none / 4%),
+    0 0 0 1px oklch(0% 0 none / 6%);
+  transition: box-shadow var(--t-fast) var(--ease-out);
+}
+
+.settings-search:focus-within {
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 4px var(--focus-ring);
+}
+
 .settings-search input,
 .installed-skills-search input,
 .mcp-servers-search input {
   width: 100%;
-  min-height: var(--control-md);
+  min-height: var(--control-lg);
   padding: 0 var(--sp-3) 0 calc(var(--sp-3) * 2 + 15px);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  background: var(--background);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
   color: var(--foreground);
   font-size: var(--fs-md);
   outline: none;
@@ -10619,7 +10821,7 @@ input:focus-visible,
 .settings-search input:focus,
 .installed-skills-search input:focus,
 .mcp-servers-search input:focus {
-  border-color: var(--ring-focus);
+  outline: none;
 }
 
 .installed-skills-update-all {
@@ -10799,43 +11001,6 @@ input:focus-visible,
   font-size: var(--fs-sm);
 }
 
-.installed-skills-filters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-5);
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.installed-skills-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-px) var(--sp-3);
-  min-height: var(--control-sm);
-  border: 1px solid var(--border-subtle);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-
-.installed-skills-chip[aria-pressed="true"] {
-  background: var(--secondary);
-  color: var(--foreground);
-  border-color: transparent;
-  box-shadow: 0 0 0 1px var(--border-subtle);
-}
-
-.installed-skills-chip-count {
-  color: var(--muted-foreground);
-}
-
-.installed-skills-chip[aria-pressed="true"] .installed-skills-chip-count {
-  color: var(--foreground);
-}
-
 .installed-skills-inline-error {
   display: flex;
   align-items: center;
@@ -10978,6 +11143,20 @@ input:focus-visible,
   align-items: center;
   gap: var(--sp-3);
   padding-top: 1px;
+}
+
+/* A trailing drill-in chevron: muted always, fully lit on row hover/focus so
+ * the row reads as openable, matching the affordance on the other list rows. */
+.installed-skill-chevron {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  opacity: 0.5;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.installed-skill-row:hover .installed-skill-chevron,
+.installed-skill-row:focus-within .installed-skill-chevron {
+  opacity: 1;
 }
 
 .installed-skill-toggle {
@@ -11505,111 +11684,31 @@ input:focus-visible,
   color: var(--muted-foreground);
 }
 
-.external-dirs-warning {
+/* The lifecycle banner renders through the shared InlineNotice so it matches
+ * the shared-directory warning stacked beneath it. The stacked notices sit in a
+ * tight group; the class stays as a scoping hook only. */
+.external-dirs-lifecycle + .inline-notice {
+  margin-top: var(--sp-2);
+}
+
+/* The action row above the list card: Add directory (opens a dialog) + refresh,
+ * right-aligned. Extra top gap gives the stacked notices above it breathing
+ * room. The raw path input lives in the dialog, not inline in a toolbar. */
+.external-dirs-actions {
   display: flex;
-  align-items: flex-start;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
-  margin-bottom: var(--sp-3);
-  border: 1px solid color-mix(in oklch, var(--warm-strong) 40%, var(--border));
-  border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--warm-strong) 8%, var(--card));
-  color: var(--foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.45;
-}
-
-.external-dirs-warning > :first-child {
-  flex: none;
-  margin-top: 2px;
-  color: var(--warm-strong);
-}
-
-.external-dirs-lifecycle {
-  display: grid;
-  gap: var(--sp-px);
-  padding: var(--sp-3) var(--sp-4);
-  margin-bottom: var(--sp-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-md);
-  background: var(--card);
-}
-
-.external-dirs-lifecycle[data-tone="warning"] {
-  border-color: color-mix(in oklch, var(--warm-strong) 40%, var(--border));
-  background: color-mix(in oklch, var(--warm-strong) 8%, var(--card));
-}
-
-.external-dirs-lifecycle[data-tone="destructive"] {
-  border-color: color-mix(in oklch, var(--destructive) 45%, var(--border));
-  background: var(--destructive-soft);
-}
-
-.external-dirs-lifecycle-eyebrow {
-  display: inline-flex;
   align-items: center;
-  gap: var(--sp-2);
-  color: var(--foreground);
-  font-weight: 500;
-  font-size: var(--fs-sm);
-}
-
-.external-dirs-lifecycle-body {
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.45;
-}
-
-.external-dirs-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: flex-end;
   gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-5);
-  border-bottom: 1px solid var(--border-subtle);
+  margin-top: var(--sp-5);
+  margin-bottom: var(--sp-3);
+  padding: 0 var(--sp-3);
 }
 
 .external-dirs-add {
-  display: flex;
-  gap: var(--sp-2);
-  min-width: 0;
-}
-
-.external-dirs-add input {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: var(--control-md);
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  /* Transparent chrome (matches the standard settings text input) so the field
-   * doesn't read as filled/disabled. */
-  background: transparent;
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  outline: none;
-}
-
-.external-dirs-add input:focus {
-  border-color: var(--ring-focus);
-}
-
-.external-dirs-add-button {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
   min-height: var(--control-md);
-  padding: 0 var(--sp-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-sm);
-  background: var(--secondary);
-  color: var(--secondary-foreground);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-
-.external-dirs-add-button:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 
 .external-dirs-refresh:disabled {
@@ -11617,44 +11716,138 @@ input:focus-visible,
   cursor: default;
 }
 
-.external-dirs-hint {
-  margin: 0;
-  padding: var(--sp-3) var(--sp-5) 0;
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-  line-height: 1.45;
+/* The dialog path field: a text input with a native folder-picker affordance. */
+.external-dirs-path-field {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* The canonical settings text input (matches the Venice key / MCP dialog /
+ * messaging fields): the shared border + card background and outer focus ring,
+ * --control-lg tall with --r-md corners, so every text input on the AI pages
+ * reads as one active field, never a gray or transparent "disabled" box. */
+.external-dirs-path-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: var(--control-lg);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--background);
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  outline: none;
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.external-dirs-path-input:focus {
+  border-color: var(--ring);
+  box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
+.external-dirs-choose {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+  height: var(--control-lg);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+
+.external-dirs-choose:hover:not(:disabled) {
+  background: var(--sidebar-accent);
+}
+
+.external-dirs-choose:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.external-dirs-dialog-error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
 }
 
 .external-dirs-inline-error {
-  padding: var(--sp-2) var(--sp-5) 0;
+  padding: var(--sp-4) var(--sp-5) 0;
 }
 
 .external-dirs-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: var(--sp-2);
 }
 
-.external-dir-row {
+.external-dir-row + .external-dir-row {
+  margin-top: var(--sp-1);
+}
+
+/* The collapsed primary view: the whole row is the disclosure trigger. Name
+ * first, the raw path muted beneath, presence pill and chevron on the right;
+ * everything else lives in the expanded details. The hover is an inset rounded
+ * rectangle (like sidebar nav items), not full-bleed edge-to-edge. */
+.external-dir-summary {
   display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  padding: var(--sp-4) var(--sp-5);
-  border-top: 1px solid var(--border-subtle);
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  padding: var(--sp-3) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease-out);
 }
 
-.external-dir-main {
+.external-dir-summary:hover {
+  background: var(--secondary);
+}
+
+.external-dir-copy {
   display: grid;
-  gap: var(--sp-2);
+  flex: 1;
+  gap: 2px;
   min-width: 0;
 }
 
-.external-dir-headline {
+.external-dir-name-row {
   display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
+  align-items: baseline;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.external-dir-name {
+  overflow: hidden;
+  color: var(--foreground);
+  font-weight: 500;
+  font-size: var(--fs-md);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The discovered-skill count reads as a quiet muted figure beside the name,
+ * matching the count-badge pattern other list headers use. */
+.external-dir-count {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-size: var(--fs-sm);
 }
 
 .external-dir-icon {
@@ -11666,11 +11859,28 @@ input:focus-visible,
 .external-dir-path {
   overflow: hidden;
   max-width: 100%;
-  color: var(--foreground);
-  font-weight: 500;
-  font-size: var(--fs-md);
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-size: var(--fs-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.external-dir-chevron {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  transition: transform 140ms ease;
+}
+
+.external-dir-row[data-open] .external-dir-chevron {
+  transform: rotate(90deg);
+}
+
+/* The expanded details, indented to the copy column (icon 16px + sp-3 gap). */
+.external-dir-details {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3) var(--sp-4) calc(var(--sp-3) + 16px + var(--sp-3));
 }
 
 /* Status chips follow the established .agent-status-pill pattern: a neutral
@@ -11681,58 +11891,33 @@ input:focus-visible,
  * settings surface shows a compact status (external-dir rows, skill setup
  * status), so status reads the same everywhere instead of each surface minting
  * its own badge. */
+/* The house badge recipe (same as .routines-item-badge): a soft muted wash,
+ * small radius, tone carried by a matched wash + text color pair. Never a
+ * mismatched wash behind a tone color. */
 .status-pill,
 .external-dir-status {
   display: inline-flex;
   align-items: center;
-  gap: var(--sp-1);
-  min-height: 18px;
-  padding: 0 var(--sp-2);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-pill);
-  background: var(--surface-subtle);
+  flex-shrink: 0;
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-sm);
+  background: color-mix(in oklch, var(--muted) 60%, transparent);
   color: var(--muted-foreground);
   font-size: var(--fs-xs);
-  font-weight: 400;
-  line-height: 1;
-}
-
-.status-pill::before,
-.external-dir-status::before {
-  content: "";
-  width: 5px;
-  height: 5px;
-  border-radius: var(--r-pill);
-  background: currentColor;
+  font-weight: 500;
+  line-height: 1.4;
 }
 
 .status-pill[data-tone="ok"],
 .external-dir-status[data-tone="ok"] {
+  background: color-mix(in oklch, var(--success) 14%, transparent);
   color: var(--success);
-}
-
-.status-pill[data-tone="info"],
-.external-dir-status[data-tone="info"] {
-  color: var(--muted-foreground);
 }
 
 .status-pill[data-tone="warning"],
 .external-dir-status[data-tone="warning"] {
+  background: var(--warm-soft);
   color: var(--warm-strong);
-}
-
-.status-pill[data-tone="muted"],
-.external-dir-status[data-tone="muted"] {
-  color: var(--muted-foreground);
-}
-
-/* The neutral "info"/"muted" states carry no signal color, so the leading dot
- * would read as a bullet; drop it and let the label stand alone. */
-.status-pill[data-tone="info"]::before,
-.status-pill[data-tone="muted"]::before,
-.external-dir-status[data-tone="info"]::before,
-.external-dir-status[data-tone="muted"]::before {
-  display: none;
 }
 
 .external-dir-resolved {
@@ -11756,15 +11941,6 @@ input:focus-visible,
   font-size: var(--fs-xs);
 }
 
-.external-dir-readonly {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-}
-
 .external-dir-note {
   margin: 0;
   color: var(--muted-foreground);
@@ -11780,21 +11956,29 @@ input:focus-visible,
   flex: none;
 }
 
+/* The standard quiet secondary button (same recipe as .skill-detail-revert):
+ * a soft surface-subtle fill, no border, neutral hover — no bespoke one-off. */
 .external-dir-remove {
-  display: inline-grid;
-  place-items: center;
-  width: var(--control-sm);
-  height: var(--control-sm);
-  border: 1px solid var(--border-subtle);
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-sm);
+  padding: 0 var(--sp-3);
+  border: 0;
   border-radius: var(--r-sm);
-  background: var(--secondary);
-  color: var(--secondary-foreground);
+  background: var(--surface-subtle);
+  color: var(--foreground);
+  font-size: var(--fs-sm);
   cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+
+.external-dir-remove:hover:not(:disabled) {
+  background: var(--secondary);
 }
 
 .external-dir-remove:disabled {
   opacity: 0.55;
-  cursor: not-allowed;
+  cursor: default;
 }
 
 .external-dirs-empty,
@@ -12563,11 +12747,14 @@ input:focus-visible,
   min-width: 0;
 }
 
+/* Reads as a page title, matching the SettingsPageHeader treatment: the serif
+ * face at weight 400. */
 .skill-detail-title {
   margin: 0;
   color: var(--foreground);
-  font-size: var(--fs-xl);
-  font-weight: 500;
+  font-family: var(--font-serif);
+  font-size: var(--fs-2xl);
+  font-weight: 400;
   letter-spacing: 0;
 }
 
@@ -12679,7 +12866,6 @@ input:focus-visible,
 .skill-detail-meta {
   display: grid;
   gap: var(--sp-3);
-  padding: 0 var(--sp-3);
 }
 
 .skill-detail-meta-list {
@@ -12839,6 +13025,14 @@ input:focus-visible,
   font-size: var(--fs-xs);
 }
 
+/* The editor actions (Revert / Save) live in the block header row, title left,
+ * actions right — not in a card footer. */
+.skill-detail-doc-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
 .skill-detail-doc-subheading {
   margin: 0;
   color: var(--muted-foreground);
@@ -12882,18 +13076,32 @@ input:focus-visible,
   font-size: var(--fs-xs);
 }
 
+/* Match the app's other textareas (e.g. .agent-clarify-form textarea): a
+ * subtle border, small radius, comfortable padding, and the standard focus
+ * ring. Keeps monospace because it edits SKILL.md. */
 .skill-detail-editor {
   width: 100%;
   min-height: 260px;
   padding: var(--sp-3);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--r-sm);
-  background: var(--background);
+  background: var(--surface);
   color: var(--foreground);
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   line-height: 1.5;
   resize: vertical;
+}
+
+/* The same two-step focus ring as the settings inputs/searches
+ * (.settings-search:focus-within), so the editor focuses like every other field
+ * in the system. Keeps monospace. */
+.skill-detail-editor:focus {
+  outline: none;
+  border-color: transparent;
+  box-shadow:
+    0 0 0 1px var(--ring),
+    0 0 0 4px var(--focus-ring);
 }
 
 .skill-detail-editor[aria-invalid="true"] {
@@ -12924,7 +13132,6 @@ input:focus-visible,
   color: var(--warm-strong);
 }
 
-.skill-detail-editor-actions,
 .skill-detail-confirm-actions {
   display: flex;
   align-items: center;
@@ -13035,35 +13242,23 @@ input:focus-visible,
   color: var(--muted-foreground);
 }
 
-.mcp-servers-toolbar {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-5);
-}
-
-.mcp-servers-refresh {
-  display: inline-flex;
+/* The action row above the list card (Codex "Servers" + Add pattern): a compact
+ * search, the refresh icon-button, and the add-server button. The search is
+ * kept narrow (~220px) so it doesn't sprawl across the row. */
+.mcp-servers-actions {
+  display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  min-height: var(--control-md);
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
   padding: 0 var(--sp-3);
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--secondary-foreground);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  transition: background-color var(--t-fast) var(--ease-out);
 }
 
-.mcp-servers-refresh:hover {
-  background: var(--secondary);
+.mcp-servers-actions .mcp-servers-search {
+  flex: 0 1 220px;
 }
 
-.mcp-servers-refresh:disabled {
-  opacity: 0.55;
-  cursor: default;
+.mcp-servers-actions .mcp-servers-add {
+  margin-left: auto;
 }
 
 .mcp-servers-add {
@@ -13082,15 +13277,17 @@ input:focus-visible,
 }
 
 .mcp-servers-body {
-  padding: 0 var(--sp-3) var(--sp-3);
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
 }
 
+/* No own top/bottom padding — the body owns the single tight top inset so the
+ * first row sits near the card top instead of stacking two paddings. */
 .mcp-servers-list {
   display: grid;
   gap: var(--sp-1);
   list-style: none;
   margin: 0;
-  padding: var(--sp-1) 0;
+  padding: 0;
 }
 
 .mcp-server-row {
@@ -13635,35 +13832,13 @@ input:focus-visible,
   line-height: 1.45;
 }
 
-/* Empty / error / loading states. */
-.mcp-servers-empty,
+/* Error / loading states (the empty state is the shared .empty-state surface). */
 .mcp-servers-error {
   display: grid;
   justify-items: center;
   gap: var(--sp-2);
   padding: var(--sp-10) var(--sp-6);
   text-align: center;
-}
-
-.mcp-servers-empty-icon {
-  display: inline-grid;
-  place-items: center;
-  color: var(--muted-foreground);
-}
-
-.mcp-servers-empty-title {
-  margin: 0;
-  color: var(--foreground);
-  font-size: var(--fs-md);
-  font-weight: 500;
-}
-
-.mcp-servers-empty-description {
-  margin: 0;
-  max-width: 380px;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.5;
 }
 
 .mcp-servers-retry {
@@ -13794,48 +13969,11 @@ input:focus-visible,
   line-height: 1.45;
 }
 
-.mcp-add-transport {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  width: fit-content;
-  min-height: var(--control-lg);
-  padding: 3px;
-  border-radius: var(--r-md);
-  background: var(--surface-subtle);
-}
-
-.mcp-add-transport-option {
-  display: inline-flex;
-  align-items: center;
-  min-height: calc(var(--control-lg) - 6px);
-  padding: 0 var(--sp-4);
-  border: 0;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  cursor: pointer;
-  transition: background-color var(--t-fast) var(--ease-out);
-}
-
-.mcp-add-transport-option[data-active="true"] {
-  background: var(--card);
-  color: var(--foreground);
-  box-shadow: var(--shadow-sm);
-}
-
-.mcp-add-transport-option:hover:not(:disabled) {
-  background: var(--secondary);
-}
-
-.mcp-add-transport-option[data-active="true"]:hover:not(:disabled) {
-  background: var(--card);
-}
-
-.mcp-add-transport-option:disabled {
-  cursor: default;
-  opacity: 0.7;
+/* Transport uses the shared segmented control; only the disabled state is
+ * section-specific (editing an existing server locks the transport). */
+.mcp-add-transport-disabled {
+  opacity: 0.55;
+  pointer-events: none;
 }
 
 .mcp-add-list-editor {
@@ -14641,6 +14779,10 @@ input:focus-visible,
   position: relative;
   display: inline-flex;
   align-items: center;
+  /* Breathing room between the (flex:1) label and the trailing count badge so
+   * a count like "72" never butts against the label. The chevron is absolutely
+   * positioned, so this only spaces the label from the count. */
+  gap: var(--sp-3);
   min-width: 220px;
   height: 32px;
   padding: 0 32px 0 var(--sp-3);
@@ -14756,6 +14898,35 @@ input:focus-visible,
   place-items: center;
   width: 16px;
   color: var(--foreground);
+}
+
+/* A label + optional trailing count badge, sharing column 1 of the option grid
+ * so the check column stays fixed. The label and the count sit on one line
+ * (never wrapping) with the count pushed to the trailing edge and breathing
+ * room between them, so a long "All categories 72" reads cleanly. */
+.select-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.select-label > :first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A small muted number badge for a count that used to be an inline parenthetical
+ * (e.g. the skills category filter). Reads as a quiet figure, not part of the
+ * label. */
+.select-count {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  font-weight: 400;
 }
 
 /* Leading color chip for color selects (Appearance accent). A slightly rounded
@@ -14908,14 +15079,16 @@ input:focus-visible,
   color: color-mix(in oklch, var(--muted-foreground) 50%, transparent);
 }
 
-.model-summary-tip {
-  display: grid;
+/* The model summary tip reuses the popover's model hovercard content
+ * (ModelPickerCardContent): name line + muted metadata line + description. The
+ * .hover-tip host already supplies the popover surface, so this only lays the
+ * content out as a column. */
+.model-summary-hovercard {
+  display: flex;
+  flex-direction: column;
   gap: var(--sp-1);
-}
-
-.model-summary-tip-name {
-  color: var(--popover-foreground);
-  font-weight: var(--fw-medium);
+  width: 232px;
+  max-width: 100%;
 }
 
 /* Hover callout card (HoverTip) — the Venice-style explainer behind privacy
@@ -16132,7 +16305,8 @@ input:focus-visible,
   line-height: 1.45;
 }
 
-.routine-detail-tabs {
+.routine-detail-tabs,
+.settings-agent-tabs {
   --routine-tabs-indicator-x: 0px;
   --routine-tabs-indicator-w: 0px;
   position: relative;
@@ -16145,7 +16319,8 @@ input:focus-visible,
   border-bottom: 1px solid var(--border-subtle);
 }
 
-.routine-detail-tabs::after {
+.routine-detail-tabs::after,
+.settings-agent-tabs::after {
   content: "";
   position: absolute;
   bottom: -1px;
@@ -16159,7 +16334,8 @@ input:focus-visible,
     width var(--t-med) var(--ease-out);
 }
 
-.routine-detail-tabs button {
+.routine-detail-tabs button,
+.settings-agent-tabs button {
   position: relative;
   min-height: 34px;
   padding: 0 0 var(--sp-2);
@@ -16175,15 +16351,18 @@ input:focus-visible,
     opacity var(--t-fast) var(--ease-out);
 }
 
-.routine-detail-tabs button:hover {
+.routine-detail-tabs button:hover,
+.settings-agent-tabs button:hover {
   color: var(--foreground);
 }
 
-.routine-detail-tabs button[aria-selected="true"] {
+.routine-detail-tabs button[aria-selected="true"],
+.settings-agent-tabs button[aria-selected="true"] {
   color: var(--foreground);
 }
 
-.routine-detail-tabs button:focus-visible {
+.routine-detail-tabs button:focus-visible,
+.settings-agent-tabs button:focus-visible {
   outline: none;
   color: var(--foreground);
 }
@@ -18016,6 +18195,14 @@ input:focus-visible,
 /* Trim the bottom padding when a footer follows so the two don't double up. */
 .empty-state:has(.empty-state-footer) .empty-state-content {
   padding-bottom: var(--sp-10);
+}
+
+/* Compact variant for an empty state that already sits inside a boxed card
+ * (e.g. the MCP servers card): the card supplies the surface, so the empty
+ * state hugs its content with tight padding instead of reserving a tall dead
+ * band. */
+.empty-state-compact .empty-state-content {
+  padding: var(--sp-6) var(--sp-6);
 }
 
 /* Borderless, muted glyph — no tile. It should whisper. The icon set ships

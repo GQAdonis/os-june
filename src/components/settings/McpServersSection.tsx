@@ -61,6 +61,9 @@ import { AdminNotifications } from "./AdminNotifications";
 import { McpToolsDialog } from "./McpToolsDialog";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Dialog } from "../ui/Dialog";
+import { EmptyState as EmptyStateSurface } from "../ui/EmptyState";
+import { SegmentedControl } from "../ui/SegmentedControl";
+import { SettingsPageHeader } from "./AppSettings";
 import { Switch } from "../ui/Switch";
 
 type McpServersSectionProps = {
@@ -215,6 +218,7 @@ export function McpServersView({
   mode?: HermesAdminMode;
 }) {
   const [query, setQuery] = useState("");
+  const [refreshSpins, setRefreshSpins] = useState(0);
   const [addOpen, setAddOpen] = useState(false);
   const [toDelete, setToDelete] = useState<HermesMcpServerInfo | undefined>();
   // The server whose connection-field edit dialog is open, or undefined.
@@ -251,14 +255,16 @@ export function McpServersView({
 
   return (
     <section className="settings-group mcp-servers" aria-labelledby="mcp-servers-heading">
-      <h2 id="mcp-servers-heading" className="settings-group-heading">
-        MCP servers
-      </h2>
-      <p className="settings-group-description">
-        Connect Model Context Protocol servers so future sessions can use their tools. Changes apply
-        after a restart.{" "}
-        <ModeNote mode={state.mode ?? mode} profile={state.profile} show={!isUnavailable} />
-      </p>
+      <SettingsPageHeader
+        id="mcp-servers-heading"
+        title="MCP servers"
+        blurb={
+          <>
+            Connect external tools and data sources. Changes apply after a restart.{" "}
+            <ModeNote mode={state.mode ?? mode} profile={state.profile} show={!isUnavailable} />
+          </>
+        }
+      />
 
       <LifecycleBanner state={state} />
       <AdminNotifications
@@ -266,43 +272,56 @@ export function McpServersView({
         onDismiss={state.dismissNotification}
       />
 
-      <div className="settings-card mcp-servers-card">
-        <div className="mcp-servers-toolbar">
-          <div className="settings-search mcp-servers-search">
-            <IconMagnifyingGlass
-              size={15}
-              ariaHidden
-              className="settings-search-icon mcp-servers-search-icon"
-            />
-            <input
-              type="search"
-              value={query}
-              placeholder="Filter servers"
-              aria-label="Filter MCP servers"
-              disabled={isUnavailable}
-              onChange={(event) => setQuery(event.currentTarget.value)}
-            />
-          </div>
-          <button
-            type="button"
-            className="mcp-servers-refresh"
-            disabled={isUnavailable || isLoadingFirst}
-            onClick={state.refresh}
-          >
-            <IconArrowRotateClockwise size={14} ariaHidden />
-            Refresh
-          </button>
-          <button
-            type="button"
-            className="btn btn-primary mcp-servers-add"
+      {/* The action row sits ABOVE the list card (Codex "Servers" + Add pattern):
+       * a compact search, refresh, and the add button, not stuffed into the
+       * card's top. */}
+      <div className="mcp-servers-actions">
+        <div className="settings-search mcp-servers-search">
+          <IconMagnifyingGlass
+            size={15}
+            ariaHidden
+            className="settings-search-icon mcp-servers-search-icon"
+          />
+          <input
+            type="search"
+            value={query}
+            placeholder="Filter servers"
+            aria-label="Filter MCP servers"
             disabled={isUnavailable}
-            onClick={() => setAddOpen(true)}
-          >
-            <IconPlusMedium size={14} ariaHidden />
-            Add MCP server
-          </button>
+            onChange={(event) => setQuery(event.currentTarget.value)}
+          />
         </div>
+        <button
+          type="button"
+          className="icon-button mcp-servers-refresh"
+          aria-label="Refresh MCP servers"
+          aria-busy={isLoadingFirst}
+          title="Refresh MCP servers"
+          disabled={isUnavailable || isLoadingFirst}
+          onClick={() => {
+            setRefreshSpins((spins) => spins + 1);
+            state.refresh();
+          }}
+        >
+          <IconArrowRotateClockwise
+            size={14}
+            ariaHidden
+            className="balance-refresh-icon"
+            style={{ transform: `rotate(${refreshSpins * 360}deg)` }}
+          />
+        </button>
+        <button
+          type="button"
+          className="btn btn-secondary mcp-servers-add"
+          disabled={isUnavailable}
+          onClick={() => setAddOpen(true)}
+        >
+          <IconPlusMedium size={14} ariaHidden />
+          Add MCP server
+        </button>
+      </div>
 
+      <div className="settings-card mcp-servers-card">
         {state.error && hasServers ? (
           <p className="settings-row-error mcp-servers-inline-error">
             <IconExclamationCircle size={14} ariaHidden />
@@ -313,6 +332,7 @@ export function McpServersView({
         <div className="mcp-servers-body">
           {isUnavailable ? (
             <EmptyState
+              className="empty-state-compact"
               title="Hermes is not running"
               description="Start Hermes to see and manage the MCP servers your sessions can use."
             />
@@ -326,11 +346,13 @@ export function McpServersView({
             <ServersLoading />
           ) : !hasServers ? (
             <EmptyState
+              className="empty-state-compact"
               title="No MCP servers"
               description="Add a server to connect external tools. Local (stdio) servers run as subprocesses; remote servers connect over HTTP."
             />
           ) : visible.length === 0 ? (
             <EmptyState
+              className="empty-state-compact"
               title="No matching servers"
               description="No server matches your search. Try a different term."
             />
@@ -1066,26 +1088,21 @@ function TransportSegmented({
   onChange: (transport: McpServerDraft["transport"]) => void;
   disabled?: boolean;
 }) {
-  const options: Array<{ value: McpServerDraft["transport"]; label: string }> = [
-    { value: "stdio", label: "Stdio" },
-    { value: "http", label: "Streamable HTTP" },
-  ];
   return (
-    <div className="mcp-add-transport" role="group" aria-label="Transport">
-      {options.map((option) => (
-        <button
-          key={option.value}
-          type="button"
-          aria-pressed={value === option.value}
-          className="mcp-add-transport-option"
-          data-active={value === option.value}
-          disabled={disabled}
-          onClick={() => onChange(option.value)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
+    <SegmentedControl<McpServerDraft["transport"]>
+      aria-label="Transport"
+      className={["mcp-add-transport", disabled ? "mcp-add-transport-disabled" : undefined]
+        .filter(Boolean)
+        .join(" ")}
+      value={value}
+      onValueChange={(next) => {
+        if (!disabled) onChange(next);
+      }}
+      options={[
+        { value: "stdio", label: "Stdio" },
+        { value: "http", label: "Streamable HTTP" },
+      ]}
+    />
   );
 }
 
@@ -1656,15 +1673,24 @@ function ServersLoading() {
   );
 }
 
-function EmptyState({ title, description }: { title: string; description: string }) {
+/** The shared empty-state surface, with this section's glyph, so MCP reads the
+ * same as Dictation/Routines/Agents when there is nothing to show. */
+function EmptyState({
+  title,
+  description,
+  className,
+}: {
+  title: string;
+  description: string;
+  className?: string;
+}) {
   return (
-    <div className="mcp-servers-empty" role="status">
-      <span className="mcp-servers-empty-icon" aria-hidden>
-        <IconServer1 size={22} />
-      </span>
-      <p className="mcp-servers-empty-title">{title}</p>
-      <p className="mcp-servers-empty-description">{description}</p>
-    </div>
+    <EmptyStateSurface
+      icon={<IconServer1 size={22} />}
+      title={title}
+      description={description}
+      className={className}
+    />
   );
 }
 

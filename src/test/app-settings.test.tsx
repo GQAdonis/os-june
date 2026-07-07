@@ -2932,8 +2932,8 @@ describe("AppSettings", () => {
       />,
     );
 
+    // Files is its own settings group on the Agent tab now (no inner tabs).
     await user.click(screen.getByRole("tab", { name: "Agent" }));
-    await user.click(screen.getByRole("button", { name: "Files" }));
 
     expect(await screen.findByText("Workspace")).toBeInTheDocument();
     expect(screen.getByText("Memory")).toBeInTheDocument();
@@ -2959,8 +2959,8 @@ describe("AppSettings", () => {
         />,
       );
 
+      // Messaging loads on mount of the Agent tab (no inner tabs).
       fireEvent.click(screen.getByRole("tab", { name: "Agent" }));
-      fireEvent.click(screen.getByRole("button", { name: "Messaging" }));
 
       await act(async () => {
         vi.advanceTimersByTime(MESSAGING_PLATFORMS_LOAD_TIMEOUT_MS);
@@ -2969,7 +2969,9 @@ describe("AppSettings", () => {
 
       expect(screen.queryByRole("status", { name: "Loading" })).toBeNull();
       expect(screen.getByText("No matching platforms")).toBeInTheDocument();
-      expect(screen.getByRole("button", { name: "Refresh" })).toBeInTheDocument();
+      // Messaging and Files each render their own toolbar refresh now.
+      const messaging = screen.getByRole("region", { name: "Messaging platforms" });
+      expect(within(messaging).getByRole("button", { name: "Refresh" })).toBeInTheDocument();
     } finally {
       vi.useRealTimers();
     }
@@ -3025,8 +3027,13 @@ describe("AppSettings", () => {
     const cliSwitch = await screen.findByRole("switch", {
       name: "Allow agent CLI access",
     });
-    // The disclosure names the deferred-execution risk, not just the benefit.
-    expect(screen.getByText(/runs outside June's sandbox/)).toBeInTheDocument();
+    // The deferred-execution risk moved off the row into a HoverTip on the info
+    // affordance next to the title; focusing it reveals the full caveat.
+    const infoAffordance = screen.getByRole("note", {
+      name: "Agent CLI access details",
+    });
+    infoAffordance.focus();
+    expect(await screen.findByText(/runs outside June's sandbox/)).toBeInTheDocument();
 
     await waitFor(() => expect(cliSwitch).toBeEnabled());
     expect(cliSwitch).toHaveAttribute("aria-checked", "false");
@@ -3038,5 +3045,57 @@ describe("AppSettings", () => {
     await user.click(cliSwitch);
     await waitFor(() => expect(mocks.setHermesAgentCliAccess).toHaveBeenCalledWith(false));
     expect(cliSwitch).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("drills into a messaging platform as a pinned detail with bar actions", async () => {
+    const user = userEvent.setup();
+    mocks.hermesBridgeMessagingPlatforms.mockResolvedValue({
+      platforms: [
+        {
+          id: "slack",
+          name: "Slack",
+          description: "Reach the agent from Slack.",
+          enabled: false,
+          configured: false,
+          state: "ready",
+          envVars: [],
+        },
+      ],
+    });
+    const onDetailPinnedChange = vi.fn();
+
+    render(
+      <AppSettings
+        account={signedInAccount}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        activeTab="agent"
+        onTabChange={vi.fn()}
+        onDetailPinnedChange={onDetailPinnedChange}
+      />,
+    );
+
+    // Drill into the platform from the list.
+    const platformButton = await screen.findByRole("button", { name: /Slack/ });
+    await user.click(platformButton);
+
+    // The detail pins at the top: a breadcrumb back affordance appears, the
+    // host is told a detail scroller is active, and the Save / enable actions
+    // live in the bar (not a separate footer).
+    expect(
+      await screen.findByRole("button", { name: "Back to messaging platforms" }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(onDetailPinnedChange).toHaveBeenLastCalledWith(true));
+    expect(screen.getByRole("button", { name: "Enable" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save changes" })).toBeInTheDocument();
+
+    // Returning to the list unpins the detail.
+    await user.click(screen.getByRole("button", { name: "Back to messaging platforms" }));
+    await waitFor(() => expect(onDetailPinnedChange).toHaveBeenLastCalledWith(false));
   });
 });

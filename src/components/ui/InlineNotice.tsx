@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-export type InlineNoticeTone = "warning" | "destructive";
+export type InlineNoticeTone = "info" | "warning" | "destructive";
 
 type InlineNoticeProps = {
   eyebrow?: ReactNode;

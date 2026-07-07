@@ -134,8 +134,12 @@ export function SkillDetailView({
     state.refresh();
   }
 
+  // Mirrors the meeting-note detail shell (App.tsx note-shell): the breadcrumb
+  // bar is a static sibling ABOVE a dedicated scroll container, never sticky
+  // inside scrolled content, so it stays pinned while everything beneath
+  // scrolls under the frosted bar (the data-has-detail-bar underlap).
   return (
-    <section className="settings-group skill-detail" aria-labelledby={headingId}>
+    <div className="skill-detail-shell">
       <BreadcrumbBar
         backLabel="Back to installed skills"
         onBack={onBack}
@@ -169,83 +173,92 @@ export function SkillDetailView({
           </>
         }
       />
-
-      <header className="skill-detail-header">
-        <div className="skill-detail-title-row">
-          <h2 id={headingId} className="skill-detail-title">
-            {title}
-          </h2>
-          <div className="skill-detail-badges">
-            <span className="skill-detail-source" data-source={info?.source}>
-              {meta.label}
-            </span>
-            {info?.version ? <span className="skill-detail-version">v{info.version}</span> : null}
-            {policy.editable ? null : (
-              <span className="skill-detail-readonly" title={policy.readOnlyReason}>
-                <IconLock size={12} ariaHidden />
-                Read only
-              </span>
-            )}
-          </div>
-        </div>
-        <p className="skill-detail-description">{info?.description ?? meta.blurb}</p>
-        <p className="skill-detail-context">
-          Targeting the {state.mode === "unrestricted" ? "full mode" : "sandboxed"} runtime (profile{" "}
-          {state.profile}). Edits apply to new sessions.
-        </p>
-      </header>
-
-      <AdminNotifications
-        notifications={state.notifications}
-        onDismiss={state.dismissNotification}
-      />
-
-      {state.error ? (
-        <p className="skill-detail-error" role="alert">
-          <IconExclamationCircle size={14} ariaHidden />
-          {state.error}
-          {state.retryable ? (
-            <button type="button" className="skill-detail-retry" onClick={state.refresh}>
-              Try again
-            </button>
-          ) : null}
-        </p>
-      ) : null}
-
-      {isLoading ? (
-        <p className="skill-detail-loading" role="status">
-          Loading skill...
-        </p>
-      ) : isError ? null : (
-        <>
-          <SkillDetailBlock title="Details">
-            <MetadataList info={info} />
-          </SkillDetailBlock>
-
-          {info && lifecycle ? (
-            <SkillDetailBlock title="Manage">
-              <LifecycleCard info={info} lifecycle={lifecycle} />
-            </SkillDetailBlock>
-          ) : null}
-
-          <SkillDetailBlock title="Supporting files">
-            <SupportingFilesCard files={state.supportingFiles} />
-          </SkillDetailBlock>
-
-          {info ? (
-            <SkillDetailBlock title="Setup">
-              <div className="settings-card skill-detail-setup-card">
-                <SkillSetupSection skill={state.skill} skillRaw={info.raw} mode={state.mode} />
+      <div className="skill-detail-scroll" data-has-detail-bar="true">
+        <section className="settings-page settings-group skill-detail" aria-labelledby={headingId}>
+          <header className="skill-detail-header">
+            <div className="skill-detail-title-row">
+              <h2 id={headingId} className="skill-detail-title">
+                {title}
+              </h2>
+              <div className="skill-detail-badges">
+                {/* The default "Skill" source (unknown) is redundant; only show
+                 * the badge for a meaningful source (bundled, hub, external). */}
+                {info?.source && info.source !== "unknown" ? (
+                  <span className="skill-detail-source" data-source={info.source}>
+                    {meta.label}
+                  </span>
+                ) : null}
+                {info?.version ? (
+                  <span className="skill-detail-version">v{info.version}</span>
+                ) : null}
+                {policy.editable ? null : (
+                  <span className="skill-detail-readonly" title={policy.readOnlyReason}>
+                    <IconLock size={12} ariaHidden />
+                    Read only
+                  </span>
+                )}
               </div>
-            </SkillDetailBlock>
+            </div>
+            <p className="skill-detail-description">{info?.description ?? meta.blurb}</p>
+            <p className="skill-detail-context">
+              Targeting the {state.mode === "unrestricted" ? "full mode" : "sandboxed"} runtime
+              (profile {state.profile}). Edits apply to new sessions.
+            </p>
+          </header>
+
+          <AdminNotifications
+            notifications={state.notifications}
+            onDismiss={state.dismissNotification}
+          />
+
+          {state.error ? (
+            <p className="skill-detail-error" role="alert">
+              <IconExclamationCircle size={14} ariaHidden />
+              {state.error}
+              {state.retryable ? (
+                <button type="button" className="skill-detail-retry" onClick={state.refresh}>
+                  Try again
+                </button>
+              ) : null}
+            </p>
           ) : null}
 
-          <SkillDetailBlock title="Skill document">
-            <SkillDocumentCard state={state} />
-          </SkillDetailBlock>
-        </>
-      )}
-    </section>
+          {isLoading ? (
+            <p className="skill-detail-loading" role="status">
+              Loading skill...
+            </p>
+          ) : isError ? null : (
+            <>
+              <SkillDetailBlock title="Details">
+                <MetadataList info={info} />
+              </SkillDetailBlock>
+
+              {info && lifecycle ? (
+                <SkillDetailBlock title="Manage">
+                  <LifecycleCard info={info} lifecycle={lifecycle} />
+                </SkillDetailBlock>
+              ) : null}
+
+              <SkillDetailBlock title="Supporting files">
+                <SupportingFilesCard files={state.supportingFiles} />
+              </SkillDetailBlock>
+
+              {info ? (
+                <SkillDetailBlock title="Setup">
+                  <div className="settings-card skill-detail-setup-card">
+                    <SkillSetupSection skill={state.skill} skillRaw={info.raw} mode={state.mode} />
+                  </div>
+                </SkillDetailBlock>
+              ) : null}
+
+              <SkillDetailBlock title="Skill document">
+                <SkillDocumentCard state={state} />
+              </SkillDetailBlock>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
   );
 }
 
@@ -272,7 +285,7 @@ function MetadataList({ info }: { info?: HermesSkillInfo }) {
   const meta = sourceMeta(info?.source ?? "unknown");
 
   return (
-    <div className="skill-detail-meta">
+    <div className="settings-card skill-detail-meta">
       <dl className="skill-detail-meta-list">
         <MetaItem label="Source" value={meta.label} hint={meta.blurb} />
         {author ? <MetaItem label="Author" value={author} /> : null}
@@ -471,7 +484,25 @@ function SkillDocumentEditor({ state }: { state: SkillDetailState }) {
           <IconPencilLine size={14} ariaHidden />
           Edit {state.relativePath ?? "SKILL.md"}
         </span>
-        <span className="skill-detail-doc-timing">{timingLabel("next-session")}</span>
+        <div className="skill-detail-doc-header-actions">
+          <span className="skill-detail-doc-timing">{timingLabel("next-session")}</span>
+          <button
+            type="button"
+            className="skill-detail-revert"
+            disabled={!state.dirty || state.saving}
+            onClick={state.revert}
+          >
+            Revert
+          </button>
+          <button
+            type="button"
+            className="skill-detail-save"
+            disabled={!canSave}
+            onClick={() => setConfirming(true)}
+          >
+            {state.saving ? "Saving..." : "Save"}
+          </button>
+        </div>
       </div>
 
       {state.policy.warning ? (
@@ -504,25 +535,6 @@ function SkillDocumentEditor({ state }: { state: SkillDetailState }) {
           ))}
         </ul>
       ) : null}
-
-      <div className="skill-detail-editor-actions">
-        <button
-          type="button"
-          className="skill-detail-revert"
-          disabled={!state.dirty || state.saving}
-          onClick={state.revert}
-        >
-          Revert
-        </button>
-        <button
-          type="button"
-          className="skill-detail-save"
-          disabled={!canSave}
-          onClick={() => setConfirming(true)}
-        >
-          {state.saving ? "Saving..." : "Save"}
-        </button>
-      </div>
 
       {confirming ? (
         <SaveConfirm
