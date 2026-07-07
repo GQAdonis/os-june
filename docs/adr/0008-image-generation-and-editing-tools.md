@@ -50,7 +50,6 @@ the backend allowlist for generated image models; newly exposed models are price
 with the same flat ~2x convention as the original list. Models that Venice prices
 by resolution use the default 1K tier until June exposes resolution controls.
 
-<<<<<<< HEAD
 ## Addendum - 2026-07-06 (JUN-209: safe mode on by default + consent dialog)
 
 Supersedes the **safe_mode** bullet above: the toggle now defaults **on**,
@@ -109,12 +108,13 @@ attached images at all and fell back to vision-analyze + regenerate, which
 the SOUL forbids and which double-charges when it works.
 
 Security shape: bare filenames get NO new power. They are accepted only when
-they are a plain name (no path separators), carry a known image extension,
-and canonicalize inside the canonicalized images root (symlink escapes
-rejected), then go through the same size cap and content sniffing as signed
-references. Hermes can already read and write that directory directly, so
-this widens nothing; signed references keep their content-hash binding for
-files the tool itself issued.
+they are a plain name (no path separators) with the attachment prefix
+(`upload_*`), carry a known image extension, and canonicalize inside the
+canonicalized images root (symlink escapes rejected), then go through the
+same size cap and content sniffing as signed references. Hermes can already
+read and write that directory directly, so this widens nothing; tool-output
+files (`generated-image-*`) still require a signed reference, keeping their
+content-hash binding.
 
 ## Context
 
