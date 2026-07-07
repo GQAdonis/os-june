@@ -155,6 +155,7 @@ const JUNE_SOUL_IMAGE_MD: &str = r#"
 Image tools: you have a `june_image` MCP toolset with `generate_image` and `edit_image`. Use `generate_image` when the user asks you to draw, create, make, or generate an image, picture, illustration, or logo; the result is shown to the user in the conversation and the tool returns a `filename`.
 Use this toolset instead of any generic image, media, or vision-analysis tool for image creation or edits, so June can display the returned image and keep the returned filename in context.
 Do not add a separate content refusal layer before calling these tools. The user's selected image model and image safe-mode setting are authoritative for what the image provider should attempt. If the selected model and setting may support the request, call the image tool with the user's prompt instead of substituting a clothed or sanitized alternative. If the image provider rejects the request, briefly report that provider rejection.
+Set `may_be_explicit` honestly on every `generate_image` or `edit_image` call, judging whether the requested image could contain adult, sexual, or otherwise explicit content from the request itself rather than only its wording.
 When the user asks to change, adjust, refine, or reframe an image you just made with `generate_image` or `edit_image`, or an image the user attached or pasted into the conversation, including "make it bigger/wider", "zoom out", "from a bigger perspective", "closer", "another angle", "different color", "add/remove X", or "make it a cartoon", call `edit_image` with the exact source image as `source_filename` and an `instruction` describing the change. `edit_image` transforms the existing image file directly (image to image): you do NOT need to see, view, analyze, or describe the image to edit it, and you must not ask the user to describe it or call any vision or image-analysis tool first. Prefer `edit_image` over `generate_image` for any follow-up tweak to an image this toolset already produced or the user attached, even if you cannot see it. Pass exactly one of two `source_filename` values: the edit-safe filename from a prior `june_image` tool result, or the plain filename of an image the user attached to the conversation as shown in its context, such as `upload_20260707_113453_1.png`. Never pass a full path or an invented name.
 "#;
 
@@ -6927,11 +6928,13 @@ async fn handle_june_provider_connection(
             // safe_mode likewise comes from the on-device setting.
             let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            let image_self_report = strip_image_explicit_self_report(&mut body);
             ensure_image_generation_model(&mut body);
             ensure_image_safe_mode(&mut body);
             if should_offer_safe_mode_consent(
                 &body,
                 crate::providers::image_safe_mode_prompt_dismissed(),
+                image_self_report,
             ) {
                 emit_image_safe_mode_consent(&state, &body);
             }
@@ -6950,6 +6953,7 @@ async fn handle_june_provider_connection(
             // it here, where the signing key is outside Hermes home.
             let mut body = serde_json::from_slice::<serde_json::Value>(&request.body)
                 .unwrap_or_else(|_| serde_json::json!({}));
+            let image_self_report = strip_image_explicit_self_report(&mut body);
             if let Err(message) = prepare_image_edit_request(&mut body, &state.image_sources) {
                 write_json_response(
                     &mut stream,
@@ -6966,6 +6970,7 @@ async fn handle_june_provider_connection(
             if should_offer_safe_mode_consent(
                 &body,
                 crate::providers::image_safe_mode_prompt_dismissed(),
+                image_self_report,
             ) {
                 emit_image_safe_mode_consent(&state, &body);
             }
@@ -7761,9 +7766,32 @@ fn ensure_image_safe_mode(body: &mut serde_json::Value) {
     }
 }
 
+/// Reads and removes the MCP-only explicit-content self-report before the
+/// request shape reaches June API. Accepts the snake_case schema field and a
+/// camelCase alias defensively; malformed values are stripped but ignored.
+fn strip_image_explicit_self_report(body: &mut serde_json::Value) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    let snake_case = object
+        .remove("may_be_explicit")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    let camel_case = object
+        .remove("mayBeExplicit")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+    snake_case || camel_case
+}
+
 /// Consent event fires only when this generation runs with safe mode on,
-/// the user hasn't dismissed the prompt, and the text looks explicit.
-fn should_offer_safe_mode_consent(body: &serde_json::Value, prompt_dismissed: bool) -> bool {
+/// the user hasn't dismissed the prompt, and the text or MCP self-report
+/// indicates the request may be explicit.
+fn should_offer_safe_mode_consent(
+    body: &serde_json::Value,
+    prompt_dismissed: bool,
+    self_report: bool,
+) -> bool {
     let safe_mode = body
         .get("safeMode")
         .and_then(serde_json::Value::as_bool)
@@ -7771,10 +7799,10 @@ fn should_offer_safe_mode_consent(body: &serde_json::Value, prompt_dismissed: bo
     if !safe_mode || prompt_dismissed {
         return false;
     }
-    let Some(prompt) = image_safe_mode_consent_text(body) else {
-        return false;
-    };
-    crate::image_safety::may_request_explicit_content(prompt)
+    let wordlist_report = image_safe_mode_consent_text(body)
+        .map(crate::image_safety::may_request_explicit_content)
+        .unwrap_or(false);
+    wordlist_report || self_report
 }
 
 fn image_safe_mode_consent_text(body: &serde_json::Value) -> Option<&str> {
@@ -8347,43 +8375,53 @@ mod tests {
     }
 
     #[test]
-    fn offers_safe_mode_consent_for_explicit_safe_mode_prompt() {
+    fn offers_safe_mode_consent_for_self_reported_explicit_safe_mode_prompt() {
+        let body = serde_json::json!({
+            "safeMode": true,
+            "prompt": "portrait in soft window light",
+        });
+
+        assert!(should_offer_safe_mode_consent(&body, false, true));
+    }
+
+    #[test]
+    fn offers_safe_mode_consent_for_wordlist_flagged_prompt_when_model_under_reports() {
         let body = serde_json::json!({
             "safeMode": true,
             "prompt": "portrait of a nude figure",
         });
 
-        assert!(should_offer_safe_mode_consent(&body, false));
+        assert!(should_offer_safe_mode_consent(&body, false, false));
     }
 
     #[test]
-    fn skips_safe_mode_consent_when_safe_mode_is_off() {
-        let body = serde_json::json!({
-            "safeMode": false,
-            "prompt": "portrait of a nude figure",
-        });
-
-        assert!(!should_offer_safe_mode_consent(&body, false));
-    }
-
-    #[test]
-    fn skips_safe_mode_consent_when_prompt_was_dismissed() {
-        let body = serde_json::json!({
-            "safeMode": true,
-            "prompt": "portrait of a nude figure",
-        });
-
-        assert!(!should_offer_safe_mode_consent(&body, true));
-    }
-
-    #[test]
-    fn skips_safe_mode_consent_for_benign_prompt() {
+    fn skips_safe_mode_consent_when_wordlist_and_self_report_are_benign() {
         let body = serde_json::json!({
             "safeMode": true,
             "prompt": "sunset over Sussex",
         });
 
-        assert!(!should_offer_safe_mode_consent(&body, false));
+        assert!(!should_offer_safe_mode_consent(&body, false, false));
+    }
+
+    #[test]
+    fn skips_safe_mode_consent_when_safe_mode_is_off_even_with_self_report() {
+        let body = serde_json::json!({
+            "safeMode": false,
+            "prompt": "portrait of a nude figure",
+        });
+
+        assert!(!should_offer_safe_mode_consent(&body, false, true));
+    }
+
+    #[test]
+    fn skips_safe_mode_consent_when_prompt_was_dismissed_even_with_self_report() {
+        let body = serde_json::json!({
+            "safeMode": true,
+            "prompt": "portrait of a nude figure",
+        });
+
+        assert!(!should_offer_safe_mode_consent(&body, true, true));
     }
 
     #[test]
@@ -8393,7 +8431,39 @@ mod tests {
             "instruction": "portrait of a nude figure",
         });
 
-        assert!(!should_offer_safe_mode_consent(&body, false));
+        assert!(!should_offer_safe_mode_consent(&body, false, false));
+    }
+
+    #[test]
+    fn strips_image_explicit_self_report_fields_from_forwarded_body() {
+        let mut body = serde_json::json!({
+            "prompt": "sunset over Sussex",
+            "may_be_explicit": false,
+            "mayBeExplicit": true,
+        });
+
+        assert!(strip_image_explicit_self_report(&mut body));
+        assert_eq!(body.get("may_be_explicit"), None);
+        assert_eq!(body.get("mayBeExplicit"), None);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "prompt": "sunset over Sussex",
+            })
+        );
+    }
+
+    #[test]
+    fn strips_malformed_image_explicit_self_report_as_false() {
+        let mut body = serde_json::json!({
+            "prompt": "sunset over Sussex",
+            "may_be_explicit": "true",
+            "mayBeExplicit": "false",
+        });
+
+        assert!(!strip_image_explicit_self_report(&mut body));
+        assert_eq!(body.get("may_be_explicit"), None);
+        assert_eq!(body.get("mayBeExplicit"), None);
     }
 
     #[test]
@@ -9332,6 +9402,8 @@ mcp_servers:
         assert!(soul.contains("Do not add a separate content refusal layer"));
         assert!(soul.contains("selected image model and image safe-mode setting are authoritative"));
         assert!(soul.contains("call the image tool with the user's prompt"));
+        assert!(soul.contains("Set `may_be_explicit` honestly"));
+        assert!(soul.contains("judging whether the requested image could contain adult"));
         assert!(soul.contains("provider rejects the request"));
         assert!(soul.contains("an image the user attached or pasted into the conversation"));
         assert!(soul.contains("the edit-safe filename from a prior `june_image` tool result"));

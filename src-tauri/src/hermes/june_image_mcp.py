@@ -71,8 +71,16 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "A detailed description of the image to generate.",
                 },
+                "may_be_explicit": {
+                    "type": "boolean",
+                    "description": (
+                        "True when the requested image could contain adult, sexual, or "
+                        "otherwise explicit content; false for clearly benign requests. "
+                        "Judge the request itself, not just its wording."
+                    ),
+                },
             },
-            "required": ["prompt"],
+            "required": ["prompt", "may_be_explicit"],
         },
     },
     {
@@ -109,8 +117,16 @@ TOOLS: list[dict[str, Any]] = [
                     "type": "string",
                     "description": "What to change about the image.",
                 },
+                "may_be_explicit": {
+                    "type": "boolean",
+                    "description": (
+                        "True when the requested image could contain adult, sexual, or "
+                        "otherwise explicit content; false for clearly benign requests. "
+                        "Judge the request itself, not just its wording."
+                    ),
+                },
             },
-            "required": ["source_filename", "instruction"],
+            "required": ["source_filename", "instruction", "may_be_explicit"],
         },
     },
 ]
@@ -289,7 +305,11 @@ def generate_image(
         base_url,
         token,
         "/image/generate",
-        {"prompt": prompt, "requestId": request_id},
+        {
+            "prompt": prompt,
+            "requestId": request_id,
+            "may_be_explicit": arguments.get("may_be_explicit", False),
+        },
     )
     image_base64 = str(envelope.get("imageBase64") or "")
     mime_type = str(envelope.get("mimeType") or "image/png")
@@ -328,6 +348,7 @@ def edit_image(
             "sourceFilename": source_filename,
             "prompt": instruction,
             "requestId": request_id,
+            "may_be_explicit": arguments.get("may_be_explicit", False),
         },
     )
     image_base64 = str(envelope.get("imageBase64") or "")
@@ -517,6 +538,8 @@ def smoke_test_generate_writes_proxy_issued_storage_filename() -> None:
                 raise AssertionError(f"wrong path: {path}")
             if payload.get("prompt") != "a cat":
                 raise AssertionError("generate did not send the prompt")
+            if payload.get("may_be_explicit") is not True:
+                raise AssertionError("generate did not forward may_be_explicit")
             if "image" in payload or "sourceFilename" in payload:
                 raise AssertionError("generate sent source data")
             return {
@@ -529,7 +552,12 @@ def smoke_test_generate_writes_proxy_issued_storage_filename() -> None:
 
         try:
             globals()["call_proxy"] = fake_call_proxy
-            result = generate_image("http://127.0.0.1", images_dir, "token", {"prompt": "a cat"})
+            result = generate_image(
+                "http://127.0.0.1",
+                images_dir,
+                "token",
+                {"prompt": "a cat", "may_be_explicit": True},
+            )
         finally:
             globals()["call_proxy"] = original_call_proxy
 
@@ -564,6 +592,8 @@ def smoke_test_edit_forwards_opaque_source_ref_without_reading_source() -> None:
                 raise AssertionError(f"wrong path: {path}")
             if payload.get("sourceFilename") != source_ref:
                 raise AssertionError("edit did not forward the source reference")
+            if payload.get("may_be_explicit") is not False:
+                raise AssertionError("edit did not forward may_be_explicit")
             if "image" in payload or "mimeType" in payload:
                 raise AssertionError("edit sent source bytes instead of an opaque ref")
             return {
@@ -583,6 +613,7 @@ def smoke_test_edit_forwards_opaque_source_ref_without_reading_source() -> None:
                 {
                     "source_filename": source_ref,
                     "instruction": "make it warmer",
+                    "may_be_explicit": False,
                 },
             )
         finally:
