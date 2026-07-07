@@ -4890,7 +4890,9 @@ input:focus-visible,
 
 .agent-composer-model-title {
   margin: 0;
-  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  /* A touch more top padding so the label sits centered in its strip rather
+   * than crammed against the popover's top edge. */
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-3);
   color: var(--muted-foreground);
   font-size: var(--fs-xs);
   font-weight: var(--fw-medium);
@@ -5133,10 +5135,11 @@ input:focus-visible,
   flex: 0 0 auto;
   height: var(--control-lg);
   /* Inset the field from the popover edges so the focus ring has breathing
-   * room, and keep the icon+placeholder gutter aligned with the row names
-   * below (row logo starts at the row's own sp-2 padding + this inset). */
-  margin: 0 var(--sp-1);
-  padding: 0 var(--sp-3);
+   * room (sp-2 margin clears the 4px ring off the edge), and keep the
+   * icon+placeholder gutter aligned with the row names below (row content
+   * starts at the row's own sp-2 padding). */
+  margin: 0 var(--sp-2);
+  padding: 0 var(--sp-2);
   border-radius: var(--r-md);
   background: var(--card);
   color: var(--muted-foreground);
@@ -10402,7 +10405,7 @@ input:focus-visible,
  * sub-group label below the header. */
 .settings-page-header {
   padding-left: var(--sp-3);
-  margin-bottom: var(--sp-7);
+  margin-bottom: var(--sp-10);
 }
 
 .settings-page-title {
@@ -13029,7 +13032,7 @@ input:focus-visible,
   display: grid;
   /* Generous separation between the detail blocks (Details, Manage, Supporting
    * files, Setup) so each section reads as its own group with breathing room. */
-  gap: var(--sp-8);
+  gap: var(--sp-10);
 }
 
 .skill-detail-refresh:disabled {
@@ -13600,7 +13603,10 @@ input:focus-visible,
   grid-template-columns: var(--control-lg) minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--sp-4);
-  min-height: 58px;
+  /* No fixed min-height: a short row (a server with a one-line subtitle) centered
+   * in a tall fixed row reserved ~20px of dead space at the top, which read as a
+   * large blank gap at the top of the list card. Let the row size to its content;
+   * the padding gives every row the same comfortable height. */
   padding: var(--sp-3);
   border-radius: var(--r-md);
   transition: background-color var(--t-fast) var(--ease-out);
