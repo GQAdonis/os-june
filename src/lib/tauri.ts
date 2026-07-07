@@ -1641,7 +1641,7 @@ export async function setImageSafeModePromptDismissed(dismissed: boolean) {
   });
 }
 
-/** Runs an on-device heuristic that gates only the safe-mode consent dialog. */
+/** Screens an image prompt for the safe-mode consent dialog. */
 export async function imagePromptMayBeExplicit(prompt: string): Promise<boolean> {
   const response = await invoke<ImagePromptScreenResponse>("image_prompt_may_be_explicit", {
     request: { prompt },
