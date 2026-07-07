@@ -1,4 +1,5 @@
 import { IconDotGrid1x3Horizontal } from "central-icons/IconDotGrid1x3Horizontal";
+import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconCalendarRepeat } from "central-icons/IconCalendarRepeat";
 import { IconPlay } from "central-icons/IconPlay";
 import { IconShieldCrossed } from "central-icons/IconShieldCrossed";
@@ -39,6 +40,8 @@ type RoutineDetailProps = {
   onRunNow: () => Promise<void>;
   onDelete: () => void;
   onOpenRun: (run: HermesSessionInfo) => void;
+  onRetryLoad?: () => void;
+  retrying?: boolean;
 };
 
 /** One routine, fully editable in place: schedule, instructions, access and
@@ -58,6 +61,8 @@ export function RoutineDetail({
   onRunNow,
   onDelete,
   onOpenRun,
+  onRetryLoad,
+  retrying,
 }: RoutineDetailProps) {
   const [name, setName] = useState(routine.name);
   const [draft, setDraft] = useState<ScheduleDraft>(() => draftFromSchedule(routine.schedule));
@@ -258,7 +263,23 @@ export function RoutineDetail({
           ) : null}
         </div>
 
-        {error ? <p className="error-banner">{error}</p> : null}
+        {error ? (
+          <div className="error-banner routines-error-banner" role="alert">
+            <p>{error}</p>
+            {onRetryLoad ? (
+              <button
+                type="button"
+                className="btn btn-ghost"
+                onClick={onRetryLoad}
+                disabled={retrying}
+                aria-busy={retrying || undefined}
+              >
+                <IconArrowRotateClockwise size={14} className="balance-refresh-icon" aria-hidden />
+                Try again
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {failure ? (
           <div className="routine-detail-failure" role="status">
             <strong>Last run failed.</strong> {failure}

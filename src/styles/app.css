@@ -9688,6 +9688,21 @@ input:focus-visible,
   font-size: var(--fs-md);
 }
 
+.routines-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.routines-error-banner p {
+  margin: 0;
+}
+
+.routines-error-banner .btn {
+  flex: 0 0 auto;
+}
+
 /* Positive sibling of .error-banner for transient good news (billing
  * feedback like "You are on Max now"). Same geometry, success palette. */
 .notice-banner {
