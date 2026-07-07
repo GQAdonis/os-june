@@ -177,6 +177,10 @@ import {
 } from "../../lib/hermes-image-attach";
 import { parseSessionUsage, type SessionUsage } from "../../lib/hermes-session-usage";
 import {
+  rememberSessionManuallyTitled,
+  sessionManuallyTitled,
+} from "../../lib/agent-session-titles";
+import {
   parseCompressSessionResult,
   type CompressSessionResult,
 } from "../../lib/hermes-session-compress";
@@ -6768,6 +6772,7 @@ export function AgentWorkspace({
   function applyManualHermesSessionTitleLocally(sessionId: string, title: string) {
     const next = title.trim();
     if (!next) return null;
+    rememberSessionManuallyTitled(sessionId);
     titleSuggestionSessionIdsRef.current.add(sessionId);
     sessionTitleOverridesRef.current = {
       ...sessionTitleOverridesRef.current,
@@ -6848,7 +6853,7 @@ export function AgentWorkspace({
     messages: HermesSessionMessage[],
   ) {
     const source = sessionTitleSourceRef.current[sessionId];
-    if (source === "manual" || source === "exchange") return;
+    if (source === "manual" || source === "exchange" || sessionManuallyTitled(sessionId)) return;
     if (
       titleSuggestionSessionIdsRef.current.has(sessionId) ||
       titleSuggestionInFlightSessionIdsRef.current.has(sessionId)

@@ -95,6 +95,7 @@ import {
   type AgentSessionStatusDetail,
 } from "../lib/agent-events";
 import { notifyAgentSessionStatus } from "../lib/agent-notifications";
+import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
 import { messageFromError } from "../lib/errors";
 import { parseDictationHelperEvent } from "../lib/dictation-events";
 import { listHermesSessions, titleFromPrompt } from "../lib/hermes-adapter";
@@ -1941,6 +1942,7 @@ export function App() {
       void ensureHermesBridgeSession({ sessionId, title: next }).catch(() => {
         setError("Could not save the session name. It may revert after a restart.");
       });
+      rememberSessionManuallyTitled(sessionId);
       recordManualAgentSessionTitle(sessionId, next);
       window.dispatchEvent(
         new CustomEvent<AgentSessionRenamedDetail>(AGENT_SESSION_RENAMED_EVENT, {

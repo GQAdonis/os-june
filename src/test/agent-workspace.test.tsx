@@ -3437,6 +3437,48 @@ describe("AgentWorkspace", () => {
     expect(screen.getByText("Manual import notes")).toBeInTheDocument();
   }, 10_000);
 
+  it("keeps a durable manual title marker from being overwritten on fresh mount", async () => {
+    const userMessage = {
+      id: "u1",
+      role: "user",
+      content: "set up staging deploy",
+      timestamp: "2026-06-04T12:00:00Z",
+    };
+    const assistantMessage = {
+      id: "a1",
+      role: "assistant",
+      content: "I checked the deployment steps and found the staging settings.",
+      timestamp: "2026-06-04T12:00:01Z",
+    };
+    window.localStorage.setItem(
+      "june.agent.manuallyTitledSessions",
+      JSON.stringify({ "session-durable-manual": true }),
+    );
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-durable-manual",
+        title: "Set up staging deploy",
+        preview: "set up staging deploy",
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([userMessage, assistantMessage]);
+    mocks.suggestAgentSessionTitle.mockResolvedValue({ title: "Staging Deploy Setup" });
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Set up staging deploy")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-durable-manual"),
+    );
+    expect(mocks.suggestAgentSessionTitle).not.toHaveBeenCalled();
+    expect(mocks.ensureHermesBridgeSession).not.toHaveBeenCalledWith({
+      sessionId: "session-durable-manual",
+      title: "Staging Deploy Setup",
+    });
+    expect(screen.getByText("Set up staging deploy")).toBeInTheDocument();
+  });
+
   it("persists manual header renames and blocks later title suggestions", async () => {
     const userMessage = {
       id: "u1",
