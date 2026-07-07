@@ -3074,6 +3074,12 @@ describe("AgentWorkspace", () => {
     render(<AgentWorkspace />);
 
     expect(await screen.findByText("CLI Run Tracking")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.ensureHermesBridgeSession).toHaveBeenCalledWith({
+        sessionId: "session-raw",
+        title: "CLI Run Tracking",
+      }),
+    );
   });
 
   it("keeps chunk boundary spaces when suggesting session titles", async () => {
@@ -3103,7 +3109,166 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText("Release Details")).toBeInTheDocument();
     expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledWith(
       "Find the full details more efficiently",
+      undefined,
     );
+  });
+
+  it("suggests a loaded-message title from the first exchange when available", async () => {
+    const rawTitle = "I need you to inspect the flaky tests";
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-exchange",
+        title: rawTitle,
+        preview: rawTitle,
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "inspect the flaky tests",
+        timestamp: "2026-06-04T12:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "I traced the failure to stale timers and updated the regression test.",
+        timestamp: "2026-06-04T12:00:01Z",
+      },
+    ]);
+    mocks.suggestAgentSessionTitle.mockResolvedValue({
+      title: "Flaky Timer Fix",
+    });
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Flaky Timer Fix")).toBeInTheDocument();
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledWith(
+      "inspect the flaky tests",
+      "I traced the failure to stale timers and updated the regression test.",
+    );
+    await waitFor(() =>
+      expect(mocks.ensureHermesBridgeSession).toHaveBeenCalledWith({
+        sessionId: "session-exchange",
+        title: "Flaky Timer Fix",
+      }),
+    );
+  });
+
+  it("upgrades a prompt-only loaded-message title once when the assistant reply appears", async () => {
+    const rawTitle = "I want you to summarize latest failures";
+    const userMessage = {
+      id: "u1",
+      role: "user",
+      content: "summarize latest failures",
+      timestamp: "2026-06-04T12:00:00Z",
+    };
+    const assistantMessage = {
+      id: "a1",
+      role: "assistant",
+      content: "I found the failing path and isolated the missing persistence call.",
+      timestamp: "2026-06-04T12:00:01Z",
+    };
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-upgrade",
+        title: rawTitle,
+        preview: rawTitle,
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages
+      .mockResolvedValueOnce([userMessage])
+      .mockResolvedValue([userMessage, assistantMessage]);
+    mocks.suggestAgentSessionTitle
+      .mockResolvedValueOnce({ title: "Failure Summary" })
+      .mockResolvedValueOnce({ title: "Persistence Fix" });
+    hermesActivityStore.record(
+      {
+        kind: "lifecycle",
+        sessionId: "session-upgrade",
+        flavor: "running",
+        status: "running",
+        text: "",
+        receivedAt: "2026-06-04T12:00:00Z",
+      },
+      "sandboxed",
+    );
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Failure Summary")).toBeInTheDocument();
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(1);
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenLastCalledWith(
+      "summarize latest failures",
+      undefined,
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 2600));
+    });
+
+    await waitFor(() => expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(2));
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenLastCalledWith(
+      "summarize latest failures",
+      "I found the failing path and isolated the missing persistence call.",
+    );
+    expect(await screen.findByText("Persistence Fix")).toBeInTheDocument();
+    hermesActivityStore.record(
+      {
+        kind: "lifecycle",
+        sessionId: "session-upgrade",
+        flavor: "running",
+        status: "running",
+        text: "",
+        receivedAt: "2026-06-04T12:00:02Z",
+      },
+      "sandboxed",
+    );
+
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 2600));
+    });
+
+    expect(mocks.suggestAgentSessionTitle).toHaveBeenCalledTimes(2);
+  }, 10_000);
+
+  it("does not suggest a title for non-replaceable loaded sessions without a title source", async () => {
+    mocks.listHermesSessions.mockResolvedValue([
+      {
+        id: "session-specific",
+        title: "Payment architecture review",
+        preview: "Review the billing shape",
+        last_active: "2026-06-04T12:00:00Z",
+      },
+    ]);
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "review the billing shape",
+        timestamp: "2026-06-04T12:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "I reviewed the architecture and found no blocking issue.",
+        timestamp: "2026-06-04T12:00:01Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Payment architecture review")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mocks.listHermesSessionMessages).toHaveBeenCalledWith("session-specific"),
+    );
+    expect(mocks.suggestAgentSessionTitle).not.toHaveBeenCalled();
+    expect(mocks.ensureHermesBridgeSession).not.toHaveBeenCalledWith({
+      sessionId: "session-specific",
+      title: expect.any(String),
+    });
   });
 
   it("renders June's CLI access request as a card and enables the setting", async () => {

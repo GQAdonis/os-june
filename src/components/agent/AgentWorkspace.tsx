@@ -1247,11 +1247,14 @@ type AgentSessionContinuity = {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, JuneHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  titleSources: Record<string, AgentSessionTitleSource>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: string[];
   submittingIssueReportSessionIds: string[];
 };
+
+type AgentSessionTitleSource = "prompt" | "exchange" | "manual";
 
 type IssueReportDeliveryResult = { sent: true } | { sent: false; errorMessage: string };
 
@@ -1389,6 +1392,7 @@ function captureSessionContinuity(state: {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, JuneHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  titleSources: Record<string, AgentSessionTitleSource>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: Set<string>;
@@ -1419,6 +1423,7 @@ function captureSessionContinuity(state: {
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
+    titleSources: pick(state.titleSources),
     pendingIssueReports: pick(state.pendingIssueReports),
     reviewableIssueReports: pick(state.reviewableIssueReports),
     diagnosisRefreshIssueReportSessionIds: [...state.diagnosisRefreshIssueReportSessionIds].filter(
@@ -1525,6 +1530,7 @@ function updateContinuityAfterIssueReportDelivery(detail: IssueReportDeliverySet
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    titleSources: sessionContinuity.titleSources,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds,
@@ -1557,6 +1563,7 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    titleSources: sessionContinuity.titleSources,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds: new Set(
@@ -2063,7 +2070,11 @@ export function AgentWorkspace({
   // selecting an existing chat from the sidebar (that should swap instantly).
   const heroExitViaThreadRef = useRef(false);
   const sessionTitleOverridesRef = useRef<Record<string, string>>(continuity?.titleOverrides ?? {});
+  const sessionTitleSourceRef = useRef<Record<string, AgentSessionTitleSource>>(
+    continuity?.titleSources ?? {},
+  );
   const titleSuggestionSessionIdsRef = useRef<Set<string>>(new Set());
+  const titleSuggestionInFlightSessionIdsRef = useRef<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement | null>(null);
   const agentScrollRef = useRef<HTMLDivElement | null>(null);
   const composerEditorRef = useRef<ComposerEditorHandle | null>(null);
@@ -3475,6 +3486,7 @@ export function AgentWorkspace({
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
+        titleSources: sessionTitleSourceRef.current,
         pendingIssueReports: Object.fromEntries(pendingIssueReportsRef.current),
         reviewableIssueReports: reviewableIssueReportsRef.current,
         diagnosisRefreshIssueReportSessionIds: diagnosisRefreshIssueReportSessionIdsRef.current,
@@ -5236,6 +5248,10 @@ export function AgentWorkspace({
         ...sessionTitleOverridesRef.current,
         [storedSessionId]: sessionTitle,
       };
+      sessionTitleSourceRef.current = {
+        ...sessionTitleSourceRef.current,
+        [storedSessionId]: "prompt",
+      };
       // The mount-time session load races this store: when its merge lands
       // first, the fetched placeholder title is already rendered and nothing
       // re-reads the override (the post-submit reload can no-op on a stale
@@ -6761,26 +6777,56 @@ export function AgentWorkspace({
     sessionId: string,
     messages: HermesSessionMessage[],
   ) {
+    const source = sessionTitleSourceRef.current[sessionId];
+    if (source === "manual" || source === "exchange") return;
     if (
-      sessionTitleOverridesRef.current[sessionId] ||
-      titleSuggestionSessionIdsRef.current.has(sessionId)
+      titleSuggestionSessionIdsRef.current.has(sessionId) ||
+      titleSuggestionInFlightSessionIdsRef.current.has(sessionId)
     ) {
       return;
     }
-    const session = hermesSessionItems.find((item) => item.id === sessionId);
-    if (!session || !isReplaceableAgentSessionTitle(session.title)) return;
-    const firstUserMessage = messages.find((message) => message.role === "user");
+    const firstUserMessageIndex = messages.findIndex((message) => message.role === "user");
+    const firstUserMessage =
+      firstUserMessageIndex >= 0 ? messages[firstUserMessageIndex] : undefined;
     const prompt = firstUserMessage ? visibleHermesMessageText(firstUserMessage).trim() : "";
     if (!prompt) return;
-    titleSuggestionSessionIdsRef.current.add(sessionId);
-    const title = await agentSessionTitleForPrompt(prompt);
-    sessionTitleOverridesRef.current = {
-      ...sessionTitleOverridesRef.current,
-      [sessionId]: title,
-    };
-    setHermesSessionItems((current) =>
-      current.map((item) => (item.id === sessionId ? { ...item, title } : item)),
+    const firstAssistantReply =
+      firstUserMessageIndex >= 0
+        ? messages
+            .slice(firstUserMessageIndex + 1)
+            .find((message) => message.role === "assistant")
+        : undefined;
+    const reply = truncateAgentTitleResponseExcerpt(
+      visibleHermesMessageText(firstAssistantReply).trim(),
     );
+    const hasReply = Boolean(reply);
+    if (source === "prompt") {
+      if (!hasReply) return;
+    } else if (sessionTitleOverridesRef.current[sessionId]) {
+      return;
+    } else {
+      const session = hermesSessionItems.find((item) => item.id === sessionId);
+      if (!session || !isReplaceableAgentSessionTitle(session.title)) return;
+    }
+    titleSuggestionInFlightSessionIdsRef.current.add(sessionId);
+    try {
+      const title = await agentSessionTitleForPrompt(prompt, hasReply ? reply : undefined);
+      if (titleSuggestionSessionIdsRef.current.has(sessionId)) return;
+      sessionTitleOverridesRef.current = {
+        ...sessionTitleOverridesRef.current,
+        [sessionId]: title,
+      };
+      sessionTitleSourceRef.current = {
+        ...sessionTitleSourceRef.current,
+        [sessionId]: hasReply ? "exchange" : "prompt",
+      };
+      setHermesSessionItems((current) =>
+        current.map((item) => (item.id === sessionId ? { ...item, title } : item)),
+      );
+      void ensureHermesBridgeSession({ sessionId, title }).catch(() => {});
+    } finally {
+      titleSuggestionInFlightSessionIdsRef.current.delete(sessionId);
+    }
   }
 
   async function setSkillEnabled(skill: HermesSkillInfo, enabled: boolean) {
@@ -8561,13 +8607,20 @@ function AgentSessionBar({
   );
 }
 
-async function agentSessionTitleForPrompt(prompt: string) {
+async function agentSessionTitleForPrompt(prompt: string, response?: string) {
   try {
-    const response = await withTimeout(suggestAgentSessionTitle(prompt), AGENT_TITLE_TIMEOUT_MS);
-    return response.title.trim() || titleFromPrompt(prompt);
+    const suggestion = await withTimeout(
+      suggestAgentSessionTitle(prompt, response),
+      AGENT_TITLE_TIMEOUT_MS,
+    );
+    return suggestion.title.trim() || titleFromPrompt(prompt);
   } catch {
     return titleFromPrompt(prompt);
   }
+}
+
+function truncateAgentTitleResponseExcerpt(response: string) {
+  return Array.from(response).slice(0, 1200).join("");
 }
 
 function isReplaceableAgentSessionTitle(title: unknown) {
