@@ -41,7 +41,6 @@ import { IconFileText } from "central-icons/IconFileText";
 import { IconEmail1Sparkle } from "central-icons/IconEmail1Sparkle";
 import { IconGauge } from "central-icons/IconGauge";
 import { IconHeartBeat } from "central-icons/IconHeartBeat";
-import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
 import { IconNoteText } from "central-icons/IconNoteText";
@@ -10359,6 +10358,112 @@ function AgentGeneratedImage({
   );
 }
 
+function actionCardPreview(text: string, maxLength = 80) {
+  const trimmed = text.trim().replace(/\s+/g, " ");
+  if (!trimmed) return undefined;
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(0, maxLength - 1)}…`;
+}
+
+/** Slim, expandable action card for approval/clarify/secret/sudo prompts.
+ * Collapsed: one quiet row (title · preview · status). Expanded: animated
+ * panel with lead copy; interactive footers stay pinned when pending so
+ * actions remain reachable after collapse. */
+function AgentActionCard({
+  title,
+  status,
+  statusLabel,
+  statusTone,
+  preview,
+  defaultOpen,
+  pinFooter,
+  details,
+  footer,
+  className,
+}: {
+  title: string;
+  status: string;
+  statusLabel: string;
+  statusTone: "running" | "complete" | "failed";
+  preview?: string;
+  defaultOpen?: boolean;
+  /** When true the footer renders outside the animated panel so actions stay
+   * visible even when the detail body is collapsed. Defaults to pending cards. */
+  pinFooter?: boolean;
+  details?: ReactNode;
+  footer?: ReactNode;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(defaultOpen ?? false);
+  const [motionReady, setMotionReady] = useState(false);
+  const footerPinned = pinFooter ?? status === "pending";
+  const expandable = Boolean(details || (footer && !footerPinned));
+
+  useEffect(() => {
+    setOpen(defaultOpen ?? false);
+  }, [defaultOpen]);
+
+  useEffect(() => {
+    const id = requestAnimationFrame(() => setMotionReady(true));
+    return () => cancelAnimationFrame(id);
+  }, []);
+
+  const footerNode = footer ? (
+    <div
+      className={[
+        "agent-action-card-footer",
+        footerPinned ? "agent-action-card-footer-pinned" : undefined,
+      ]
+        .filter(Boolean)
+        .join(" ")}
+    >
+      {footer}
+    </div>
+  ) : null;
+
+  return (
+    <article
+      className={["agent-action-card", className].filter(Boolean).join(" ")}
+      data-status={status}
+      data-open={open || undefined}
+    >
+      <button
+        type="button"
+        className="agent-action-card-summary"
+        aria-expanded={open}
+        disabled={!expandable}
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="agent-action-card-title">{title}</span>
+        {!open && preview ? (
+          <span className="agent-action-card-preview">{preview}</span>
+        ) : null}
+        <span className="agent-tool-live-status" data-status={statusTone}>
+          {statusLabel}
+        </span>
+        {expandable ? (
+          <IconChevronDownSmall size={14} className="agent-disclosure-chevron" aria-hidden />
+        ) : null}
+      </button>
+      {expandable ? (
+        <div
+          className="agent-action-card-panel-wrap"
+          data-motion={motionReady || undefined}
+          aria-hidden={!open}
+        >
+          <div className="agent-action-card-panel">
+            <div className="agent-action-card-panel-inner">
+              {details ? <div className="agent-action-card-body">{details}</div> : null}
+              {!footerPinned ? footerNode : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {footerPinned ? footerNode : null}
+    </article>
+  );
+}
+
 function ClarifyPart({
   onClarify,
   part,
@@ -10371,103 +10476,101 @@ function ClarifyPart({
   const [typing, setTyping] = useState(part.choices.length === 0);
   const [draft, setDraft] = useState("");
   const disabled = part.status !== "pending" || submitting !== undefined;
+  const resolved = part.status !== "pending";
+  const answerLabel =
+    part.answer !== undefined ? (part.answer.trim() ? part.answer : "Skipped") : undefined;
 
   return (
-    <article className="agent-clarify-card" data-status={part.status}>
-      <span className="agent-tool-icon">
-        <IconBubbleWide size={14} />
-      </span>
-      <div>
-        <div className="agent-tool-title">
-          <span>Clarify</span>
-          <span
-            className="agent-tool-live-status"
-            data-status={part.status === "pending" ? "running" : "complete"}
-          >
-            {part.status === "pending" ? "Waiting" : "Answered"}
-          </span>
-        </div>
-        <p>{part.question}</p>
-        {part.answer !== undefined ? (
-          <p className="agent-clarify-answer">{part.answer.trim() ? part.answer : "Skipped"}</p>
-        ) : null}
-        {part.status === "pending" ? (
-          <>
-            {!typing && part.choices.length ? (
-              <div className="agent-clarify-choices">
-                {part.choices.map((choice, index) => (
-                  <button
-                    type="button"
-                    key={`${index}:${choice}`}
-                    disabled={disabled}
-                    onClick={() => onClarify(part, choice)}
-                  >
-                    <span>{index + 1}</span>
-                    {choice}
-                  </button>
-                ))}
+    <AgentActionCard
+      className="agent-clarify-card"
+      title="Clarify"
+      status={part.status}
+      statusLabel={part.status === "pending" ? "Waiting" : "Answered"}
+      statusTone={part.status === "pending" ? "running" : "complete"}
+      preview={
+        resolved && answerLabel
+          ? actionCardPreview(answerLabel)
+          : actionCardPreview(part.question)
+      }
+      defaultOpen={part.status === "pending"}
+      details={<p className="agent-action-card-lead">{part.question}</p>}
+      footer={
+        part.status === "pending" ? (
+          !typing && part.choices.length ? (
+            <div className="agent-clarify-choices">
+              {part.choices.map((choice, index) => (
                 <button
                   type="button"
-                  disabled={submitting !== undefined}
-                  onClick={() => setTyping(true)}
-                >
-                  <span>+</span>
-                  Other
-                </button>
-              </div>
-            ) : null}
-            {typing || !part.choices.length ? (
-              <form
-                className="agent-clarify-form"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const answer = draft.trim();
-                  if (answer) onClarify(part, answer);
-                }}
-              >
-                <textarea
-                  value={draft}
+                  key={`${index}:${choice}`}
                   disabled={disabled}
-                  rows={3}
-                  placeholder="Type your answer"
-                  onChange={(event) => setDraft(event.currentTarget.value)}
-                />
-                <div>
-                  {part.choices.length ? (
-                    <button
-                      type="button"
-                      className="btn btn-ghost"
-                      disabled={submitting !== undefined}
-                      onClick={() => {
-                        setDraft("");
-                        setTyping(false);
-                      }}
-                    >
-                      Back
-                    </button>
-                  ) : null}
+                  onClick={() => onClarify(part, choice)}
+                >
+                  <span>{index + 1}</span>
+                  {choice}
+                </button>
+              ))}
+              <button
+                type="button"
+                disabled={submitting !== undefined}
+                onClick={() => setTyping(true)}
+              >
+                <span>+</span>
+                Other
+              </button>
+            </div>
+          ) : (
+            <form
+              className="agent-clarify-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                const answer = draft.trim();
+                if (answer) onClarify(part, answer);
+              }}
+            >
+              <textarea
+                value={draft}
+                disabled={disabled}
+                rows={2}
+                placeholder="Type your answer"
+                onChange={(event) => setDraft(event.currentTarget.value)}
+              />
+              <div className="agent-clarify-form-actions">
+                {part.choices.length ? (
                   <button
                     type="button"
                     className="btn btn-ghost"
-                    disabled={disabled}
-                    onClick={() => onClarify(part, "")}
+                    disabled={submitting !== undefined}
+                    onClick={() => {
+                      setDraft("");
+                      setTyping(false);
+                    }}
                   >
-                    Skip
+                    Back
                   </button>
-                  <button
-                    type="submit"
-                    className="btn btn-secondary"
-                    disabled={disabled || !draft.trim()}
-                  >
-                    {submitting !== undefined ? "Sending" : "Send"}
-                  </button>
-                </div>
-              </form>
-            ) : null}
-          </>
-        ) : null}
-      </div>
-    </article>
+                ) : null}
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  disabled={disabled}
+                  onClick={() => onClarify(part, "")}
+                >
+                  Skip
+                </button>
+                <button
+                  type="submit"
+                  className="btn btn-secondary"
+                  disabled={disabled || !draft.trim()}
+                >
+                  {submitting !== undefined ? "Sending" : "Send"}
+                </button>
+              </div>
+            </form>
+          )
+        ) : answerLabel ? (
+          <p className="agent-clarify-answer">{answerLabel}</p>
+        ) : undefined
+      }
+    />
   );
 }
 
@@ -10490,28 +10593,34 @@ function AgentCliAccessCard({ cliAccess }: { cliAccess?: AgentCliAccessCardProps
   const enabled = cliAccess?.enabled === true;
   const resolved = enabled || dismissed;
   const busy = Boolean(cliAccess?.submitting);
+  const resultLabel = enabled ? "Agent CLI access enabled" : "Not now";
   return (
-    <article className="agent-approval-card" data-status={resolved ? "resolved" : "pending"}>
-      <span className="agent-tool-icon">
-        <IconConsole size={14} />
-      </span>
-      <div>
-        <div className="agent-tool-title">
-          <span>Agent CLI access requested</span>
-          <span className="agent-tool-live-status" data-status={resolved ? "complete" : "running"}>
-            {resolved ? "Resolved" : "Waiting"}
-          </span>
-        </div>
-        <p>
+    <AgentActionCard
+      title="Agent CLI access requested"
+      status={resolved ? "resolved" : "pending"}
+      statusLabel={resolved ? "Resolved" : "Waiting"}
+      statusTone={resolved ? "complete" : "running"}
+      preview={
+        resolved
+          ? resultLabel
+          : actionCardPreview(
+              "June wants write access to the state folders of your coding CLIs so they stay logged in.",
+            )
+      }
+      defaultOpen={!resolved}
+      details={
+        <p className="agent-action-card-lead">
           June wants write access to the state folders of your coding CLIs (Claude Code, Codex,
           Gemini, opencode) so they stay logged in and can save their work in sandboxed sessions.
           Those folders configure software that also runs outside June's sandbox. Enabling turns on
           "Agent CLI access" in Settings and restarts the sandboxed runtime.
         </p>
-        {resolved ? (
+      }
+      footer={
+        resolved ? (
           <p className="agent-approval-result" data-choice={enabled ? "once" : "deny"}>
             {enabled ? <IconCheckmark1Small size={14} /> : <IconCrossMedium size={14} />}
-            {enabled ? "Agent CLI access enabled" : "Not now"}
+            {resultLabel}
           </p>
         ) : (
           <div className="agent-approval-actions">
@@ -10532,9 +10641,9 @@ function AgentCliAccessCard({ cliAccess }: { cliAccess?: AgentCliAccessCardProps
               Not now
             </button>
           </div>
-        )}
-      </div>
-    </article>
+        )
+      }
+    />
   );
 }
 
@@ -10583,52 +10692,52 @@ function ApprovalPart({
   }
 
   return (
-    <article className="agent-approval-card" data-status={part.status}>
-      <span className="agent-tool-icon">
-        <IconShieldCheck size={14} />
-      </span>
-      <div>
-        <div className="agent-tool-title">
-          <span>Approval required</span>
-          <span
-            className="agent-tool-live-status"
-            data-status={part.status === "pending" ? "running" : "complete"}
-          >
-            {part.status === "pending" ? "Waiting" : "Resolved"}
-          </span>
-        </div>
-        <p>{part.description}</p>
-        {part.command ? <pre>{part.command}</pre> : null}
-        {!resolved && explainOpen ? (
-          <div className="agent-approval-explanation" id={explanationId}>
-            {explainState === "loading" ? (
-              <p className="agent-approval-explanation-loading" role="status" aria-live="polite">
-                <Spinner aria-hidden />
-                <span>Working out what this request does…</span>
-              </p>
-            ) : explainState === "ready" && explanation ? (
-              explanation
-                .split(/\n{2,}/)
-                .map((paragraph) => paragraph.trim())
-                .filter(Boolean)
-                .map((paragraph, index) => <p key={index}>{paragraph}</p>)
-            ) : (
-              // Generation unavailable (offline, signed out): keep the
-              // static framing rather than an empty panel.
+    <AgentActionCard
+      title="Approval required"
+      status={part.status}
+      statusLabel={part.status === "pending" ? "Waiting" : "Resolved"}
+      statusTone={part.status === "pending" ? "running" : "complete"}
+      preview={
+        resolved
+          ? approvalChoiceLabel(activeChoice, part.status === "pending" && submitting !== undefined)
+          : actionCardPreview(part.description)
+      }
+      defaultOpen={!resolved}
+      details={
+        <>
+          <p className="agent-action-card-lead">{part.description}</p>
+          {part.command ? <pre>{part.command}</pre> : null}
+          {!resolved && explainOpen ? (
+            <div className="agent-approval-explanation" id={explanationId}>
+              {explainState === "loading" ? (
+                <p className="agent-approval-explanation-loading" role="status" aria-live="polite">
+                  <Spinner aria-hidden />
+                  <span>Working out what this request does…</span>
+                </p>
+              ) : explainState === "ready" && explanation ? (
+                explanation
+                  .split(/\n{2,}/)
+                  .map((paragraph) => paragraph.trim())
+                  .filter(Boolean)
+                  .map((paragraph, index) => <p key={index}>{paragraph}</p>)
+              ) : (
+                <p>
+                  June is paused because this request needs your explicit permission before it can
+                  continue.
+                </p>
+              )}
               <p>
-                June is paused because this request needs your explicit permission before it can
-                continue.
+                Approve once allows only this request. This session allows matching requests until
+                the session ends.{" "}
+                {part.allowPermanent ? "Always allows matching requests in future sessions. " : null}
+                Deny blocks the request.
               </p>
-            )}
-            <p>
-              Approve once allows only this request. This session allows matching requests until the
-              session ends.{" "}
-              {part.allowPermanent ? "Always allows matching requests in future sessions. " : null}
-              Deny blocks the request.
-            </p>
-          </div>
-        ) : null}
-        {resolved ? (
+            </div>
+          ) : null}
+        </>
+      }
+      footer={
+        resolved ? (
           <p className="agent-approval-result" data-choice={activeChoice}>
             {activeChoice === "deny" ? (
               <IconCrossMedium size={14} />
@@ -10641,8 +10750,6 @@ function ApprovalPart({
             )}
           </p>
         ) : (
-          // System buttons (.btn) — quiet soft-fill choices, ghost deny. The
-          // repeated per-button icons read as noise, so labels stand alone.
           <div className="agent-approval-actions">
             <button
               type="button"
@@ -10690,9 +10797,9 @@ function ApprovalPart({
               Deny
             </button>
           </div>
-        )}
-      </div>
-    </article>
+        )
+      }
+    />
   );
 }
 
@@ -10842,41 +10949,46 @@ export function SudoPart({
   const decided = part.approved ?? (submitting ? submitting === "approve" : undefined);
 
   return (
-    <article className="agent-approval-card" data-status={part.status}>
-      <span className="agent-tool-icon">
-        {unrestricted ? <IconShieldCrossed size={14} /> : <IconShieldCheck size={14} />}
-      </span>
-      <div>
-        <div className="agent-tool-title">
-          <span>Privilege escalation requested</span>
-          <span
-            className="agent-tool-live-status"
-            data-status={part.status === "pending" ? "running" : "complete"}
+    <AgentActionCard
+      title="Privilege escalation requested"
+      status={part.status}
+      statusLabel={part.status === "pending" ? "Waiting" : "Resolved"}
+      statusTone={part.status === "pending" ? "running" : "complete"}
+      preview={
+        resolved
+          ? decided
+            ? submitting
+              ? "Approving"
+              : "Approved"
+            : submitting
+              ? "Denying"
+              : "Denied"
+          : actionCardPreview(part.reason ?? "June needs elevated permissions before it can continue.")
+      }
+      defaultOpen={!resolved}
+      details={
+        <>
+          <p className="agent-action-card-lead">
+            {part.reason ?? "June needs elevated permissions before it can continue."}
+          </p>
+          {part.command ? <pre>{part.command}</pre> : null}
+          <p
+            className="agent-sudo-mode"
+            data-mode={mode}
+            title={
+              unrestricted
+                ? "Runs with full write access, outside June's sandbox."
+                : "Runs inside June's write sandbox."
+            }
           >
-            {part.status === "pending" ? "Waiting" : "Resolved"}
-          </span>
-        </div>
-        <p>{part.reason ?? "June needs elevated permissions before it can continue."}</p>
-        {part.command ? <pre>{part.command}</pre> : null}
-        <p
-          className="agent-sudo-mode"
-          data-mode={mode}
-          title={
-            unrestricted
-              ? "Runs with full write access, outside June's sandbox."
-              : "Runs inside June's write sandbox."
-          }
-        >
-          {unrestricted ? (
-            <IconShieldCrossed size={12} aria-hidden />
-          ) : (
-            <IconShieldCheck size={12} aria-hidden />
-          )}
-          {unrestricted
-            ? "Will run unrestricted (full write access)"
-            : "Will run sandboxed (limited write access)"}
-        </p>
-        {resolved ? (
+            {unrestricted
+              ? "Will run unrestricted (full write access)"
+              : "Will run sandboxed (limited write access)"}
+          </p>
+        </>
+      }
+      footer={
+        resolved ? (
           <p className="agent-approval-result" data-choice={decided ? "once" : "deny"}>
             {decided ? <IconCheckmark1Small size={14} /> : <IconCrossMedium size={14} />}
             {decided ? (submitting ? "Approving" : "Approved") : submitting ? "Denying" : "Denied"}
@@ -10900,9 +11012,9 @@ export function SudoPart({
               Deny
             </button>
           </div>
-        )}
-      </div>
-    </article>
+        )
+      }
+    />
   );
 }
 
@@ -10949,28 +11061,32 @@ export function SecretPart({
   }
 
   return (
-    <article className="agent-approval-card" data-status={part.status}>
-      <span className="agent-tool-icon">
-        <IconLock size={14} />
-      </span>
-      <div>
-        <div className="agent-tool-title">
-          <span>Secret requested</span>
-          <span
-            className="agent-tool-live-status"
-            data-status={part.status === "pending" ? "running" : "complete"}
-          >
-            {part.status === "pending" ? "Waiting" : "Provided"}
-          </span>
-        </div>
-        <p>{part.reason ?? "June needs a secret value before it can continue."}</p>
-        {label ? (
-          <p className="agent-secret-key">
-            <span>Key</span>
-            <code>{label}</code>
+    <AgentActionCard
+      title="Secret requested"
+      status={part.status}
+      statusLabel={part.status === "pending" ? "Waiting" : "Provided"}
+      statusTone={part.status === "pending" ? "running" : "complete"}
+      preview={
+        part.status === "pending"
+          ? actionCardPreview(part.reason ?? "June needs a secret value before it can continue.")
+          : "Secret provided"
+      }
+      defaultOpen={part.status === "pending"}
+      details={
+        <>
+          <p className="agent-action-card-lead">
+            {part.reason ?? "June needs a secret value before it can continue."}
           </p>
-        ) : null}
-        {part.status === "pending" ? (
+          {label ? (
+            <p className="agent-secret-key">
+              <span>Key</span>
+              <code>{label}</code>
+            </p>
+          ) : null}
+        </>
+      }
+      footer={
+        part.status === "pending" ? (
           <form
             className="agent-secret-form"
             onSubmit={(event) => {
@@ -10989,7 +11105,6 @@ export function SecretPart({
               autoCorrect="off"
               autoCapitalize="off"
               spellCheck={false}
-              // The browser must never store or suggest this value.
               data-1p-ignore
               data-lpignore="true"
               disabled={disabled}
@@ -11019,9 +11134,9 @@ export function SecretPart({
             <IconCheckmark1Small size={14} />
             Secret provided
           </p>
-        )}
-      </div>
-    </article>
+        )
+      }
+    />
   );
 }
 

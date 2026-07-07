@@ -1321,13 +1321,12 @@ input:focus-visible,
   font-size: var(--fs-sm);
 }
 
-/* Action cards (approval, clarify) — a clean system card: card surface, subtle
- * border, soft shadow. */
+/* Action cards (approval, clarify, secret, sudo) — slim disclosure rows that
+ * expand for detail. Pending cards start open; resolved ones collapse to one
+ * line. Matches the quiet tool-disclosure treatment (no icon column). */
 .agent-safety-panel,
 .agent-tool-event,
-.agent-hermes-event,
-.agent-approval-card,
-.agent-clarify-card {
+.agent-hermes-event {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: var(--sp-3);
@@ -1338,37 +1337,186 @@ input:focus-visible,
   box-shadow: var(--shadow-sm);
 }
 
-.agent-approval-card > .agent-tool-icon {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
+.agent-action-card {
+  width: min(760px, 100%);
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-md);
   background: var(--card);
-  color: var(--warm-strong);
+  overflow: hidden;
 }
 
-.agent-approval-card > div {
-  min-width: 0;
+.agent-action-card[data-status="pending"] {
+  border-color: color-mix(in oklch, var(--warm-strong) 28%, var(--border-subtle));
 }
 
-.agent-approval-card .agent-tool-title > span:first-child {
+.agent-action-card[data-status="resolved"],
+.agent-action-card[data-status="answered"] {
+  background: color-mix(in oklch, var(--muted) 18%, var(--card));
+}
+
+.agent-action-card-summary {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-action-card-summary:disabled {
+  cursor: default;
+}
+
+.agent-action-card-summary:not(:disabled):hover {
   color: var(--foreground);
+}
+
+.agent-action-card[data-open] > .agent-action-card-summary {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.agent-action-card-title {
+  flex: 0 0 auto;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
   font-weight: var(--fw-medium);
 }
 
-.agent-approval-card p,
-.agent-clarify-card p {
-  margin: var(--sp-2) 0 0;
+.agent-action-card-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Height animation via 0fr → 1fr (same technique as the HUD error reveal).
+ * Transitions are gated behind [data-motion] so pending cards don't animate
+ * open on first mount. */
+.agent-action-card-panel-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+.agent-action-card-panel-wrap[data-motion] {
+  transition:
+    grid-template-rows 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.18s ease;
+}
+
+.agent-action-card[data-open] .agent-action-card-panel-wrap {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.agent-action-card-panel {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.agent-action-card-panel-inner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+}
+
+.agent-action-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.agent-action-card-lead {
+  margin: 0;
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-action-card-body p:not(.agent-action-card-lead):not(.agent-clarify-answer):not(.agent-secret-key):not(.agent-secret-note):not(.agent-sudo-mode) {
+  margin: 0;
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
   line-height: 1.45;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
-.agent-approval-card p {
+.agent-action-card-body pre {
+  overflow: auto;
+  max-height: 220px;
+  margin: 0;
+  border-radius: var(--r-sm);
+  padding: var(--sp-2) var(--sp-3);
+  background: color-mix(in oklch, var(--muted) 45%, transparent);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  max-width: 100%;
   overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.agent-action-card-footer {
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-action-card-footer-pinned {
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-action-card-footer:empty {
+  display: none;
+}
+
+.agent-action-card-footer:has(.agent-approval-result) {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.agent-action-card .agent-approval-actions {
+  margin-top: 0;
+}
+
+.agent-action-card .agent-approval-result {
+  margin-top: 0 !important;
+}
+
+.agent-action-card .agent-clarify-choices {
+  margin-top: 0;
+}
+
+.agent-action-card .agent-clarify-form {
+  margin-top: 0;
+}
+
+.agent-action-card .agent-secret-form {
+  margin-top: 0;
+}
+
+.agent-action-card[data-open] .agent-disclosure-chevron {
+  transform: rotate(180deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-action-card-panel-wrap[data-motion] {
+    transition: none;
+  }
 }
 
 .agent-clarify-card {
@@ -1427,16 +1575,16 @@ input:focus-visible,
 .agent-clarify-form {
   display: grid;
   gap: var(--sp-2);
-  margin-top: var(--sp-3);
+  margin-top: 0;
 }
 
 .agent-clarify-form textarea {
   width: 100%;
-  min-height: 84px;
+  min-height: 56px;
   resize: vertical;
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-sm);
-  padding: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
   background: var(--surface);
   color: var(--foreground);
   font: inherit;
@@ -1448,26 +1596,16 @@ input:focus-visible,
   outline-offset: 2px;
 }
 
-.agent-clarify-form div {
+.agent-clarify-form-actions {
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-2);
 }
 
-.agent-approval-card pre {
-  overflow: auto;
-  max-height: 220px;
-  margin: var(--sp-3) 0 0;
-  border-radius: var(--r-md);
-  padding: var(--sp-3) var(--sp-4);
-  background: color-mix(in oklch, var(--muted) 45%, transparent);
-  color: var(--foreground);
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  line-height: 1.45;
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
+.agent-clarify-form div {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
 }
 
 .agent-approval-explanation {
