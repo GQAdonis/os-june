@@ -27,6 +27,7 @@ import {
   setDictationLanguage,
   setDictationMicrophone,
   setDictationShortcut,
+  setImageSafeMode,
   setVeniceApiKey,
   setVeniceModel,
 } from "../../lib/tauri";
@@ -209,6 +210,8 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
     modelId: "",
     apiKey: "",
   },
+  // Off by default (privacy-first), matching the Rust providers default.
+  imageSafeMode: false,
 };
 
 const MIC_TEST_DURATION_SECONDS = 5;
@@ -293,7 +296,7 @@ type AppSettingsProps = {
   // Confirmed leave-rc reconcile: downloads and installs the current stable,
   // even if it is older than the running prerelease build (Q4-Q8).
   onReconcileToStable?: () => void;
-  // Opens a new agent session seeded with a report category chip.
+  // Opens Agent with the direct issue report dialog preselected.
   onReportIssue?: (category: ReportCategory) => void;
   // Opens a new agent session that runs a skill bundle's slash command.
   onStartBundleChat?: (prompt: string) => void;
@@ -996,6 +999,20 @@ export function AppSettings({
       setProviderSettings(next);
       setVeniceApiKeyDraft("");
       setStatus("Venice API key removed.");
+    } catch (error) {
+      setStatus(messageFromError(error));
+    }
+  }
+
+  async function toggleImageSafeMode(enabled: boolean) {
+    try {
+      const next = await setImageSafeMode(enabled);
+      setProviderSettings(next);
+      setStatus(
+        enabled
+          ? "Safe mode on: adult content is blurred."
+          : "Safe mode off: images are not filtered.",
+      );
     } catch (error) {
       setStatus(messageFromError(error));
     }
@@ -1737,6 +1754,22 @@ export function AppSettings({
                       options={imageOptions}
                       onOpen={() => openModelPicker("image")}
                     />
+                    <div className="settings-row">
+                      <div className="settings-row-info">
+                        <h3 className="settings-row-title">Safe mode</h3>
+                        <p className="settings-row-description">
+                          Blur adult content in generated and edited images. Off by default; your
+                          image work stays private either way.
+                        </p>
+                      </div>
+                      <div className="settings-row-control">
+                        <Switch
+                          checked={providerSettings.imageSafeMode}
+                          aria-label="Blur adult content in images"
+                          onCheckedChange={toggleImageSafeMode}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
               </section>
@@ -1911,8 +1944,8 @@ export function AppSettings({
                     <div className="settings-row-info">
                       <h3 className="settings-row-title">Report an issue</h3>
                       <p className="settings-row-description">
-                        Something not working? Describe it to June, attach a screenshot if you have
-                        one, and June will send the report to the team along with its own diagnosis.
+                        Describe the problem, attach files if you have them, and send the report to
+                        the June team.
                       </p>
                     </div>
                     <div className="settings-row-control">

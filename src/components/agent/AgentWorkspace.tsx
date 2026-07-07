@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import type { Editor as TiptapEditor } from "@tiptap/react";
 import { IconArrowDown } from "central-icons/IconArrowDown";
 import { IconArrowInbox } from "central-icons/IconArrowInbox";
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
@@ -28,7 +29,6 @@ import { IconArrowCornerDownRight } from "central-icons/IconArrowCornerDownRight
 import { IconArrowUp } from "central-icons/IconArrowUp";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { IconChevronLeftSmall } from "central-icons/IconChevronLeftSmall";
-import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconConsoleSimple } from "central-icons/IconConsoleSimple";
 import { IconWallet3 } from "central-icons/IconWallet3";
 import { IconDeepSearch } from "central-icons/IconDeepSearch";
@@ -44,6 +44,7 @@ import { IconHeartBeat } from "central-icons/IconHeartBeat";
 import { IconLock } from "central-icons/IconLock";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconMicrophone } from "central-icons/IconMicrophone";
+import { IconNoteText } from "central-icons/IconNoteText";
 import { IconNotes } from "central-icons/IconNotes";
 import { IconPageTextSearch } from "central-icons/IconPageTextSearch";
 import { IconPencil } from "central-icons/IconPencil";
@@ -75,7 +76,6 @@ import { Dialog } from "../ui/Dialog";
 import { EmptyState } from "../ui/EmptyState";
 import { HoverTip } from "../ui/HoverTip";
 import { InlineNotice } from "../ui/InlineNotice";
-import { ModelPrivacyChip } from "../ui/ModelPrivacyChip";
 import { SegmentedControl } from "../ui/SegmentedControl";
 import { Spinner } from "../ui/Spinner";
 import {
@@ -87,6 +87,7 @@ import {
   getHermesBridgeSkill,
   ensureHermesBridgeSession,
   hermesBridgeFilesystemSnapshot,
+  hermesBridgeImageDataUrl,
   hermesBridgeMessagingPlatforms,
   hermesBridgeFilePreview,
   hermesBridgeFileText,
@@ -159,9 +160,11 @@ import {
   classifyHermesEvent,
   createHermesMethods,
   hermesModeFor,
+  isTerminalHermesEvent,
   isHermesFeatureSupported,
   isSensitiveKey,
   type HermesMode,
+  type JuneHermesEvent,
 } from "../../lib/hermes-control-plane";
 import {
   attachImageToSession,
@@ -182,7 +185,7 @@ import {
 import { normalizeSteerText, steeringLiveEvent } from "../../lib/hermes-session-steer";
 import { unsupportedEventStore } from "../../lib/hermes-unsupported-events";
 import { pendingActionStore } from "../../lib/hermes-pending-actions";
-import { hermesActivityStore } from "../../lib/hermes-activity-store";
+import { hermesActivityStore, type AgentActivityRecord } from "../../lib/hermes-activity-store";
 import {
   hermesArtifactStore,
   // The store's record shape collides by name with this file's local
@@ -195,6 +198,15 @@ import { AgentActivityDrawer, AgentArtifactsSection } from "./AgentActivityDrawe
 import { hermesTraceBuffer } from "../../lib/hermes-trace-buffer";
 import { UnsupportedEventNotice } from "./UnsupportedEventNotice";
 import { HermesTracePanel } from "./HermesTracePanel";
+import { MarkdownContent, highlightText } from "./MarkdownContent";
+import {
+  ComposerModelPicker,
+  ComposerModelPopover,
+  PrivacyModeBadge,
+  UnrestrictedBadge,
+  heroPrivacyFootnote,
+  type ComposerModelFlyout,
+} from "./composer/ModelPicker";
 import {
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
   dispatchProviderModelSettingsChanged,
@@ -212,18 +224,15 @@ import {
   rawLocalGenerationModelId,
   withLocalGenerationOption,
 } from "../../lib/local-generation";
-import { preferredVisionFallbackModel, suggestedModelsForMode } from "../../lib/suggested-models";
-import {
-  contextLabel,
-  modelOptions,
-  pricingLabel,
-  selectedModel as selectedModelOption,
-} from "../settings/ModelPickerDialog";
+import { preferredVisionFallbackModel } from "../../lib/suggested-models";
+import { modelOptions, selectedModel as selectedModelOption } from "../settings/ModelPickerDialog";
 import {
   isHermesServerError,
   isHermesSessionsStartupRequestError,
+  isTopUpRequiresMaxError,
   messageFromError,
 } from "../../lib/errors";
+import { clipboardImageFiles } from "../../lib/clipboard-files";
 import { withTimeout } from "../../lib/async-timeout";
 import {
   MESSAGING_PLATFORMS_LOAD_TIMEOUT_MESSAGE,
@@ -247,20 +256,23 @@ import {
   resolveSlashModel,
   slashModelResolutionError,
 } from "../../lib/agent-composer-slash-commands";
-import { generateChatImage } from "../../lib/chat-image-generation";
+import { generateChatImage, newImageRequestId } from "../../lib/chat-image-generation";
 import { IMAGE_GENERATION_ENABLED } from "../../lib/feature-flags";
 import {
   ComposerEditor,
   type ComposerEditorHandle,
   stripPlaceholder,
 } from "./composer/ComposerEditor";
+import { noteReferenceToken, type NoteReferenceInput } from "./composer/noteReference";
 import { CategoryIcon } from "./composer/CategoryIcon";
 import { FileTypeIcon, fileTypeIconComponent } from "./FileTypeIcon";
 import {
+  ISSUE_REPORT_ATTACHMENTS_ONLY_DESCRIPTION,
   isReportCategory,
   REPORT_CATEGORIES,
   type ReportCategory,
 } from "./composer/reportCategory";
+import { ReportDialog } from "./ReportDialog";
 import { hermesConnectionForMode } from "../../lib/hermes-connection";
 import {
   forgetSessionMode,
@@ -277,12 +289,10 @@ import {
   buildAgentChatTurns,
   buildHermesSessionChatTurns,
   displayedComposerUserMessageText,
-  repairContractionSpacing,
   textFromHermesContent,
   type AgentApprovalChoice,
   type AgentChatPart,
   type AgentChatTurn,
-  type LiveHermesEvent,
 } from "../../lib/agent-chat-runtime";
 import { toolActivitySentence } from "../../lib/agent-tool-labels";
 import {
@@ -733,9 +743,12 @@ export type { AgentSessionsChangedDetail };
 
 export type AgentNewSessionDetail = {
   prompt?: string;
-  /** Seeds the composer with a category chip (and skips auto-submit) so the
-   * user lands ready to type a tagged report instead of an ordinary message. */
+  /** Opens the direct issue report dialog with the category preselected. No
+   * model runs, so there is nothing to charge. */
   category?: ReportCategory;
+  /** Seeds the composer with a note chip (and skips auto-submit) so the user
+   * lands ready to ask about that note instead of starting an ordinary ask. */
+  noteRef?: NoteReferenceInput;
 };
 
 /** Frames the user's bug report for June: investigate and write a diagnosis
@@ -778,8 +791,6 @@ function reportableAgentErrorOptions(
   if (!issueReport) return options;
   return { ...options, issueReport };
 }
-
-type HermesToolEventPhase = "start" | "progress" | "complete";
 
 type AgentWorkspaceError = {
   message: string;
@@ -826,12 +837,304 @@ type AgentArtifact = {
 
 type AgentAttachment = ImportedHermesFile & {
   id: string;
+  /** Ephemeral image data for hidden `/image` fast-path holds. Kept out of
+   * visible composer state, artifacts, and traces; cleared with the hold after
+   * the next successful prompt submit. */
+  attachDataUrl?: string;
   /** Structured attach status (feature 19). Tracks whether this import has been
    * sent to the model via image.attach_bytes: imported (ready) → attached (acked) →
    * or failed. Carries file refs only, never the image bytes. Files stay
    * `imported` (they only ride along as a path in the prompt). */
   attach: HermesAttachmentState;
 };
+
+type PersistedImageSlashTurn = {
+  id: string;
+  sessionId: string;
+  prompt: string;
+  sourcePrompt: string;
+  path: string;
+  name: string;
+  createdAt: string;
+  imageCreatedAt: string;
+  contextPending: boolean;
+  /** True from just before the paid request starts until import succeeds.
+   * `path`/`name` are still empty; the fields below carry the replay shape so
+   * an app exit mid-generation can retry the SAME June API request instead of
+   * minting a new id and a second charge. */
+  pending?: boolean;
+  requestId?: string;
+  model?: string;
+  safeMode?: boolean;
+};
+
+function imageSlashUserTurn(turn: Pick<PersistedImageSlashTurn, "createdAt" | "id" | "prompt">) {
+  return {
+    id: `${turn.id}:user`,
+    role: "user" as const,
+    createdAt: turn.createdAt,
+    status: "complete" as const,
+    parts: [{ type: "text" as const, text: turn.prompt, status: "complete" as const }],
+  };
+}
+
+function imageSlashAssistantTurn(
+  turn: Pick<
+    PersistedImageSlashTurn,
+    | "id"
+    | "imageCreatedAt"
+    | "name"
+    | "path"
+    | "prompt"
+    | "createdAt"
+    | "pending"
+    | "requestId"
+    | "model"
+    | "safeMode"
+  >,
+): AgentChatTurn {
+  if (turn.pending) {
+    // The app exited while this paid generation was in flight. Restore it as
+    // a retryable error carrying the pinned request shape - Try again replays
+    // the SAME June API request id, so a settled-but-unseen result is
+    // deduplicated server-side instead of billed twice.
+    return {
+      id: `${turn.id}:assistant`,
+      role: "assistant",
+      createdAt: turn.imageCreatedAt,
+      status: "complete",
+      parts: [
+        {
+          type: "image",
+          status: "error",
+          prompt: turn.prompt,
+          requestId: turn.requestId,
+          model: turn.model,
+          safeMode: turn.safeMode,
+          userCreatedAt: turn.createdAt,
+          imageCreatedAt: turn.imageCreatedAt,
+          error: "Generation was interrupted. Try again to resume.",
+        },
+      ],
+    };
+  }
+  return {
+    id: `${turn.id}:assistant`,
+    role: "assistant",
+    createdAt: turn.imageCreatedAt,
+    status: "complete",
+    parts: [
+      {
+        type: "image",
+        status: "complete",
+        prompt: turn.prompt,
+        path: turn.path,
+        name: turn.name,
+      },
+    ],
+  };
+}
+
+function runningImageSlashTurns(input: {
+  id: string;
+  prompt: string;
+  requestId: string;
+  createdAt: string;
+  imageCreatedAt: string;
+  model?: string;
+  safeMode?: boolean;
+}): AgentChatTurn[] {
+  return [
+    imageSlashUserTurn(input),
+    {
+      id: `${input.id}:assistant`,
+      role: "assistant",
+      createdAt: input.imageCreatedAt,
+      status: "running",
+      parts: [
+        {
+          type: "image",
+          status: "running",
+          prompt: input.prompt,
+          requestId: input.requestId,
+          model: input.model,
+          safeMode: input.safeMode,
+          userCreatedAt: input.createdAt,
+          imageCreatedAt: input.imageCreatedAt,
+        },
+      ],
+    },
+  ];
+}
+
+function imageSlashTurnsBySessionFromStored(): Record<string, AgentChatTurn[]> {
+  const turns = storedImageSlashTurns();
+  return Object.fromEntries(
+    Object.entries(turns).map(([sessionId, sessionTurns]) => [
+      sessionId,
+      sessionTurns.flatMap((turn) => [imageSlashUserTurn(turn), imageSlashAssistantTurn(turn)]),
+    ]),
+  );
+}
+
+function storedPendingImageSlashAttachments(sessionId: string): AgentAttachment[] {
+  return (storedImageSlashTurns()[sessionId] ?? [])
+    .filter((turn) => turn.contextPending)
+    .map((turn) => {
+      const file = importedFileFromImageSlashTurn(turn);
+      return {
+        ...file,
+        id: `held-image:${turn.id}`,
+        attach: attachmentStateFrom(file, sessionId),
+      };
+    });
+}
+
+function importedFileFromImageSlashTurn(turn: PersistedImageSlashTurn): ImportedHermesFile {
+  return {
+    name: turn.name,
+    path: turn.path,
+    rootLabel: "Workspace",
+    size: 0,
+    previewDataUrl: null,
+  };
+}
+
+function storedImageSlashTurns(): Record<string, PersistedImageSlashTurn[]> {
+  try {
+    const raw = window.localStorage.getItem(IMAGE_SLASH_TURNS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>)
+        .map(([sessionId, value]) => [
+          sessionId,
+          Array.isArray(value)
+            ? value
+                .map((item) => persistedImageSlashTurn(sessionId, item))
+                .filter((item): item is PersistedImageSlashTurn => item !== undefined)
+            : [],
+        ])
+        .filter(([, turns]) => turns.length > 0),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function persistedImageSlashTurn(
+  sessionId: string,
+  value: unknown,
+): PersistedImageSlashTurn | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<PersistedImageSlashTurn>;
+  // A pending entry (paid request in flight when the app exited) has no
+  // path/name yet; its replay request id is what makes it worth restoring.
+  const pending =
+    candidate.pending === true &&
+    typeof candidate.requestId === "string" &&
+    candidate.requestId.trim() !== "";
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.prompt !== "string" ||
+    typeof candidate.path !== "string" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.createdAt !== "string" ||
+    typeof candidate.imageCreatedAt !== "string" ||
+    !candidate.id.trim() ||
+    !candidate.prompt.trim() ||
+    (!pending && !candidate.path.trim()) ||
+    (!pending && !candidate.name.trim()) ||
+    Number.isNaN(Date.parse(candidate.createdAt)) ||
+    Number.isNaN(Date.parse(candidate.imageCreatedAt))
+  ) {
+    return undefined;
+  }
+  return {
+    id: candidate.id,
+    sessionId,
+    prompt: candidate.prompt,
+    sourcePrompt:
+      typeof candidate.sourcePrompt === "string" && candidate.sourcePrompt.trim()
+        ? candidate.sourcePrompt
+        : candidate.prompt,
+    path: candidate.path,
+    name: candidate.name,
+    createdAt: candidate.createdAt,
+    imageCreatedAt: candidate.imageCreatedAt,
+    // A pending turn has no image to attach on the follow-up.
+    contextPending: pending ? false : candidate.contextPending !== false,
+    ...(pending
+      ? {
+          pending: true,
+          requestId: candidate.requestId,
+          model: typeof candidate.model === "string" ? candidate.model : undefined,
+          safeMode: typeof candidate.safeMode === "boolean" ? candidate.safeMode : undefined,
+        }
+      : {}),
+  };
+}
+
+function writeStoredImageSlashTurns(turns: Record<string, PersistedImageSlashTurn[]>) {
+  try {
+    const entries = Object.entries(turns)
+      .map(([sessionId, sessionTurns]) => [
+        sessionId,
+        sessionTurns
+          .slice()
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+          .slice(-50),
+      ])
+      .filter(([, sessionTurns]) => (sessionTurns as PersistedImageSlashTurn[]).length > 0);
+    if (!entries.length) {
+      window.localStorage.removeItem(IMAGE_SLASH_TURNS_STORAGE_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      IMAGE_SLASH_TURNS_STORAGE_KEY,
+      JSON.stringify(Object.fromEntries(entries)),
+    );
+  } catch {
+    // Best-effort restore only; the live in-memory turns still render.
+  }
+}
+
+function upsertStoredImageSlashTurn(turn: PersistedImageSlashTurn) {
+  const turns = storedImageSlashTurns();
+  const sessionTurns = turns[turn.sessionId] ?? [];
+  turns[turn.sessionId] = [...sessionTurns.filter((item) => item.id !== turn.id), turn];
+  writeStoredImageSlashTurns(turns);
+}
+
+function markStoredImageSlashTurnsAttached(sessionId: string, paths: string[]) {
+  if (!paths.length) return;
+  const pathSet = new Set(paths);
+  const turns = storedImageSlashTurns();
+  const sessionTurns = turns[sessionId] ?? [];
+  if (!sessionTurns.length) return;
+  turns[sessionId] = sessionTurns.map((turn) =>
+    pathSet.has(turn.path) ? { ...turn, contextPending: false } : turn,
+  );
+  writeStoredImageSlashTurns(turns);
+}
+
+function removeStoredImageSlashSession(sessionId: string) {
+  const turns = storedImageSlashTurns();
+  if (!turns[sessionId]) return;
+  delete turns[sessionId];
+  writeStoredImageSlashTurns(turns);
+}
+
+function uniqueAttachmentsByWorkspacePath(attachments: AgentAttachment[]) {
+  const seen = new Set<string>();
+  return attachments.filter((attachment) => {
+    const key = attachment.attach.workspacePath ?? attachment.path ?? attachment.id;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
 
 /** Thrown when a structured image attach fails so the prompt is NOT sent with a
  * missing image (feature 19). Carries the attachments with their failed status
@@ -906,26 +1209,25 @@ type AgentWorkspaceProps = {
 // Mid-run continuity across remounts. While June is working, a session has
 // state that exists nowhere outside this component: the optimistic list entry
 // (title + preview), the just-sent user bubble Hermes hasn't persisted yet,
-// the working/waiting flags that drive the reconcile poll, the stored→runtime
-// session mapping, the buffered live events, the title override, and any
-// queued issue report draft, the review-ready report waiting for the user to
-// send, and the delayed diagnosis refresh that makes the final June answer
-// available to the report payload.
+// the stored→runtime session mapping, the buffered live events, the title
+// override, and any queued issue report draft, the review-ready report waiting
+// for the user to send, and the delayed diagnosis refresh that makes the final
+// June answer available to the report payload. Working/waiting/tool-call
+// display state lives in the module-global activity store, which survives this
+// workspace unmount.
 // Navigating away (e.g. to Settings) unmounts the workspace; without this
 // snapshot the remount restores only the selected id from localStorage, and a
 // session whose first turn hasn't persisted renders as an empty "Untitled
-// session" that nothing ever polls back to life. Captured on unmount for the
-// sessions with active work, hydrated by the next mount's state initializers
-// so the working poll picks the run straight back up.
+// session" that nothing ever polls back to life. Captured on unmount for
+// sessions with activity-store work or local pending/report state, hydrated by
+// the next mount's state initializers so the working poll picks the run
+// straight back up.
 type AgentSessionContinuity = {
   sessionItems: HermesSessionInfo[];
   pendingMessages: Record<string, HermesSessionMessage[]>;
-  workingSessionIds: string[];
-  waitingSessionIds: string[];
   runtimeSessionIds: Record<string, string>;
-  liveEvents: Record<string, LiveHermesEvent[]>;
+  liveEvents: Record<string, JuneHermesEvent[]>;
   titleOverrides: Record<string, string>;
-  activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: string[];
@@ -950,6 +1252,7 @@ let sessionContinuity: AgentSessionContinuity | null = null;
 const NEW_SESSION_DRAFT_KEY = "new-session";
 const NEW_SESSION_DRAFT_STORAGE_KEY = "june:agent:new-session-draft";
 const REVIEWABLE_ISSUE_REPORTS_STORAGE_KEY = "june:agent:reviewable-issue-reports";
+const IMAGE_SLASH_TURNS_STORAGE_KEY = "june:agent:image-slash-turns";
 const ISSUE_REPORT_DELIVERY_SETTLED_EVENT = "june-agent-issue-report-delivery-settled";
 const ISSUE_REPORT_FOLLOW_UP_SUBMIT_FAILED_EVENT =
   "june-agent-issue-report-follow-up-submit-failed";
@@ -1047,50 +1350,32 @@ function removeStoredNewSessionDraft() {
   }
 }
 
+function activeHermesActivitySessionIds() {
+  const activeIds = new Set<string>();
+  for (const record of hermesActivityStore.getRecords()) {
+    if (record.phase === "running" || record.phase === "waiting" || record.phase === "background") {
+      activeIds.add(record.sessionId);
+    }
+  }
+  return activeIds;
+}
+
 function shouldOpenNewSessionOnMount() {
   return hasPendingNewSessionRequest() || hasNewSessionComposerDraft();
-}
-
-function activeToolCallsRecord(
-  activeToolCallsBySession: Map<string, Map<string, number>>,
-): Record<string, Record<string, number>> {
-  return Object.fromEntries(
-    Array.from(activeToolCallsBySession.entries())
-      .filter(([, tools]) => tools.size > 0)
-      .map(([sessionId, tools]) => [sessionId, Object.fromEntries(tools)]),
-  );
-}
-
-function activeToolCallsMap(
-  activeToolCallsBySession: Record<string, Record<string, number>> | undefined,
-) {
-  return new Map(
-    Object.entries(activeToolCallsBySession ?? {}).map(([sessionId, tools]) => [
-      sessionId,
-      new Map(
-        Object.entries(tools).filter(
-          (entry): entry is [string, number] => Number.isFinite(entry[1]) && entry[1] > 0,
-        ),
-      ),
-    ]),
-  );
 }
 
 function captureSessionContinuity(state: {
   sessionItems: HermesSessionInfo[];
   pendingMessages: Record<string, HermesSessionMessage[]>;
-  workingSessionIds: Set<string>;
-  waitingSessionIds: Set<string>;
   runtimeSessionIds: Record<string, string>;
-  liveEvents: Record<string, LiveHermesEvent[]>;
+  liveEvents: Record<string, JuneHermesEvent[]>;
   titleOverrides: Record<string, string>;
-  activeToolCallsBySession: Record<string, Record<string, number>>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: Set<string>;
   submittingIssueReportSessionIds: Set<string>;
 }): AgentSessionContinuity | null {
-  const activeIds = new Set([...state.workingSessionIds, ...state.waitingSessionIds]);
+  const activeIds = activeHermesActivitySessionIds();
   for (const [sessionId, pending] of Object.entries(state.pendingMessages)) {
     if (pending.length > 0) activeIds.add(sessionId);
   }
@@ -1106,21 +1391,15 @@ function captureSessionContinuity(state: {
   for (const sessionId of state.submittingIssueReportSessionIds) {
     activeIds.add(sessionId);
   }
-  for (const sessionId of Object.keys(state.activeToolCallsBySession)) {
-    activeIds.add(sessionId);
-  }
   if (activeIds.size === 0) return null;
   const pick = <T,>(record: Record<string, T>) =>
     Object.fromEntries(Object.entries(record).filter(([sessionId]) => activeIds.has(sessionId)));
   return {
     sessionItems: state.sessionItems.filter((session) => activeIds.has(session.id)),
     pendingMessages: pick(state.pendingMessages),
-    workingSessionIds: [...state.workingSessionIds],
-    waitingSessionIds: [...state.waitingSessionIds],
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
-    activeToolCallsBySession: pick(state.activeToolCallsBySession),
     pendingIssueReports: pick(state.pendingIssueReports),
     reviewableIssueReports: pick(state.reviewableIssueReports),
     diagnosisRefreshIssueReportSessionIds: [...state.diagnosisRefreshIssueReportSessionIds].filter(
@@ -1224,12 +1503,9 @@ function updateContinuityAfterIssueReportDelivery(detail: IssueReportDeliverySet
   sessionContinuity = captureSessionContinuity({
     sessionItems: sessionContinuity.sessionItems,
     pendingMessages: sessionContinuity.pendingMessages,
-    workingSessionIds: new Set(sessionContinuity.workingSessionIds),
-    waitingSessionIds: new Set(sessionContinuity.waitingSessionIds),
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
-    activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds,
@@ -1259,12 +1535,9 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
   sessionContinuity = captureSessionContinuity({
     sessionItems: sessionContinuity.sessionItems,
     pendingMessages: sessionContinuity.pendingMessages,
-    workingSessionIds: new Set(sessionContinuity.workingSessionIds),
-    waitingSessionIds: new Set(sessionContinuity.waitingSessionIds),
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
-    activeToolCallsBySession: sessionContinuity.activeToolCallsBySession,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds: new Set(
@@ -1342,6 +1615,20 @@ export function resetAgentSessionContinuity() {
   sessionContinuity = null;
   agentComposerDrafts.clear();
   removeStoredNewSessionDraft();
+  for (const record of hermesActivityStore.getRecords()) {
+    hermesActivityStore.clearSession(record.sessionId);
+  }
+}
+
+export function seedAgentComposerDraftForTest(
+  key: string,
+  snapshot: {
+    text: string;
+    category: ReportCategory | null;
+    attachments?: AgentAttachment[];
+  },
+) {
+  rememberComposerDraft(key, snapshot.text, snapshot.category, snapshot.attachments ?? []);
 }
 
 /** The catalog id that represents the current global generation selection:
@@ -1382,9 +1669,9 @@ export function AgentWorkspace({
   const [selectedTaskId, setSelectedTaskId] = useState<string>();
   const [activePanel, setActivePanel] = useState<AgentPanel>("chat");
   const [draft, setDraft] = useState("");
-  // The message's single category tag, mirrored from the composer's chip. Null
-  // when the message carries no tag. Drives the report wrapper and (server
-  // side) the no-charge waiver.
+  // The message's single category tag, mirrored from a restored legacy chip.
+  // New reports use the direct popover instead; the server creates the
+  // team-facing diagnosis there because no model runs on the client.
   const [category, setCategory] = useState<ReportCategory | null>(null);
   // Live mirror of `draft` for closures (the hero-chip interval) that must read
   // the current value without re-subscribing.
@@ -1451,10 +1738,16 @@ export function AgentWorkspace({
   const sandboxMenuRef = useRef<HTMLDivElement | null>(null);
   const sandboxFirstItemRef = useRef<HTMLButtonElement | null>(null);
   const sandboxMenuWasOpenRef = useRef(false);
-  // The "+" popover: attach files, or tag the message as a report.
+  // The "+" popover: attach files, reference a note, or open the report form.
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const attachTriggerRef = useRef<HTMLButtonElement | null>(null);
   const attachMenuRef = useRef<HTMLDivElement | null>(null);
+  const [reportDialogOpen, setReportDialogOpen] = useState(false);
+  const [reportDialogCategory, setReportDialogCategory] = useState<ReportCategory>("bug");
+  const [reportDialogDescription, setReportDialogDescription] = useState("");
+  const [reportDialogAttachments, setReportDialogAttachments] = useState<AgentAttachment[]>([]);
+  // Bumped when a report is sent; see reportDialogAppendForCurrentGeneration.
+  const reportDialogGenerationRef = useRef(0);
   const [hermesSessionItems, setHermesSessionItems] = useState<HermesSessionInfo[]>(() => {
     const restored = continuity?.sessionItems ?? [];
     if (!initialSession) return restored;
@@ -1502,7 +1795,15 @@ export function AgentWorkspace({
   );
   const handleTopUp = useCallback(() => {
     const result = onTopUp ? onTopUp() : osAccountsUpgrade();
-    void Promise.resolve(result).catch((err: unknown) => setError(messageFromError(err)));
+    void Promise.resolve(result).catch((err: unknown) => {
+      // A top-up that the backend gates behind Max must never surface as a raw
+      // error; point the user at the upgrade path instead.
+      if (isTopUpRequiresMaxError(err)) {
+        setError("Upgrade to Max to keep using credits.");
+        return;
+      }
+      setError(messageFromError(err));
+    });
   }, [onTopUp, setError]);
   const clearErrorForSession = useCallback((sessionId: string) => {
     setErrorState((current) => (current?.sessionId === sessionId ? null : current));
@@ -1525,33 +1826,52 @@ export function AgentWorkspace({
   >(() => continuity?.pendingMessages ?? {});
   const pendingHermesMessagesRef =
     useRef<Record<string, HermesSessionMessage[]>>(pendingHermesMessages);
-  // Per-session, client-synthesized assistant turns for the `/image` slash
-  // command. The generated image never comes off the gateway message stream, so
-  // it can't ride in `pendingHermesMessages` (those are HermesSessionMessages);
-  // it lives here as a ready-built AgentChatTurn carrying the image part inline,
-  // merged into the rendered turns by createdAt. In-memory like the artifact
-  // store — survives session switches, not a full app reload.
+  // Per-session, client-synthesized turns for the `/image` slash command. The
+  // generated image never comes off the gateway message stream, so it can't ride
+  // in `pendingHermesMessages` (those are HermesSessionMessages); these turns
+  // carry the user prompt plus generated image and are hydrated from a small
+  // localStorage metadata snapshot so reopening a session still shows the image.
   const [imageTurnsBySession, setImageTurnsBySession] = useState<Record<string, AgentChatTurn[]>>(
-    {},
+    imageSlashTurnsBySessionFromStored,
   );
+  // JUN-171 (Phase A): the `/image` fast path renders in-thread but never enters
+  // the model's session history, so a follow-up ("do you think it's nice?")
+  // reaches an empty context. Hold each generated image here, keyed by session,
+  // and lazily attach it to the user's NEXT prompt via the same
+  // `image.attach_bytes` path composer attachments use — so the image lands in
+  // context exactly when the model first needs it. A ref (not state) on purpose:
+  // it must NOT render a composer chip (the image already shows in-thread; ADR
+  // 0003 decision 2). Cleared once attached.
+  const pendingFastPathImagesRef = useRef<Record<string, AgentAttachment[]>>({});
   // Per-session ordering for message fetches: the sequence handed out at
   // fetch start, and the highest sequence whose response was applied. See
   // listSessionMessagesOrdered.
   const sessionMessagesFetchSeqRef = useRef<Map<string, number>>(new Map());
   const sessionMessagesAppliedSeqRef = useRef<Map<string, number>>(new Map());
   const [hermesSessionsLoading, setHermesSessionsLoading] = useState(false);
-  const [liveEvents, setLiveEvents] = useState<Record<string, LiveHermesEvent[]>>(
+  const [liveEvents, setLiveEvents] = useState<Record<string, JuneHermesEvent[]>>(
     () => continuity?.liveEvents ?? {},
   );
   const [thinkingOpenByKey, setThinkingOpenByKey] = useState<Record<string, boolean>>({});
   const [workingTaskIds, setWorkingTaskIds] = useState<Set<string>>(() => new Set());
-  const [workingSessionIds, setWorkingSessionIds] = useState<Set<string>>(
-    () => new Set(continuity?.workingSessionIds),
+  const activityStoreVersion = useSyncExternalStore(
+    hermesActivityStore.subscribe,
+    hermesActivityStore.getVersion,
+    hermesActivityStore.getVersion,
   );
+  const activityRecords = useMemo(
+    () => hermesActivityStore.getRecords(),
+    // `activityStoreVersion` is the change signal; the read returns live rows.
+    [activityStoreVersion],
+  );
+  const previousActivityLevelsRef = useRef<AgentActivityLevelProjection | undefined>(undefined);
+  const activityLevels = useMemo(() => {
+    const next = projectAgentActivityLevels(activityRecords, previousActivityLevelsRef.current);
+    previousActivityLevelsRef.current = next;
+    return next;
+  }, [activityRecords]);
+  const { toolCallSessionIds, waitingSessionIds, workingSessionIds } = activityLevels;
   const workingSessionIdsRef = useRef<Set<string>>(workingSessionIds);
-  const [toolCallSessionIds, setToolCallSessionIds] = useState<Set<string>>(
-    () => new Set(Object.keys(continuity?.activeToolCallsBySession ?? {})),
-  );
   const toolCallSessionIdsRef = useRef<Set<string>>(toolCallSessionIds);
   // Steers we've sent that Hermes may not have delivered yet. Hermes only
   // injects a steer into the next tool result, so a no-tool turn drops it; we
@@ -1560,12 +1880,6 @@ export function AgentWorkspace({
   const pendingSteerBySessionIdRef = useRef<
     Record<string, { text: string; accepted: boolean; toolDrained: boolean }[]>
   >({});
-  const activeToolCallsBySessionRef = useRef<Map<string, Map<string, number>>>(
-    activeToolCallsMap(continuity?.activeToolCallsBySession),
-  );
-  const [waitingSessionIds, setWaitingSessionIds] = useState<Set<string>>(
-    () => new Set(continuity?.waitingSessionIds),
-  );
   const waitingSessionIdsRef = useRef<Set<string>>(waitingSessionIds);
   const [runtimeSessionIds, setRuntimeSessionIds] = useState<Record<string, string>>(
     () => continuity?.runtimeSessionIds ?? {},
@@ -1690,7 +2004,7 @@ export function AgentWorkspace({
   // the previous turn is still streaming must replace the old handler, not
   // stack a second one — otherwise every event lands twice in liveEvents.
   const sessionGatewayUnlistenRef = useRef<Map<string, () => void>>(new Map());
-  const liveEventsRef = useRef<Record<string, LiveHermesEvent[]>>(liveEvents);
+  const liveEventsRef = useRef<Record<string, JuneHermesEvent[]>>(liveEvents);
   const hydratedTaskIdsRef = useRef<Set<string>>(new Set());
   // Tasks whose hydration fetch has resolved (hydratedTaskIdsRef only says
   // the fetch *started*) — the scroll-settling logic needs the landing.
@@ -1731,10 +2045,14 @@ export function AgentWorkspace({
   const listRef = useRef<HTMLDivElement | null>(null);
   const agentScrollRef = useRef<HTMLDivElement | null>(null);
   const composerEditorRef = useRef<ComposerEditorHandle | null>(null);
+  const composerTiptapEditorRef = useRef<TiptapEditor | null>(null);
   const composerBoxRef = useRef<HTMLDivElement | null>(null);
-  // A category to seed into the composer chip once the editor is ready, set by
-  // startNewTask for the sidebar/settings report entry points.
-  const pendingSeedCategoryRef = useRef<ReportCategory | null>(null);
+  // A note reference to seed once the editor is ready, set by startNewTask for
+  // note-level "Ask June" entry points.
+  const pendingSeedNoteRefRef = useRef<{
+    noteRef: NoteReferenceInput;
+    prompt: string;
+  } | null>(null);
 
   function setReviewableIssueReport(sessionId: string, report: PendingIssueReport | null) {
     const next = { ...reviewableIssueReportsRef.current };
@@ -1870,7 +2188,7 @@ export function AgentWorkspace({
   }, [runtimeSessionIds]);
 
   useEffect(() => {
-    const restoredSessionIds = continuity?.workingSessionIds ?? [];
+    const restoredSessionIds = Array.from(workingSessionIdsRef.current);
     if (!restoredSessionIds.length) return;
     let cancelled = false;
 
@@ -1918,136 +2236,66 @@ export function AgentWorkspace({
     workingSessionIds,
   ]);
 
-  const setSessionToolCallActive = useCallback((sessionId: string, active: boolean) => {
-    setToolCallSessionIds((current) => {
-      const next = new Set(current);
-      if (active) {
-        next.add(sessionId);
-      } else {
-        next.delete(sessionId);
-      }
-      toolCallSessionIdsRef.current = next;
-      return next;
-    });
-  }, []);
-
-  function clearSessionToolCalls(sessionId: string) {
-    activeToolCallsBySessionRef.current.delete(sessionId);
-    setSessionToolCallActive(sessionId, false);
+  function recordSessionRunningActivity(sessionId: string) {
+    hermesActivityStore.record(
+      {
+        kind: "lifecycle",
+        sessionId,
+        flavor: "running",
+        status: "running",
+        text: "",
+        receivedAt: new Date().toISOString(),
+      },
+      hermesModeFor(sessionId),
+    );
   }
 
-  function updateSessionToolCallActivity(
-    sessionId: string,
-    event: HermesGatewayEvent,
-    phase: HermesToolEventPhase,
-  ) {
-    const eventKey = toolEventActivityKey(event);
-    const current = new Map(activeToolCallsBySessionRef.current.get(sessionId) ?? []);
-
-    if (phase === "progress" && eventKey === undefined) {
-      return current.size > 0;
-    }
-
-    const key = eventKey ?? "__anonymous_tool__";
-
-    if (phase === "start") {
-      current.set(key, (current.get(key) ?? 0) + 1);
-    } else if (phase === "progress") {
-      if (!current.has(key)) current.set(key, 1);
-    } else {
-      const count = current.get(key) ?? 0;
-      if (count > 1) {
-        current.set(key, count - 1);
-      } else {
-        current.delete(key);
-      }
-    }
-
-    if (current.size > 0) {
-      activeToolCallsBySessionRef.current.set(sessionId, current);
-      setSessionToolCallActive(sessionId, true);
-      return true;
-    }
-
-    activeToolCallsBySessionRef.current.delete(sessionId);
-    setSessionToolCallActive(sessionId, false);
-    return false;
+  function recordSessionErrorActivity(sessionId: string, message: string) {
+    hermesActivityStore.record(
+      { kind: "error", sessionId, message, receivedAt: new Date().toISOString() },
+      hermesModeFor(sessionId),
+    );
   }
 
-  const setSessionWorking = useCallback((sessionId: string, working: boolean) => {
-    setWorkingSessionIds((current) => {
-      const next = new Set(current);
-      if (working) {
-        next.add(sessionId);
-      } else {
-        next.delete(sessionId);
-      }
-      workingSessionIdsRef.current = next;
-      return next;
-    });
+  const clearSessionActivity = useCallback((sessionId: string, status = "completed") => {
+    hermesActivityStore.record(
+      {
+        kind: "lifecycle",
+        sessionId,
+        flavor: "terminal",
+        status,
+        text: "",
+        receivedAt: new Date().toISOString(),
+      },
+      hermesModeFor(sessionId),
+    );
+    return agentActivityCountsFromStore();
   }, []);
-
-  const setSessionWaiting = useCallback((sessionId: string, waiting: boolean) => {
-    setWaitingSessionIds((current) => {
-      const next = new Set(current);
-      if (waiting) {
-        next.add(sessionId);
-      } else {
-        next.delete(sessionId);
-      }
-      waitingSessionIdsRef.current = next;
-      return next;
-    });
-  }, []);
-
-  const clearSessionActivity = useCallback(
-    (sessionId: string) => {
-      clearSessionToolCalls(sessionId);
-
-      const nextWorking = new Set(workingSessionIdsRef.current);
-      nextWorking.delete(sessionId);
-      workingSessionIdsRef.current = nextWorking;
-      setWorkingSessionIds(nextWorking);
-
-      const nextWaiting = new Set(waitingSessionIdsRef.current);
-      nextWaiting.delete(sessionId);
-      waitingSessionIdsRef.current = nextWaiting;
-      setWaitingSessionIds(nextWaiting);
-
-      return {
-        activeCount: nextWorking.size + nextWaiting.size,
-        needsUserCount: nextWaiting.size,
-      };
-    },
-    [setSessionToolCallActive],
-  );
 
   // Shared teardown for a session that is going away: its messages, pending
-  // sends, working/waiting flags, live gateway listener, and buffered live
-  // events. Both delete paths (sidebar event and session-bar menu) run this so
-  // neither leaves a phantom "working" session with a leaked listener behind.
-  const scrubHermesSessionState = useCallback(
-    (sessionId: string) => {
-      setHermesSessionMessages((current) => omitRecordKey(current, sessionId));
-      setPendingHermesMessages((current) => {
-        const next = omitRecordKey(current, sessionId);
-        pendingHermesMessagesRef.current = next;
-        return next;
-      });
-      clearSessionActivity(sessionId);
-      // Feature 11: a deleted session has no activity to show, so drop its row
-      // from the activity drawer's store as well.
-      hermesActivityStore.clearSession(sessionId);
-      // Feature 14: likewise drop its artifact timeline.
-      hermesArtifactStore.clearSession(sessionId);
-      sessionGatewayUnlistenRef.current.get(sessionId)?.();
-      liveEventsRef.current = omitRecordKey(liveEventsRef.current, sessionId);
-      setLiveEvents(liveEventsRef.current);
-      // A deleted session must not be the restore target on the next mount.
-      forgetLastOpenSessionId(sessionId);
-    },
-    [clearSessionActivity],
-  );
+  // sends, activity-store row, live gateway listener, and buffered live events.
+  // Both delete paths (sidebar event and session-bar menu) run this so neither
+  // leaves a phantom "working" session with a leaked listener behind.
+  const scrubHermesSessionState = useCallback((sessionId: string) => {
+    setHermesSessionMessages((current) => omitRecordKey(current, sessionId));
+    setPendingHermesMessages((current) => {
+      const next = omitRecordKey(current, sessionId);
+      pendingHermesMessagesRef.current = next;
+      return next;
+    });
+    setImageTurnsBySession((current) => omitRecordKey(current, sessionId));
+    removeStoredImageSlashSession(sessionId);
+    // Feature 11: a deleted session has no activity to show, so drop its row
+    // from the activity drawer's store as well.
+    hermesActivityStore.clearSession(sessionId);
+    // Feature 14: likewise drop its artifact timeline.
+    hermesArtifactStore.clearSession(sessionId);
+    sessionGatewayUnlistenRef.current.get(sessionId)?.();
+    liveEventsRef.current = omitRecordKey(liveEventsRef.current, sessionId);
+    setLiveEvents(liveEventsRef.current);
+    // A deleted session must not be the restore target on the next mount.
+    forgetLastOpenSessionId(sessionId);
+  }, []);
 
   const selectedTask = useMemo(
     () => tasks.find((task) => task.id === selectedTaskId),
@@ -2128,10 +2376,24 @@ export function AgentWorkspace({
     : undefined;
   const composerHasPendingImage =
     pendingImageAttachments(attachments.map((attachment) => attachment.attach)).length > 0;
+  const parsedComposerSlashCommand = useMemo(
+    () => parseBuiltinComposerSlashCommand(draft),
+    [draft],
+  );
+  const imageSlashDraftActive =
+    IMAGE_GENERATION_ENABLED && parsedComposerSlashCommand?.name === "image";
+  const imageSlashBlockedByModel =
+    imageSlashDraftActive &&
+    !!resolvedGenerationModel &&
+    !modelSupportsImageInput(resolvedGenerationModel);
   const showImageInputWarning =
     composerHasPendingImage &&
     !!resolvedGenerationModel &&
     !modelSupportsImageInput(resolvedGenerationModel);
+  const showImageModelWarning = showImageInputWarning || imageSlashBlockedByModel;
+  const imageModelWarningText = imageSlashBlockedByModel
+    ? `${resolvedGenerationModel?.name ?? "This model"} can't read images. Switch to a vision model before using /image.`
+    : `${resolvedGenerationModel?.name ?? "This model"} can't read images.`;
   const composerInputSignature = useMemo(
     () =>
       composerInputSignatureFor({
@@ -2284,16 +2546,6 @@ export function AgentWorkspace({
   // this flag back to true to restore it.
   const ACTIVITY_DRAWER_ENABLED = false;
   const [activityDrawerOpen, setActivityDrawerOpen] = useState(false);
-  const activityStoreVersion = useSyncExternalStore(
-    hermesActivityStore.subscribe,
-    hermesActivityStore.getVersion,
-    hermesActivityStore.getVersion,
-  );
-  const activityRecords = useMemo(
-    () => hermesActivityStore.getRecords(),
-    // `activityStoreVersion` is the change signal; the read returns live rows.
-    [activityStoreVersion],
-  );
   // The store only knows the count once a session has reported activity; treat a
   // never-touched store as "loading" so the very first paint shows a spinner
   // copy rather than the empty state flashing before any event lands.
@@ -3050,7 +3302,7 @@ export function AgentWorkspace({
     const pending = pendingNewSessionRequest();
     if (pending) {
       void windowEventHandlersRef.current.startNewTask(pending, {
-        deferCategorySeed: true,
+        deferSeed: true,
       });
     }
 
@@ -3095,7 +3347,7 @@ export function AgentWorkspace({
           // latest message is the user's, so re-arm working state — the
           // working-gated poll below picks the session back up and
           // reconciles it from persisted messages.
-          setSessionWorking(selectedHermesSessionId, true);
+          recordSessionRunningActivity(selectedHermesSessionId);
         }
         if (sessionHasAssistantAfterLatestUser(combined)) {
           promotePendingIssueReportToReview(selectedHermesSessionId, {
@@ -3198,12 +3450,9 @@ export function AgentWorkspace({
       sessionContinuity = captureSessionContinuity({
         sessionItems: hermesSessionItemsRef.current,
         pendingMessages: pendingHermesMessagesRef.current,
-        workingSessionIds: workingSessionIdsRef.current,
-        waitingSessionIds: waitingSessionIdsRef.current,
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
-        activeToolCallsBySession: activeToolCallsRecord(activeToolCallsBySessionRef.current),
         pendingIssueReports: Object.fromEntries(pendingIssueReportsRef.current),
         reviewableIssueReports: reviewableIssueReportsRef.current,
         diagnosisRefreshIssueReportSessionIds: diagnosisRefreshIssueReportSessionIdsRef.current,
@@ -3407,12 +3656,158 @@ export function AgentWorkspace({
     return true;
   }
 
+  function updateImageSlashPart(
+    sessionId: string,
+    assistantTurnId: string,
+    patch: Partial<Extract<AgentChatPart, { type: "image" }>>,
+  ) {
+    setImageTurnsBySession((current) => {
+      const turns = current[sessionId] ?? [];
+      return {
+        ...current,
+        [sessionId]: turns.map((turn) => {
+          if (turn.id !== assistantTurnId) return turn;
+          const parts = turn.parts.map((part) =>
+            part.type === "image" ? { ...part, ...patch } : part,
+          );
+          const running = parts.some((part) => part.type === "image" && part.status === "running");
+          return { ...turn, parts, status: running ? "running" : "complete" };
+        }),
+      };
+    });
+  }
+
+  function imageSlashBaseTurnId(assistantTurnId: string) {
+    return assistantTurnId.endsWith(":assistant")
+      ? assistantTurnId.slice(0, -":assistant".length)
+      : assistantTurnId;
+  }
+
+  async function finishImageSlashGeneration(input: {
+    sessionId: string;
+    turnId: string;
+    prompt: string;
+    requestId: string;
+    createdAt: string;
+    imageCreatedAt: string;
+    model?: string;
+    safeMode?: boolean;
+  }) {
+    const { sessionId, turnId, prompt, requestId, createdAt, imageCreatedAt } = input;
+    const assistantTurnId = `${turnId}:assistant`;
+    try {
+      const result = await generateChatImage(
+        prompt,
+        {
+          generate: (text, model, nextRequestId, safeMode) =>
+            generateImage(text, model, nextRequestId, safeMode),
+          importImageBytes: importHermesBridgeFileBytes,
+        },
+        input.model,
+        requestId,
+        input.safeMode,
+      );
+      if (result.status !== "ok") {
+        updateImageSlashPart(sessionId, assistantTurnId, {
+          status: "error",
+          error: result.message,
+        });
+        return;
+      }
+      updateImageSlashPart(sessionId, assistantTurnId, {
+        status: "complete",
+        dataUrl: result.dataUrl,
+        path: result.file.path,
+        name: result.file.name,
+      });
+      upsertStoredImageSlashTurn({
+        id: turnId,
+        sessionId,
+        prompt,
+        sourcePrompt: prompt,
+        path: result.file.path,
+        name: result.file.name,
+        createdAt,
+        imageCreatedAt,
+        contextPending: true,
+      });
+      // Mirror into the files drawer/timeline like any artifact the agent
+      // touches, so the image is reachable after it scrolls away.
+      hermesArtifactStore.recordArtifact(
+        {
+          sessionId,
+          kind: "image",
+          action: "attached",
+          path: result.file.path,
+          displayName: result.file.name,
+          previewAvailable: true,
+        },
+        hermesModeFor(sessionId),
+      );
+      void loadFilesystemSnapshot();
+      // JUN-171 (Phase A): hold the generated image so the user's next message
+      // carries it into the model's context (lazy attach). No composer chip -
+      // it already renders in-thread as the assistant image turn above. Reuses
+      // attachmentStateFrom so it rides the exact structured-attach path a
+      // pasted/dropped image would (kind:"image", status:"imported").
+      const heldImage: AgentAttachment = {
+        ...result.file,
+        id: `held-image:${sessionId}:${Date.now()}`,
+        attachDataUrl: result.dataUrl,
+        attach: attachmentStateFrom(result.file, sessionId),
+      };
+      pendingFastPathImagesRef.current = {
+        ...pendingFastPathImagesRef.current,
+        [sessionId]: [...(pendingFastPathImagesRef.current[sessionId] ?? []), heldImage],
+      };
+    } catch (err) {
+      updateImageSlashPart(sessionId, assistantTurnId, {
+        status: "error",
+        error: messageFromError(err),
+      });
+    } finally {
+      setGeneratingImage(false);
+      setImportingFiles(false);
+    }
+  }
+
+  async function retryImageSlashTurn(
+    sessionId: string,
+    assistantTurnId: string,
+    part: Extract<AgentChatPart, { type: "image" }>,
+  ) {
+    if (part.status !== "error" || !part.requestId) return;
+    const now = new Date().toISOString();
+    setError(null);
+    setImportingFiles(true);
+    setGeneratingImage(true);
+    updateImageSlashPart(sessionId, assistantTurnId, {
+      status: "running",
+      error: undefined,
+    });
+    await finishImageSlashGeneration({
+      sessionId,
+      turnId: imageSlashBaseTurnId(assistantTurnId),
+      prompt: part.prompt,
+      requestId: part.requestId,
+      createdAt: part.userCreatedAt ?? now,
+      imageCreatedAt: part.imageCreatedAt ?? now,
+      // Replay the shape pinned at turn creation - resolving the CURRENT
+      // settings here would change the June API ledger key and turn a retry
+      // into a second billable generation.
+      model: part.model,
+      safeMode: part.safeMode,
+    });
+  }
+
   // `/image <prompt>` renders the generated image inline in the chat as an
   // assistant turn (loader -> image, with view + download), NOT as a composer
   // attachment chip. It creates/uses a real session and the prompt becomes a
   // user turn, but the model is never invoked — the image endpoint IS the whole
-  // response (see submitHermesSession's `skipPrompt`). The image model is
-  // resolved server-side from the saved default.
+  // response (see submitHermesSession's `skipPrompt`). The active text model
+  // must already be vision-capable so the generated image can enter context on
+  // the follow-up. The image generation model is still resolved server-side
+  // from the saved image default.
   async function runImageSlashCommand(argument: string, commandText: string) {
     const prompt = argument.trim();
     if (!prompt) {
@@ -3457,76 +3852,75 @@ export function AgentWorkspace({
     }
     const sessionId = targetSessionId;
 
-    // Inject a running assistant turn so the loader shows immediately, ordered
-    // just after the user prompt bubble (createdAt + 1ms).
-    const turnId = `image:${sessionId}:${Date.now()}`;
-    const updateImagePart = (patch: Partial<Extract<AgentChatPart, { type: "image" }>>) =>
-      setImageTurnsBySession((current) => {
-        const turns = current[sessionId] ?? [];
-        return {
-          ...current,
-          [sessionId]: turns.map((turn) => {
-            if (turn.id !== turnId) return turn;
-            const parts = turn.parts.map((part) =>
-              part.type === "image" ? { ...part, ...patch } : part,
-            );
-            const running = parts.some(
-              (part) => part.type === "image" && part.status === "running",
-            );
-            return { ...turn, parts, status: running ? "running" : "complete" };
-          }),
-        };
-      });
+    // Inject the synthetic user prompt plus running assistant image turn. The
+    // slash flow does not call prompt.submit, so these are June-side turns.
+    const turnStartedAt = Date.now();
+    const turnId = `image:${sessionId}:${turnStartedAt}`;
+    const createdAt = new Date(turnStartedAt).toISOString();
+    const imageCreatedAt = new Date(turnStartedAt + 1).toISOString();
+    const requestId = newImageRequestId();
+    // Pin the image model and safe mode NOW: June API's replay ledger hashes
+    // them into the requestId's key, so a retry after a settings change must
+    // send the values this turn started with or it becomes a second charge.
+    // If the settings read fails, leave them unpinned (server resolves live,
+    // matching the pre-pinning behavior).
+    let pinnedModel: string | undefined;
+    let pinnedSafeMode: boolean | undefined;
+    try {
+      const settingsResponse = await providerModelSettings();
+      pinnedModel = settingsResponse.settings.imageModel || undefined;
+      pinnedSafeMode = settingsResponse.settings.imageSafeMode;
+    } catch {
+      // Non-fatal: generation proceeds with server-resolved settings.
+    }
 
     setImageTurnsBySession((current) => ({
       ...current,
       [sessionId]: [
         ...(current[sessionId] ?? []),
-        {
+        ...runningImageSlashTurns({
           id: turnId,
-          role: "assistant",
-          createdAt: new Date(Date.now() + 1).toISOString(),
-          status: "running",
-          parts: [{ type: "image", status: "running", prompt }],
-        },
+          prompt,
+          requestId,
+          createdAt,
+          imageCreatedAt,
+          model: pinnedModel,
+          safeMode: pinnedSafeMode,
+        }),
       ],
     }));
 
-    try {
-      const result = await generateChatImage(prompt, {
-        generate: (text, model) => generateImage(text, model),
-        importImageBytes: importHermesBridgeFileBytes,
-      });
-      if (result.status !== "ok") {
-        updateImagePart({ status: "error", error: result.message });
-        return;
-      }
-      updateImagePart({
-        status: "complete",
-        dataUrl: result.dataUrl,
-        path: result.file.path,
-        name: result.file.name,
-      });
-      // Mirror into the files drawer/timeline like any artifact the agent
-      // touches, so the image is reachable after it scrolls away.
-      hermesArtifactStore.recordArtifact(
-        {
-          sessionId,
-          kind: "image",
-          action: "attached",
-          path: result.file.path,
-          displayName: result.file.name,
-          previewAvailable: true,
-        },
-        hermesModeFor(sessionId),
-      );
-      void loadFilesystemSnapshot();
-    } catch (err) {
-      updateImagePart({ status: "error", error: messageFromError(err) });
-    } finally {
-      setGeneratingImage(false);
-      setImportingFiles(false);
-    }
+    // Persist the replay shape BEFORE the paid request starts: if the app
+    // exits mid-generation, the restored turn can retry the SAME request id
+    // instead of minting a new one (a possibly-settled request would then be
+    // billed twice). The success path below overwrites this with the
+    // completed turn.
+    upsertStoredImageSlashTurn({
+      id: turnId,
+      sessionId,
+      prompt,
+      sourcePrompt: prompt,
+      path: "",
+      name: "",
+      createdAt,
+      imageCreatedAt,
+      contextPending: false,
+      pending: true,
+      requestId,
+      model: pinnedModel,
+      safeMode: pinnedSafeMode,
+    });
+
+    await finishImageSlashGeneration({
+      sessionId,
+      turnId,
+      prompt,
+      requestId,
+      createdAt,
+      imageCreatedAt,
+      model: pinnedModel,
+      safeMode: pinnedSafeMode,
+    });
   }
 
   async function runModelSlashCommand(argument: string, commandText: string) {
@@ -3599,7 +3993,8 @@ export function AgentWorkspace({
       (!message && !attachments.length) ||
       submitting ||
       importingFiles ||
-      selectedHermesSessionIsProvisional
+      selectedHermesSessionIsProvisional ||
+      imageSlashBlockedByModel
     )
       return;
     if (message && (await handleBuiltinComposerSlashCommand(message))) return;
@@ -3713,7 +4108,7 @@ export function AgentWorkspace({
             category: reportCategory,
             // An attachments-only send has no typed text, but the server
             // requires a description; the report must not bounce there.
-            description: prepared.typedMessage || "No description was typed; see the attachments.",
+            description: prepared.typedMessage || ISSUE_REPORT_ATTACHMENTS_ONLY_DESCRIPTION,
             followUps: [],
             attachmentNames: attachments.map((attachment) => attachment.name),
             attachmentPaths: attachments.map((attachment) => attachment.path),
@@ -3853,6 +4248,10 @@ export function AgentWorkspace({
   }
 
   function handleComposerDrop(event: DragEvent<HTMLFormElement>) {
+    // The report dialog's JSX lives inside this form, so its events React-
+    // bubble here even though it renders in a portal; a report drop or paste
+    // must never land in the chat composer.
+    if (reportDialogOpen) return;
     event.preventDefault();
     setDropActive(false);
     const files = Array.from(event.dataTransfer.files);
@@ -3864,15 +4263,32 @@ export function AgentWorkspace({
   }
 
   function handleComposerPaste(event: ClipboardEvent<HTMLFormElement>) {
+    if (reportDialogOpen) return;
     const files = clipboardImageFiles(event.clipboardData);
     if (!files.length) return;
     event.preventDefault();
     void importPastedImageFiles(files);
   }
 
+  function agentAttachmentFromImportedFile(file: ImportedHermesFile): AgentAttachment {
+    return {
+      ...file,
+      id: `${file.path}:${Date.now()}:${Math.random().toString(36)}`,
+      // Seed the structured attach status (feature 19). Images become
+      // `kind:"image"`, status `imported` — eligible for structured attach on
+      // the next submit. No bytes are kept here.
+      attach: attachmentStateFrom(file),
+    };
+  }
+
+  function addReportDialogAttachments(nextAttachments: AgentAttachment[]) {
+    setReportDialogAttachments((current) => [...current, ...nextAttachments]);
+  }
+
   async function importAttachments<T>(
     items: T[],
     importItem: (item: T) => Promise<ImportedHermesFile>,
+    options: { onImported?: (attachments: AgentAttachment[]) => void } = {},
   ) {
     if (!items.length) return true;
     setImportingFiles(true);
@@ -3884,17 +4300,12 @@ export function AgentWorkspace({
       for (const item of items) {
         imported.push(await importItem(item));
       }
-      setComposerAttachments((current) => [
-        ...current,
-        ...imported.map((file) => ({
-          ...file,
-          id: `${file.path}:${Date.now()}:${Math.random().toString(36)}`,
-          // Seed the structured attach status (feature 19). Images become
-          // `kind:"image"`, status `imported` — eligible for structured attach on
-          // the next submit. No bytes are kept here.
-          attach: attachmentStateFrom(file),
-        })),
-      ]);
+      const nextAttachments = imported.map(agentAttachmentFromImportedFile);
+      if (options.onImported) {
+        options.onImported(nextAttachments);
+      } else {
+        setComposerAttachments((current) => [...current, ...nextAttachments]);
+      }
       setError(null);
       void loadFilesystemSnapshot();
       return true;
@@ -3907,24 +4318,34 @@ export function AgentWorkspace({
   }
 
   // Native paths come from the file picker and Tauri drag-drop events.
-  async function importDroppedFilePaths(paths: string[]) {
+  async function importDroppedFilePaths(
+    paths: string[],
+    options: { onImported?: (attachments: AgentAttachment[]) => void } = {},
+  ) {
     const uniquePaths = Array.from(new Set(paths.map((path) => path.trim())))
       .filter(Boolean)
       .slice(0, 8);
-    return importAttachments(uniquePaths, importHermesBridgeFile);
+    return importAttachments(uniquePaths, importHermesBridgeFile, options);
   }
 
   // DOM drops are how Finder files actually arrive: Tauri's drag-drop
   // interception is disabled (it has to be, so notes can use HTML5 drag into
   // folders) and WKWebView never exposes filesystem paths on dropped Files —
   // so read each blob and import its bytes.
-  async function importDroppedFiles(files: File[]) {
-    await importFileBytes(files, {
-      tooLargeMessage: "Dropped files must be 50 MB or smaller.",
-      readErrorMessage: (file) =>
-        // Reading fails for directories, which Finder happily lets you drop.
-        `Could not read "${file.name}". Folders can't be attached.`,
-    });
+  async function importDroppedFiles(
+    files: File[],
+    options: { onImported?: (attachments: AgentAttachment[]) => void } = {},
+  ) {
+    await importFileBytes(
+      files,
+      {
+        tooLargeMessage: "Dropped files must be 50 MB or smaller.",
+        readErrorMessage: (file) =>
+          // Reading fails for directories, which Finder happily lets you drop.
+          `Could not read "${file.name}". Folders can't be attached.`,
+      },
+      options,
+    );
   }
 
   async function importPastedImageFiles(files: File[]) {
@@ -3934,16 +4355,24 @@ export function AgentWorkspace({
     });
   }
 
-  async function importFileBytes(files: File[], options: FileBytesImportOptions) {
-    await importAttachments(files.slice(0, 8), async (file) => {
-      if (file.size > 50 * 1024 * 1024) {
-        throw new Error(options.tooLargeMessage);
-      }
-      const bytes = await readFileBytes(file).catch(() => {
-        throw new Error(options.readErrorMessage(file));
-      });
-      return importHermesBridgeFileBytes(file.name, bytes);
-    });
+  async function importFileBytes(
+    files: File[],
+    options: FileBytesImportOptions,
+    importOptions: { onImported?: (attachments: AgentAttachment[]) => void } = {},
+  ) {
+    await importAttachments(
+      files.slice(0, 8),
+      async (file) => {
+        if (file.size > 50 * 1024 * 1024) {
+          throw new Error(options.tooLargeMessage);
+        }
+        const bytes = await readFileBytes(file).catch(() => {
+          throw new Error(options.readErrorMessage(file));
+        });
+        return importHermesBridgeFileBytes(file.name, bytes);
+      },
+      importOptions,
+    );
   }
 
   function removeAttachment(id: string) {
@@ -3967,7 +4396,7 @@ export function AgentWorkspace({
 
   // The "+" picker routes through the same bridge import as drag-drop so the
   // agent always gets a real, readable path.
-  async function pickAttachments() {
+  async function pickAttachments(onImported?: (attachments: AgentAttachment[]) => void) {
     try {
       const selected = await openFileDialog({
         multiple: true,
@@ -3975,7 +4404,7 @@ export function AgentWorkspace({
       });
       if (!selected) return false;
       const paths = Array.isArray(selected) ? selected : [selected];
-      return await importDroppedFilePaths(paths);
+      return await importDroppedFilePaths(paths, { onImported });
     } catch (err) {
       setError(messageFromError(err));
       return false;
@@ -4102,11 +4531,10 @@ export function AgentWorkspace({
   /**
    * Attach this turn's pending images to the live session via image.attach_bytes
    * (feature 19), updating each chip's status and feeding the artifact timeline.
-   * The base64 is read on demand from the workspace file (hermesBridgeFilePreview
-   * returns a data url), passed straight to the typed attachImage, and discarded;
-   * it never lands on composer state and the trace entry is redacted to a byte
-   * count. Throws a single blocking error if any image failed so the prompt is
-   * not sent with a missing image.
+   * The base64 is read on demand from the workspace file, passed straight to
+   * the typed attachImage, and discarded; it never lands on composer state and
+   * the trace entry is redacted to a byte count. Throws a single blocking error
+   * if any image failed so the prompt is not sent with a missing image.
    */
   async function attachPendingImages(
     gateway: HermesGatewayClient,
@@ -4117,9 +4545,17 @@ export function AgentWorkspace({
     const pending = pendingImageAttachments(turnAttachments.map((attachment) => attachment.attach));
     if (!pending.length) return;
     const methods = createHermesMethods(gateway);
+    const heldImageDataByPath = new Map(
+      turnAttachments.flatMap((attachment) =>
+        attachment.attachDataUrl && attachment.attach.workspacePath
+          ? [[attachment.attach.workspacePath, attachment.attachDataUrl] as const]
+          : [],
+      ),
+    );
     const deps = {
       attachImage: methods.attachImage,
-      readImageData: (path: string) => hermesBridgeFilePreview(path),
+      readImageData: async (path: string) =>
+        heldImageDataByPath.get(path) ?? (await hermesBridgeImageDataUrl(path)),
       isSupported: () => isHermesFeatureSupported("image.attach_bytes"),
     };
     const mode = hermesModeFor(storedSessionId);
@@ -4178,6 +4614,25 @@ export function AgentWorkspace({
     }
   }
 
+  function clearHeldFastPathImages(sessionId: string, heldImages: AgentAttachment[]) {
+    if (!heldImages.length) return;
+    const heldIds = new Set(heldImages.map((attachment) => attachment.id));
+    const heldPaths = heldImages
+      .map((attachment) => attachment.attach.workspacePath)
+      .filter((path): path is string => Boolean(path));
+    const remaining = (pendingFastPathImagesRef.current[sessionId] ?? []).filter(
+      (attachment) => !heldIds.has(attachment.id),
+    );
+    const next = { ...pendingFastPathImagesRef.current };
+    if (remaining.length) {
+      next[sessionId] = remaining;
+    } else {
+      delete next[sessionId];
+    }
+    pendingFastPathImagesRef.current = next;
+    markStoredImageSlashTurnsAttached(sessionId, heldPaths);
+  }
+
   function startOptimisticHermesSession({
     displayContent,
     model,
@@ -4221,8 +4676,7 @@ export function AgentWorkspace({
       pendingHermesMessagesRef.current = next;
       return next;
     });
-    setSessionWorking(sessionId, true);
-    setSessionWaiting(sessionId, false);
+    recordSessionRunningActivity(sessionId);
     dispatchAgentSessionStatus({
       title,
       prompt: displayContent,
@@ -4277,18 +4731,8 @@ export function AgentWorkspace({
     });
     liveEventsRef.current = moveRecordKey(liveEventsRef.current, fromSessionId, toSessionId);
     setLiveEvents(liveEventsRef.current);
-    setWorkingSessionIds((current) => {
-      const next = new Set(current);
-      if (next.delete(fromSessionId)) next.add(toSessionId);
-      workingSessionIdsRef.current = next;
-      return next;
-    });
-    setWaitingSessionIds((current) => {
-      const next = new Set(current);
-      if (next.delete(fromSessionId)) next.add(toSessionId);
-      waitingSessionIdsRef.current = next;
-      return next;
-    });
+    hermesActivityStore.clearSession(fromSessionId);
+    recordSessionRunningActivity(toSessionId);
     selectedHermesSessionIdRef.current = toSessionId;
     setSelectedHermesSessionId(toSessionId);
   }
@@ -4315,18 +4759,7 @@ export function AgentWorkspace({
     for (const id of ids) nextLiveEvents = omitRecordKey(nextLiveEvents, id);
     liveEventsRef.current = nextLiveEvents;
     setLiveEvents(nextLiveEvents);
-    setWorkingSessionIds((current) => {
-      const next = new Set(current);
-      for (const id of ids) next.delete(id);
-      workingSessionIdsRef.current = next;
-      return next;
-    });
-    setWaitingSessionIds((current) => {
-      const next = new Set(current);
-      for (const id of ids) next.delete(id);
-      waitingSessionIdsRef.current = next;
-      return next;
-    });
+    for (const id of ids) hermesActivityStore.clearSession(id);
     const selectedSessionId = selectedHermesSessionIdRef.current;
     if (selectedSessionId && ids.has(selectedSessionId)) {
       selectedHermesSessionIdRef.current = undefined;
@@ -4352,40 +4785,37 @@ export function AgentWorkspace({
     const removeListener = gateway.onEvent((event) => {
       if (event.session_id !== runtimeSessionId && event.session_id !== storedSessionId) return;
       const liveEvent = { ...event, receivedAt: new Date().toISOString() };
-      // Run every live frame through the typed control plane alongside the
-      // existing string-based handling below. This is the first consumer of
-      // the classifier: it doesn't drive rendering yet (later features migrate
-      // families onto it incrementally), but it proves the live path is typed
-      // and surfaces any raw type June can't yet model. Unknown frames classify
-      // as `unsupported` rather than being dropped, so a Hermes upgrade that
-      // adds an event shows up in dev instead of silently doing nothing.
+      // Classify the raw frame once at ingress. Stores and transcript rendering
+      // consume the typed event; the raw frame remains only for trace capture
+      // and the Stage B status helpers below.
       const classified = classifyHermesEvent(liveEvent);
+      const storedClassified = withStoredHermesSessionId(classified, storedSessionId);
       // Feature 15: record every inbound frame (raw type + the kind it
       // classified to) into the bounded, sanitized trace buffer so the dev/debug
       // trace panel can reconstruct the session. recordInbound re-classifies and
       // sanitizes internally; nothing raw is retained.
-      hermesTraceBuffer.recordInbound(liveEvent);
-      if (classified.kind === "unsupported") {
+      hermesTraceBuffer.recordInbound(liveEvent, { storedSessionId });
+      if (storedClassified.kind === "unsupported") {
         // Feed the bounded per-session store so the user gets a recoverable
         // notice (when this is the active session) and developers get a
         // sanitized, issue-report-safe export. The payload is already sanitized
         // by the classifier; nothing raw is retained or logged.
-        unsupportedEventStore.record(classified);
+        unsupportedEventStore.record(storedClassified);
         if (import.meta.env.DEV) {
           // biome-ignore lint/suspicious/noConsole: dev-only unsupported-event diagnostic
           console.debug(
             "[hermes] unsupported event",
-            classified.rawType,
-            classified.sanitizedPayload,
+            storedClassified.rawType,
+            storedClassified.sanitizedPayload,
           );
         }
-      } else if (classified.kind === "pending_action") {
+      } else if (storedClassified.kind === "pending_action") {
         // Feature 04: aggregate this blocker into the pending-action store
         // keyed by mode + session + request. The session's mode comes from its
         // recorded opt-in (sudo carries its own; the rest derive it here). A
         // fresh event for a known request also re-confirms a row that went
         // stale across a reconnect (see the store's reconcile logic).
-        pendingActionStore.record(classified, hermesModeFor(storedSessionId));
+        pendingActionStore.record(storedClassified, hermesModeFor(storedSessionId));
       }
       // Feature 11: roll EVERY classified event into the global activity store
       // that backs the Agent activity drawer. The store is total and ignores
@@ -4393,25 +4823,27 @@ export function AgentWorkspace({
       // derives the session's phase (running/waiting/background/error/complete),
       // current tool, and subagent count from the normalized event — never from
       // the raw frame (raw JSON belongs to feature 15's trace panel).
-      hermesActivityStore.record(classified, hermesModeFor(storedSessionId));
+      hermesActivityStore.record(storedClassified, hermesModeFor(storedSessionId));
       // Feature 14: extract any file/artifact reference this event carries into
       // the per-session artifact timeline behind the drawer's "Artifacts"
       // section. The store is total and only acts on `tool` completions that
       // name a known file/url field (conservative — never parses prose), so one
       // unconditional call is safe for every kind. Mode rides along so each
       // artifact can show its blast radius (sandboxed copy vs unrestricted path).
-      hermesArtifactStore.record(classified, hermesModeFor(storedSessionId));
+      hermesArtifactStore.record(storedClassified, hermesModeFor(storedSessionId));
       const nextSessionEvents = [
         ...(liveEventsRef.current[storedSessionId] ?? []),
-        liveEvent,
+        classified,
       ].slice(-200);
       liveEventsRef.current = {
         ...liveEventsRef.current,
         [storedSessionId]: nextSessionEvents,
       };
       setLiveEvents(liveEventsRef.current);
-      const toolEventPhase = hermesToolEventPhase(event.type);
+      const toolEventPhase = classified.kind === "tool" ? classified.phase : undefined;
       if (toolEventPhase === "complete") {
+        // The classifier treats any tool.*complete* subtype as complete, a
+        // superset of the old exact tool.complete drain trigger.
         // Hermes drains every accepted steer into the tool result it just
         // produced (run_agent.steer). Mark the pending entries drained rather
         // than removing them here: whether a steer was ACCEPTED is settled
@@ -4425,21 +4857,10 @@ export function AgentWorkspace({
           for (const entry of list) entry.toolDrained = true;
         }
       }
-      const hasActiveToolCalls =
-        toolEventPhase !== undefined
-          ? updateSessionToolCallActivity(storedSessionId, event, toolEventPhase)
-          : toolCallSessionIdsRef.current.has(storedSessionId);
-      const status = agentStatusFromHermesEvent(event);
-      if (status === "waitingForUser") {
-        setSessionWorking(storedSessionId, false);
-        setSessionWaiting(storedSessionId, true);
-      } else if (status === "running") {
-        setSessionWaiting(storedSessionId, false);
-        setSessionWorking(storedSessionId, true);
-      }
+      const status = agentStatusFromHermesEvent(classified);
       const activityCounts =
         status === "completed" || status === "failed" || status === "cancelled"
-          ? clearSessionActivity(storedSessionId)
+          ? agentActivityCountsFromStore()
           : undefined;
       if (activityCounts) {
         // Feature 04: the session reached a terminal state (completed, a
@@ -4454,11 +4875,11 @@ export function AgentWorkspace({
           sessionId: storedSessionId,
           title: sessionDisplayTitle,
           status,
-          summary: agentStatusSummaryFromHermesEvent(event, status),
+          summary: agentStatusSummaryFromHermesEvent(classified, status),
           ...activityCounts,
         });
       }
-      if (isTerminalHermesEvent(event.type)) {
+      if (isTerminalHermesEvent(classified)) {
         unlisten();
         if (!activityCounts) {
           clearSessionActivity(storedSessionId);
@@ -4547,16 +4968,30 @@ export function AgentWorkspace({
     // hermesModelIdFor: when local generation is active the default (and any
     // session row backfilled from it) carries the synthetic local option id,
     // which must never reach Hermes — session.create/ensure get the raw id.
+    const selectedSessionModelId = targetSessionId
+      ? hermesSessionItemsRef.current
+          .find((session) => session.id === targetSessionId)
+          ?.model?.trim()
+      : undefined;
+    const existingSessionModelId = explicitSession?.model?.trim() || selectedSessionModelId;
     const targetSessionModelId = hermesModelIdFor(
       targetSessionId
-        ? explicitSession?.model?.trim() ||
-            hermesSessionItemsRef.current
-              .find((session) => session.id === targetSessionId)
-              ?.model?.trim() ||
-            defaultGenerationModelId
-        : defaultGenerationModelId,
+        ? existingSessionModelId || defaultGenerationModelIdRef.current
+        : defaultGenerationModelIdRef.current,
     );
-    const turnAttachments = options?.attachments ?? [];
+    // JUN-171 (Phase A): fold any held fast-path `/image` outputs for this
+    // session into the turn so they ride the same structured-attach path as
+    // composer images and enter the model's context. Never on the skipPrompt
+    // (`/image`) path itself — that would flush a prior image with no following
+    // prompt (the semantics ADR 0003 decision 2 deliberately avoids).
+    const heldFastPathImages =
+      options?.skipPrompt || !targetSessionId
+        ? []
+        : uniqueAttachmentsByWorkspacePath([
+            ...(pendingFastPathImagesRef.current[targetSessionId] ?? []),
+            ...storedPendingImageSlashAttachments(targetSessionId),
+          ]);
+    const turnAttachments = [...(options?.attachments ?? []), ...heldFastPathImages];
     const pendingImages = pendingImageAttachments(
       turnAttachments.map((attachment) => attachment.attach),
     );
@@ -4779,7 +5214,7 @@ export function AgentWorkspace({
       content: displayContent,
       timestamp: createdAt,
     };
-    if (!optimisticSession) {
+    if (!optimisticSession && !options?.skipPrompt) {
       setPendingHermesMessages((current) => {
         const next = {
           ...current,
@@ -4794,8 +5229,7 @@ export function AgentWorkspace({
     // the model is never called and no "working" loader competes with the
     // image's own in-thread loader.
     if (options?.skipPrompt) return storedSessionId;
-    setSessionWorking(storedSessionId, true);
-    setSessionWaiting(storedSessionId, false);
+    recordSessionRunningActivity(storedSessionId);
     dispatchAgentSessionStatus({
       sessionId: storedSessionId,
       title: sessionDisplayTitle,
@@ -4824,6 +5258,12 @@ export function AgentWorkspace({
         session_id: runtimeSessionId,
         text: promptSubmitContent,
       });
+      // JUN-171 (Phase A): the held fast-path images have now ridden along
+      // with a successful follow-up prompt, either as structured image bytes or
+      // in the non-vision path fallback. Clear only after prompt.submit accepts
+      // the message, so a rejected submit can be retried with the same image
+      // context.
+      clearHeldFastPathImages(storedSessionId, heldFastPathImages);
       await loadHermesSessions({
         suppressStartupRequestError: !hermesSessionsHydratedRef.current,
       });
@@ -4858,8 +5298,7 @@ export function AgentWorkspace({
         throw err;
       }
       sessionGatewayUnlistenRef.current.get(storedSessionId)?.();
-      setSessionWorking(storedSessionId, false);
-      setSessionWaiting(storedSessionId, false);
+      recordSessionErrorActivity(storedSessionId, messageFromError(err));
       dispatchAgentSessionStatus({
         sessionId: storedSessionId,
         title: sessionDisplayTitle,
@@ -5229,14 +5668,17 @@ export function AgentWorkspace({
         session_id: sessionId,
         choice,
       });
-      pushLiveEvent(liveEventKey, {
-        type: "approval.response",
-        session_id: sessionId,
-        payload: { request_id: requestId, choice },
-      });
+      pushLiveEvent(
+        liveEventKey,
+        classifyOptimisticLiveEvent({
+          type: "approval.response",
+          session_id: sessionId,
+          payload: { request_id: requestId, choice },
+        }),
+      );
       // Feature 04: the user just answered this approval — clear its global
       // "Needs you" row immediately (the response itself is the resolution).
-      pendingActionStore.resolveRequest(sessionId, requestId);
+      pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
@@ -5259,7 +5701,7 @@ export function AgentWorkspace({
         setLiveEvents(liveEventsRef.current);
         // The request can never be answered now — retire its card so neither the
         // sidebar count nor the inline prompt offers a dead-end "Respond".
-        pendingActionStore.resolveRequest(sessionId, requestId);
+        pendingActionStore.resolveRequest(liveEventKey, requestId);
         void loadHermesSessions();
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
@@ -5287,10 +5729,13 @@ export function AgentWorkspace({
         request_id: requestId,
         answer,
       });
-      pushLiveEvent(liveEventKey, {
-        type: "clarify.response",
-        payload: { request_id: requestId, answer },
-      });
+      pushLiveEvent(
+        liveEventKey,
+        classifyOptimisticLiveEvent({
+          type: "clarify.response",
+          payload: { request_id: requestId, answer },
+        }),
+      );
       // Feature 04: the user answered the clarification — clear its pending record.
       pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
@@ -5337,20 +5782,23 @@ export function AgentWorkspace({
         approved,
         mode,
       });
-      pushLiveEvent(liveEventKey, {
-        type: "sudo.response",
-        session_id: sessionId,
-        payload: { request_id: requestId, granted: approved, mode },
-      });
+      pushLiveEvent(
+        liveEventKey,
+        classifyOptimisticLiveEvent({
+          type: "sudo.response",
+          session_id: sessionId,
+          payload: { request_id: requestId, granted: approved, mode },
+        }),
+      );
       // Feature 04: the user resolved the sudo prompt — clear its pending record.
-      pendingActionStore.resolveRequest(sessionId, requestId);
+      pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
       if (isSessionGoneError(message)) {
         // The runtime is gone, so this prompt can never be answered — retire
         // its card and say so plainly instead of leaking the raw 404.
-        pendingActionStore.resolveRequest(sessionId, requestId);
+        pendingActionStore.resolveRequest(liveEventKey, requestId);
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
         setError(message, { sessionId });
@@ -5382,20 +5830,23 @@ export function AgentWorkspace({
         requestId,
         value,
       });
-      pushLiveEvent(liveEventKey, {
-        type: "secret.response",
-        session_id: sessionId,
-        payload: { request_id: requestId, provided: true },
-      });
+      pushLiveEvent(
+        liveEventKey,
+        classifyOptimisticLiveEvent({
+          type: "secret.response",
+          session_id: sessionId,
+          payload: { request_id: requestId, provided: true },
+        }),
+      );
       // Feature 04: the user provided the secret — clear its pending record.
-      pendingActionStore.resolveRequest(sessionId, requestId);
+      pendingActionStore.resolveRequest(liveEventKey, requestId);
       setError(null);
     } catch (err) {
       const message = messageFromError(err);
       if (isSessionGoneError(message)) {
         // The runtime is gone, so this secret prompt can never be answered —
         // retire its card and say so plainly instead of leaking the raw 404.
-        pendingActionStore.resolveRequest(sessionId, requestId);
+        pendingActionStore.resolveRequest(liveEventKey, requestId);
         setError(SESSION_GONE_MESSAGE, { sessionId });
       } else {
         setError(message, { sessionId });
@@ -5512,7 +5963,7 @@ export function AgentWorkspace({
       // cached live runtime id can branch from the current in-memory tip and
       // persist later messages past from_message_id. If the stored id is not
       // accepted by this Hermes pin, fall back to the live runtime path.
-      let raw: unknown = undefined;
+      let raw: unknown;
       try {
         raw = await branchVia(sessionId);
       } catch (err) {
@@ -5643,9 +6094,22 @@ export function AgentWorkspace({
     }
   }
 
-  function pushLiveEvent(key: string, event: HermesGatewayEvent) {
-    const liveEvent = { ...event, receivedAt: new Date().toISOString() };
-    const nextEvents = [...(liveEventsRef.current[key] ?? []), liveEvent].slice(-200);
+  function classifyOptimisticLiveEvent(event: HermesGatewayEvent): JuneHermesEvent {
+    return classifyHermesEvent({
+      ...event,
+      receivedAt: new Date().toISOString(),
+    } as HermesGatewayEvent & { receivedAt: string });
+  }
+
+  function withStoredHermesSessionId(
+    event: JuneHermesEvent,
+    storedSessionId: string,
+  ): JuneHermesEvent {
+    return { ...event, sessionId: storedSessionId } as JuneHermesEvent;
+  }
+
+  function pushLiveEvent(key: string, event: JuneHermesEvent) {
+    const nextEvents = [...(liveEventsRef.current[key] ?? []), event].slice(-200);
     liveEventsRef.current = {
       ...liveEventsRef.current,
       [key]: nextEvents,
@@ -5685,14 +6149,17 @@ export function AgentWorkspace({
 
   async function startNewTask(
     request?: AgentNewSessionDetail,
-    options: { deferCategorySeed?: boolean } = {},
+    options: { deferSeed?: boolean } = {},
   ) {
     clearPendingNewSessionRequest();
     const seedCategory = request?.category ?? null;
-    // A seeded report never auto-submits: the category chip lands in the
-    // composer for the user to type their report after, whatever prompt the
-    // request carried.
-    const initialPrompt = seedCategory ? "" : (request?.prompt?.trim() ?? "");
+    const seedNoteRef = seedCategory ? null : (request?.noteRef ?? null);
+    const seedPrompt = request?.prompt?.trim() ?? "";
+    // A seeded report never auto-submits: the direct report dialog opens for
+    // the user to describe the issue and submit it without a model turn.
+    // A seeded note reference follows the same rule: the chip lands in the
+    // composer and the user decides what to send.
+    const initialPrompt = seedCategory || seedNoteRef ? "" : seedPrompt;
     // The pending-marker mount path and the AGENT_NEW_SESSION_EVENT dispatch
     // can deliver the same request twice (App marks the marker, then fires
     // the event in a setTimeout for already-mounted workspaces). Submitting
@@ -5716,13 +6183,22 @@ export function AgentWorkspace({
     selectedHermesSessionIdRef.current = undefined;
     composerDraftKeyRef.current = NEW_SESSION_DRAFT_KEY;
     setSelectedHermesSessionId(undefined);
-    // Seed the composer: a category chip for a report, the prompt otherwise.
-    // The editor may not be mounted yet on a cold open, so stash the category
-    // for ComposerEditor's onReady to pick up and also try to apply now.
-    pendingSeedCategoryRef.current = seedCategory;
+    // Seed the report dialog, a note chip, or the prompt. The editor may not
+    // be mounted yet on a cold open, so stash note chips for ComposerEditor's
+    // onReady to pick up and also try to apply now.
+    pendingSeedNoteRefRef.current = seedNoteRef
+      ? {
+          noteRef: seedNoteRef,
+          prompt: seedPrompt,
+        }
+      : null;
     if (seedCategory) {
+      pendingSeedNoteRefRef.current = null;
       clearComposerDraft(NEW_SESSION_DRAFT_KEY);
-      seedComposerCategory({ defer: options.deferCategorySeed });
+      openReportDialog(seedCategory);
+    } else if (seedNoteRef) {
+      clearComposerDraft(NEW_SESSION_DRAFT_KEY);
+      seedComposerNoteRef({ defer: options.deferSeed });
     } else if (initialPrompt) {
       rememberComposerDraft(NEW_SESSION_DRAFT_KEY, initialPrompt, null);
       composerEditorRef.current?.setContent(initialPrompt);
@@ -5800,26 +6276,95 @@ export function AgentWorkspace({
     });
   }
 
-  /** Applies any pending seed category to the composer chip once the editor is
-   * available. Called from startNewTask (best-effort, the editor may not be
-   * mounted yet) and again from ComposerEditor's onReady. */
-  function seedComposerCategory(options: { defer?: boolean } = {}) {
-    if (!pendingSeedCategoryRef.current) return;
+  function openReportDialog(categoryToOpen: ReportCategory) {
+    setAttachMenuOpen(false);
+    // Every entry-point open is a fresh report intent, so start clean —
+    // even when reopening the same category. An abandoned draft (closed
+    // without sending) must not survive close, because its stale
+    // attachments (screenshots, logs) could ride into a later report
+    // unnoticed. Bumping the generation also invalidates any in-flight
+    // attachment import from the abandoned draft (see
+    // reportDialogAppendForCurrentGeneration). Switching categories INSIDE
+    // the open dialog still keeps the in-progress form — that lives in the
+    // dialog's own category selector and is unaffected.
+    reportDialogGenerationRef.current += 1;
+    setReportDialogDescription("");
+    setReportDialogAttachments([]);
+    setReportDialogCategory(categoryToOpen);
+    setReportDialogOpen(true);
+    setIssueReportNotice(null);
+  }
+
+  /** Drops appends from imports that were still in flight when the report
+   * was sent or the dialog was reopened: without this a slow import
+   * repopulates the cleared attachment state and haunts the next report.
+   * Both send and the next open bump the generation, so a mid-flight import
+   * from an abandoned draft is discarded rather than resurfaced. */
+  function reportDialogAppendForCurrentGeneration() {
+    const generation = reportDialogGenerationRef.current;
+    return (attachments: AgentAttachment[]) => {
+      if (generation === reportDialogGenerationRef.current) {
+        addReportDialogAttachments(attachments);
+      }
+    };
+  }
+
+  function pickReportDialogAttachments() {
+    return pickAttachments(reportDialogAppendForCurrentGeneration());
+  }
+
+  function importReportDialogDroppedFiles(files: File[]) {
+    return importDroppedFiles(files, { onImported: reportDialogAppendForCurrentGeneration() });
+  }
+
+  function removeReportDialogAttachment(id: string) {
+    setReportDialogAttachments((current) => current.filter((item) => item.id !== id));
+  }
+
+  // Clears the draft once a dialog report is delivered. The dialog stays
+  // open showing its own confirmation (no chat notice for dialog sends —
+  // the pill is legacy chip-flow only); closing it is the user's move.
+  function handleReportDialogSent() {
+    reportDialogGenerationRef.current += 1;
+    setReportDialogDescription("");
+    setReportDialogAttachments([]);
+    setError(null);
+  }
+
+  /** Applies any pending note reference to the composer once the editor is
+   * available for cold-open note entry points. */
+  function seedComposerNoteRef(options: { defer?: boolean } = {}) {
+    if (!pendingSeedNoteRefRef.current) return;
     const editor = composerEditorRef.current;
+    const tiptapEditor = composerTiptapEditorRef.current;
     // Not mounted yet (cold open) — leave it pending for onReady to apply.
-    if (!editor) return;
+    if (!editor || !tiptapEditor || tiptapEditor.isDestroyed) return;
     const applySeed = () => {
-      const seed = pendingSeedCategoryRef.current;
+      const seed = pendingSeedNoteRefRef.current;
       const currentEditor = composerEditorRef.current;
-      if (!seed || !currentEditor) return;
-      pendingSeedCategoryRef.current = null;
-      draftRef.current = "";
-      categoryRef.current = seed;
-      setDraft("");
-      setCategory(seed);
-      rememberComposerDraft(NEW_SESSION_DRAFT_KEY, "", seed);
+      const currentTiptapEditor = composerTiptapEditorRef.current;
+      if (!seed || !currentEditor || !currentTiptapEditor || currentTiptapEditor.isDestroyed) {
+        return;
+      }
+      pendingSeedNoteRefRef.current = null;
+      draftRef.current = `${noteReferenceToken(seed.noteRef)} ${seed.prompt}`;
+      categoryRef.current = null;
+      setDraft(draftRef.current);
+      setCategory(null);
+      rememberComposerDraft(NEW_SESSION_DRAFT_KEY, draftRef.current, null);
       restoredComposerDraftKeyRef.current = NEW_SESSION_DRAFT_KEY;
-      currentEditor.setContent("", seed);
+      currentEditor.setContent("", null);
+      currentEditor.insertNoteReference(seed.noteRef);
+      if (seed.prompt) {
+        // String insertContent parses HTML; a node insert keeps the prompt literal.
+        currentTiptapEditor
+          .chain()
+          .focus()
+          .insertContent({ type: "text", text: seed.prompt })
+          .run();
+      } else {
+        currentEditor.focus();
+      }
     };
     if (options.defer) {
       window.setTimeout(applySeed, 0);
@@ -5859,7 +6404,7 @@ export function AgentWorkspace({
   }
 
   // Stops a running June turn: interrupts the runtime session over the
-  // gateway, then clears the local working/waiting flags regardless — the
+  // gateway, then records a terminal activity-store level regardless — the
   // user asked for it to stop, so the UI must not stay "thinking" even when
   // the RPC fails (gateway drop, runtime session already gone).
   async function stopHermesSession(sessionId: string) {
@@ -5880,15 +6425,7 @@ export function AgentWorkspace({
     // too -- otherwise a steer typed-then-stopped lingers and could auto-submit
     // as a follow-up after a later run in the same session.
     delete pendingSteerBySessionIdRef.current[sessionId];
-    const activityCounts = clearSessionActivity(sessionId);
-    // Feature 11: the per-session listener is gone, so no terminal frame will
-    // reach the activity store to retire this row. Record a synthetic terminal
-    // lifecycle so the drawer flips the session out of "running" the instant
-    // the user clicks stop (the row persists, now reading as complete).
-    hermesActivityStore.record(
-      { kind: "lifecycle", sessionId, status: "cancelled" },
-      hermesModeFor(sessionId),
-    );
+    const activityCounts = clearSessionActivity(sessionId, "cancelled");
     dispatchAgentSessionStatus({
       sessionId,
       title:
@@ -6059,8 +6596,8 @@ export function AgentWorkspace({
 
   // Drops a deleted session from local state. Removing it from items fires
   // the sessions-changed effect, which syncs the sidebar; the shared scrub
-  // clears messages, pending sends, working/waiting flags, and live events so
-  // a running session doesn't linger as phantom "working" work.
+  // clears messages, pending sends, activity-store state, and live events so a
+  // running session doesn't linger as phantom "working" work.
   function removeHermesSessionLocally(sessionId: string, selectNext = true) {
     setHermesSessionItems((current) => {
       const next = current.filter((session) => session.id !== sessionId);
@@ -6286,10 +6823,24 @@ export function AgentWorkspace({
   // generated file uses. The image part carries its bytes inline for the
   // thumbnail, but the affordances key off the imported path on disk.
   const downloadGeneratedImage = (part: Extract<AgentChatPart, { type: "image" }>) => {
-    if (!part.path) return;
-    void downloadHermesBridgeFile(part.path).catch((err: unknown) =>
-      setError(messageFromError(err)),
-    );
+    // A `/image` result has an imported workspace file; save it through the
+    // bridge (native save dialog). A tool-produced image (june_image MCP) has
+    // no June-workspace path — its bytes live only in the inline data url, so
+    // save those directly via an anchor download.
+    if (part.path) {
+      void downloadHermesBridgeFile(part.path).catch((err: unknown) =>
+        setError(messageFromError(err)),
+      );
+      return;
+    }
+    if (part.dataUrl) {
+      const link = document.createElement("a");
+      link.href = part.dataUrl;
+      link.download = part.name?.trim() || "generated-image.png";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+    }
   };
   const openGeneratedImage = (part: Extract<AgentChatPart, { type: "image" }>) => {
     if (!part.path) return;
@@ -6732,16 +7283,14 @@ export function AgentWorkspace({
               ))}
             </div>
           ) : null}
-          {showImageInputWarning ? (
+          {showImageModelWarning ? (
             <div className="agent-composer-image-warning" role="status">
               <IconExclamationTriangle
                 size={14}
                 aria-hidden
                 className="agent-composer-image-warning-icon"
               />
-              <span className="agent-composer-image-warning-text">
-                {resolvedGenerationModel?.name ?? "This model"} can't read images.
-              </span>
+              <span className="agent-composer-image-warning-text">{imageModelWarningText}</span>
               {preferredVisionModel ? (
                 <button
                   type="button"
@@ -6837,9 +7386,10 @@ export function AgentWorkspace({
               );
             }}
             onSubmit={() => void submit()}
-            onReady={() => {
+            onReady={(editor) => {
+              composerTiptapEditorRef.current = editor;
               restoreComposerDraft(composerDraftKeyRef.current);
-              seedComposerCategory({ defer: true });
+              seedComposerNoteRef({ defer: true });
             }}
           />
           <div className="agent-composer-toolbar">
@@ -6847,12 +7397,15 @@ export function AgentWorkspace({
               type="button"
               ref={attachTriggerRef}
               className="agent-composer-attach"
-              aria-label="Attach files or tag this message"
-              title="Attach or tag"
+              aria-label="Add files, notes, or reports"
+              title="Add"
               aria-haspopup="menu"
               aria-expanded={attachMenuOpen}
               data-open={attachMenuOpen || undefined}
-              onClick={() => setAttachMenuOpen((open) => !open)}
+              onClick={() => {
+                setReportDialogOpen(false);
+                setAttachMenuOpen((open) => !open);
+              }}
             >
               <IconPlusMedium size={18} />
             </button>
@@ -6925,7 +7478,13 @@ export function AgentWorkspace({
                     submitting ||
                     importingFiles ||
                     selectedHermesSessionIsProvisional ||
+                    imageSlashBlockedByModel ||
                     (!draft.trim() && !attachments.length)
+                  }
+                  title={
+                    imageSlashBlockedByModel
+                      ? "Switch to a vision model before using /image."
+                      : undefined
                   }
                   aria-label={
                     selectedHermesSessionId || selectedTask ? "Send message" : "Start session"
@@ -6944,7 +7503,7 @@ export function AgentWorkspace({
             ref={attachMenuRef}
             className="agent-attach-menu"
             role="menu"
-            aria-label="Attach or tag this message"
+            aria-label="Add files, notes, or reports"
           >
             <button
               type="button"
@@ -6959,6 +7518,34 @@ export function AgentWorkspace({
               </span>
               <span className="agent-attach-menu-label">Attach files</span>
             </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setAttachMenuOpen(false);
+                const editor = composerTiptapEditorRef.current;
+                if (editor && !editor.isDestroyed) {
+                  // The suggestion plugin only matches a trigger preceded by
+                  // whitespace or a line start, so pad the "@" when the caret
+                  // sits right after text or an atom chip.
+                  const nodeBefore = editor.state.selection.$from.nodeBefore;
+                  const lastChar = nodeBefore?.isText ? (nodeBefore.text?.slice(-1) ?? "") : "";
+                  const needsSpace = nodeBefore != null && !/\s/.test(lastChar || "x");
+                  editor
+                    .chain()
+                    .focus()
+                    .insertContent(needsSpace ? " @" : "@")
+                    .run();
+                } else {
+                  composerEditorRef.current?.focus();
+                }
+              }}
+            >
+              <span className="agent-attach-menu-icon">
+                <IconNoteText size={16} aria-hidden />
+              </span>
+              <span className="agent-attach-menu-label">Reference a note</span>
+            </button>
             <div className="agent-attach-menu-divider" role="separator" />
             {REPORT_CATEGORIES.map((reportCategory) => (
               <button
@@ -6966,9 +7553,7 @@ export function AgentWorkspace({
                 type="button"
                 role="menuitem"
                 onClick={() => {
-                  setAttachMenuOpen(false);
-                  composerEditorRef.current?.insertCategory(reportCategory.key);
-                  composerEditorRef.current?.focus();
+                  openReportDialog(reportCategory.key);
                 }}
               >
                 <span className="agent-attach-menu-icon" data-category={reportCategory.key}>
@@ -6978,6 +7563,21 @@ export function AgentWorkspace({
               </button>
             ))}
           </div>
+        ) : null}
+        {reportDialogOpen ? (
+          <ReportDialog
+            category={reportDialogCategory}
+            description={reportDialogDescription}
+            attachments={reportDialogAttachments}
+            importingFiles={importingFiles}
+            onCategoryChange={setReportDialogCategory}
+            onDescriptionChange={setReportDialogDescription}
+            onAddFiles={pickReportDialogAttachments}
+            onDropFiles={importReportDialogDroppedFiles}
+            onRemoveAttachment={removeReportDialogAttachment}
+            onClose={() => setReportDialogOpen(false)}
+            onSent={handleReportDialogSent}
+          />
         ) : null}
         {composerModelOpen ? (
           <ComposerModelPopover
@@ -7093,8 +7693,8 @@ export function AgentWorkspace({
         onReportIssue={() => {
           // The sanitized, secret-free trace bundle for this session is the
           // payload an issue report should attach (payload previews come from
-          // `sanitizePayload`; there is no real reporting surface yet — see the
-          // feature 15 notes). Logged in dev until that surface lands.
+          // `sanitizePayload`). This trace affordance is not wired into the
+          // report dialog yet, so keep logging in dev.
           if (import.meta.env.DEV) {
             // biome-ignore lint/suspicious/noConsole: dev-only trace-bundle diagnostic
             console.debug(
@@ -7131,6 +7731,9 @@ export function AgentWorkspace({
           onOpenArtifact={openArtifact}
           onDownloadImage={downloadGeneratedImage}
           onOpenImage={openGeneratedImage}
+          onRetryImage={(assistantTurnId, part) =>
+            void retryImageSlashTurn(selectedHermesSessionId, assistantTurnId, part)
+          }
           onApproval={(part, choice) =>
             void respondToApproval(
               selectedHermesSessionId,
@@ -7585,546 +8188,6 @@ export function AgentWorkspace({
         </>
       )}
     </section>
-  );
-}
-
-function ComposerModelPicker({
-  open,
-  model,
-  triggerRef,
-  onToggleOpen,
-}: {
-  open: boolean;
-  model?: VeniceModelDto;
-  triggerRef: RefObject<HTMLButtonElement>;
-  onToggleOpen: () => void;
-}) {
-  if (!model) return null;
-  return (
-    <div className="agent-composer-model" data-open={open || undefined}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="agent-composer-model-trigger"
-        aria-label={`Model: ${model.name}`}
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        onClick={onToggleOpen}
-      >
-        <span>{model.name}</span>
-        <IconChevronDownSmall size={12} aria-hidden />
-      </button>
-    </div>
-  );
-}
-
-// The composer model popover is two-layered, menu-style: the root layer
-// lists the curated suggested models as plain rows, and a flyout panel
-// opens beside it — hover details for a suggested row, or the searchable
-// full catalog behind the "All models" row.
-type ComposerModelFlyout = { kind: "model"; id: string } | { kind: "all" } | null;
-
-// Hover-intent delay before a hover opens a flyout or card — a pointer
-// sweeping across rows (or rows scrolling under a resting pointer) should
-// not flash panels open. Click and keyboard focus stay immediate.
-const MODEL_HOVER_INTENT_MS = 150;
-const MODEL_HOVERCARD_W = 220;
-const MODEL_HOVERCARD_GAP = 4;
-const MODEL_HOVERCARD_VIEWPORT_MARGIN = 12;
-
-function ComposerModelPopover({
-  flyout,
-  model,
-  options,
-  search,
-  popoverRef,
-  searchRef,
-  onFlyoutChange,
-  onSearchChange,
-  onSelect,
-}: {
-  flyout: ComposerModelFlyout;
-  model?: VeniceModelDto;
-  options: VeniceModelDto[];
-  search: string;
-  popoverRef: RefObject<HTMLDivElement>;
-  searchRef: RefObject<HTMLInputElement>;
-  onFlyoutChange: (flyout: ComposerModelFlyout) => void;
-  onSearchChange: (value: string) => void;
-  onSelect: (modelId: string) => void;
-}) {
-  const flyoutRef = useRef<HTMLDivElement | null>(null);
-  const listRef = useRef<HTMLDivElement | null>(null);
-  // Styled hover card for catalog rows (replaces the native title tooltip):
-  // fixed-positioned next to the hovered row, on the panel's outer side.
-  const [catalogHover, setCatalogHover] = useState<{
-    model: VeniceModelDto;
-    top: number;
-    x: number;
-    side: "left" | "right";
-  } | null>(null);
-  // One shared timer debounces every hover trigger in the popover.
-  const hoverTimerRef = useRef<number | null>(null);
-  const cancelHoverIntent = useCallback(() => {
-    if (hoverTimerRef.current !== null) {
-      window.clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-  }, []);
-  const hoverIntent = useCallback(
-    (action: () => void) => {
-      cancelHoverIntent();
-      hoverTimerRef.current = window.setTimeout(action, MODEL_HOVER_INTENT_MS);
-    },
-    [cancelHoverIntent],
-  );
-  useEffect(() => cancelHoverIntent, [cancelHoverIntent]);
-  // The catalog hover card is interactive (its description carries its own
-  // hover tip for the full, untruncated text), so it cannot vanish the instant
-  // the pointer leaves a row — it has to survive the trip across the gap onto
-  // the card. A short close debounce bridges that gap; entering the card or a
-  // fresh row cancels it.
-  const closeTimerRef = useRef<number | null>(null);
-  const cancelCatalogClose = useCallback(() => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current);
-      closeTimerRef.current = null;
-    }
-  }, []);
-  const scheduleCatalogClose = useCallback(() => {
-    cancelCatalogClose();
-    closeTimerRef.current = window.setTimeout(() => setCatalogHover(null), MODEL_HOVER_INTENT_MS);
-  }, [cancelCatalogClose]);
-  useEffect(() => cancelCatalogClose, [cancelCatalogClose]);
-  // Position-aware scroll fades on the catalog list, same treatment as the
-  // artifact panel body: only when it overflows, only on edges with hidden
-  // content.
-  const [fade, setFade] = useState({ top: false, bottom: false });
-  const updateFade = useCallback(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const canScroll = el.scrollHeight - el.clientHeight > 1;
-    const atTop = el.scrollTop <= 1;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-    setFade((prev) => {
-      const top = canScroll && !atTop;
-      const bottom = canScroll && !atBottom;
-      return prev.top === top && prev.bottom === bottom ? prev : { top, bottom };
-    });
-  }, []);
-
-  // The flyout always opens on the composer side (left of the menu), where
-  // there is reliably room — flipping with the window edge made the card
-  // jump sides between otherwise-identical hovers. The right side is only a
-  // fallback for the degenerate case of the menu hugging the left edge.
-  //
-  // The hover detail card pins to the hovered row, submenu-style, so it
-  // shows up next to the pointer. The all-models panel stays anchored to
-  // the menu's bottom edge and grows upward, so its height is capped to the
-  // room above — clearing the titlebar strip, which would otherwise cover
-  // the search field — and to a fixed ceiling so it doesn't tower on tall
-  // windows.
-  useLayoutEffect(() => {
-    const el = flyoutRef.current;
-    if (!el) return;
-    el.dataset.side = "left";
-    if (flyout?.kind === "model") {
-      const row = el.parentElement?.querySelector<HTMLElement>(
-        '.agent-composer-model-row[data-active="true"]',
-      );
-      el.style.top = row ? `${row.offsetTop}px` : "";
-      el.style.bottom = row ? "auto" : "";
-      el.style.maxHeight = "";
-    } else {
-      el.style.top = "";
-      el.style.bottom = "";
-      const titlebar = parseFloat(getComputedStyle(el).getPropertyValue("--titlebar-h")) || 0;
-      const room = el.getBoundingClientRect().bottom - titlebar - 16;
-      el.style.maxHeight = `${Math.max(160, Math.min(room, 400))}px`;
-    }
-    if (el.getBoundingClientRect().left < 12) {
-      el.dataset.side = "right";
-    }
-  }, [flyout]);
-
-  // Re-measure the fades whenever the list's content or cap changes: panel
-  // open (after the max-height effect above), and every search keystroke.
-  useLayoutEffect(() => {
-    updateFade();
-  }, [flyout, search, options, updateFade]);
-
-  // Row positions shift under the pointer on filter/reflow, so a lingering
-  // card would point at the wrong row.
-  useEffect(() => {
-    setCatalogHover(null);
-  }, [flyout, search]);
-
-  if (!model) return null;
-  const suggested = suggestedModelsForMode("generation", options);
-  const query = search.trim().toLowerCase();
-  // June's agent needs tool calls, so models without tool support can never
-  // be picked — leave them out of the quick-switch list entirely instead of
-  // showing dead rows. (Settings still lists them, greyed, for context.)
-  const selectable = options.filter((option) => !option.provider || modelSupportsTools(option));
-  const filteredOptions = query
-    ? selectable.filter((option) => modelMatchesQuery(option, query))
-    : selectable;
-  const detail =
-    flyout?.kind === "model" ? suggested.find((item) => item.model.id === flyout.id) : undefined;
-
-  function showCatalogHover(option: VeniceModelDto, row: HTMLElement) {
-    cancelCatalogClose();
-    const panel = flyoutRef.current;
-    if (!panel) return;
-    const rowRect = row.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-    const preferred = panel.dataset.side === "right" ? "right" : "left";
-    const canOpenLeft =
-      panelRect.left - MODEL_HOVERCARD_GAP - MODEL_HOVERCARD_W - MODEL_HOVERCARD_VIEWPORT_MARGIN >=
-      0;
-    const canOpenRight =
-      panelRect.right + MODEL_HOVERCARD_GAP + MODEL_HOVERCARD_W + MODEL_HOVERCARD_VIEWPORT_MARGIN <=
-      window.innerWidth;
-    const side =
-      preferred === "left"
-        ? canOpenLeft
-          ? "left"
-          : canOpenRight
-            ? "right"
-            : null
-        : canOpenRight
-          ? "right"
-          : canOpenLeft
-            ? "left"
-            : null;
-    if (!side) {
-      setCatalogHover(null);
-      return;
-    }
-    setCatalogHover({
-      model: option,
-      top: rowRect.top,
-      x:
-        side === "right"
-          ? panelRect.right + MODEL_HOVERCARD_GAP
-          : panelRect.left - MODEL_HOVERCARD_GAP,
-      side,
-    });
-  }
-
-  return (
-    <div
-      ref={popoverRef}
-      className="agent-composer-model-popover"
-      role="dialog"
-      aria-label="Choose text model"
-      onMouseLeave={() => {
-        // Hover details follow the pointer out; the all-models panel stays
-        // pinned so a search in progress doesn't vanish mid-keystroke.
-        cancelHoverIntent();
-        if (flyout?.kind === "model") onFlyoutChange(null);
-      }}
-    >
-      <p className="agent-composer-model-title">Model</p>
-      <div className="agent-composer-model-menu" role="listbox" aria-label="Suggested text models">
-        {suggested.length ? (
-          suggested.map(({ model: option }) => (
-            <button
-              key={option.id}
-              type="button"
-              className="agent-composer-model-row"
-              role="option"
-              aria-selected={option.id === model.id}
-              data-active={(flyout?.kind === "model" && flyout.id === option.id) || undefined}
-              onMouseEnter={() =>
-                hoverIntent(() => onFlyoutChange({ kind: "model", id: option.id }))
-              }
-              onFocus={() => {
-                cancelHoverIntent();
-                onFlyoutChange({ kind: "model", id: option.id });
-              }}
-              onClick={() => onSelect(option.id)}
-            >
-              <span className="agent-composer-model-row-name">{option.name}</span>
-              {option.id === model.id ? (
-                <IconCheckmark1Small
-                  size={14}
-                  aria-hidden
-                  className="agent-composer-model-row-check"
-                />
-              ) : null}
-            </button>
-          ))
-        ) : (
-          <p className="agent-composer-model-empty">Loading suggested models.</p>
-        )}
-      </div>
-      <button
-        type="button"
-        className="agent-composer-model-row agent-composer-model-all"
-        aria-haspopup="true"
-        aria-expanded={flyout?.kind === "all"}
-        data-active={flyout?.kind === "all" || undefined}
-        onMouseEnter={() => hoverIntent(() => onFlyoutChange({ kind: "all" }))}
-        onFocus={() => {
-          cancelHoverIntent();
-          onFlyoutChange({ kind: "all" });
-        }}
-        onClick={() => {
-          cancelHoverIntent();
-          onFlyoutChange({ kind: "all" });
-          searchRef.current?.focus();
-        }}
-      >
-        <span className="agent-composer-model-row-name">All models</span>
-        <IconChevronRightSmall size={12} aria-hidden className="agent-composer-model-row-chevron" />
-      </button>
-      {detail ? (
-        <div ref={flyoutRef} className="agent-composer-model-flyout agent-composer-model-detail">
-          <div className="agent-composer-model-surface">
-            <ComposerModelCardContent model={detail.model} />
-          </div>
-        </div>
-      ) : flyout?.kind === "all" ? (
-        <div
-          ref={flyoutRef}
-          className="agent-composer-model-flyout agent-composer-model-all-panel"
-          role="group"
-          aria-label="All text models"
-          onMouseLeave={() => {
-            cancelHoverIntent();
-            scheduleCatalogClose();
-          }}
-        >
-          <div className="agent-composer-model-surface">
-            <label className="agent-composer-model-search">
-              <IconMagnifyingGlass size={14} aria-hidden />
-              <input
-                ref={searchRef}
-                value={search}
-                onChange={(event) => onSearchChange(event.currentTarget.value)}
-                placeholder="Search models"
-                aria-label="Search models"
-              />
-            </label>
-            <div
-              className="agent-composer-model-list-wrap"
-              data-fade-top={fade.top || undefined}
-              data-fade-bottom={fade.bottom || undefined}
-            >
-              <div
-                ref={listRef}
-                className="agent-composer-model-list"
-                role="listbox"
-                aria-label="All text models"
-                onScroll={() => {
-                  updateFade();
-                  cancelHoverIntent();
-                  setCatalogHover(null);
-                }}
-              >
-                {filteredOptions.length ? (
-                  filteredOptions.map((option) => (
-                    <ComposerModelOption
-                      key={option.id}
-                      model={option}
-                      selected={option.id === model.id}
-                      onSelect={onSelect}
-                      onHover={(hoverModel, row, immediate) => {
-                        cancelCatalogClose();
-                        if (immediate) {
-                          cancelHoverIntent();
-                          showCatalogHover(hoverModel, row);
-                        } else {
-                          hoverIntent(() => showCatalogHover(hoverModel, row));
-                        }
-                      }}
-                    />
-                  ))
-                ) : (
-                  <p className="agent-composer-model-empty">No models match your search.</p>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {flyout?.kind === "all" && catalogHover ? (
-        <div
-          className="agent-composer-model-hovercard agent-composer-model-detail"
-          data-side={catalogHover.side}
-          onMouseEnter={cancelCatalogClose}
-          onMouseLeave={scheduleCatalogClose}
-          style={
-            catalogHover.side === "right"
-              ? { top: catalogHover.top, left: catalogHover.x }
-              : {
-                  top: catalogHover.top,
-                  right: window.innerWidth - catalogHover.x,
-                }
-          }
-        >
-          <div className="agent-composer-model-surface">
-            <ComposerModelCardContent model={catalogHover.model} withDescription />
-          </div>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-// Footnote under the hero composer. June's agent runs on the user's Mac, but
-// model calls go out to the provider, so the privacy claim has to match the
-// active model: encrypted into the enclave (E2EE), private (zero retention),
-// or anonymized (identity stripped, prompts may be retained). Name the model
-// so it's clear what's running; fall back to the plain line when none is known.
-function heroPrivacyFootnote(
-  model: VeniceModelDto | undefined,
-  badge: ModelPrivacyBadge | undefined,
-): string {
-  if (!model) return "June runs locally.";
-  switch (badge?.mode) {
-    case "e2ee":
-      return `June runs locally. Calls to ${model.name} are end-to-end encrypted.`;
-    case "private":
-      return `June runs locally. Calls to ${model.name} are private.`;
-    case "anonymous":
-      return `June runs locally. Calls to ${model.name} are anonymized.`;
-    default:
-      return `June runs locally. You're running ${model.name}.`;
-  }
-}
-
-// Shared content of the model hover cards: name with the privacy chip
-// alongside, then the value line (pricing, context window). The catalog
-// card also carries the model's description, standing in for the native
-// title tooltip it replaces.
-function ComposerModelCardContent({
-  model,
-  withDescription,
-}: {
-  model: VeniceModelDto;
-  withDescription?: boolean;
-}) {
-  const badge = modelPrivacyBadge(model);
-  const values = [pricingLabel(model), contextLabel(model)].filter(Boolean).join(" · ");
-  return (
-    <>
-      <p className="agent-composer-model-detail-name">
-        <span>{model.name}</span>
-        {badge ? (
-          <ModelPrivacyChip
-            badge={badge}
-            withTip={false}
-            label={badge.label.replace(" mode", "")}
-          />
-        ) : null}
-      </p>
-      {values ? <p className="agent-composer-model-detail-values">{values}</p> : null}
-      {withDescription && model.description ? (
-        <ComposerModelDescription text={model.description} />
-      ) : null}
-    </>
-  );
-}
-
-// The catalog card clamps the description to two lines so it stays compact.
-// When that clamp actually hides text, the row becomes its own hover tip
-// carrying the full copy — hover the truncated blurb to read the rest. The tip
-// only attaches when the text is clipped, so short descriptions don't get a
-// redundant repeat of what's already fully visible.
-function ComposerModelDescription({ text }: { text: string }) {
-  const ref = useRef<HTMLSpanElement | null>(null);
-  const [clamped, setClamped] = useState(false);
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el) setClamped(el.scrollHeight - el.clientHeight > 1);
-  }, [text]);
-  const body = (
-    <span ref={ref} className="agent-composer-model-detail-desc">
-      {text}
-    </span>
-  );
-  return clamped ? (
-    <HoverTip tip={text} className="agent-composer-model-detail-desc-tip">
-      {body}
-    </HoverTip>
-  ) : (
-    body
-  );
-}
-
-// Name-only rows: the composer popover is for quick switching, so pricing,
-// context, and privacy detail live in the hover card beside the row.
-function ComposerModelOption({
-  model,
-  selected,
-  onSelect,
-  onHover,
-}: {
-  model: VeniceModelDto;
-  selected: boolean;
-  onSelect: (modelId: string) => void;
-  onHover: (model: VeniceModelDto, row: HTMLElement, immediate: boolean) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className="agent-composer-model-row"
-      role="option"
-      aria-selected={selected}
-      onMouseEnter={(event) => onHover(model, event.currentTarget, false)}
-      onFocus={(event) => onHover(model, event.currentTarget, true)}
-      onClick={() => onSelect(model.id)}
-    >
-      <span className="agent-composer-model-row-name">{model.name}</span>
-      {selected ? (
-        <IconCheckmark1Small size={14} aria-hidden className="agent-composer-model-row-check" />
-      ) : null}
-    </button>
-  );
-}
-
-function modelMatchesQuery(model: VeniceModelDto, query: string) {
-  return [model.name, model.id, model.description, model.privacy, ...model.traits]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase()
-    .includes(query);
-}
-
-// The current model's privacy mode as a pill — Private, Anonymous, or E2EE,
-// with the same icons the composer model popover uses. The model itself is
-// switched from the composer's picker; this badge just keeps the privacy
-// claim visible while the conversation scrolls. The claims stay verifiable:
-// the attestation walkthrough lives in Settings (Models and About) and
-// onboarding.
-function PrivacyModeBadge({ badge }: { badge?: ModelPrivacyBadge }) {
-  if (!badge) return null;
-  // Delegates to the shared chip in the themed (brand-tinted pill) family so the
-  // session bar and the usage panel render the same component. The look is
-  // unchanged: themed-md keeps the 13px icon and the `.agent-safety-badge`
-  // recipe; the aria-label now unifies to the shared "label: description" form.
-  return <ModelPrivacyChip badge={badge} variant="themed" />;
-}
-
-// Indicator of the selected session's opt-in. The jail itself is
-// per-process, but every send restarts the runtime into the target session's
-// recorded mode, so the session — not the runtime's current state — is the
-// honest unit to label.
-function UnrestrictedBadge() {
-  const description =
-    "This session runs without the file sandbox: June can change any file your account can. Sandboxed sessions keep their jail and run alongside on a separate, jailed runtime.";
-  return (
-    <HoverTip
-      tip={description}
-      className="agent-safety-badge agent-sandbox-badge"
-      tabIndex={0}
-      aria-label={`Unrestricted - ${description}`}
-    >
-      <IconShieldCrossed size={13} aria-hidden />
-      Unrestricted
-    </HoverTip>
   );
 }
 
@@ -9352,6 +9415,7 @@ function AgentChatTurnRow({
   onOpenArtifact,
   onDownloadImage,
   onOpenImage,
+  onRetryImage,
   onThinkingOpenChange,
   onTopUp,
   topUpLabel,
@@ -9382,6 +9446,7 @@ function AgentChatTurnRow({
    * the dev gallery can render image rows without the live bridge. */
   onDownloadImage?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
   onOpenImage?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
+  onRetryImage?: (assistantTurnId: string, part: Extract<AgentChatPart, { type: "image" }>) => void;
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
   topUpLabel?: string;
@@ -9679,6 +9744,7 @@ function AgentChatTurnRow({
               part={part}
               onOpen={onOpenImage}
               onDownload={onDownloadImage}
+              onRetry={onRetryImage ? () => onRetryImage(turn.id, part) : undefined}
             />
           ) : null,
         )}
@@ -9689,7 +9755,7 @@ function AgentChatTurnRow({
         />
         {textParts.length === 0 && nonTextParts.length === 0 ? (
           <p className="agent-assistant-empty">
-            <span className="text-shimmer">Thinking…</span>
+            <span className="text-shimmer shimmer">Thinking…</span>
           </p>
         ) : (
           // No actions on an empty/in-flight turn. There is nothing useful to
@@ -10066,16 +10132,39 @@ function AgentGeneratedImage({
   part,
   onOpen,
   onDownload,
+  onRetry,
 }: {
   part: Extract<AgentChatPart, { type: "image" }>;
   onOpen?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
   onDownload?: (part: Extract<AgentChatPart, { type: "image" }>) => void;
+  onRetry?: () => void;
 }) {
+  const [pathPreviewDataUrl, setPathPreviewDataUrl] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (part.status !== "complete" || part.dataUrl || !part.path) {
+      setPathPreviewDataUrl(null);
+      return;
+    }
+    let cancelled = false;
+    setPathPreviewDataUrl(null);
+    hermesBridgeFilePreview(part.path)
+      .then((dataUrl) => {
+        if (!cancelled) setPathPreviewDataUrl(dataUrl);
+      })
+      .catch(() => {
+        if (!cancelled) setPathPreviewDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [part.status, part.dataUrl, part.path]);
+
   if (part.status === "running") {
     return (
       <div className="agent-generated-image" data-status="running" role="status" aria-live="polite">
         <div className="agent-generated-image-placeholder">
-          <span className="text-shimmer">Generating image…</span>
+          <span className="text-shimmer shimmer">Generating image…</span>
         </div>
       </div>
     );
@@ -10086,21 +10175,39 @@ function AgentGeneratedImage({
         <p className="agent-generated-image-error">
           {part.error?.trim() || "Could not generate the image."}
         </p>
+        {onRetry && part.requestId ? (
+          <button type="button" className="agent-generated-image-retry" onClick={onRetry}>
+            Try again
+          </button>
+        ) : null}
       </div>
     );
   }
   const label = part.name?.trim() || "Generated image";
+  // "Open" enlarges filesystem-backed images in the artifact viewer. MCP image
+  // blocks have only inline bytes, so they render as a plain frame; Hermes
+  // MEDIA references have a path and lazily fetch their preview data url above.
+  const imageSrc = part.dataUrl ?? pathPreviewDataUrl;
+  const image = imageSrc ? (
+    <img src={imageSrc} alt={part.prompt} draggable={false} />
+  ) : part.path ? (
+    <span className="agent-generated-image-loading text-shimmer shimmer">Loading image...</span>
+  ) : null;
   return (
     <figure className="agent-generated-image" data-status="complete">
-      <button
-        type="button"
-        className="agent-generated-image-frame"
-        onClick={() => onOpen?.(part)}
-        aria-label={`Open ${label}`}
-        title="Open image"
-      >
-        {part.dataUrl ? <img src={part.dataUrl} alt={part.prompt} draggable={false} /> : null}
-      </button>
+      {part.path ? (
+        <button
+          type="button"
+          className="agent-generated-image-frame"
+          onClick={() => onOpen?.(part)}
+          aria-label={`Open ${label}`}
+          title="Open image"
+        >
+          {image}
+        </button>
+      ) : (
+        <div className="agent-generated-image-frame">{image}</div>
+      )}
       <figcaption className="agent-generated-image-bar">
         <span className="agent-generated-image-name" title={label}>
           {label}
@@ -10822,7 +10929,7 @@ function AgentThinkingGroup({
       onToggle={(event) => onOpenChange(event.currentTarget.open)}
     >
       <summary>
-        <span className={running ? "text-shimmer" : undefined}>
+        <span className={running ? "text-shimmer shimmer" : undefined}>
           {running ? "Thinking" : "Thought"}
         </span>
         <IconChevronDownSmall size={14} className="agent-disclosure-chevron" />
@@ -11365,295 +11472,6 @@ function isMarkdownPath(path: string) {
   return /\.(md|markdown|mdx)$/i.test(path);
 }
 
-function MarkdownContent({
-  markdown,
-  highlight,
-  // Repairs the gateway's dropped-space-after-contraction artifact ("it'snot"
-  // -> "it's not"). Only set for assistant prose: it must never touch code or
-  // a user's own text. See repairContractionSpacing.
-  repairProse = false,
-}: {
-  markdown: string;
-  highlight?: string;
-  repairProse?: boolean;
-}) {
-  return (
-    <div className="agent-markdown">{renderMarkdownBlocks(markdown, highlight, repairProse)}</div>
-  );
-}
-
-/** Wraps case-insensitive matches of `highlight` in <mark>, leaving the text
- * untouched when there's nothing to find. Every text emission point in the
- * markdown renderer funnels through here so find-in-file can light up
- * rendered documents, not just raw source. */
-function highlightText(text: string, highlight: string | undefined, keySeed: string): ReactNode[] {
-  const needle = highlight?.toLowerCase();
-  if (!needle) return [text];
-  const lower = text.toLowerCase();
-  const nodes: ReactNode[] = [];
-  let cursor = 0;
-  let count = 0;
-  for (;;) {
-    const at = lower.indexOf(needle, cursor);
-    if (at < 0) break;
-    if (at > cursor) nodes.push(text.slice(cursor, at));
-    nodes.push(<mark key={`hl-${keySeed}-${count++}`}>{text.slice(at, at + needle.length)}</mark>);
-    cursor = at + needle.length;
-  }
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return nodes;
-}
-
-function renderMarkdownBlocks(markdown: string, highlight?: string, repairProse = false) {
-  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-  const blocks: ReactNode[] = [];
-  let paragraph: string[] = [];
-  let key = 0;
-
-  const flushParagraph = () => {
-    const text = paragraph.join("\n").trim();
-    paragraph = [];
-    if (!text) return;
-    blocks.push(
-      <p key={`p-${key++}`}>{renderInlineMarkdown(text, key, highlight, repairProse)}</p>,
-    );
-  };
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-    if (!trimmed) {
-      flushParagraph();
-      continue;
-    }
-
-    if (trimmed.startsWith("```")) {
-      flushParagraph();
-      const code: string[] = [];
-      index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      // Skip empty fences — including a stray trailing ``` while streaming —
-      // so we don't flash an empty code block (a bare padded gray bar).
-      const body = code.join("\n");
-      if (body.trim()) {
-        blocks.push(
-          <pre key={`code-${key++}`}>
-            <code>{highlightText(body, highlight, `code-${key}`)}</code>
-          </pre>,
-        );
-      }
-      continue;
-    }
-
-    // Thematic break (---, ***, ___) → a quiet rule instead of literal dashes.
-    if (/^([-*_])\1{2,}$/.test(trimmed)) {
-      flushParagraph();
-      blocks.push(<hr key={`hr-${key++}`} className="agent-md-rule" />);
-      continue;
-    }
-
-    // Blockquote: strip the > prefix and re-render the inner lines, so quotes
-    // can hold paragraphs, lists, or code like any other block.
-    if (trimmed.startsWith(">")) {
-      flushParagraph();
-      const quoted: string[] = [];
-      while (index < lines.length && lines[index].trim().startsWith(">")) {
-        quoted.push(lines[index].trim().replace(/^>\s?/, ""));
-        index += 1;
-      }
-      index -= 1;
-      blocks.push(
-        <blockquote key={`quote-${key++}`}>
-          {renderMarkdownBlocks(quoted.join("\n"), highlight, repairProse)}
-        </blockquote>,
-      );
-      continue;
-    }
-
-    // Pipe table: a |…| row followed by a |---|---| separator.
-    const isTableRow = (value: string) =>
-      value.startsWith("|") && value.endsWith("|") && value.length > 1;
-    if (
-      isTableRow(trimmed) &&
-      index + 1 < lines.length &&
-      /^\|(\s*:?-+:?\s*\|)+$/.test(lines[index + 1].trim())
-    ) {
-      flushParagraph();
-      const splitRow = (value: string) =>
-        value
-          .slice(1, -1)
-          .split("|")
-          .map((cell) => cell.trim());
-      const header = splitRow(trimmed);
-      index += 2;
-      const rows: string[][] = [];
-      while (index < lines.length && isTableRow(lines[index].trim())) {
-        rows.push(splitRow(lines[index].trim()));
-        index += 1;
-      }
-      index -= 1;
-      blocks.push(
-        <div key={`table-${key++}`} className="agent-md-table">
-          <table>
-            <thead>
-              <tr>
-                {header.map((cell, cellIndex) => (
-                  <th key={cellIndex}>{renderInlineMarkdown(cell, key, highlight, repairProse)}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={rowIndex}>
-                  {row.map((cell, cellIndex) => (
-                    <td key={cellIndex}>
-                      {renderInlineMarkdown(cell, key, highlight, repairProse)}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      continue;
-    }
-
-    const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed);
-    if (heading) {
-      flushParagraph();
-      const level = Math.min(heading[1].length, 3);
-      const content = renderInlineMarkdown(heading[2], key, highlight, repairProse);
-      blocks.push(
-        level === 1 ? <h2 key={`h-${key++}`}>{content}</h2> : <h3 key={`h-${key++}`}>{content}</h3>,
-      );
-      continue;
-    }
-
-    const unordered = /^[-*]\s+(.+)$/.exec(trimmed);
-    const ordered = /^\d+\.\s+(.+)$/.exec(trimmed);
-    if (unordered || ordered) {
-      flushParagraph();
-      const orderedList = Boolean(ordered);
-      const items: string[] = [];
-      while (index < lines.length) {
-        const candidate = lines[index].trim();
-        const match = orderedList
-          ? /^\d+\.\s+(.+)$/.exec(candidate)
-          : /^[-*]\s+(.+)$/.exec(candidate);
-        if (!match) break;
-        items.push(match[1]);
-        index += 1;
-      }
-      index -= 1;
-      const listItems = items.map((item, itemIndex) => (
-        <li key={`li-${key}-${itemIndex}`}>
-          {renderInlineMarkdown(item, key + itemIndex, highlight, repairProse)}
-        </li>
-      ));
-      blocks.push(
-        orderedList ? (
-          <ol key={`list-${key++}`}>{listItems}</ol>
-        ) : (
-          <ul key={`list-${key++}`}>{listItems}</ul>
-        ),
-      );
-      continue;
-    }
-
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  return blocks;
-}
-
-function renderInlineMarkdown(
-  text: string,
-  keySeed: number,
-  highlight?: string,
-  repairProse = false,
-): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const mark = (value: string, slot: string) =>
-    highlightText(value, highlight, `${keySeed}-${slot}`);
-  // Prose runs (plain text, emphasis, link text) get the contraction-spacing
-  // repair; code spans and URLs go through `mark` untouched.
-  const markProse = (value: string, slot: string) =>
-    mark(repairProse ? repairContractionSpacing(value) : value, slot);
-  const pattern =
-    /(\*\*([^*]+)\*\*|\*([^*]+)\*|~~([^~]+)~~|`([^`]+)`|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\))/g;
-  let lastIndex = 0;
-  let index = 0;
-  let match = pattern.exec(text);
-  while (match !== null) {
-    if (match.index > lastIndex) {
-      nodes.push(...markProse(text.slice(lastIndex, match.index), `g${index}`));
-    }
-    if (match[2]) {
-      nodes.push(
-        <strong key={`strong-${keySeed}-${index}`}>{markProse(match[2], `s${index}`)}</strong>,
-      );
-    } else if (match[3]) {
-      nodes.push(<em key={`em-${keySeed}-${index}`}>{markProse(match[3], `e${index}`)}</em>);
-    } else if (match[4]) {
-      nodes.push(<del key={`del-${keySeed}-${index}`}>{markProse(match[4], `d${index}`)}</del>);
-    } else if (match[5]) {
-      nodes.push(<code key={`code-${keySeed}-${index}`}>{mark(match[5], `c${index}`)}</code>);
-    } else if (match[6] && match[7]) {
-      nodes.push(
-        <a key={`link-${keySeed}-${index}`} href={match[7]} rel="noreferrer" target="_blank">
-          {markProse(match[6], `a${index}`)}
-        </a>,
-      );
-    }
-    lastIndex = pattern.lastIndex;
-    index += 1;
-    match = pattern.exec(text);
-  }
-  if (lastIndex < text.length) {
-    nodes.push(...markProse(text.slice(lastIndex), "t"));
-  }
-  return nodes;
-}
-
-function eventText(event: HermesGatewayEvent) {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  if (!payload) return "";
-  for (const key of [
-    "text",
-    "delta",
-    "message",
-    "summary",
-    "status",
-    "content",
-    "output",
-    "result",
-    "command",
-  ]) {
-    const value = stringValue(
-      payload[key],
-      key === "text" || key === "delta" || key === "message" || key === "content",
-    );
-    if (value) return value;
-  }
-  return "";
-}
-
-function stringValue(value: unknown, preserveWhitespace = false) {
-  if (typeof value === "string") {
-    if (!value.trim()) return undefined;
-    return preserveWhitespace ? value : value.trim();
-  }
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-  return undefined;
-}
-
 function capabilityMatches(
   item: HermesSkillInfo | HermesToolsetInfo | HermesMessagingPlatformInfo,
   query: string,
@@ -12071,7 +11889,7 @@ function sessionHasActiveWork(
   sessionId: string,
   workingSessionIds: Set<string>,
   waitingSessionIds: Set<string>,
-  liveEvents: Record<string, LiveHermesEvent[]>,
+  liveEvents: Record<string, JuneHermesEvent[]>,
 ) {
   return (
     workingSessionIds.has(sessionId) ||
@@ -12080,80 +11898,92 @@ function sessionHasActiveWork(
   );
 }
 
-function isTerminalHermesEvent(type: string) {
-  const normalized = type.toLowerCase();
-  return (
-    normalized === "error" ||
-    normalized === "message.complete" ||
-    normalized === "message.completed" ||
-    normalized === "turn.complete" ||
-    normalized === "turn.completed" ||
-    normalized === "session.complete" ||
-    normalized === "session.completed" ||
-    normalized === "background.complete" ||
-    normalized === "background.completed"
-  );
-}
+export type AgentActivityLevelProjection = {
+  workingSessionIds: Set<string>;
+  waitingSessionIds: Set<string>;
+  toolCallSessionIds: Set<string>;
+};
 
-function hermesToolEventPhase(type: string): HermesToolEventPhase | undefined {
-  const normalized = type.toLowerCase();
-  if (normalized === "tool.complete") return "complete";
-  if (normalized === "tool.start") return "start";
-  if (normalized === "tool.progress") return "progress";
-  return undefined;
-}
-
-function toolEventActivityKey(event: HermesGatewayEvent) {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  return (
-    stringValue(payload?.tool_id) ??
-    stringValue(payload?.tool_call_id) ??
-    stringValue(payload?.call_id) ??
-    stringValue(payload?.id) ??
-    stringValue(payload?.request_id)
-  );
-}
-
-function agentStatusFromHermesEvent(event: HermesGatewayEvent): AgentSessionStatusKind | undefined {
-  if (event.type === "error") return "failed";
-  if (event.type === "clarify.request" || event.type === "approval.request") {
-    return "waitingForUser";
+export function projectAgentActivityLevels(
+  records: AgentActivityRecord[],
+  previous?: AgentActivityLevelProjection,
+): AgentActivityLevelProjection {
+  const workingSessionIds = new Set<string>();
+  const waitingSessionIds = new Set<string>();
+  const toolCallSessionIds = new Set<string>();
+  for (const record of records) {
+    if (record.phase === "running" || record.phase === "background") {
+      workingSessionIds.add(record.sessionId);
+    } else if (record.phase === "waiting") {
+      waitingSessionIds.add(record.sessionId);
+    }
+    if (record.currentTool) {
+      toolCallSessionIds.add(record.sessionId);
+    }
   }
-  if (event.type === "clarify.response" || event.type === "approval.response") {
-    return "running";
+  return {
+    workingSessionIds: stableSet(workingSessionIds, previous?.workingSessionIds),
+    waitingSessionIds: stableSet(waitingSessionIds, previous?.waitingSessionIds),
+    toolCallSessionIds: stableSet(toolCallSessionIds, previous?.toolCallSessionIds),
+  };
+}
+
+function stableSet(next: Set<string>, previous: Set<string> | undefined): Set<string> {
+  if (!previous || previous.size !== next.size) return next;
+  for (const value of next) {
+    if (!previous.has(value)) return next;
   }
-  if (isTerminalHermesEvent(event.type)) return "completed";
+  return previous;
+}
+
+function agentActivityCountsFromStore() {
+  const projection = projectAgentActivityLevels(hermesActivityStore.getRecords());
+  return {
+    activeCount: projection.workingSessionIds.size + projection.waitingSessionIds.size,
+    needsUserCount: projection.waitingSessionIds.size,
+  };
+}
+
+function lifecycleStatusLooksRunning(event: Extract<JuneHermesEvent, { kind: "lifecycle" }>) {
+  return event.flavor === "running";
+}
+
+function agentStatusFromHermesEvent(event: JuneHermesEvent): AgentSessionStatusKind | undefined {
+  if (event.kind === "error") return "failed";
+  if (event.kind === "pending_action") return "waitingForUser";
+  if (event.kind === "pending_action_resolution") return "running";
+  if (isTerminalHermesEvent(event)) return "completed";
   if (
-    event.type === "message.start" ||
-    event.type === "thinking.delta" ||
-    event.type === "reasoning.delta" ||
-    event.type === "status.update" ||
-    event.type.startsWith("tool.")
+    event.kind === "tool" ||
+    event.kind === "reasoning" ||
+    // Only a turn START flips status (delta === undefined). Text deltas never
+    // re-dispatched status on the raw path either — per-chunk dispatch would
+    // churn app state on every streamed token.
+    (event.kind === "transcript" && !event.complete && event.delta === undefined) ||
+    (event.kind === "lifecycle" && lifecycleStatusLooksRunning(event))
   ) {
     return "running";
   }
   return undefined;
 }
 
-function agentStatusSummaryFromHermesEvent(
-  event: HermesGatewayEvent,
-  status: AgentSessionStatusKind,
-) {
+function agentStatusSummaryFromHermesEvent(event: JuneHermesEvent, status: AgentSessionStatusKind) {
   if (status === "waitingForUser") {
-    return event.type === "approval.request" ? "June needs approval." : "June has a question.";
+    if (event.kind !== "pending_action") return "June has a question.";
+    // Sudo and secret deliberately keep the generic sentence for visible-copy parity with main.
+    return event.action.kind === "approval" ? "June needs approval." : "June has a question.";
   }
   if (status === "completed") return "June finished.";
-  if (status === "failed") return eventText(event) || "June hit a problem.";
-  if (event.type === "status.update") {
-    return eventText(event) || "June is working.";
+  if (status === "failed") {
+    return event.kind === "error" ? event.message || "June hit a problem." : "June hit a problem.";
   }
-  if (event.type.startsWith("tool.")) {
-    const payload = event.payload as Record<string, unknown> | undefined;
-    const name =
-      stringValue(payload?.name) ?? stringValue(payload?.tool_name) ?? stringValue(payload?.tool);
-    return toolActivitySentence(name, payload);
+  if (event.kind === "lifecycle") {
+    return event.text || "June is working.";
   }
-  if (event.type === "thinking.delta" || event.type === "reasoning.delta") {
+  if (event.kind === "tool") {
+    return toolActivitySentence(event.name, event.sanitizedPayload);
+  }
+  if (event.kind === "reasoning") {
     return "Thinking.";
   }
   return "June is working.";
@@ -12238,91 +12068,6 @@ function safeText(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
-function clipboardImageFiles(data: DataTransfer | null): File[] {
-  if (!data) return [];
-  const itemFiles =
-    data.items && data.items.length
-      ? Array.from(data.items)
-          .filter((item) => item.kind === "file" && isClipboardImageType(item.type))
-          .map((item) => item.getAsFile())
-          .filter((file): file is File => Boolean(file))
-      : [];
-  if (itemFiles.length) return normalizeClipboardImageFiles(itemFiles);
-  return normalizeClipboardImageFiles(
-    Array.from(data.files ?? []).filter((file) => isClipboardImageType(file.type)),
-  );
-}
-
-function normalizeClipboardImageFiles(files: File[]): File[] {
-  if (files.length <= 1 || hasDistinctClipboardFileNames(files)) {
-    return files.map(ensureClipboardImageName);
-  }
-  const best = [...files].sort(
-    (left, right) => clipboardImageRank(right) - clipboardImageRank(left),
-  )[0];
-  return best ? [ensureClipboardImageName(best, 0)] : [];
-}
-
-function hasDistinctClipboardFileNames(files: File[]) {
-  const names = files.map((file) => file.name.trim()).filter(Boolean);
-  const stems = names.map(clipboardImageStem);
-  return (
-    names.length === files.length &&
-    new Set(names).size === files.length &&
-    new Set(stems).size === files.length
-  );
-}
-
-function ensureClipboardImageName(file: File, index: number) {
-  if (file.name.trim()) return file;
-  const suffix = index === 0 ? "" : `-${index + 1}`;
-  return new File([file], `pasted-image${suffix}.${clipboardImageExtension(file)}`, {
-    type: file.type,
-    lastModified: file.lastModified,
-  });
-}
-
-function isClipboardImageType(type: string) {
-  const mimeType = normalizedImageMimeType(type);
-  return (
-    mimeType === "image/png" ||
-    mimeType === "image/jpeg" ||
-    mimeType === "image/jpg" ||
-    mimeType === "image/tiff" ||
-    mimeType === "image/tif" ||
-    mimeType === "image/gif" ||
-    mimeType === "image/webp"
-  );
-}
-
-function clipboardImageExtension(file: File) {
-  const mimeType = normalizedImageMimeType(file.type);
-  if (mimeType === "image/jpeg" || mimeType === "image/jpg") return "jpg";
-  if (mimeType === "image/tiff" || mimeType === "image/tif") return "tiff";
-  const subtype = mimeType.startsWith("image/") ? mimeType.slice(6) : "";
-  return subtype.replace(/[^a-z0-9]/g, "") || "png";
-}
-
-function clipboardImageStem(name: string) {
-  const trimmed = name.trim().toLowerCase();
-  const dot = trimmed.lastIndexOf(".");
-  return dot > 0 ? trimmed.slice(0, dot) : trimmed;
-}
-
-function clipboardImageRank(file: File) {
-  const mimeType = normalizedImageMimeType(file.type);
-  if (mimeType === "image/png") return 50;
-  if (mimeType === "image/tiff" || mimeType === "image/tif") return 40;
-  if (mimeType === "image/webp") return 30;
-  if (mimeType === "image/jpeg" || mimeType === "image/jpg") return 20;
-  if (mimeType === "image/gif") return 10;
-  return 1;
-}
-
-function normalizedImageMimeType(type: string) {
-  return type.toLowerCase().split(";")[0];
-}
-
 function toolNames(toolset: HermesToolsetInfo) {
   return Array.isArray(toolset.tools) ? toolset.tools : [];
 }
@@ -12365,14 +12110,14 @@ function ActivityIndicator({
   );
 }
 
-// Bottom-of-timeline "responding" affordance: a shimmering label, reusing the
-// same text-shimmer the recorder uses while transcribing. Lives in the timeline
-// (not the header) so it reads like the agent is actively composing the next
-// turn.
+// Bottom-of-timeline "responding" affordance: a shimmering label, painted by
+// the same shared .shimmer utility the recorder uses while transcribing. Lives
+// in the timeline (not the header) so it reads like the agent is actively
+// composing the next turn.
 function AgentThinking() {
   return (
     <div className="agent-thinking" role="status" aria-live="polite">
-      <span className="text-shimmer agent-thinking-label">Thinking…</span>
+      <span className="text-shimmer shimmer agent-thinking-label">Thinking…</span>
     </div>
   );
 }
@@ -12475,13 +12220,14 @@ function writeLastOpenSessionId(sessionId: string) {
 
 export function markAgentNewSessionPending(
   prompt?: string,
-  options?: { category?: ReportCategory },
+  options?: { category?: ReportCategory; noteRef?: NoteReferenceInput },
 ) {
   try {
     const payload = JSON.stringify({
       createdAt: Date.now(),
       prompt: prompt?.trim() || undefined,
       category: options?.category,
+      noteRef: options?.noteRef,
     });
     window.sessionStorage.setItem(AGENT_NEW_SESSION_PENDING_KEY, payload);
   } catch {
@@ -12514,7 +12260,17 @@ function hasPendingNewSessionRequest(): boolean {
   }
 }
 
-function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
+function parsePendingNoteRef(value: unknown): NoteReferenceInput | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as { id?: unknown; title?: unknown };
+  if (typeof record.id !== "string" || record.id.trim().length === 0) return undefined;
+  return {
+    id: record.id,
+    title: typeof record.title === "string" ? record.title : "",
+  };
+}
+
+export function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
   try {
     const value = window.sessionStorage.getItem(AGENT_NEW_SESSION_PENDING_KEY);
     if (value == null) return undefined;
@@ -12526,6 +12282,7 @@ function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
         createdAt?: number;
         prompt?: string;
         category?: string;
+        noteRef?: unknown;
       };
       if (
         typeof parsed.createdAt !== "number" ||
@@ -12533,9 +12290,12 @@ function pendingNewSessionRequest(): AgentNewSessionDetail | undefined {
       ) {
         return undefined;
       }
+      const category = isReportCategory(parsed.category) ? parsed.category : undefined;
+      const noteRef = category ? undefined : parsePendingNoteRef(parsed.noteRef);
       return {
         ...(typeof parsed.prompt === "string" ? { prompt: parsed.prompt } : {}),
-        ...(isReportCategory(parsed.category) ? { category: parsed.category } : {}),
+        ...(category ? { category } : {}),
+        ...(noteRef ? { noteRef } : {}),
       };
     } catch {
       return undefined;

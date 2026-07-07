@@ -95,8 +95,13 @@ distinct from the `specs/` Spec Kit feature specs.)
 
 - [sentence-case](spec/sentence-case.md) — sentence case for all UI labels (never ALL CAPS / uppercase)
 - [no-typographic-dashes](spec/no-typographic-dashes.md) — no en/em dashes in user-facing copy (hyphen or "to")
+- [no-all-caps](spec/no-all-caps.md) — no ALL CAPS in UI, no `text-transform: uppercase`
 - [icons-central-only](spec/icons-central-only.md) — icons from `central-icons` / `central-icons-filled` only (never lucide)
 - [design-tokens](spec/design-tokens.md) — use the variables in `src/styles/tokens.css`
+- [type-scale](spec/type-scale.md) — font sizes only from `--fs-*`; headings follow the mapping table
+- [font-weights](spec/font-weights.md) — only 400 and `var(--fw-medium)`, never raw 500/600/700
+- [font-families](spec/font-families.md) — sans is the voice; serif for headings/display, mono for code
+- [control-sizes](spec/control-sizes.md) — control heights from `--control-*`, no raw min/max-heights
 
 ## PR and description conventions
 
@@ -127,10 +132,38 @@ symlink to `../../.agents/skills/<name>` — never a real directory. Add a new
 skill under `.agents/skills/<name>/` and create the `.claude/skills/<name>`
 symlink in the same change. Current project skills: `os-platform`,
 `os-accounts-integration`, `os-rust-backend`, `os-rust-backend-ci`,
-`os-task-prep`, `repo-build-pr`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus
-the Spec Kit workflow skills (`speckit-*`). `make skills-update` /
+`os-task-prep`, `repo-build-pr`, `repo-review`, `repo-delegate`,
+`repo-orchestrate`, `repo-retrospect`, `browser-test-tauri-fe`, `agent-e2e-qa`, plus the Spec
+Kit workflow skills (`speckit-*`). `make skills-update` /
 `skills-restore` / `skills-sync` (thin wrappers over `npx skills`) refresh,
 restore from the lockfile, or re-link them.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live on the Open Software platform (os-platform), org `june` — not
+GitHub Issues. Read/search/take via the `os-platform` skill script; writes go
+through the documented platform API with an append-only, probe-then-verify
+discipline. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Hybrid mapping: `needs-triage` / `needs-info` / `ready-for-human` are platform
+labels; "ready-for-agent" = status `todo` + os-task-prep enrichment; "wontfix"
+= status `cancelled`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one root `CONTEXT.md` (canonical glossary, binding _Avoid_
+lists) + `docs/adr/`. See `docs/agents/domain.md`.
+
+### Collaboration (build, delegate, review)
+
+`repo-build-pr` is the entry-point skill; implementation can be delegated
+across harnesses (`with codex`), reviews always run on a harness that did not
+write the diff, and trust levels are explicit (OS sandbox vs policy-level).
+See `docs/agents/collaboration.md` for the map.
 
 ## Build, test, lint
 

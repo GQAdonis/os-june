@@ -45,6 +45,16 @@ environment, never in June. In code, each upstream sits behind a domain trait
 `june-domain` and implemented in `june-providers`.
 _Avoid_: AI provider, model provider, vendor, "the LLM".
 
+### Notes
+
+**Note**:
+The central June artifact — a persistent, user-editable markdown document,
+listed in the sidebar and optionally organized into folders. Created blank or
+filled by **note generation**, and owns any manual notes the user types. A
+**recording session** is note-backed: the recording attaches to a note, never
+the reverse, and a note need not have a recording at all.
+_Avoid_: meeting (June has no meeting entity), document, summary.
+
 ### Audio & recording
 
 **Recording session**:
@@ -86,11 +96,26 @@ never written to `transcripts`, never the note's source of truth (see
 [ADR-0002](docs/adr/0002-live-transcript-preview-strategy.md)).
 _Avoid_: realtime transcription, live captions, streaming.
 
+**Transcript coverage**:
+How much of a recording's detected speech ended up in persisted, successful
+note-transcription turns (`transcribed_ms` vs `detected_speech_ms`). Always
+measured against detected speech spans, never wall-clock recording duration —
+silence is not lost audio. Persisted per processing pass as a
+`transcript_coverage` checkpoint; surfaced on the note (non-blocking) when
+materially incomplete.
+_Avoid_: transcript completeness, duration coverage (wall-clock framing).
+
 **System audio helper**:
 The out-of-process macOS `.app` (`june-system-audio-recorder`) that captures
 system audio via CoreAudio process taps and reports over a `status.json` file
 (see [ADR-0004](docs/adr/0004-out-of-process-system-audio-helper.md)).
 _Avoid_: system driver, in-process capture.
+
+**Dictation helper**:
+The native macOS helper (`mac-dictation-helper`) that owns push-to-talk
+**dictation** capture and text insertion into the foreground app, and is the
+authoritative source for microphone + accessibility permission state.
+_Avoid_: dictation app, keyboard helper.
 
 ### Agent runtime (Hermes)
 
@@ -113,7 +138,9 @@ _Avoid_: control plane, API.
 
 **Control plane**:
 The typed seam (`src/lib/hermes-control-plane/`) that turns raw Hermes frames
-into the total `JuneHermesEvent` union and typed outbound methods.
+into the total `JuneHermesEvent` union and typed outbound methods. The union
+also carries locally minted first-party events (see **Steer**) that the
+classifier never emits.
 _Avoid_: gateway, adapter.
 
 **Runtime mode**:
@@ -132,11 +159,33 @@ _Avoid_: "the session id" (always say which).
 The ProseMirror chat input with slash commands and attachment chips.
 _Avoid_: textbox.
 
+**Issue report**:
+A bug / feedback / feature submission to the June team, collected by the
+report dialog (composer "+", sidebar, or settings) and sent straight to June
+API `/v1/issue-reports` — no agent turn runs and nothing is authorized or
+charged. The team-facing **diagnosis** is generated inside June API at
+delivery time on a server-configured model, at June's expense, and is never
+shown to the user (see
+[ADR-0012](docs/adr/0012-direct-issue-report-submission.md)).
+_Avoid_: bug report for the mechanism (bug is one of three report
+categories), June's reply for the diagnosis (the user never sees it),
+investigation turn (the removed chip flow; old clients only).
+
 **Slash command**:
-A `/name arg` handled client-side before submit — builtin `/model` and
-`/file`, plus skill slash commands. (There is no `/image` builtin on `main`;
-image *generation* is an upstream Hermes tool, not a June slash command.)
+A `/name arg` handled client-side before submit — builtin `/model`, `/file`,
+and `/image`, plus skill slash commands. `/image <prompt>` starts June's
+image generation fast path without invoking the model (kill switch:
+`IMAGE_GENERATION_ENABLED`).
 _Avoid_: gateway command.
+
+**Steer**:
+A user instruction delivered into a still-running agent session without
+interrupting it. A steer is first-party and local to June — never a Hermes
+wire frame. A steer the run never consumed is resent as an ordinary follow-up
+when the run completes cleanly, and dropped when the run fails or is
+cancelled.
+_Avoid_: interrupt/stop (a steer never halts the run), follow-up (that is the
+fallback delivery, not the steer), mid-run message.
 
 **Model capability**:
 An authoritative boolean flag from the live Venice catalog `capabilities`
@@ -150,11 +199,28 @@ A file or image imported into the Hermes workspace and referenced by path;
 images additionally get a structured `image.attach_bytes`.
 _Avoid_: upload (unqualified).
 
+**Note reference**:
+A plain-text token — `@note:<id>`, optionally followed by the quoted note
+title — that points the agent at one specific note. Inserted as a composer
+chip via `@`, seeded by "Ask June" on a note, or pasted from "Copy note
+reference"; the agent resolves it on demand through `june_context`'s
+`get_meeting_note` tool (see
+[ADR-0010](docs/adr/0010-note-references-in-agent-chat.md)).
+_Avoid_: note link (no URL or deep link is involved), note mention (the chip
+is UI; the reference is the token).
+
 **Skill / Toolset / MCP server**:
 A Skill is a bundled/installed capability pack; a Toolset is a togglable tool
-group; an MCP server is an external tool provider (June ships `june_context`
-and `june_web`).
+group; an MCP server is an external tool provider (June ships `june_context`,
+`june_web`, and `june_image`).
 _Avoid_: using "tool" for all three.
+
+**Admin surface**:
+A June-native management view for the embedded Hermes runtime — skills hub,
+MCP servers and diagnostics, toolsets, integrations health, and similar —
+rendered with June's own UI and driven through the Hermes admin request
+channel, never by exposing Hermes's own web UI.
+_Avoid_: admin panel, Hermes UI (June presents as June).
 
 ### AI work & billing
 
@@ -184,7 +250,7 @@ _Avoid_: notes generation, AI summarisation.
 Producing a new image from a text **prompt** (text-to-image), via Venice. The
 user reaches it two ways: an explicit `/image` command (a fast, no-model shot),
 or the assistant calling it as a tool mid-conversation. Distinct from **image
-editing**. See [ADR 0003](docs/adr/0003-image-generation-and-editing-tools.md).
+editing**. See [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md).
 _Avoid_: rendering, drawing (say **image generation**).
 
 **Image editing**:
@@ -192,7 +258,7 @@ Producing a new image by transforming an *existing* image plus an instruction
 (image-to-image / inpaint), via Venice's separate edit models. Always references
 a prior image (a generated one, by filename); never starts from a blank canvas.
 Distinct from **image generation**.
-_Avoid_: img2img (jargon), regenerate (that's a fresh **image generation**).
+_Avoid_: image-to-image jargon, regenerate (that's a fresh **image generation**).
 
 **Credit price** (per upstream model):
 The number of OS Accounts credits June charges per unit of consumed work
@@ -227,11 +293,25 @@ The metered-operation id (e.g. `note_transcribe`, `dictate_transcribe`,
 splits the bill in the dashboard.
 _Avoid_: operation, endpoint.
 
+**Plan**:
+The OS Accounts subscription level carried in the account snapshot
+(`subscription.plan`, e.g. `max`). Gates features and sizes the recurring
+**credit grant**; the **FundingGate** keys off subscription state.
+_Avoid_: tier, subscription (that is the whole object, not the level).
+
+**Credit grant**:
+Credits deposited into the wallet by OS Accounts when a plan starts, renews,
+or upgrades. Arrives asynchronously after the plan change itself resolves, so
+"plan flipped" and "credits arrived" are two separate moments — June polls
+the account snapshot until the grant lands rather than assuming credits are
+present the instant the plan changes.
+_Avoid_: top-up (a user-initiated purchase), refill.
+
 ### Desktop shell & updates
 
 **Release channel**:
-The updater track: `stable` (the only track on `main` today) or `rc`
-(in-flight on branch `jakub/rc-channel-for-june`, PR #529).
+The updater track: `stable` or `rc` (shipped in PR #529; see
+[ADR-0003](docs/adr/0003-release-candidate-channel-and-promotion.md)).
 _Avoid_: beta.
 
 **Update manifest** (`latest.json`):
@@ -261,6 +341,12 @@ _Avoid_: profile, balance (unqualified).
 The sign-in wall (`AccountGate`) versus the credits-exhausted / upgrade wall
 (`FundingGate`, keyed off `subscription.subscribed`).
 _Avoid_: paywall (unqualified — say which gate).
+
+**Agent HUD**:
+The floating agent overlay window, toggled from the menu bar and separate
+from the main window.
+_Avoid_: pet (legacy name — survives only in an old storage key), overlay
+(unqualified), floating window.
 
 **Permission**:
 A macOS TCC grant June needs — microphone, accessibility, or screen/system

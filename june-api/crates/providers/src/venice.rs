@@ -7,7 +7,10 @@ use june_domain::{
     CleanupRequest, DomainError, GeneratedNote, GenerationRequest, Generator, ProviderCredentials,
     TokenUsage, Transcriber, Transcript, TranscriptionRequest,
 };
-use reqwest::multipart::{Form, Part};
+use reqwest::{
+    StatusCode,
+    multipart::{Form, Part},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -194,6 +197,9 @@ impl VeniceTranscriber {
             let retryable = retry::is_retryable_status(status);
             let body = response.text().await.unwrap_or_default();
             tracing::error!(%status, %url, model = %model_id, body_bytes = body.len(), retryable, "venice: non-success response");
+            if let Some(error) = user_venice_key_auth_error(status, &request.provider_credentials) {
+                return Err(UpstreamAttemptError::fatal(error));
+            }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
                 retryable,
@@ -401,12 +407,11 @@ impl VeniceChat {
     ) -> Result<ChatCompletionResponse, DomainError> {
         body.messages.insert(0, ChatMessage::safety_context());
         let url = format!("{}/chat/completions", self.base_url);
-        let api_key = venice_api_key(&self.api_key, provider_credentials);
         // Bounded retry on transient failures — same rationale as the
         // transcribers: metering settles only after success, so a replay
         // can never double-charge.
         for attempt in 0..retry::UPSTREAM_ATTEMPTS {
-            let error = match self.complete_once(&url, &body, api_key).await {
+            let error = match self.complete_once(&url, &body, provider_credentials).await {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) => error,
             };
@@ -429,8 +434,9 @@ impl VeniceChat {
         &self,
         url: &str,
         body: &ChatCompletionRequest,
-        api_key: &str,
+        provider_credentials: &ProviderCredentials,
     ) -> Result<ChatCompletionResponse, UpstreamAttemptError> {
+        let api_key = venice_api_key(&self.api_key, provider_credentials);
         let response = self
             .http
             .post(url)
@@ -451,6 +457,9 @@ impl VeniceChat {
             let retryable = retry::is_retryable_status(status);
             let body_text = response.text().await.unwrap_or_default();
             tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, "venice: chat non-success response");
+            if let Some(error) = user_venice_key_auth_error(status, provider_credentials) {
+                return Err(UpstreamAttemptError::fatal(error));
+            }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
                 retryable,
@@ -481,6 +490,7 @@ impl VeniceChat {
             serde_json::Value::String(model.0.clone()),
         );
         inject_safety_context(object);
+        sanitize_tool_schemas(object);
         if object.get("stream").and_then(serde_json::Value::as_bool) == Some(true) {
             let stream_options = object
                 .entry("stream_options")
@@ -519,13 +529,24 @@ impl VeniceChat {
             DomainError::UpstreamProvider
         })?;
         if !status.is_success() {
+            // The upstream error body is the only place Venice states WHY it
+            // rejected the request (e.g. its tool-schema normalizer bugs) —
+            // but agent chat bodies can carry private note/chat content that a
+            // validation error might echo. Log ONLY the structured error field
+            // from a JSON error body (capped), never a raw body preview, so
+            // this path keeps the provider-wide no-payload-in-logs rule.
+            let error_detail = upstream_error_detail(&body).unwrap_or_default();
             tracing::error!(
                 %status,
                 %url,
                 model = %model.0,
                 body_bytes = body.len(),
+                error_detail = %error_detail,
                 "venice: agent chat non-success response"
             );
+            if let Some(error) = user_venice_key_auth_error(status, provider_credentials) {
+                return Err(error);
+            }
             return Err(DomainError::UpstreamProvider);
         }
         let usage = usage_from_chat_body(&body, &content_type)?;
@@ -538,6 +559,19 @@ impl VeniceChat {
     }
 }
 
+/// Extracts the short, structured error message from an upstream JSON error
+/// body (`{"error": "..."}` / `{"message": "..."}`), capped. Returns `None`
+/// for a non-JSON body or one without a string error field, so free-text
+/// bodies that might echo request content are never logged.
+fn upstream_error_detail(body: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let detail = value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("message").and_then(serde_json::Value::as_str))?;
+    Some(detail.chars().take(200).collect())
+}
+
 fn venice_api_key<'a>(configured: &'a str, credentials: &'a ProviderCredentials) -> &'a str {
     credentials
         .venice_api_key
@@ -545,6 +579,21 @@ fn venice_api_key<'a>(configured: &'a str, credentials: &'a ProviderCredentials)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(configured)
+}
+
+pub(crate) fn user_venice_key_auth_error(
+    status: StatusCode,
+    credentials: &ProviderCredentials,
+) -> Option<DomainError> {
+    if credentials.has_venice_api_key()
+        && matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN)
+    {
+        Some(DomainError::InvalidInput {
+            reason: "venice_api_key_rejected".to_string(),
+        })
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -618,6 +667,67 @@ struct ChatCompletionMessage {
 struct ChatCompletionUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+}
+
+/// Works around a Venice request-normalizer bug: a tool parameter schema node
+/// that carries BOTH a `type` and an `allOf` (valid JSON Schema draft-07 —
+/// Todoist's MCP server emits it for its date fields) is rejected with
+/// "Conflict in schema definitions for key 'type'. Previous: object, New:
+/// string", which turns EVERY chat request into a 400 while such a server is
+/// connected. The `allOf` branches only restate the declared type plus regex
+/// refinements, so dropping `allOf` where a sibling `type` exists loses
+/// nothing the model needs for tool calling.
+fn sanitize_tool_schemas(body: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(tools) = body
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for tool in tools {
+        if let Some(parameters) = tool
+            .get_mut("function")
+            .and_then(|function| function.get_mut("parameters"))
+        {
+            strip_conflicting_all_of(parameters);
+        }
+    }
+}
+
+/// Recursively resolves `allOf` on any schema node that also declares `type`
+/// (the combination Venice's normalizer rejects). Instead of dropping the
+/// branch outright, its keys are FOLDED into the parent (parent wins on
+/// conflict), so constraints a branch legitimately contributes — `required`,
+/// nested `properties`, a `pattern` the parent lacks — survive the rewrite.
+/// True `allOf` AND-semantics cannot be fully expressed after folding (two
+/// competing `pattern`s keep only the parent's), which is acceptable for tool
+/// calling: the schemas guide the model, they are not the validator. Nodes
+/// using `allOf` without a sibling `type` are left untouched.
+fn strip_conflicting_all_of(node: &mut serde_json::Value) {
+    match node {
+        serde_json::Value::Object(map) => {
+            if map.contains_key("type")
+                && let Some(serde_json::Value::Array(branches)) = map.remove("allOf")
+            {
+                for branch in branches {
+                    if let serde_json::Value::Object(branch_map) = branch {
+                        for (key, value) in branch_map {
+                            map.entry(key).or_insert(value);
+                        }
+                    }
+                }
+            }
+            for value in map.values_mut() {
+                strip_conflicting_all_of(value);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                strip_conflicting_all_of(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Prepends the standing safety policy to a raw (client-supplied) chat
@@ -1031,13 +1141,14 @@ mod tests {
     use super::{
         SAFETY_CONTEXT, VeniceAgentChat, VeniceGenerator, VeniceModelsApiResponse,
         cleanup_generated_note_text, cleanup_source_text, generation_source_text,
-        inject_safety_context, strip_scaffolding_tags, venice_priced_model_items,
+        inject_safety_context, sanitize_tool_schemas, strip_scaffolding_tags,
+        venice_priced_model_items,
     };
     use crate::http;
     use june_config::ModelType;
     use june_config::UpstreamConfig;
     use june_domain::{
-        AgentChatCompleter, AgentChatRequest, GenerationRequest, Generator, ModelId,
+        AgentChatCompleter, AgentChatRequest, DomainError, GenerationRequest, Generator, ModelId,
         ProviderCredentials,
     };
     use pretty_assertions::assert_eq;
@@ -1435,6 +1546,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_chat_reports_rejected_user_venice_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer VENICE_INFERENCE_KEY_bad"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": "Invalid API key"
+            })))
+            .mount(&server)
+            .await;
+        let agent = VeniceAgentChat::from_config(
+            http::default_client(),
+            &UpstreamConfig {
+                api_key: "shared_venice_key".to_string(),
+                base_url: server.uri(),
+            },
+        );
+
+        let error = agent
+            .complete(AgentChatRequest {
+                body: json!({
+                    "model": "text-model",
+                    "messages": [{ "role": "user", "content": "hi" }],
+                }),
+                model: ModelId("text-model".to_string()),
+                provider_credentials: ProviderCredentials {
+                    venice_api_key: Some("VENICE_INFERENCE_KEY_bad".to_string()),
+                },
+            })
+            .await
+            .expect_err("bad user key should be rejected");
+
+        assert_eq!(
+            error,
+            DomainError::InvalidInput {
+                reason: "venice_api_key_rejected".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn generator_sends_safety_context_ahead_of_the_system_prompt() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -1534,6 +1686,65 @@ mod tests {
         let mut body = json!({ "model": "text-model", "messages": "bogus" });
         inject_safety_context(body.as_object_mut().expect("object"));
         assert_eq!(body["messages"], "bogus");
+    }
+
+    #[test]
+    fn sanitize_tool_schemas_strips_all_of_beside_type() {
+        // Todoist's find_completed_tasks date fields: `type: string` with an
+        // `allOf` of pattern refinements. Venice rejects the combination with
+        // "Conflict in schema definitions for key 'type'".
+        let mut body = json!({
+            "model": "m",
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "mcp_todoist_find_completed_tasks",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "since": {
+                                "type": "string",
+                                "format": "date",
+                                "allOf": [
+                                    { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+                                ]
+                            },
+                            // An allOf WITHOUT a sibling type stays untouched.
+                            "combined": {
+                                "allOf": [{ "type": "string" }]
+                            },
+                            // A branch's non-conflicting constraints are
+                            // FOLDED into the parent, not dropped with it.
+                            "filter": {
+                                "type": "object",
+                                "allOf": [{
+                                    "type": "object",
+                                    "required": ["kind"],
+                                    "properties": { "kind": { "type": "string" } }
+                                }]
+                            }
+                        }
+                    }
+                }
+            }]
+        });
+        sanitize_tool_schemas(body.as_object_mut().expect("object"));
+        let params = &body["tools"][0]["function"]["parameters"];
+        assert!(params["properties"]["since"].get("allOf").is_none());
+        assert_eq!(params["properties"]["since"]["type"], "string");
+        assert_eq!(params["properties"]["since"]["format"], "date");
+        assert!(params["properties"]["combined"].get("allOf").is_some());
+        // The folded branch kept its constraints; the conflicting key is gone.
+        let filter = &params["properties"]["filter"];
+        assert!(filter.get("allOf").is_none());
+        assert_eq!(filter["type"], "object");
+        assert_eq!(filter["required"][0], "kind");
+        assert_eq!(filter["properties"]["kind"]["type"], "string");
+
+        // Tool-less and malformed bodies are left alone.
+        let mut no_tools = json!({ "model": "m" });
+        sanitize_tool_schemas(no_tools.as_object_mut().expect("object"));
+        assert!(no_tools.get("tools").is_none());
     }
 
     #[test]

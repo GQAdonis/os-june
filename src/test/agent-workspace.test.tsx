@@ -9,7 +9,9 @@ import {
   AgentWorkspace,
   HERO_GREETINGS,
   SkillsToolsPanel,
+  projectAgentActivityLevels,
   resetAgentSessionContinuity,
+  seedAgentComposerDraftForTest,
   type AgentSessionsChangedDetail,
 } from "../components/agent/AgentWorkspace";
 import {
@@ -18,10 +20,13 @@ import {
   PROVIDER_MODEL_SETTINGS_CHANGED_EVENT,
 } from "../lib/model-privacy";
 import { HermesGatewayError } from "../lib/hermes-gateway";
+import { AGENT_SESSION_STATUS_EVENT, type AgentSessionStatusDetail } from "../lib/agent-events";
 import { classifyHermesEvent } from "../lib/hermes-control-plane";
+import { hermesActivityStore, type AgentActivityRecord } from "../lib/hermes-activity-store";
 import { hermesArtifactStore } from "../lib/hermes-artifact-store";
 import { hermesTraceBuffer } from "../lib/hermes-trace-buffer";
 import { pendingActionStore } from "../lib/hermes-pending-actions";
+import { unsupportedEventStore } from "../lib/hermes-unsupported-events";
 
 const formatTokenCount = (value: number) => value.toLocaleString();
 
@@ -33,6 +38,7 @@ const HERO_GREETING = new RegExp(
 const mocks = vi.hoisted(() => ({
   cancelAgentTask: vi.fn(),
   createAgentTask: vi.fn(),
+  editImage: vi.fn(),
   ensureHermesBridgeSession: vi.fn(),
   finalizeHermesBridgeBranch: vi.fn(),
   generateImage: vi.fn(),
@@ -40,6 +46,7 @@ const mocks = vi.hoisted(() => ({
   getHermesBridgeSkill: vi.fn(),
   hermesBridgeFilesystemSnapshot: vi.fn(),
   hermesBridgeFilePreview: vi.fn(),
+  hermesBridgeImageDataUrl: vi.fn(),
   hermesBridgeFileText: vi.fn(),
   hermesBridgeMessagingPlatforms: vi.fn(),
   hermesBridgeSkills: vi.fn(),
@@ -91,6 +98,7 @@ vi.mock("../lib/tauri", () => ({
   invoke: vi.fn(async () => []),
   cancelAgentTask: mocks.cancelAgentTask,
   createAgentTask: mocks.createAgentTask,
+  editImage: mocks.editImage,
   ensureHermesBridgeSession: mocks.ensureHermesBridgeSession,
   finalizeHermesBridgeBranch: mocks.finalizeHermesBridgeBranch,
   generateImage: mocks.generateImage,
@@ -98,6 +106,7 @@ vi.mock("../lib/tauri", () => ({
   getHermesBridgeSkill: mocks.getHermesBridgeSkill,
   hermesBridgeFilesystemSnapshot: mocks.hermesBridgeFilesystemSnapshot,
   hermesBridgeFilePreview: mocks.hermesBridgeFilePreview,
+  hermesBridgeImageDataUrl: mocks.hermesBridgeImageDataUrl,
   hermesBridgeFileText: mocks.hermesBridgeFileText,
   hermesBridgeMessagingPlatforms: mocks.hermesBridgeMessagingPlatforms,
   hermesAgentCliAccess: mocks.hermesAgentCliAccess,
@@ -180,6 +189,20 @@ const existingSession = {
   preview: "Existing preview",
   last_active: "2026-06-04T12:00:00Z",
 };
+
+function seedLegacyNewSessionReportDraft() {
+  seedAgentComposerDraftForTest("new-session", {
+    text: "",
+    category: "bug",
+  });
+}
+
+function seedLegacyExistingSessionReportDraft() {
+  seedAgentComposerDraftForTest("session:session-1", {
+    text: "",
+    category: "bug",
+  });
+}
 
 function mockGlmCapabilities(capabilities: string[]) {
   mocks.listVeniceModels.mockResolvedValue({
@@ -291,9 +314,13 @@ describe("AgentWorkspace", () => {
     }));
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({ roots: [] });
     // Mirrors the Rust image_preview_data_url: an image path yields a
-    // data url, anything else null. Feature 19's structured image attach reads
-    // the bytes through this command at attach time.
+    // thumbnail data url, anything else null.
     mocks.hermesBridgeFilePreview.mockImplementation(async (path: string) =>
+      /\.(png|jpe?g|gif|webp|tiff?)$/i.test(path) ? "data:image/png;base64,cHJldmlldw==" : null,
+    );
+    // Feature 19's structured image attach reads full image bytes through the
+    // image-source capped command at attach time.
+    mocks.hermesBridgeImageDataUrl.mockImplementation(async (path: string) =>
       /\.(png|jpe?g|gif|webp|tiff?)$/i.test(path) ? "data:image/png;base64,cHJldmlldw==" : null,
     );
     mocks.hermesBridgeFileText.mockResolvedValue(null);
@@ -337,6 +364,26 @@ describe("AgentWorkspace", () => {
       }
       return Promise.resolve({});
     });
+  });
+
+  it("reuses activity projection set identities when membership is unchanged", () => {
+    const record: AgentActivityRecord = {
+      id: "session-1",
+      mode: "sandboxed",
+      sessionId: "session-1",
+      phase: "running",
+      pendingActionCount: 0,
+      subagentCount: 0,
+      subagents: [],
+      lastEventAt: 1,
+    };
+    const first = projectAgentActivityLevels([record]);
+
+    const second = projectAgentActivityLevels([{ ...record, lastEventAt: 2 }], first);
+
+    expect(second.workingSessionIds).toBe(first.workingSessionIds);
+    expect(second.waitingSessionIds).toBe(first.waitingSessionIds);
+    expect(second.toolCallSessionIds).toBe(first.toolCallSessionIds);
   });
 
   it("lets users cancel a clean skill editor without making changes", async () => {
@@ -495,7 +542,7 @@ describe("AgentWorkspace", () => {
 
     render(<AgentWorkspace />);
 
-    expect(await screen.findByText(HERO_GREETING)).toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "Message June" })).toBeInTheDocument();
     await waitFor(() => expect(mocks.listHermesSessions).toHaveBeenCalled());
     expect(screen.queryByText("Existing session")).toBeNull();
     expect(screen.queryByText("Existing task")).toBeNull();
@@ -636,7 +683,7 @@ describe("AgentWorkspace", () => {
     }
   });
 
-  it("seeds a bug report chip without submitting", async () => {
+  it("opens the issue report dialog without submitting", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
       JSON.stringify({ createdAt: Date.now(), category: "bug" }),
@@ -644,14 +691,16 @@ describe("AgentWorkspace", () => {
 
     render(<AgentWorkspace />);
 
-    // The composer opens tagged with a Bug report chip instead of
-    // auto-submitting; the user types their report after it.
-    expect(await screen.findByText("Bug report")).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Issue report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bug report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.create", expect.anything());
     expect(window.sessionStorage.getItem(AGENT_NEW_SESSION_PENDING_KEY)).toBeNull();
   });
 
-  it("clears a stale new-session draft before seeding a report chip", async () => {
+  it("clears a stale new-session draft before opening a report dialog", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
@@ -660,7 +709,7 @@ describe("AgentWorkspace", () => {
 
     render(<AgentWorkspace />);
 
-    expect(await screen.findByText(HERO_GREETING)).toBeInTheDocument();
+    expect(await screen.findByRole("textbox", { name: "Message June" })).toBeInTheDocument();
     await user.type(screen.getByRole("textbox"), "stale hero draft");
 
     act(() => {
@@ -671,11 +720,13 @@ describe("AgentWorkspace", () => {
       );
     });
 
-    expect(await screen.findByText("Bug report")).toBeInTheDocument();
-    expect(screen.getByRole("textbox")).not.toHaveTextContent("stale hero draft");
+    expect(await screen.findByRole("dialog", { name: "Issue report" })).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message June" })).not.toHaveTextContent(
+      "stale hero draft",
+    );
   });
 
-  it("seeds a report chip immediately when the composer is already open", async () => {
+  it("opens a report dialog immediately when the composer is already open", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
       JSON.stringify({ createdAt: Date.now() }),
@@ -693,11 +744,15 @@ describe("AgentWorkspace", () => {
       );
     });
 
-    expect(screen.getByText("Bug report")).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Issue report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Bug report" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.create", expect.anything());
   });
 
-  it("seeds a report chip while the current session is still running", async () => {
+  it("opens a report dialog while the current session is still running", async () => {
     const user = userEvent.setup();
     let resolveSubmit: (() => void) | undefined;
     mocks.gatewayRequest.mockImplementation((method: string) => {
@@ -727,8 +782,12 @@ describe("AgentWorkspace", () => {
       );
     });
 
-    expect(await screen.findByText("Feedback")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start session" })).toBeDisabled();
+    expect(await screen.findByRole("dialog", { name: "Issue report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Feedback" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "Send report" })).toBeDisabled();
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.create", expect.anything());
 
     await act(async () => {
@@ -736,17 +795,81 @@ describe("AgentWorkspace", () => {
     });
   });
 
-  it("wraps a submitted issue report for June and waits for explicit send", async () => {
+  it("opens report rows from the plus menu without inserting a chip", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
+      JSON.stringify({ createdAt: Date.now() }),
     );
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByRole("textbox", { name: "Message June" })).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Add files, notes, or reports",
+      }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "Feature request" }));
+
+    expect(await screen.findByRole("dialog", { name: "Issue report" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Feature request" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(document.querySelector(".agent-category-chip")).toBeNull();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("session.create", expect.anything());
+  });
+
+  it("starts a fresh report dialog draft when reopening the same category", async () => {
+    const user = userEvent.setup();
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({ createdAt: Date.now() }),
+    );
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByRole("textbox", { name: "Message June" })).toBeInTheDocument();
+
+    // Open a Bug report and stage a draft: a description plus a dropped file.
+    await user.click(screen.getByRole("button", { name: "Add files, notes, or reports" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Bug report" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Issue report" });
+    await user.type(within(dialog).getByLabelText("Description"), "sensitive draft notes");
+    const dropZone = dialog.querySelector(".report-dialog-drop");
+    expect(dropZone).not.toBeNull();
+    fireEvent.drop(dropZone as HTMLElement, {
+      dataTransfer: {
+        files: [new File(["png"], "screenshot.png", { type: "image/png" })],
+      },
+    });
+    expect(await within(dialog).findByText("screenshot.png")).toBeInTheDocument();
+
+    // Abandon the draft without sending.
+    await user.click(within(dialog).getByRole("button", { name: "Close" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Issue report" })).toBeNull());
+
+    // Reopening the SAME category is a new report intent: the abandoned
+    // draft (description + attachment) must not survive the close.
+    await user.click(screen.getByRole("button", { name: "Add files, notes, or reports" }));
+    await user.click(await screen.findByRole("menuitem", { name: "Bug report" }));
+
+    const reopened = await screen.findByRole("dialog", { name: "Issue report" });
+    expect(within(reopened).getByLabelText("Description")).toHaveValue("");
+    expect(within(reopened).queryByText("screenshot.png")).toBeNull();
+    expect(within(reopened).queryByRole("list", { name: "Attached files" })).toBeNull();
+  });
+
+  it("wraps a submitted issue report for June and waits for explicit send", async () => {
+    const user = userEvent.setup();
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
 
     render(<AgentWorkspace />);
 
-    // Wait for the Bug report chip to seed, then type the report after it.
+    // Wait for the restored legacy Bug report chip, then type the report after it.
     expect(await screen.findByText("Bug report")).toBeInTheDocument();
     const composer = await screen.findByRole("textbox");
     await user.type(composer, "The recorder crashes after long meetings");
@@ -846,15 +969,10 @@ describe("AgentWorkspace", () => {
         timestamp: "2026-06-11T10:00:10Z",
       },
     ]);
+    seedLegacyExistingSessionReportDraft();
 
     render(<AgentWorkspace initialSession={existingSession} />);
 
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Attach files or tag this message",
-      }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "Bug report" }));
     expect(await screen.findByText("Bug report")).toBeInTheDocument();
     await user.type(
       await screen.findByRole("textbox"),
@@ -901,15 +1019,11 @@ describe("AgentWorkspace", () => {
         timestamp: "2026-06-11T10:00:10Z",
       },
     ]);
+    seedLegacyExistingSessionReportDraft();
 
     render(<AgentWorkspace initialSession={existingSession} />);
 
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Attach files or tag this message",
-      }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "Bug report" }));
+    expect(await screen.findByText("Bug report")).toBeInTheDocument();
     await user.type(
       await screen.findByRole("textbox"),
       "The recorder crashes from this existing chat",
@@ -962,15 +1076,11 @@ describe("AgentWorkspace", () => {
     const user = userEvent.setup();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
     mocks.listHermesSessionMessages.mockResolvedValue([]);
+    seedLegacyExistingSessionReportDraft();
 
     render(<AgentWorkspace initialSession={existingSession} />);
 
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Attach files or tag this message",
-      }),
-    );
-    await user.click(await screen.findByRole("menuitem", { name: "Bug report" }));
+    expect(await screen.findByText("Bug report")).toBeInTheDocument();
     await user.type(await screen.findByRole("textbox"), "Agent response text is losing spaces");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
@@ -1073,10 +1183,7 @@ describe("AgentWorkspace", () => {
 
   it("sends a report when the diagnosis refresh stalls", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
     let stalledRefreshStarted = false;
 
@@ -1131,10 +1238,7 @@ describe("AgentWorkspace", () => {
 
   it("appends report follow-ups before filing", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
 
     render(<AgentWorkspace />);
@@ -1212,10 +1316,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a review-ready report after leaving and returning", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
     const first = render(<AgentWorkspace />);
 
@@ -1264,10 +1365,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a review-ready report after an app restart", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
     const first = render(<AgentWorkspace />);
 
@@ -1337,10 +1435,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a pending report follow-up after leaving before June answers", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport.mockResolvedValue({ received: true });
     const first = render(<AgentWorkspace />);
 
@@ -1414,10 +1509,7 @@ describe("AgentWorkspace", () => {
 
   it("does not restore a report after leaving during successful delivery", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let resolveDelivery: ((value: { received: boolean }) => void) | undefined;
     mocks.submitIssueReport.mockImplementation(
       () =>
@@ -1474,10 +1566,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a report after leaving during failed delivery", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let rejectDelivery: ((error: Error) => void) | undefined;
     mocks.submitIssueReport.mockImplementation(
       () =>
@@ -1534,10 +1623,7 @@ describe("AgentWorkspace", () => {
 
   it("keeps a newer follow-up draft when an older report delivery finishes", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let resolveFirstDelivery: ((value: { received: boolean }) => void) | undefined;
     mocks.submitIssueReport
       .mockImplementationOnce(
@@ -1635,10 +1721,7 @@ describe("AgentWorkspace", () => {
 
   it("does not restore a stale report when an older delivery fails during a follow-up", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let rejectFirstDelivery: ((error: Error) => void) | undefined;
     mocks.submitIssueReport
       .mockImplementationOnce(
@@ -1730,10 +1813,7 @@ describe("AgentWorkspace", () => {
 
   it("does not restore a delivered report when a follow-up submit fails", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let resolveFirstDelivery: ((value: { received: boolean }) => void) | undefined;
     let rejectFollowUp: ((error: Error) => void) | undefined;
     mocks.submitIssueReport.mockImplementationOnce(
@@ -1823,10 +1903,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a report when delivery and a follow-up submit both fail", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let rejectFirstDelivery: ((error: Error) => void) | undefined;
     let rejectFollowUp: ((error: Error) => void) | undefined;
     mocks.submitIssueReport.mockImplementationOnce(
@@ -1918,10 +1995,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a report when a follow-up submit fails before delivery starts", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.gatewayRequest.mockImplementation((method: string, args?: unknown) => {
       if (method === "session.create") {
         return Promise.resolve({
@@ -1980,10 +2054,7 @@ describe("AgentWorkspace", () => {
 
   it("restores a report after leaving during a failed follow-up submit", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let rejectFollowUp: ((error: Error) => void) | undefined;
     mocks.gatewayRequest.mockImplementation((method: string, args?: unknown) => {
       if (method === "session.create") {
@@ -2130,10 +2201,7 @@ describe("AgentWorkspace", () => {
 
   it("does not show a failed issue report banner after switching away", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let rejectIssueReport: ((error: Error) => void) | undefined;
     mocks.submitIssueReport.mockImplementation(
       () =>
@@ -2193,10 +2261,7 @@ describe("AgentWorkspace", () => {
 
   it("clears a failed issue report banner after a successful retry", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     mocks.submitIssueReport
       .mockRejectedValueOnce(new Error("upstream_provider_failed"))
       .mockResolvedValue({ received: true });
@@ -2243,10 +2308,7 @@ describe("AgentWorkspace", () => {
 
   it("keeps report sending disabled while attachment imports are pending", async () => {
     const user = userEvent.setup();
-    window.sessionStorage.setItem(
-      AGENT_NEW_SESSION_PENDING_KEY,
-      JSON.stringify({ createdAt: Date.now(), category: "bug" }),
-    );
+    seedLegacyNewSessionReportDraft();
     let resolveImport:
       | ((file: {
           name: string;
@@ -4793,6 +4855,227 @@ describe("AgentWorkspace", () => {
     expect(mocks.explainAgentApproval).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps approval cards on the runtime session while activity uses the stored session", async () => {
+    const user = userEvent.setup();
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the build",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the build",
+      }),
+    );
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "approval.request",
+          session_id: "runtime-session-2",
+          payload: {
+            request_id: "approval-runtime",
+            description: "Security scan requires approval.",
+            command: "npm run build",
+            allow_permanent: true,
+          },
+        });
+      }
+    });
+
+    expect(await screen.findByText("Approval required")).toBeInTheDocument();
+    expect(hermesActivityStore.getRecord("runtime-session-2")).toBeUndefined();
+    expect(hermesActivityStore.getRecord("session-2")?.phase).toBe("waiting");
+    const [pendingRecord] = pendingActionStore.openRecords().filter((record) => {
+      return record.requestId === "approval-runtime";
+    });
+    expect(pendingRecord?.sessionId).toBe("session-2");
+    expect(
+      pendingActionStore.openRecords().some((record) => record.sessionId === "runtime-session-2"),
+    ).toBe(false);
+    const projection = projectAgentActivityLevels(hermesActivityStore.getRecords());
+    expect(projection.waitingSessionIds.has("session-2")).toBe(true);
+    expect(projection.waitingSessionIds.has("runtime-session-2")).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Approve once" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("approval.respond", {
+        session_id: "runtime-session-2",
+        choice: "once",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        pendingActionStore.openRecords().some((record) => record.requestId === "approval-runtime"),
+      ).toBe(false),
+    );
+  });
+
+  it("keys inbound diagnostics by the stored session id", async () => {
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.create") {
+        return Promise.resolve({
+          session_id: "runtime-diagnostics-session",
+          stored_session_id: "stored-diagnostics-session",
+        });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      return Promise.resolve({});
+    });
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "inspect diagnostics",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-diagnostics-session",
+        text: "inspect diagnostics",
+      }),
+    );
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "future.diagnostic",
+          session_id: "runtime-diagnostics-session",
+          payload: { detail: "unknown" },
+        });
+      }
+    });
+
+    expect(unsupportedEventStore.activeNotice("runtime-diagnostics-session")).toBeUndefined();
+    expect(unsupportedEventStore.activeNotice("stored-diagnostics-session")?.type).toBe(
+      "future.diagnostic",
+    );
+    expect(hermesTraceBuffer.entriesFor("runtime-diagnostics-session")).toHaveLength(0);
+    const traceEntry = hermesTraceBuffer
+      .entriesFor("stored-diagnostics-session")
+      .find((entry) => entry.rawType === "future.diagnostic");
+    expect(traceEntry).toBeDefined();
+    expect(traceEntry?.sessionId).toBe("stored-diagnostics-session");
+    expect(traceEntry?.runtimeSessionId).toBe("runtime-diagnostics-session");
+  });
+
+  it("treats lifecycle.complete as a terminal workspace edge", async () => {
+    const statusDetails: AgentSessionStatusDetail[] = [];
+    const handleStatus = (event: Event) => {
+      statusDetails.push((event as CustomEvent<AgentSessionStatusDetail>).detail);
+    };
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, handleStatus);
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the build",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the build",
+      }),
+    );
+    expect(mocks.gatewayEventHandlers.size).toBe(1);
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "lifecycle.complete",
+          session_id: "runtime-session-2",
+          payload: { status: "success" },
+        });
+      }
+    });
+
+    await waitFor(() =>
+      expect(statusDetails).toContainEqual(
+        expect.objectContaining({
+          sessionId: "session-2",
+          status: "completed",
+          summary: "June finished.",
+        }),
+      ),
+    );
+    expect(mocks.gatewayEventHandlers.size).toBe(0);
+    window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleStatus);
+  });
+
+  it("keeps sudo and secret pending status copy generic", async () => {
+    const statusDetails: AgentSessionStatusDetail[] = [];
+    const handleStatus = (event: Event) => {
+      statusDetails.push((event as CustomEvent<AgentSessionStatusDetail>).detail);
+    };
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, handleStatus);
+    window.sessionStorage.setItem(
+      AGENT_NEW_SESSION_PENDING_KEY,
+      JSON.stringify({
+        createdAt: Date.now(),
+        prompt: "run the build",
+      }),
+    );
+
+    render(<AgentWorkspace />);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-2",
+        text: "run the build",
+      }),
+    );
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "sudo.request",
+          session_id: "runtime-session-2",
+          payload: {
+            request_id: "sudo-copy",
+            command: "npm run build",
+          },
+        });
+        handler({
+          type: "secret.request",
+          session_id: "runtime-session-2",
+          payload: {
+            request_id: "secret-copy",
+            key_name: "API_KEY",
+          },
+        });
+      }
+    });
+
+    await waitFor(() =>
+      expect(
+        statusDetails
+          .filter((detail) => detail.status === "waitingForUser")
+          .map((detail) => ({
+            sessionId: detail.sessionId,
+            summary: detail.summary,
+          })),
+      ).toEqual([
+        { sessionId: "session-2", summary: "June has a question." },
+        { sessionId: "session-2", summary: "June has a question." },
+      ]),
+    );
+    expect(statusDetails.some((detail) => detail.summary === "June needs approval.")).toBe(false);
+    window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleStatus);
+  });
+
   it("retires a pending approval and explains when its runtime session is gone", async () => {
     const user = userEvent.setup();
     window.sessionStorage.setItem(
@@ -6009,6 +6292,33 @@ describe("AgentWorkspace", () => {
     expect(mocks.hermesBridgeFilePreview).not.toHaveBeenCalledWith(screenshotPath);
   });
 
+  it("renders Hermes MEDIA image references as inline generated images", async () => {
+    const mediaPath =
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/image_cache/img_ce347dc6e27a.png";
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-1",
+        role: "assistant",
+        content: [
+          "Here is the regenerated wolf:",
+          "",
+          `MEDIA:${mediaPath}`,
+          "",
+          "A majestic wolf rendered in a misty forest at dawn.",
+        ].join("\n"),
+        timestamp: "2026-06-04T18:39:00Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Here is the regenerated wolf:")).toBeInTheDocument();
+    const image = await screen.findByRole("img", { name: "Generated image" });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,cHJldmlldw==");
+    expect(screen.queryByText(/MEDIA:/)).not.toBeInTheDocument();
+    expect(mocks.hermesBridgeFilePreview).toHaveBeenCalledWith(mediaPath);
+  });
+
   it("imports dropped files into the Hermes workspace before submitting", async () => {
     const user = userEvent.setup();
     render(<AgentWorkspace />);
@@ -6695,10 +7005,25 @@ describe("AgentWorkspace", () => {
     expect(mocks.importHermesBridgeFile).not.toHaveBeenCalled();
   });
 
-  it("does not intercept /image while image generation is hidden", async () => {
+  it("generates an image from the /image slash command and renders it inline in the thread", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
     const user = userEvent.setup();
     render(<AgentWorkspace />);
     expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
 
     const composer = await screen.findByRole("textbox");
     await user.type(composer, "/image a red bicycle");
@@ -6706,12 +7031,650 @@ describe("AgentWorkspace", () => {
     expect(form).not.toBeNull();
     fireEvent.submit(form as HTMLFormElement);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Image generation is not available.",
+    // The image renders inline in the assistant turn (loader -> image), shown
+    // from the generated bytes directly — NOT dropped into the composer as an
+    // attachment chip. Its alt text is the prompt, so it is also accessible.
+    const image = await screen.findByRole("img", { name: "a red bicycle" });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,aGVsbG8=");
+    expect(image.closest(".agent-generated-image-frame")).not.toBeNull();
+    expect(document.querySelector(".agent-attachment-chip")).toBeNull();
+    // The prompt went to generation (nothing pinned: the default settings mock
+    // has no image model/safe mode, so the server resolves both); the decoded
+    // bytes were imported into the workspace.
+    expect(mocks.generateImage).toHaveBeenCalledWith(
+      "a red bicycle",
+      undefined,
+      expect.any(String),
+      undefined,
     );
-    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+    expect(mocks.importHermesBridgeFileBytes).toHaveBeenCalledWith(
+      expect.stringMatching(/^generated-image-\d+\.png$/),
+      expect.any(Uint8Array),
+    );
+  });
+
+  it("reuses the failed /image request id when the user retries the same turn", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockRejectedValueOnce(new Error("gateway timeout")).mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+
+    expect(await screen.findByText("gateway timeout")).toBeInTheDocument();
+    const firstRequestId = mocks.generateImage.mock.calls[0]?.[2];
+    expect(firstRequestId).toEqual(expect.any(String));
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    await screen.findByRole("img", { name: "a red bicycle" });
+    expect(mocks.generateImage).toHaveBeenCalledTimes(2);
+    expect(mocks.generateImage.mock.calls[1]?.[2]).toBe(firstRequestId);
+    expect(mocks.importHermesBridgeFileBytes).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays the pinned image shape when settings change before retry", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    // June API's replay ledger hashes model + safe mode into the requestId's
+    // key, so the retry must resend the values the turn started with - not the
+    // settings at retry time - or one visible turn becomes two charges.
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "zai-org-glm-5-2",
+        imageModel: "venice-sd35",
+        imageSafeMode: false,
+      },
+    });
+    mocks.generateImage.mockRejectedValueOnce(new Error("gateway timeout")).mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+
+    expect(await screen.findByText("gateway timeout")).toBeInTheDocument();
+    expect(mocks.generateImage).toHaveBeenCalledWith(
+      "a red bicycle",
+      "venice-sd35",
+      expect.any(String),
+      false,
+    );
+    const firstRequestId = mocks.generateImage.mock.calls[0]?.[2];
+
+    // Settings drift between the failed attempt and the retry.
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "zai-org-glm-5-2",
+        imageModel: "flux-2-pro",
+        imageSafeMode: true,
+      },
+    });
+
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    await screen.findByRole("img", { name: "a red bicycle" });
+    expect(mocks.generateImage).toHaveBeenCalledTimes(2);
+    expect(mocks.generateImage.mock.calls[1]).toEqual([
+      "a red bicycle",
+      "venice-sd35",
+      firstRequestId,
+      false,
+    ]);
+  });
+
+  it("restores a /image prompt and generated image above the preview cap with context after remount", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    const { unmount } = render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await screen.findByRole("img", { name: "a red bicycle" });
+    expect(screen.getByText("a red bicycle")).toBeInTheDocument();
+
+    unmount();
+    resetAgentSessionContinuity();
+    mocks.gatewayRequest.mockClear();
+    mocks.hermesBridgeFilePreview.mockResolvedValue(null);
+    mocks.hermesBridgeImageDataUrl.mockResolvedValue("data:image/png;base64,ZnVsbC1zaXpl");
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("a red bicycle")).toBeInTheDocument();
+
+    await user.type(await screen.findByRole("textbox"), "what do you think");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach_bytes", {
+        session_id: "runtime-session-1",
+        mime_type: "image/png",
+        content_base64: "ZnVsbC1zaXpl",
+        filename: "generated-image.png",
+      }),
+    );
+    expect(mocks.hermesBridgeImageDataUrl).toHaveBeenCalledWith(
+      "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+    );
+    const attachIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "image.attach_bytes",
+    );
+    const submitIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "prompt.submit",
+    );
+    expect(attachIndex).toBeGreaterThanOrEqual(0);
+    expect(submitIndex).toBeGreaterThan(attachIndex);
+  });
+
+  it("recovers an interrupted /image turn after remount and retries with the same request id", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    const { unmount } = render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "zai-org-glm-5-2",
+        imageModel: "venice-sd35",
+        imageSafeMode: false,
+      },
+    });
+    // The paid request never settles client-side - the app "exits" while the
+    // generation is in flight, after June API may already have started work.
+    mocks.generateImage.mockImplementationOnce(() => new Promise(() => {}));
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await waitFor(() => expect(mocks.generateImage).toHaveBeenCalledTimes(1));
+    const firstRequestId = mocks.generateImage.mock.calls[0]?.[2];
+    expect(firstRequestId).toEqual(expect.any(String));
+
+    unmount();
+    resetAgentSessionContinuity();
+    render(<AgentWorkspace />);
+
+    // The turn is restored as retryable instead of silently lost.
+    expect(
+      await screen.findByText("Generation was interrupted. Try again to resume."),
+    ).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
+    await user.click(screen.getByRole("button", { name: "Try again" }));
+
+    // The retry replays the exact request June API hashed into its ledger key:
+    // same request id, same pinned model and safe mode.
+    await screen.findByRole("img", { name: "a red bicycle" });
+    expect(mocks.generateImage).toHaveBeenCalledTimes(2);
+    expect(mocks.generateImage.mock.calls[1]).toEqual([
+      "a red bicycle",
+      "venice-sd35",
+      firstRequestId,
+      false,
+    ]);
+  });
+
+  it.each([
+    "make it better",
+    "change my mind",
+    "let's try again",
+    "new version of the doc",
+  ])("submits generic image-session follow-up through the model instead of an image fast path: %s", async (followUp) => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await screen.findByRole("img", { name: "a red bicycle" });
+
+    mocks.generateImage.mockClear();
+    mocks.editImage.mockClear();
+    mocks.gatewayRequest.mockClear();
+    await user.type(await screen.findByRole("textbox"), followUp);
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: followUp,
+      }),
+    );
     expect(mocks.generateImage).not.toHaveBeenCalled();
-    expect(mocks.importHermesBridgeFileBytes).not.toHaveBeenCalled();
+    expect(mocks.editImage).not.toHaveBeenCalled();
+  });
+
+  it("keeps /image follow-ups in model context after an image-session follow-up", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    mocks.importHermesBridgeFileBytes.mockResolvedValueOnce({
+      name: "generated-image.png",
+      path: "/Users/alex/Library/Application Support/co.opensoftware.june/hermes/workspace/uploads/generated-image.png",
+      rootLabel: "Workspace",
+      size: 5,
+      previewDataUrl: "data:image/png;base64,preview",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image june the assistant");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await screen.findByRole("img", { name: "june the assistant" });
+
+    mocks.gatewayRequest.mockClear();
+    await user.type(await screen.findByRole("textbox"), "make it feel calmer");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach_bytes", {
+        session_id: "runtime-session-1",
+        mime_type: "image/png",
+        content_base64: "aGVsbG8=",
+        filename: "generated-image.png",
+      }),
+    );
+    expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+      session_id: "runtime-session-1",
+      text: "make it feel calmer",
+    });
+    const attachIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "image.attach_bytes",
+    );
+    const submitIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "prompt.submit",
+    );
+    expect(attachIndex).toBeGreaterThanOrEqual(0);
+    expect(submitIndex).toBeGreaterThan(attachIndex);
+  });
+
+  it("blocks /image on a non-vision model until the user switches explicitly", async () => {
+    mocks.listAgentTasks.mockResolvedValue({ items: [] });
+    mocks.listHermesSessions.mockResolvedValue([]);
+    const catalog = [
+      {
+        provider: "venice",
+        id: "zai-org-glm-5-2",
+        name: "GLM 5.2",
+        modelType: "text",
+        privacy: "private",
+        traits: [],
+        capabilities: ["functionCalling"],
+      },
+      {
+        provider: "venice",
+        id: "kimi-k2-6",
+        name: "Kimi K2.6",
+        modelType: "text",
+        privacy: "private",
+        traits: [],
+        capabilities: ["functionCalling", "supportsVision"],
+      },
+    ];
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "zai-org-glm-5-2",
+      models: catalog,
+    });
+    mocks.setVeniceModel.mockResolvedValue(undefined);
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    expect(
+      await screen.findByText(
+        "GLM 5.2 can't read images. Switch to a vision model before using /image.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Start session" })).toBeDisabled();
+
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    expect(mocks.setVeniceModel).not.toHaveBeenCalled();
+    expect(mocks.generateImage).not.toHaveBeenCalled();
+
+    mocks.providerModelSettings.mockResolvedValue({
+      settings: {
+        transcriptionProvider: "venice",
+        transcriptionModel: "nvidia/parakeet-tdt-0.6b-v3",
+        generationModel: "kimi-k2-6",
+      },
+    });
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "kimi-k2-6",
+      models: catalog,
+    });
+    await user.click(screen.getByRole("button", { name: "Switch to Kimi K2.6" }));
+    await waitFor(() =>
+      expect(mocks.setVeniceModel).toHaveBeenCalledWith("generation", "kimi-k2-6"),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Start session" })).not.toBeDisabled(),
+    );
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+
+    await screen.findByRole("img", { name: "a red bicycle" });
+    expect(mocks.gatewayRequest).toHaveBeenCalledWith(
+      "session.create",
+      expect.objectContaining({ model: "kimi-k2-6" }),
+    );
+    expect(mocks.ensureHermesBridgeSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "session-2",
+        model: "kimi-k2-6",
+      }),
+    );
+  });
+
+  it("carries a /image fast-path image into the next message so a follow-up has it in context (JUN-171 Phase A)", async () => {
+    // JUN-171: the /image image renders in-thread but must also enter the
+    // model's session history, so a follow-up ("what do you think?") reaches the
+    // model WITH the image. On a vision model the held image is sent via
+    // image.attach_bytes before that follow-up's prompt.submit — and with NO
+    // composer chip in between (it already renders in-thread).
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+
+    // The fast-path image renders in-thread with no composer chip.
+    await screen.findByRole("img", { name: "a red bicycle" });
+    expect(document.querySelector(".agent-attachment-chip")).toBeNull();
+    // The /image itself never attaches (no prompt to carry it yet).
+    expect(
+      mocks.gatewayRequest.mock.calls.some(([method]) => method === "image.attach_bytes"),
+    ).toBe(false);
+
+    await user.type(await screen.findByRole("textbox"), "what do you think");
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    // The generated image lands in the session via image.attach_bytes, keyed to
+    // the same session, before the follow-up prompt.submit.
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach_bytes", {
+        session_id: "runtime-session-1",
+        mime_type: "image/png",
+        content_base64: "aGVsbG8=",
+        filename: expect.stringMatching(/^generated-image-\d+\.png$/),
+      }),
+    );
+    const attachIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "image.attach_bytes",
+    );
+    const submitIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "prompt.submit",
+    );
+    expect(attachIndex).toBeGreaterThanOrEqual(0);
+    expect(submitIndex).toBeGreaterThan(attachIndex);
+    // Attached exactly once — the held image is cleared after it goes through,
+    // not re-sent.
+    expect(
+      mocks.gatewayRequest.mock.calls.filter(([method]) => method === "image.attach_bytes"),
+    ).toHaveLength(1);
+  });
+
+  it("attaches a /image fast-path image from generated bytes when preview is unavailable", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    mocks.hermesBridgeFilePreview.mockResolvedValue(null);
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a large red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await screen.findByRole("img", { name: "a large red bicycle" });
+
+    await user.type(await screen.findByRole("textbox"), "what do you think");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("image.attach_bytes", {
+        session_id: "runtime-session-1",
+        mime_type: "image/png",
+        content_base64: "aGVsbG8=",
+        filename: expect.stringMatching(/^generated-image-\d+\.png$/),
+      }),
+    );
+  });
+
+  it("keeps a held /image fast-path image when the follow-up submit fails", async () => {
+    mockGlmCapabilities(["functionCalling", "supportsVision"]);
+    let promptSubmitAttempts = 0;
+    mocks.gatewayRequest.mockImplementation((method: string) => {
+      if (method === "session.create") {
+        return Promise.resolve({
+          session_id: "runtime-session-2",
+          stored_session_id: "session-2",
+        });
+      }
+      if (method === "session.resume") {
+        return Promise.resolve({ session_id: "runtime-session-1" });
+      }
+      if (method === "prompt.submit") {
+        promptSubmitAttempts += 1;
+        if (promptSubmitAttempts === 1) {
+          return Promise.reject(new Error("temporary submit failure"));
+        }
+      }
+      return Promise.resolve({});
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await screen.findByRole("img", { name: "a red bicycle" });
+
+    await user.type(await screen.findByRole("textbox"), "what do you think");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(promptSubmitAttempts).toBe(1));
+
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() => expect(promptSubmitAttempts).toBe(2));
+
+    const attachCalls = mocks.gatewayRequest.mock.calls.filter(
+      ([method]) => method === "image.attach_bytes",
+    );
+    expect(attachCalls).toHaveLength(2);
+    for (const [, payload] of attachCalls) {
+      expect(payload).toMatchObject({
+        session_id: "runtime-session-1",
+        mime_type: "image/png",
+        content_base64: "aGVsbG8=",
+      });
+    }
+  });
+
+  it("falls back to a path-in-prompt for a /image image on a non-vision model (JUN-171 Phase A)", async () => {
+    // `/image` itself must start from a vision-capable chat. If the user later
+    // switches that chat to a text-only model, the held generated image falls
+    // back to a path-in-prompt instead of calling image.attach_bytes.
+    mocks.listHermesSessions.mockResolvedValue([{ ...existingSession, model: "kimi-k2-6" }]);
+    mocks.listVeniceModels.mockResolvedValue({
+      mode: "generation",
+      modelType: "text",
+      selectedModel: "zai-org-glm-5-2",
+      models: [
+        {
+          provider: "venice",
+          id: "zai-org-glm-5-2",
+          name: "GLM 5.2",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling"],
+        },
+        {
+          provider: "venice",
+          id: "kimi-k2-6",
+          name: "Kimi K2.6",
+          modelType: "text",
+          privacy: "private",
+          traits: [],
+          capabilities: ["functionCalling", "supportsVision"],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Model: Kimi K2.6" })).toBeInTheDocument();
+
+    mocks.generateImage.mockResolvedValueOnce({
+      imageBase64: "aGVsbG8=",
+      mimeType: "image/png",
+      model: "venice-sd35",
+      provider: "venice",
+    });
+
+    await user.type(await screen.findByRole("textbox"), "/image a red bicycle");
+    fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
+    await screen.findByRole("img", { name: "a red bicycle" });
+
+    await user.click(screen.getByRole("button", { name: "Model: Kimi K2.6" }));
+    const dialog = await screen.findByRole("dialog", { name: "Choose text model" });
+    await user.click(within(dialog).getByRole("option", { name: /GLM 5\.2/ }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("command.dispatch", {
+        session_id: "session-1",
+        command: "/model zai-org-glm-5-2",
+      }),
+    );
+
+    await user.type(await screen.findByRole("textbox"), "what do you think");
+    const sendButton = screen.getByRole("button", { name: "Send message" });
+    await waitFor(() => expect(sendButton).not.toBeDisabled());
+    await user.click(sendButton);
+
+    await waitFor(() => {
+      const submitCall = mocks.gatewayRequest.mock.calls.find(
+        ([method]) => method === "prompt.submit",
+      );
+      expect(submitCall?.[1]?.text).toContain("does not support image input");
+      expect(submitCall?.[1]?.text).toMatch(/generated-image-\d+\.png/);
+    });
+    // No structured attach on a non-vision model — the image rides as a path.
+    expect(
+      mocks.gatewayRequest.mock.calls.some(([method]) => method === "image.attach_bytes"),
+    ).toBe(false);
   });
 
   it("chooses one preferred image when paste exposes multiple representations", async () => {
@@ -7691,6 +8654,37 @@ describe("AgentWorkspace", () => {
 
     await user.click(screen.getByRole("button", { name: "Upgrade" }));
     expect(mocks.osAccountsUpgrade).toHaveBeenCalledOnce();
+  });
+
+  it("maps a Max-gated top-up failure to an upgrade message, not a raw error", async () => {
+    const user = userEvent.setup();
+    mocks.osAccountsUpgrade.mockRejectedValue({
+      code: "top_up_requires_max",
+      message: "Buying credits requires the Max plan.",
+    });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "m1",
+        role: "user",
+        content: "How are the subagents doing",
+        timestamp: "2026-06-10T10:00:00Z",
+      },
+      {
+        id: "m2",
+        role: "assistant",
+        content:
+          "Error: Error code: 402 - {'data': None, 'success': False, 'error_code': 4301, 'message': 'insufficient_credits'}",
+        timestamp: "2026-06-10T10:00:01Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    await screen.findByText(/June stopped because your balance ran out/);
+    await user.click(screen.getByRole("button", { name: "Upgrade" }));
+
+    expect(await screen.findByText("Upgrade to Max to keep using credits.")).toBeInTheDocument();
+    expect(screen.queryByText("Buying credits requires the Max plan.")).toBeNull();
   });
 
   it("renders an out-of-credits notice with a top-up action for subscribed users", async () => {

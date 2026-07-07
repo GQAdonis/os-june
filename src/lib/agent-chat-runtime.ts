@@ -4,7 +4,6 @@ import type {
   AgentToolEventStatus,
   HermesSessionMessage,
 } from "./tauri";
-import type { HermesGatewayEvent } from "./hermes-gateway";
 import {
   isContextOverflowErrorSentinel,
   isContextOverflowMessage,
@@ -13,13 +12,8 @@ import {
 import { isScheduledRunPreamble, stripScheduledRunPreamble } from "./hermes-adapter";
 import { displayedUserMessageText } from "./issue-report-prompt";
 import { displayedSkillInvocationText } from "./skill-slash-commands";
-import { STEER_EVENT_TYPE, steeringPartText } from "./hermes-session-steer";
-import { parseHermesMode } from "./hermes-control-plane";
+import type { JuneHermesEvent } from "./hermes-control-plane";
 import { toolActivityLabel } from "./agent-tool-labels";
-
-export type LiveHermesEvent = HermesGatewayEvent & {
-  receivedAt: string;
-};
 
 export type AgentChatTextPart = {
   type: "text";
@@ -132,6 +126,18 @@ export type AgentChatImagePart = {
   status: "running" | "complete" | "error";
   /** The prompt the user typed after `/image`. */
   prompt: string;
+  /** Stable June API replay key for this logical `/image` turn. */
+  requestId?: string;
+  /** Image model pinned at turn creation. A retry must replay the exact
+   * request shape June API hashed into the replay-ledger key, so a settings
+   * change between attempt and retry cannot become a second charge. */
+  model?: string;
+  /** Safe-mode value pinned at turn creation; same replay-shape reason. */
+  safeMode?: boolean;
+  /** Original synthetic user-turn timestamp, kept so retry can finish the same turn. */
+  userCreatedAt?: string;
+  /** Original synthetic assistant-turn timestamp, kept so retry can finish the same turn. */
+  imageCreatedAt?: string;
   /** Imported workspace path; set once `status === "complete"`. */
   path?: string;
   /** `data:<mime>;base64,…` for the inline preview; set when complete. */
@@ -169,6 +175,14 @@ export type AgentChatTurn = {
   isScheduledRun?: boolean;
 };
 
+const MEDIA_IMAGE_EXTENSION_PATTERN = "png|jpe?g|gif|webp|tiff?|bmp|avif";
+const MEDIA_IMAGE_REFERENCE_PATTERN = new RegExp(
+  `MEDIA:(/[^\\r\\n]+?\\.(?:${MEDIA_IMAGE_EXTENSION_PATTERN}))(?:[)\\].,;:]?)(?=\\s|$)`,
+  "gi",
+);
+const mediaImageReferencePattern = () =>
+  new RegExp(MEDIA_IMAGE_REFERENCE_PATTERN.source, MEDIA_IMAGE_REFERENCE_PATTERN.flags);
+
 function sortAgentChatTurns(turns: AgentChatTurn[]) {
   return turns
     .map((turn, index) => ({ turn, index }))
@@ -179,7 +193,7 @@ function sortAgentChatTurns(turns: AgentChatTurn[]) {
 export function buildAgentChatTurns(
   messages: AgentMessageDto[],
   toolEvents: AgentToolEventDto[],
-  liveEvents: LiveHermesEvent[] = [],
+  liveEvents: JuneHermesEvent[] = [],
 ): AgentChatTurn[] {
   const turns = messages.map(messageToTurn);
   appendPersistedToolEvents(turns, toolEvents);
@@ -193,7 +207,7 @@ export function buildAgentChatTurns(
 
 export function buildHermesSessionChatTurns(
   messages: HermesSessionMessage[],
-  liveEvents: LiveHermesEvent[] = [],
+  liveEvents: JuneHermesEvent[] = [],
 ): AgentChatTurn[] {
   const turns: AgentChatTurn[] = [];
   const toolResults = new Map<string, HermesSessionMessage>();
@@ -210,11 +224,19 @@ export function buildHermesSessionChatTurns(
         text: textFromHermesContent(message.content) ?? "",
         status: "complete",
       });
+      // An image tool result carries its image inline (base64); render it as an
+      // image part so it shows in-thread instead of being lost to the collapsed
+      // tool row. The base64 is stripped from the tool text above.
+      for (const imagePart of imagePartsFromHermesContent(message.content)) {
+        turn.parts.push(imagePart);
+      }
       turn.status = "complete";
       continue;
     }
 
     const content = displayContentForHermesMessage(message);
+    const messageImageParts =
+      message.role === "assistant" ? imagePartsFromHermesContent(message.content) : [];
     const contextPart = content ? contextCompactionPartForHermesContent(content) : undefined;
 
     const turn: AgentChatTurn = {
@@ -260,15 +282,20 @@ export function buildHermesSessionChatTurns(
       }
 
       if (content) {
-        turn.parts.push(
-          (turn.role === "assistant"
+        const notice =
+          turn.role === "assistant"
             ? (creditsNoticeFromTurnText(content) ?? persistedContextOverflowNotice(content))
-            : undefined) ?? {
+            : undefined;
+        turn.parts.push(
+          notice ?? {
             type: "text",
             text: content,
             status: "complete",
           },
         );
+      }
+      if (!contextPart && turn.role === "assistant") {
+        appendImageParts(turn.parts, messageImageParts);
       }
     }
 
@@ -308,7 +335,7 @@ export function repairContractionSpacing(text: string): string {
   );
 }
 
-export function completedHermesMessageText(events: LiveHermesEvent[]) {
+export function completedHermesMessageText(events: JuneHermesEvent[]) {
   const turn = buildAgentChatTurns([], [], events)
     .filter((item) => item.role === "assistant")
     .at(-1);
@@ -422,345 +449,295 @@ function assistantTurnForTimestamp(turns: AgentChatTurn[], createdAt: string | u
   return undefined;
 }
 
-function appendLiveHermesEvents(turns: AgentChatTurn[], events: LiveHermesEvent[]) {
+function appendLiveHermesEvents(turns: AgentChatTurn[], events: JuneHermesEvent[]) {
   let currentAssistant: AgentChatTurn | null = null;
   const toolCreatedTurns = new Set<AgentChatTurn>();
 
   for (const event of events) {
-    const text = eventText(event);
-    if (event.type === STEER_EVENT_TYPE) {
-      // A user instruction steered into the running turn (feature 06). It is a
-      // local, first-party event — not a Hermes frame — so it gets its own
-      // quiet system turn at its `receivedAt` order. Close any open assistant
-      // turn so the instruction reads as a beat between what June was doing and
-      // what it does next.
-      const instruction = steeringPartText(event.payload).trim();
-      if (instruction) {
-        turns.push({
-          id: `steering:${event.receivedAt}:${turns.length}`,
-          role: "system",
-          createdAt: event.receivedAt,
-          status: "complete",
-          parts: [{ type: "steering", text: instruction }],
-        });
-        currentAssistant = null;
-      }
-      continue;
-    }
-
-    if (event.type === "message.start") {
-      currentAssistant = createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      continue;
-    }
-
-    if (event.type === "message.delta") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      appendAssistantTextPart(currentAssistant.parts, deltaEventText(event), "running");
-      continue;
-    }
-
-    if (event.type === "message.complete") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      const payload = event.payload as Record<string, unknown> | undefined;
-      // A billing failure is recognizable from its "Error:" text prefix; a
-      // context overflow is not, so only fold it when the turn actually failed
-      // — an ordinary sentence that mentions "context length" stays prose.
-      const failed = stringValue(payload?.status)?.toLowerCase() === "error";
-      const notice = text
-        ? (creditsNoticeFromTurnText(text) ?? (failed ? contextOverflowNotice(text) : undefined))
-        : undefined;
-      if (notice) {
-        // The complete text is authoritative for the turn (see
-        // completeAssistantTextPart); when it's a billing failure, any
-        // partially streamed text is superseded along with it.
-        currentAssistant.parts = currentAssistant.parts.filter((part) => part.type !== "text");
-        currentAssistant.parts.push(notice);
-      } else if (text) {
-        completeAssistantTextPart(currentAssistant.parts, text);
-      }
-      currentAssistant.status = "complete";
-      completeRunningParts(currentAssistant.parts);
-      currentAssistant = null;
-      continue;
-    }
-
-    if (event.type === "thinking.delta" || event.type === "reasoning.delta") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      appendReasoningPart(currentAssistant.parts, deltaEventText(event));
-      continue;
-    }
-
-    if (event.type.startsWith("subagent.")) {
-      // Delegated subagents (the model's `delegate_task`) stream their own
-      // lifecycle: subagent.start / .tool / .progress / .thinking / .complete,
-      // each carrying the subagent's goal and identity. The gateway forwards
-      // them over the same socket as everything else; without this branch they
-      // were silently dropped and the spawn never appeared in the chat. Render
-      // each subagent as a tool-style row keyed by its id, so N parallel
-      // subagents show as N live rows that resolve as they finish.
-      if (!currentAssistant) {
-        currentAssistant = createAssistantTurn(turns, event.receivedAt);
-        toolCreatedTurns.add(currentAssistant);
-      }
-      const payload = event.payload as Record<string, unknown> | undefined;
-      const subagentId = stringValue(payload?.subagent_id);
-      const taskIndexRaw = payload?.task_index;
-      const taskIndex = typeof taskIndexRaw === "number" ? taskIndexRaw : undefined;
-      const key = subagentId ?? (taskIndex !== undefined ? `task-${taskIndex}` : "subagent");
-      const partId = `subagent:${key}`;
-      const goal = stringValue(payload?.goal);
-      const taskCountRaw = payload?.task_count;
-      const taskCount = typeof taskCountRaw === "number" ? taskCountRaw : undefined;
-      // Keep the richest label we have seen for this subagent: progress and
-      // tool events often omit the goal, and downgrading to the generic
-      // "Subagent" would make the row flicker. Prefer the goal, else the name
-      // already shown, else a task-position label.
-      const existingName = currentAssistant.parts.find(
-        (part): part is AgentChatToolPart => part.type === "tool" && part.id === partId,
-      )?.name;
-      const label = goal
-        ? `Subagent: ${goal}`
-        : (existingName ??
-          (taskCount && taskCount > 1 && taskIndex !== undefined
-            ? `Subagent ${taskIndex + 1} of ${taskCount}`
-            : "Subagent"));
-      // Terminal on `subagent.complete` or any failure-flavored subtype the
-      // gateway might add (fail/cancel/timeout/abort/interrupt). Keyed off the
-      // subtype, not a fixed allow-list, so a new terminal event can't strand
-      // a row as "running" forever.
-      const subtype = event.type.slice("subagent.".length).toLowerCase();
-      const reportedStatus = stringValue(payload?.status)?.toLowerCase() ?? "";
-      const failurePattern = /fail|error|cancel|timeout|abort|interrupt/;
-      const failed = failurePattern.test(subtype) || failurePattern.test(reportedStatus);
-      const completed = subtype === "complete" || subtype === "done" || failed;
-      const status: AgentChatToolPart["status"] = completed
-        ? failed
-          ? "failed"
-          : "complete"
-        : "running";
-      if (status === "running") {
-        currentAssistant.status = "running";
-      } else if (toolCreatedTurns.has(currentAssistant)) {
-        currentAssistant.status = "complete";
-      }
-      // The live line: a completion summary, else whatever the subagent is
-      // doing now (its latest tool preview).
-      const activity =
-        stringValue(payload?.summary) ??
-        stringValue(payload?.tool_preview) ??
-        (completed ? undefined : stringValue(payload?.text));
-      upsertToolPart(currentAssistant.parts, {
-        id: partId,
-        name: label,
-        text: activity ?? "",
-        status,
-      });
-      continue;
-    }
-
-    if (event.type.startsWith("tool.")) {
-      if (isClarifyToolEvent(event)) {
-        if (event.type.includes("complete") || event.type.includes("fail")) {
-          completePendingClarifyParts((currentAssistant ?? lastAssistantTurn(turns))?.parts ?? []);
+    switch (event.kind) {
+      case "steering": {
+        // A user instruction steered into the running turn (feature 06). It is
+        // local first-party state, so it gets its own quiet system turn at its
+        // `receivedAt` order. Close any open assistant turn so the instruction
+        // reads as a beat between what June was doing and what it does next.
+        const instruction = event.text.trim();
+        if (instruction) {
+          turns.push({
+            id: `steering:${event.receivedAt}:${turns.length}`,
+            role: "system",
+            createdAt: event.receivedAt,
+            status: "complete",
+            parts: [{ type: "steering", text: instruction }],
+          });
+          currentAssistant = null;
         }
-        continue;
+        break;
       }
-      if (!currentAssistant) {
-        currentAssistant = createAssistantTurn(turns, event.receivedAt);
-        toolCreatedTurns.add(currentAssistant);
-      }
-      const status = toolEventStatus(event);
-      if (status === "running") {
-        currentAssistant.status = "running";
-      } else if (toolCreatedTurns.has(currentAssistant)) {
-        // A turn that exists only because of tool events has nothing left to
-        // stream once its tool reaches a terminal state.
+
+      case "transcript": {
+        if (!event.complete && event.delta === undefined) {
+          currentAssistant = createAssistantTurn(turns, event.receivedAt);
+          currentAssistant.status = "running";
+          break;
+        }
+        currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
+        if (!event.complete) {
+          currentAssistant.status = "running";
+          appendAssistantTextPart(currentAssistant.parts, event.delta ?? "", "running");
+          break;
+        }
+        const text = event.delta ?? "";
+        // A billing failure is recognizable from its "Error:" text prefix; a
+        // context overflow is not, so only fold it when the turn actually
+        // failed — an ordinary sentence that mentions "context length" stays prose.
+        const displayText = stripMediaImageReferences(text);
+        const imageParts = imagePartsFromHermesContent(text);
+        const notice = displayText
+          ? (creditsNoticeFromTurnText(displayText) ??
+            (event.failed ? contextOverflowNotice(displayText) : undefined))
+          : undefined;
+        if (notice) {
+          // The complete text is authoritative for the turn (see
+          // completeAssistantTextPart); when it's a billing failure, any
+          // partially streamed text is superseded along with it.
+          currentAssistant.parts = currentAssistant.parts.filter((part) => part.type !== "text");
+          currentAssistant.parts.push(notice);
+        } else if (text) {
+          if (displayText.trim()) {
+            completeAssistantTextPart(currentAssistant.parts, displayText);
+          } else if (imageParts.length) {
+            removeAssistantTextParts(currentAssistant.parts);
+          }
+          appendImageParts(currentAssistant.parts, imageParts);
+        }
         currentAssistant.status = "complete";
+        completeRunningParts(currentAssistant.parts);
+        currentAssistant = null;
+        break;
       }
-      const payload = event.payload as Record<string, unknown> | undefined;
-      const name =
-        stringValue(payload?.name) ??
-        stringValue(payload?.tool_name) ??
-        stringValue(payload?.tool) ??
-        "tool";
-      upsertToolPart(currentAssistant.parts, {
-        id: toolEventKey(event),
-        name: toolActivityLabel(name, payload),
-        text,
-        status,
-      });
-      continue;
-    }
 
-    if (event.type === "clarify.request") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      const payload = event.payload as Record<string, unknown> | undefined;
-      upsertClarifyPart(currentAssistant.parts, {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `clarify:${event.receivedAt}`,
-        sessionId: event.session_id,
-        question:
-          stringValue(payload?.question, true) ?? "Hermes needs clarification before continuing.",
-        choices: stringArrayValue(payload?.choices),
-        status: "pending",
-      });
-      continue;
-    }
+      case "reasoning": {
+        currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
+        currentAssistant.status = "running";
+        if (event.full) {
+          // A `*.available` frame carries the FULL reasoning text: replace the
+          // thought instead of appending, so a replay after streamed deltas
+          // (or a whole-block reasoning model with no deltas at all) renders
+          // exactly one copy.
+          replaceReasoningPart(currentAssistant.parts, event.delta);
+        } else {
+          appendReasoningPart(currentAssistant.parts, event.delta);
+        }
+        break;
+      }
 
-    if (event.type === "clarify.response") {
-      const payload = event.payload as Record<string, unknown> | undefined;
-      upsertClarifyPart((currentAssistant ?? lastAssistantTurn(turns))?.parts ?? [], {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `clarify:${event.receivedAt}`,
-        sessionId: event.session_id,
-        question: stringValue(payload?.question, true) ?? "",
-        choices: stringArrayValue(payload?.choices),
-        answer: stringValue(payload?.answer, true) ?? "",
-        status: "resolved",
-      });
-      continue;
-    }
-
-    if (event.type === "approval.request") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      const payload = event.payload as Record<string, unknown> | undefined;
-      upsertApprovalPart(currentAssistant.parts, {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `approval:${event.receivedAt}`,
-        command: stringValue(payload?.command, true) ?? "",
-        description:
-          stringValue(payload?.description, true) ?? "Hermes needs approval before continuing.",
-        sessionId: event.session_id,
-        allowPermanent: payload?.allow_permanent !== false,
-        status: "pending",
-      });
-      continue;
-    }
-
-    if (event.type === "approval.response") {
-      const payload = event.payload as Record<string, unknown> | undefined;
-      upsertApprovalPart((currentAssistant ?? lastAssistantTurn(turns))?.parts ?? [], {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `approval:${event.receivedAt}`,
-        command: stringValue(payload?.command, true) ?? "",
-        description: stringValue(payload?.description, true) ?? "",
-        sessionId: event.session_id,
-        allowPermanent: payload?.allow_permanent !== false,
-        choice: approvalChoiceValue(payload?.choice),
-        status: "resolved",
-      });
-      continue;
-    }
-
-    if (event.type === "sudo.request") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      const payload = event.payload as Record<string, unknown> | undefined;
-      upsertSudoPart(currentAssistant.parts, {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `sudo:${event.receivedAt}`,
-        sessionId: event.session_id,
-        command: stringValue(payload?.command, true),
-        reason: stringValue(payload?.reason, true),
-        mode: parseHermesMode(payload?.mode),
-        status: "pending",
-      });
-      continue;
-    }
-
-    if (event.type === "sudo.response") {
-      const payload = event.payload as Record<string, unknown> | undefined;
-      // Hermes spells the outcome `granted`; `approved` is accepted as a synonym
-      // so a slightly different gateway build still resolves the card.
-      const granted =
-        typeof payload?.granted === "boolean"
-          ? payload.granted
-          : typeof payload?.approved === "boolean"
-            ? payload.approved
-            : undefined;
-      upsertSudoPart((currentAssistant ?? lastAssistantTurn(turns))?.parts ?? [], {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `sudo:${event.receivedAt}`,
-        sessionId: event.session_id,
-        mode: parseHermesMode(payload?.mode),
-        approved: granted,
-        status: "resolved",
-      });
-      continue;
-    }
-
-    if (event.type === "secret.request") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      currentAssistant.status = "running";
-      const payload = event.payload as Record<string, unknown> | undefined;
-      // Read ONLY the metadata fields — never `value`/`api_key`, even if the
-      // gateway erroneously includes them, so the secret value can never reach
-      // a part or the serialized turn tree.
-      upsertSecretPart(currentAssistant.parts, {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `secret:${event.receivedAt}`,
-        sessionId: event.session_id,
-        keyName:
-          stringValue(payload?.key_name) ??
-          stringValue(payload?.keyName) ??
-          stringValue(payload?.key) ??
-          stringValue(payload?.name),
-        reason: stringValue(payload?.reason, true),
-        status: "pending",
-      });
-      continue;
-    }
-
-    if (event.type === "secret.response") {
-      const payload = event.payload as Record<string, unknown> | undefined;
-      // Again metadata only: the response carries a `provided` flag, never the
-      // value the user typed.
-      upsertSecretPart((currentAssistant ?? lastAssistantTurn(turns))?.parts ?? [], {
-        id:
-          stringValue(payload?.request_id) ??
-          stringValue(payload?.id) ??
-          `secret:${event.receivedAt}`,
-        sessionId: event.session_id,
-        status: "resolved",
-      });
-      continue;
-    }
-
-    if (event.type === "error") {
-      currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
-      const notice = text ? turnNotice(text) : undefined;
-      if (notice) {
-        currentAssistant.parts.push(notice);
-      } else {
+      case "background_activity": {
+        // Delegated subagents (the model's `delegate_task`) stream lifecycle
+        // and progress over the same live channel. Render each subagent as a
+        // tool-style row keyed by its id, so N parallel subagents show as N live
+        // rows that resolve as they finish.
+        if (!currentAssistant) {
+          currentAssistant = createAssistantTurn(turns, event.receivedAt);
+          toolCreatedTurns.add(currentAssistant);
+        }
+        const { activity } = event;
+        const key =
+          activity.subagentId === "subagent" && activity.taskIndex !== undefined
+            ? `task-${activity.taskIndex}`
+            : activity.subagentId;
+        const partId = `subagent:${key}`;
+        // Keep the richest label we have seen for this subagent: progress and
+        // tool events often omit the goal, and downgrading to the generic
+        // "Subagent" would make the row flicker. Prefer the goal, else the name
+        // already shown, else a task-position label.
+        const existingName = currentAssistant.parts.find(
+          (part): part is AgentChatToolPart => part.type === "tool" && part.id === partId,
+        )?.name;
+        const label = activity.goal
+          ? `Subagent: ${activity.goal}`
+          : (existingName ??
+            (activity.taskCount && activity.taskCount > 1 && activity.taskIndex !== undefined
+              ? `Subagent ${activity.taskIndex + 1} of ${activity.taskCount}`
+              : "Subagent"));
+        // `blocked` is resumable, mirroring the activity store's non-terminal phase.
+        const status: AgentChatToolPart["status"] =
+          activity.phase === "complete"
+            ? "complete"
+            : activity.phase === "error"
+              ? "failed"
+              : "running";
+        if (status === "running") {
+          currentAssistant.status = "running";
+        } else if (toolCreatedTurns.has(currentAssistant)) {
+          currentAssistant.status = "complete";
+        }
         upsertToolPart(currentAssistant.parts, {
-          id: `error:${event.receivedAt}`,
-          name: "Error",
-          text: text || "The agent reported an error.",
-          status: "failed",
+          id: partId,
+          name: label,
+          text: activity.resultPreview ?? "",
+          status,
         });
+        break;
       }
-      currentAssistant.status = "complete";
-      completeRunningParts(currentAssistant.parts);
-      currentAssistant = null;
+
+      case "tool": {
+        if (event.isClarify) {
+          if (event.phase === "complete" || event.phase === "failed") {
+            completePendingClarifyParts(
+              (currentAssistant ?? lastAssistantTurn(turns))?.parts ?? [],
+            );
+          }
+          break;
+        }
+        if (!currentAssistant) {
+          currentAssistant = createAssistantTurn(turns, event.receivedAt);
+          toolCreatedTurns.add(currentAssistant);
+        }
+        const status: AgentChatToolPart["status"] =
+          event.phase === "complete" ? "complete" : event.phase === "failed" ? "failed" : "running";
+        if (status === "running") {
+          currentAssistant.status = "running";
+        } else if (toolCreatedTurns.has(currentAssistant)) {
+          // A turn that exists only because of tool events has nothing left to
+          // stream once its tool reaches a terminal state.
+          currentAssistant.status = "complete";
+        }
+        upsertToolPart(currentAssistant.parts, {
+          id: event.key,
+          name: toolActivityLabel(event.name ?? "tool", event.sanitizedPayload),
+          text: event.text,
+          status,
+        });
+        break;
+      }
+
+      case "pending_action": {
+        currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
+        currentAssistant.status = "running";
+        const { action } = event;
+        switch (action.kind) {
+          case "clarify":
+            upsertClarifyPart(currentAssistant.parts, {
+              id: action.requestId,
+              sessionId: optionalSessionId(event.sessionId),
+              question: action.question,
+              choices: action.choices ?? [],
+              status: "pending",
+            });
+            break;
+          case "approval":
+            upsertApprovalPart(currentAssistant.parts, {
+              id: action.requestId,
+              command: action.command ?? "",
+              description: action.description ?? "Hermes needs approval before continuing.",
+              sessionId: optionalSessionId(event.sessionId),
+              allowPermanent: action.allowPermanent,
+              status: "pending",
+            });
+            break;
+          case "sudo":
+            upsertSudoPart(currentAssistant.parts, {
+              id: action.requestId,
+              sessionId: optionalSessionId(event.sessionId),
+              command: action.command,
+              reason: action.reason,
+              mode: action.mode,
+              status: "pending",
+            });
+            break;
+          case "secret":
+            upsertSecretPart(currentAssistant.parts, {
+              id: action.requestId,
+              sessionId: optionalSessionId(event.sessionId),
+              keyName: action.keyName,
+              reason: action.reason,
+              status: "pending",
+            });
+            break;
+        }
+        break;
+      }
+
+      case "pending_action_resolution": {
+        const targetParts = (currentAssistant ?? lastAssistantTurn(turns))?.parts ?? [];
+        const { action } = event;
+        switch (action.kind) {
+          case "clarify":
+            upsertClarifyPart(targetParts, {
+              id: action.requestId,
+              sessionId: optionalSessionId(event.sessionId),
+              question: action.question,
+              choices: action.choices,
+              answer: action.answer,
+              status: "resolved",
+            });
+            break;
+          case "approval":
+            upsertApprovalPart(targetParts, {
+              id: action.requestId,
+              command: action.command,
+              description: action.description,
+              sessionId: optionalSessionId(event.sessionId),
+              allowPermanent: action.allowPermanent,
+              choice: action.choice,
+              status: "resolved",
+            });
+            break;
+          case "sudo":
+            upsertSudoPart(targetParts, {
+              id: action.requestId,
+              sessionId: optionalSessionId(event.sessionId),
+              mode: action.mode,
+              approved: action.granted,
+              status: "resolved",
+            });
+            break;
+          case "secret":
+            upsertSecretPart(targetParts, {
+              id: action.requestId,
+              sessionId: optionalSessionId(event.sessionId),
+              keyName: action.keyName,
+              reason: action.reason,
+              status: "resolved",
+            });
+            break;
+        }
+        break;
+      }
+
+      case "error": {
+        currentAssistant ??= createAssistantTurn(turns, event.receivedAt);
+        const notice = event.message ? turnNotice(event.message) : undefined;
+        if (notice) {
+          currentAssistant.parts.push(notice);
+        } else {
+          upsertToolPart(currentAssistant.parts, {
+            id: `error:${event.receivedAt}`,
+            name: "Error",
+            text: event.message || "The agent reported an error.",
+            status: "failed",
+          });
+        }
+        currentAssistant.status = "complete";
+        completeRunningParts(currentAssistant.parts);
+        currentAssistant = null;
+        break;
+      }
+
+      case "lifecycle": {
+        if (event.flavor === "terminal") {
+          const target = currentAssistant ?? lastAssistantTurn(turns);
+          if (target?.status === "running") {
+            target.status = "complete";
+            completeRunningParts(target.parts);
+          }
+          currentAssistant = null;
+        }
+        break;
+      }
+
+      case "unsupported":
+        break;
     }
   }
 }
@@ -799,6 +776,10 @@ function lastAssistantTurn(turns: AgentChatTurn[]) {
     if (turns[index]?.role === "assistant") return turns[index];
   }
   return undefined;
+}
+
+function optionalSessionId(sessionId: string | undefined) {
+  return sessionId || undefined;
 }
 
 function appendAssistantTextPart(
@@ -862,6 +843,24 @@ function completeAssistantTextPart(parts: AgentChatPart[], text: string) {
   }
 }
 
+function removeAssistantTextParts(parts: AgentChatPart[]) {
+  for (let index = parts.length - 1; index >= 0; index -= 1) {
+    if (parts[index]?.type === "text") parts.splice(index, 1);
+  }
+}
+
+function appendImageParts(parts: AgentChatPart[], images: AgentChatImagePart[]) {
+  for (const image of images) {
+    const exists = parts.some(
+      (part) =>
+        part.type === "image" &&
+        ((image.path && part.path === image.path) ||
+          (image.dataUrl && part.dataUrl === image.dataUrl)),
+    );
+    if (!exists) parts.push(image);
+  }
+}
+
 // True when `complete` can be derived from `streamed` purely by deleting
 // whitespace characters. Deliberately rejects whitespace substitutions:
 // deletions are the only damage joining trimmed chunks can do, so anything
@@ -888,6 +887,19 @@ function appendReasoningPart(parts: AgentChatPart[], delta: string) {
     return;
   }
   parts.push({ type: "reasoning", text: delta, status: "running" });
+}
+
+/** Replaces the last reasoning part's text with the authoritative full text
+ * (a `reasoning.available` frame), creating the part when none streamed. */
+function replaceReasoningPart(parts: AgentChatPart[], text: string) {
+  if (!text) return;
+  const last = parts.at(-1);
+  if (last?.type === "reasoning") {
+    last.text = text;
+    last.status = "running";
+    return;
+  }
+  parts.push({ type: "reasoning", text, status: "running" });
 }
 
 function completeRunningParts(parts: AgentChatPart[]) {
@@ -1041,41 +1053,6 @@ function upsertSecretPart(
   });
 }
 
-function eventText(event: HermesGatewayEvent) {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  if (!payload) return "";
-  for (const key of [
-    "text",
-    "delta",
-    "message",
-    "summary",
-    "status",
-    "content",
-    "output",
-    "result",
-    "command",
-  ]) {
-    const value = stringValue(
-      payload[key],
-      key === "text" || key === "delta" || key === "message" || key === "content",
-    );
-    if (value) return value;
-  }
-  return "";
-}
-
-// Streaming deltas must be appended verbatim — including whitespace-only
-// chunks — so this intentionally bypasses the trimming in `stringValue`.
-function deltaEventText(event: HermesGatewayEvent) {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  if (!payload) return "";
-  for (const key of ["text", "delta", "message", "content"]) {
-    const value = payload[key];
-    if (typeof value === "string" && value) return value;
-  }
-  return "";
-}
-
 function messageTimestamp(message: HermesSessionMessage) {
   return timestampString(message.timestamp ?? message.created_at);
 }
@@ -1114,10 +1091,11 @@ function safeJsonParse(value: string) {
 }
 
 function resolveHermesMessageText(message: HermesSessionMessage) {
+  const stripMediaImageReferences = message.role !== "user";
   return (
-    textFromHermesContent(message.content) ??
-    textFromHermesContent(message.text) ??
-    textFromHermesContent(message.context) ??
+    textFromHermesContent(message.content, { stripMediaImageReferences }) ??
+    textFromHermesContent(message.text, { stripMediaImageReferences }) ??
+    textFromHermesContent(message.context, { stripMediaImageReferences }) ??
     stringValue(message.name, true) ??
     ""
   );
@@ -1196,26 +1174,49 @@ function contextCompactionPreview(value: string) {
     : "Earlier turns were compacted into a reference summary.";
 }
 
-export function textFromHermesContent(value: unknown, depth = 0): string | undefined {
+type TextFromHermesContentOptions = {
+  stripMediaImageReferences?: boolean;
+};
+
+export function textFromHermesContent(
+  value: unknown,
+  options: TextFromHermesContentOptions = {},
+): string | undefined {
+  return textFromHermesContentInner(value, 0, options);
+}
+
+function textFromHermesContentInner(
+  value: unknown,
+  depth: number,
+  options: TextFromHermesContentOptions,
+): string | undefined {
   if (value === null || value === undefined || depth > 4) return undefined;
   if (typeof value === "string") {
     if (!value.trim()) return undefined;
     const parsed = parseLikelyJsonContent(value);
     if (parsed !== undefined) {
-      const parsedText = textFromHermesContent(parsed, depth + 1);
+      const parsedText = textFromHermesContentInner(parsed, depth + 1, options);
       if (parsedText?.trim()) return parsedText;
     }
-    return value;
+    const text =
+      options.stripMediaImageReferences === false ? value : stripMediaImageReferences(value);
+    return text.trim() ? text : undefined;
   }
   if (typeof value === "number" || typeof value === "boolean") return String(value);
   if (Array.isArray(value)) {
-    const text = value.map((item) => textFromHermesContent(item, depth + 1) ?? "").join("");
+    const text = value
+      .map((item) => textFromHermesContentInner(item, depth + 1, options) ?? "")
+      .join("");
     return text.trim() ? text : undefined;
   }
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
+    // MCP image content blocks carry raw base64 in `data`; never surface that as
+    // "text" — it would dump a giant base64 string into a tool row. They render
+    // inline as image parts instead (see imagePartsFromHermesContent).
+    if (record.type === "image") return undefined;
     for (const key of ["text", "output_text", "content", "message", "delta", "summary"]) {
-      const text = textFromHermesContent(record[key], depth + 1);
+      const text = textFromHermesContentInner(record[key], depth + 1, options);
       if (text?.trim()) return text;
     }
     return stringifyObject(value) || undefined;
@@ -1227,6 +1228,139 @@ function parseLikelyJsonContent(value: string) {
   const trimmed = value.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
   return safeJsonParse(trimmed);
+}
+
+function stripMediaImageReferences(value: string) {
+  return value
+    .replace(mediaImageReferencePattern(), "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+function mediaImageReferences(value: unknown, depth = 0): string[] {
+  if (value === null || value === undefined || depth > 4) return [];
+  if (typeof value === "string") {
+    const parsed = parseLikelyJsonContent(value);
+    const nested = parsed !== undefined ? mediaImageReferences(parsed, depth + 1) : [];
+    const direct = [...value.matchAll(mediaImageReferencePattern())]
+      .map((match) => match[1]?.trim())
+      .filter((path): path is string => Boolean(path));
+    return uniqueStrings([...nested, ...direct]);
+  }
+  if (Array.isArray(value)) {
+    return uniqueStrings(value.flatMap((item) => mediaImageReferences(item, depth + 1)));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return uniqueStrings(
+      ["text", "output_text", "content", "message", "delta", "summary", "url", "image_url"].flatMap(
+        (key) => mediaImageReferences(record[key], depth + 1),
+      ),
+    );
+  }
+  return [];
+}
+
+function mediaImagePart(path: string): AgentChatImagePart {
+  return {
+    type: "image",
+    status: "complete",
+    prompt: "Generated image",
+    path,
+    name: filenameFromPath(path),
+  };
+}
+
+function filenameFromPath(path: string) {
+  const name = path.split(/[\\/]/).pop()?.trim();
+  return name || "generated-image.png";
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values)];
+}
+
+type McpImageBlock = { data: string; mimeType: string };
+
+/** Collects MCP image content blocks ({type:"image", data:<base64>, mimeType})
+ * from a tool result. The content may be an array of blocks, a JSON string of
+ * one, or nested under `content`, so walk it defensively (depth-bounded). */
+function mcpImageContentBlocks(value: unknown, depth = 0): McpImageBlock[] {
+  if (value === null || value === undefined || depth > 4) return [];
+  if (typeof value === "string") {
+    const parsed = parseLikelyJsonContent(value);
+    return parsed !== undefined ? mcpImageContentBlocks(parsed, depth + 1) : [];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => mcpImageContentBlocks(item, depth + 1));
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (record.type === "image" && typeof record.data === "string" && record.data.trim()) {
+      const mimeType =
+        typeof record.mimeType === "string" && record.mimeType.trim()
+          ? record.mimeType
+          : "image/png";
+      return [{ data: record.data, mimeType }];
+    }
+    if (Array.isArray(record.content)) {
+      return mcpImageContentBlocks(record.content, depth + 1);
+    }
+  }
+  return [];
+}
+
+/** The caption/filename an image tool ({@link mcpImageContentBlocks}) returned
+ * alongside its image, carried in a sibling JSON text block ({label, filename}).
+ * Best-effort: used for the inline image's alt text and open/download name. */
+function mcpImageMetadata(value: unknown, depth = 0): { label?: string; filename?: string } {
+  if (value === null || value === undefined || depth > 4) return {};
+  if (typeof value === "string") {
+    const parsed = parseLikelyJsonContent(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const record = parsed as Record<string, unknown>;
+      const label = typeof record.label === "string" ? record.label : undefined;
+      const filename = typeof record.filename === "string" ? record.filename : undefined;
+      if (label || filename) return { label, filename };
+    }
+    return {};
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const meta = mcpImageMetadata(item, depth + 1);
+      if (meta.label || meta.filename) return meta;
+    }
+    return {};
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      const meta = mcpImageMetadata(record.text, depth + 1);
+      if (meta.label || meta.filename) return meta;
+    }
+    if (Array.isArray(record.content)) {
+      return mcpImageMetadata(record.content, depth + 1);
+    }
+  }
+  return {};
+}
+
+/** Turns MCP image content blocks in a tool result into inline image parts, so a
+ * tool-produced image (e.g. the `june_image` MCP `generate_image`/`edit_image`
+ * tools) renders in-thread the same way the `/image` fast path does — and thus
+ * enters the session context the model reads. */
+export function imagePartsFromHermesContent(content: unknown): AgentChatImagePart[] {
+  const blocks = mcpImageContentBlocks(content);
+  const meta = mcpImageMetadata(content);
+  const blockParts = blocks.map((block) => ({
+    type: "image" as const,
+    status: "complete" as const,
+    prompt: meta.label?.trim() || "Generated image",
+    dataUrl: `data:${block.mimeType};base64,${block.data}`,
+    ...(meta.filename ? { name: meta.filename } : {}),
+  }));
+  const mediaParts = mediaImageReferences(content).map(mediaImagePart);
+  return [...blockParts, ...mediaParts];
 }
 
 function stripHermesContextMarkers(value: string) {
@@ -1246,25 +1380,6 @@ function stringifyObject(value: unknown) {
   }
 }
 
-export function toolEventKey(event: HermesGatewayEvent) {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  return (
-    stringValue(payload?.tool_id) ??
-    stringValue(payload?.id) ??
-    stringValue(payload?.call_id) ??
-    stringValue(payload?.tool_call_id) ??
-    stringValue(payload?.name) ??
-    `tool:${event.type}:${(event as LiveHermesEvent).receivedAt}`
-  );
-}
-
-function isClarifyToolEvent(event: HermesGatewayEvent) {
-  const payload = event.payload as Record<string, unknown> | undefined;
-  const name =
-    stringValue(payload?.name) ?? stringValue(payload?.tool_name) ?? stringValue(payload?.tool);
-  return name?.toLowerCase() === "clarify";
-}
-
 function completePendingClarifyParts(parts: AgentChatPart[]) {
   const pending = [...parts]
     .reverse()
@@ -1272,12 +1387,6 @@ function completePendingClarifyParts(parts: AgentChatPart[]) {
       (part): part is AgentChatClarifyPart => part.type === "clarify" && part.status === "pending",
     );
   if (pending) pending.status = "resolved";
-}
-
-function toolEventStatus(event: HermesGatewayEvent): AgentChatToolPart["status"] {
-  if (event.type.includes("complete")) return "complete";
-  if (event.type.includes("error") || event.type.includes("fail")) return "failed";
-  return "running";
 }
 
 function toolStatus(status: AgentToolEventStatus): AgentChatToolPart["status"] {
@@ -1303,25 +1412,12 @@ function partText(part: AgentChatPart) {
   return part.text;
 }
 
-function approvalChoiceValue(value: unknown): AgentApprovalChoice | undefined {
-  if (value === "once" || value === "session" || value === "always" || value === "deny") {
-    return value;
-  }
-  return undefined;
-}
-
 function appendLogText(current: string, next: string) {
   if (!next.trim()) return current;
   if (!current) return next;
   if (current.endsWith(next)) return current;
   const separator = /\n$/.test(current) || /^\s/.test(next) || /^[.,!?;:]/.test(next) ? "" : "\n";
   return `${current}${separator}${next}`;
-}
-
-function stringArrayValue(value: unknown) {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
 }
 
 function stringValue(value: unknown, preserveWhitespace = false) {

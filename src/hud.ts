@@ -112,17 +112,14 @@ const brailleWave = spinners.waverows;
 const EXIT_TRANSITION_MS = 240;
 // Matches the .hud.is-morphing fade (60ms) plus a frame of slack.
 const MORPH_FADE_MS = 80;
-// Transparent, click-through margin around the frostless HUD surface. Its
-// CSS shadow paints here and the meeting dismiss can overhang the card's
-// edge. This is the agent HUD model: transparent native window, CSS-painted
-// surface, no native vibrancy rim.
-const WINDOW_GUTTER = 16;
+// Transparent margin around the frostless HUD surface. The compact HUD shadow
+// paints here and the meeting dismiss can overhang the card's edge. Keep this
+// in sync with --shadow-hud's maximum spread in tokens.css; using the larger
+// app-card shadows here clips the overlay or forces a click-blocking window.
+const WINDOW_GUTTER = 18;
 // Gap between the error pill and the message layer that draws above/below it
 // — must match the .hud-error-layer margin in hud.css.
 const ERROR_LAYER_GAP = 8;
-// The error message layer's reveal / retract — must track the
-// .hud-error-layer grid-template-rows transition (--t-med) in hud.css.
-const ERROR_REVEAL_MS = 160;
 const MEETING_PROMPT_TIMEOUT_MS = 30_000;
 
 function invokeBestEffort(command: string, args?: Record<string, unknown>) {
@@ -302,6 +299,7 @@ function startBarLoop() {
 }
 
 function resetBars() {
+  cancelPendingAudioLevel();
   meter.reset();
   audioPeakHold = 0;
   lastHoldAt = 0;
@@ -340,6 +338,36 @@ function renderAudioLevel(rawLevel: number) {
   lastAudioLevelAt = performance.now();
   meter.pushLevel(shaped);
   startBarLoop();
+}
+
+// Under CPU contention (e.g. a meeting recording competing for the machine),
+// the helper's audio_level events arrive in bursts. The bar meter advances its
+// travelling wave one history slot per pushLevel call (see audio-meter), so
+// draining a burst within one frame lurches the wave several slots and the
+// waveform jitters. Coalesce to at most one level per animation frame — the
+// loudest pending sample — so the history advances at a steady frame rate no
+// matter how bursty delivery is. Within a frame the peak-hold takes the max
+// anyway, so this preserves the shaping while smoothing the motion.
+let pendingRawLevel: number | null = null;
+let levelFlushHandle: number | undefined;
+
+function queueAudioLevel(rawLevel: number) {
+  pendingRawLevel = pendingRawLevel === null ? rawLevel : Math.max(pendingRawLevel, rawLevel);
+  if (levelFlushHandle !== undefined) return;
+  levelFlushHandle = window.requestAnimationFrame(() => {
+    levelFlushHandle = undefined;
+    const next = pendingRawLevel;
+    pendingRawLevel = null;
+    if (next !== null) renderAudioLevel(next);
+  });
+}
+
+function cancelPendingAudioLevel() {
+  if (levelFlushHandle !== undefined) {
+    window.cancelAnimationFrame(levelFlushHandle);
+    levelFlushHandle = undefined;
+  }
+  pendingRawLevel = null;
 }
 
 function startBraille() {
@@ -399,7 +427,7 @@ function setDismissHover(isHovered: boolean) {
 // Hovering anywhere over the card (plus the overhanging X) reveals the
 // corner dismiss; hovering the record button paints its hover wash.
 function pushDismissBoundsToNative() {
-  if (!hud || hud.dataset.state !== "meeting") {
+  if (hud?.dataset.state !== "meeting") {
     invokeBestEffort("dictation_hud_set_dismiss_bounds", { rect: null });
     invokeBestEffort("dictation_hud_set_record_bounds", { rect: null });
     return;
@@ -821,12 +849,15 @@ async function handleDictationEventPayload(payload: unknown) {
       return;
     }
     const level = Number(dictationEvent.payload?.level || 0);
-    renderAudioLevel(level);
+    queueAudioLevel(level);
     setHud("listening", "Listening");
     return;
   }
 
   if (dictationEvent.type === "finalizing_transcript") {
+    // Drop any level still queued from listening so it can't push a stray
+    // sample into the meter after we've moved on to transcribing.
+    cancelPendingAudioLevel();
     const transition = setHud("transcribing", "Transcribing");
     await showHud(showOptionsForTransition(transition));
     return;

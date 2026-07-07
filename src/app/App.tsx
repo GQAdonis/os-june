@@ -27,6 +27,9 @@ import { RoutinesView } from "../components/routines/RoutinesView";
 import { MoveNoteToFolderDialog } from "../components/folders/MoveNoteToFolderDialog";
 import { MoveSessionToProjectDialog } from "../components/folders/MoveSessionToProjectDialog";
 import { NoteEditor } from "../components/note-editor/NoteEditor";
+import { NoteHeaderActions } from "../components/note-editor/NoteHeaderActions";
+import { NoteChatPanel } from "../components/note-chat/NoteChatPanel";
+import { useNoteChat } from "../components/note-chat/useNoteChat";
 import { GlobalRecorderPill } from "../components/recorder/GlobalRecorderPill";
 import type { GlobalRecorderDemoApi } from "../lib/global-recorder-demo";
 import type { UpdateCardDemoApi } from "../lib/update-card-demo";
@@ -55,6 +58,7 @@ import {
   deleteNote,
   deleteNotes,
   dictationHelperCommand,
+  ensureHermesBridgeSession,
   finishRecording,
   getRecordingStatus,
   getNote,
@@ -63,8 +67,6 @@ import {
   listSessionFolders,
   openPrivacySettings,
   osAccountsLogout,
-  osAccountsOpenPortal,
-  osAccountsUpgrade,
   pauseRecording,
   removeNoteFromFolder,
   removeSessionFromFolder,
@@ -141,11 +143,23 @@ import {
   shouldReplayOnboarding,
 } from "../lib/onboarding";
 import {
+  depletedBalanceAction,
   depletedBalanceActionLabel,
-  shouldOpenPortalForDepletedBalance,
   shouldBlockOnFunding,
   shouldBlockOnSignIn,
 } from "../lib/account-gate";
+import { runDepletedBalanceAction } from "../lib/billing-actions";
+import {
+  MAX_UPGRADE_BUSY_LABEL,
+  MAX_UPGRADE_CONFIRM_BODY,
+  MAX_UPGRADE_CONFIRM_LABEL,
+  MAX_UPGRADE_CONFIRM_TITLE,
+  MAX_UPGRADE_READY_STATUS,
+  MAX_UPGRADE_SLOW_STATUS,
+  MAX_UPGRADE_WAITING_STATUS,
+  pollForMaxGrant,
+} from "../lib/max-upgrade";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { checkJuneUpdate, reconcileToStable, relaunchJune, type JuneUpdate } from "../lib/updater";
 import { PROCESSING_DEMO_NOTE_ID, shouldPollProcessingStatus } from "./processing-polling";
 import { attachScrollThumbFade } from "../lib/scroll-thumb-fade";
@@ -504,11 +518,67 @@ export function App() {
   const fundingRequired =
     !devAccountsUnconfigured && !signInRequired && shouldBlockOnFunding(account);
   const topUpLabel = depletedBalanceActionLabel(account);
-  const topUpOpensPortal = shouldOpenPortalForDepletedBalance(account);
+  // Confirm gate for the Pro -> Max upgrade reached from depleted-balance
+  // surfaces (note failure banner, agent workspace notice). The change
+  // charges the saved card the moment it runs, so it never fires straight
+  // from those buttons.
+  const [maxUpgradePromptOpen, setMaxUpgradePromptOpen] = useState(false);
+  const [maxUpgradeError, setMaxUpgradeError] = useState<string>();
+  // Transient billing feedback ("You are on Max now...") shown beside the
+  // error banner; cleared automatically once it has been seen.
+  const [billingNotice, setBillingNotice] = useState<string | null>(null);
+  const billingNoticeTimerRef = useRef<number | undefined>(undefined);
+  const showBillingNotice = useCallback((notice: string, autoClearMs?: number) => {
+    window.clearTimeout(billingNoticeTimerRef.current);
+    setBillingNotice(notice);
+    if (autoClearMs) {
+      billingNoticeTimerRef.current = window.setTimeout(() => setBillingNotice(null), autoClearMs);
+    }
+  }, []);
+  const confirmMaxUpgrade = useCallback(async () => {
+    const baselineCredits = account.balance?.credits ?? 0;
+    try {
+      const outcome = await runDepletedBalanceAction(account);
+      if (outcome !== "changed_plan") {
+        // Stale snapshot resolved another way (subscribe prompt): refresh and
+        // let the surfaces re-render; nothing was charged.
+        void refreshAccount();
+        return;
+      }
+    } catch (err) {
+      // Keep the dialog open with the failure inside it, next to retry.
+      setMaxUpgradeError(messageFromError(err));
+      throw err;
+    }
+    // The PATCH resolves before the webhook grants the credits: show interim
+    // feedback and poll briefly until the new balance lands.
+    showBillingNotice(MAX_UPGRADE_WAITING_STATUS);
+    // No separate refresh: the poll's first tick refreshes immediately, and a
+    // parallel request could resolve out of order and overwrite the poll's
+    // fresher snapshot with a stale pre-grant one.
+    void pollForMaxGrant(refreshAccount, baselineCredits).then((landed) => {
+      showBillingNotice(landed ? MAX_UPGRADE_READY_STATUS : MAX_UPGRADE_SLOW_STATUS, 8000);
+    });
+  }, [account, refreshAccount, showBillingNotice]);
   const handleTopUp = useCallback(() => {
-    const action = topUpOpensPortal ? osAccountsOpenPortal : osAccountsUpgrade;
-    void action().catch((err: unknown) => setError(messageFromError(err)));
-  }, [topUpOpensPortal]);
+    // Tier-aware: Max tops up, Pro upgrades in place to Max, Free subscribes.
+    // The upgrade is a charge, so it routes through an explicit confirm
+    // dialog. upgrade_required / subscribe_required mean the server proved
+    // our snapshot stale (top-up gated behind Max, or no active
+    // subscription): refresh so the depleted-balance surfaces re-render as
+    // the right prompt and the user chooses explicitly; no raw error, and
+    // never an automatic purchase.
+    if (depletedBalanceAction(account) === "upgrade_to_max") {
+      setMaxUpgradeError(undefined);
+      setMaxUpgradePromptOpen(true);
+      return;
+    }
+    runDepletedBalanceAction(account)
+      .then((outcome) => {
+        if (outcome !== "opened_browser") void refreshAccount();
+      })
+      .catch((err: unknown) => setError(messageFromError(err)));
+  }, [account, refreshAccount]);
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();
@@ -549,6 +619,33 @@ export function App() {
   }, []);
   const selectedNote = state.selectedNote;
   const selectedNoteId = selectedNote?.id;
+  // The contextual Ask June panel next to the open note. Scoped to one note:
+  // it only renders while a note is the active view, and closes whenever the
+  // open note changes (below) so it never flies out onto a different or
+  // brand-new note the user didn't open it on.
+  const [noteChatOpen, setNoteChatOpen] = useState(false);
+  const [confirmDeleteNote, setConfirmDeleteNote] = useState(false);
+  useEffect(() => {
+    setNoteChatOpen(false);
+    setConfirmDeleteNote(false);
+  }, [selectedNoteId]);
+  // The note's Ask June chat is owned here, not inside the panel, so its
+  // session and working state survive the panel closing: a fired-off question
+  // keeps running in the background and the toolbar's Ask June button shows a
+  // working dot until the reply lands.
+  const noteChat = useNoteChat(
+    selectedNote ? { id: selectedNote.id, title: selectedNote.title } : null,
+  );
+  const noteToolbarActions = selectedNote ? (
+    <NoteHeaderActions
+      noteId={selectedNote.id}
+      noteTitle={selectedNote.title}
+      askJuneOpen={noteChatOpen}
+      askJuneWorking={noteChat.working}
+      onAskJune={() => setNoteChatOpen((open) => !open)}
+      onDelete={() => setConfirmDeleteNote(true)}
+    />
+  ) : null;
   const originFolder = originFolderId
     ? state.folders.find((folder) => folder.id === originFolderId)
     : undefined;
@@ -568,7 +665,6 @@ export function App() {
   const recoverableNoteIds = useMemo(() => new Set(recoveriesByNote.keys()), [recoveriesByNote]);
   const selectedRecovery = selectedNote ? recoveriesByNote.get(selectedNote.id) : undefined;
   const noteDetailScrollerActive = activeView === "meetings" && !!selectedNote;
-  const noteHasBreadcrumb = !!(originFolder || originAllNotes);
   const detailScrollerActive = activeView === "folders" && !!state.selectedFolderId;
 
   // ---- Tabs ------------------------------------------------------------
@@ -1983,10 +2079,9 @@ export function App() {
     }
   }
 
-  // "Report an issue": the fresh-chat handshake with a bug chip seeded into
-  // the composer instead of auto-submitting, so the user types their report
-  // after the tag. The submitted report (plus June's diagnosis) is filed to
-  // the June team.
+  // "Report an issue": navigate to Agent and open the direct report dialog.
+  // It submits through June API without a model turn, so there is nothing to
+  // charge; June API creates the team-facing diagnosis.
   function handleReportIssue(category: ReportCategory = "bug") {
     pendingSessionProjectRef.current = null;
     setAgentOrigin(undefined);
@@ -1997,6 +2092,44 @@ export function App() {
       window.dispatchEvent(
         new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT, {
           detail: { category },
+        }),
+      );
+    }, 0);
+  }
+
+  // Escalates a note chat into the full agent view: an existing session opens
+  // in place (it's a normal Hermes session, so history already knows it); a
+  // chat that never started falls back to the seeded new-session flow.
+  function handleOpenNoteChatInAgent(noteRef: { id: string; title: string }, sessionId?: string) {
+    if (!sessionId) {
+      handleAskJuneAboutNote(noteRef);
+      return;
+    }
+    pendingSessionProjectRef.current = null;
+    setAgentOrigin(undefined);
+    // The agent view resolves the conversation by this id, so switch straight
+    // in. Backfill the bridge session-list registration in the background (best
+    // effort) so the session also shows in the agent history sidebar even if
+    // the note chat's own registration hadn't landed yet — never blocks the
+    // handoff, so a slow or failed registration can't stall or dead-end it.
+    void ensureHermesBridgeSession({
+      sessionId,
+      title: noteRef.title.trim() || "Note chat",
+    }).catch(() => undefined);
+    setActiveAgentSession({ id: sessionId, title: noteRef.title.trim() || undefined });
+    setActiveView("agent");
+  }
+
+  function handleAskJuneAboutNote(noteRef: { id: string; title: string }) {
+    pendingSessionProjectRef.current = null;
+    setAgentOrigin(undefined);
+    markAgentNewSessionPending(undefined, { noteRef });
+    setActiveAgentSession(undefined);
+    setActiveView("agent");
+    window.setTimeout(() => {
+      window.dispatchEvent(
+        new CustomEvent<AgentNewSessionDetail>(AGENT_NEW_SESSION_EVENT, {
+          detail: { noteRef },
         }),
       );
     }, 0);
@@ -2758,6 +2891,11 @@ export function App() {
             data-note-detail-scroller={noteDetailScrollerActive ? "true" : undefined}
           >
             {error ? <p className="error-banner">{error}</p> : null}
+            {billingNotice ? (
+              <p className="notice-banner" role="status">
+                {billingNotice}
+              </p>
+            ) : null}
             <div className="workspace">
               {activeView === "settings" ? (
                 <AppSettings
@@ -3004,6 +3142,11 @@ export function App() {
                 />
               ) : selectedNote ? (
                 <div className="note-shell">
+                  {/* Every note gets the toolbar so its content starts at a
+                      consistent height (aligning with the Ask June panel) and
+                      the note actions live in one predictable spot. The left
+                      shows breadcrumb nav when there's a parent, else a quiet
+                      "Notes" root. */}
                   {originFolder ? (
                     <BreadcrumbBar
                       backLabel={`Back to ${originFolder.name}`}
@@ -3031,6 +3174,7 @@ export function App() {
                           label: selectedNote.title.trim() || "New note",
                         },
                       ]}
+                      actions={noteToolbarActions}
                     />
                   ) : originAllNotes ? (
                     <BreadcrumbBar
@@ -3051,12 +3195,21 @@ export function App() {
                           label: selectedNote.title.trim() || "New note",
                         },
                       ]}
+                      actions={noteToolbarActions}
                     />
-                  ) : null}
+                  ) : (
+                    <BreadcrumbBar
+                      items={[
+                        { label: "Notes", onClick: () => setActiveView("all-notes") },
+                        { label: selectedNote.title.trim() || "New note" },
+                      ]}
+                      actions={noteToolbarActions}
+                    />
+                  )}
                   <div
                     ref={noteDetailScrollRef}
                     className="note-detail-scroll"
-                    data-has-detail-bar={noteHasBreadcrumb ? "true" : undefined}
+                    data-has-detail-bar="true"
                   >
                     <NoteEditor
                       note={selectedNote}
@@ -3175,6 +3328,33 @@ export function App() {
             ) : null}
           </AnimatePresence>
         </section>
+        {activeView === "meetings" && selectedNote && noteChatOpen ? (
+          <NoteChatPanel
+            note={{ id: selectedNote.id, title: selectedNote.title }}
+            chat={noteChat}
+            recordingActive={captureActive}
+            onClose={() => setNoteChatOpen(false)}
+            onOpenInAgent={(sessionId) => {
+              setNoteChatOpen(false);
+              handleOpenNoteChatInAgent(
+                { id: selectedNote.id, title: selectedNote.title },
+                sessionId,
+              );
+            }}
+          />
+        ) : null}
+        <ConfirmDialog
+          open={confirmDeleteNote && !!selectedNote}
+          onClose={() => setConfirmDeleteNote(false)}
+          onConfirm={async () => {
+            setConfirmDeleteNote(false);
+            if (selectedNote) await handleDeleteNote(selectedNote.id);
+          }}
+          title="Delete note?"
+          description="This permanently deletes the note and its transcript. This can't be undone."
+          confirmLabel="Delete note"
+          destructive
+        />
       </div>
       <Dialog
         open={recordingInactivityPrompt !== null}
@@ -3236,6 +3416,15 @@ export function App() {
         folders={state.folders}
         onSetFolder={(sessionId, folderId) => handleSetSessionFolder(sessionId, folderId)}
         onMoved={() => agentSessionsListRef.current?.resetSelection()}
+      />
+      <ConfirmDialog
+        open={maxUpgradePromptOpen}
+        onClose={() => setMaxUpgradePromptOpen(false)}
+        onConfirm={confirmMaxUpgrade}
+        title={MAX_UPGRADE_CONFIRM_TITLE}
+        description={maxUpgradeError ?? MAX_UPGRADE_CONFIRM_BODY}
+        confirmLabel={MAX_UPGRADE_CONFIRM_LABEL}
+        confirmBusyLabel={MAX_UPGRADE_BUSY_LABEL}
       />
     </main>
   );
@@ -3328,9 +3517,7 @@ function UpdateRelaunchCard({
           <JuneMark />
         </span>
         <span className="update-relaunch-copy">
-          <span
-            className={relaunching ? "update-relaunch-title text-shimmer" : "update-relaunch-title"}
-          >
+          <span className={relaunching ? "update-relaunch-title shimmer" : "update-relaunch-title"}>
             {relaunching ? "Relaunching..." : "Relaunch to update"}
           </span>
           <span className={status ? "update-relaunch-status" : undefined}>{meta}</span>

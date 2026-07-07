@@ -8,7 +8,7 @@
 //! user-supplied Venice key for the upstream call.
 
 use crate::retry::{self, UpstreamAttemptError};
-use crate::venice::PROVIDER_NAME;
+use crate::venice::{PROVIDER_NAME, user_venice_key_auth_error};
 use async_trait::async_trait;
 use june_config::UpstreamConfig;
 use june_domain::{
@@ -27,14 +27,22 @@ pub struct VeniceImageGenerator {
     http: reqwest::Client,
     api_key: String,
     base_url: String,
+    /// End-to-end budget for the whole generate leg INCLUDING retries; the
+    /// hold TTL and route timeout arithmetic assume this bound (config lib.rs).
+    leg_budget: std::time::Duration,
 }
 
 impl VeniceImageGenerator {
-    pub fn from_config(http: reqwest::Client, config: &UpstreamConfig) -> Self {
+    pub fn from_config(
+        http: reqwest::Client,
+        config: &UpstreamConfig,
+        leg_budget: std::time::Duration,
+    ) -> Self {
         Self {
             http,
             api_key: config.api_key.clone(),
             base_url: config.base_url.trim_end_matches('/').to_string(),
+            leg_budget,
         }
     }
 
@@ -42,8 +50,9 @@ impl VeniceImageGenerator {
         &self,
         url: &str,
         body: &VeniceImageRequest<'_>,
-        api_key: &str,
+        provider_credentials: &ProviderCredentials,
     ) -> Result<VeniceImageResponse, UpstreamAttemptError> {
+        let api_key = venice_api_key(&self.api_key, provider_credentials);
         let response = self
             .http
             .post(url)
@@ -72,6 +81,9 @@ impl VeniceImageGenerator {
                 return Err(UpstreamAttemptError::fatal(DomainError::InvalidInput {
                     reason: "image_generation_rejected".to_string(),
                 }));
+            }
+            if let Some(error) = user_venice_key_auth_error(status, provider_credentials) {
+                return Err(UpstreamAttemptError::fatal(error));
             }
             return Err(UpstreamAttemptError {
                 error: DomainError::UpstreamProvider,
@@ -106,26 +118,42 @@ impl ImageGenerator for VeniceImageGenerator {
             format: IMAGE_FORMAT,
             width: request.width,
             height: request.height,
+            safe_mode: request.safe_mode,
         };
         let url = format!("{}/image/generate", self.base_url);
-        let api_key = venice_api_key(&self.api_key, &request.provider_credentials);
         // Bounded retry on transient failures (connection reset, 429, 5xx),
         // same as the chat and augment paths. The service settles at most one
         // June charge after this call returns; a retry can cost at most one
-        // extra upstream generation if a completed response was lost.
-        for attempt in 0..retry::UPSTREAM_ATTEMPTS {
-            let error = match self.generate_once(&url, &body, api_key).await {
-                Ok(parsed) => return image_from_response(parsed, &request.model.0),
-                Err(error) => error,
-            };
-            if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
-                tracing::warn!(%url, model = %request.model.0, attempt, "venice image: transient failure, retrying");
-                tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
-                continue;
+        // extra upstream generation if a completed response was lost. The
+        // whole loop runs under one end-to-end deadline: per-attempt HTTP
+        // timeouts alone would let retries spend attempts x budget, breaking
+        // the authorize + generate + settle <= route/hold arithmetic and
+        // expiring the credit hold before settlement.
+        let attempts = async {
+            for attempt in 0..retry::UPSTREAM_ATTEMPTS {
+                let error = match self
+                    .generate_once(&url, &body, &request.provider_credentials)
+                    .await
+                {
+                    Ok(parsed) => return image_from_response(parsed, &request.model.0),
+                    Err(error) => error,
+                };
+                if error.retryable && attempt + 1 < retry::UPSTREAM_ATTEMPTS {
+                    tracing::warn!(%url, model = %request.model.0, attempt, "venice image: transient failure, retrying");
+                    tokio::time::sleep(retry::UPSTREAM_RETRY_BACKOFF).await;
+                    continue;
+                }
+                return Err(error.error);
             }
-            return Err(error.error);
+            Err(DomainError::UpstreamProvider)
+        };
+        match tokio::time::timeout(self.leg_budget, attempts).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                tracing::error!(%url, model = %request.model.0, "venice image: generate leg budget exhausted");
+                Err(DomainError::UpstreamProvider)
+            }
         }
-        Err(DomainError::UpstreamProvider)
     }
 }
 
@@ -168,6 +196,8 @@ struct VeniceImageRequest<'a> {
     width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    safe_mode: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +228,7 @@ mod tests {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
             },
+            std::time::Duration::from_secs(5),
         )
     }
 
@@ -207,6 +238,7 @@ mod tests {
             model: ModelId("venice-sd35".to_string()),
             width: Some(1024),
             height: Some(1024),
+            safe_mode: None,
             provider_credentials: ProviderCredentials::default(),
         }
     }

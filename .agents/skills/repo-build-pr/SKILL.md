@@ -1,41 +1,67 @@
 ---
 name: repo-build-pr
 description: >-
-  Use when the user invokes /repo-build-pr (or $repo-build-pr in Codex), or asks
-  to build, implement, ship, or fix something in os-june from a feature prompt,
-  bug report, screenshot, PR comment, or freeform repo task: study the prompt,
-  ask the clarifying questions that change what gets built up front,
-  plan and architect on the most capable model while delegating bulk
-  implementation to cheaper strong models,
-  work in one or more git worktrees based on complexity, validate changes with
-  deterministic checks plus agent-driven live app walkthroughs when useful,
-  record, upload through os-platform, and attach reviewer-friendly QA video URLs
-  when the change benefits from visual evidence, open a draft PR, wait for
-  Greptile and Codex review, address
-  only relevant feedback, request a final review, and mark the PR ready for
-  review.
+  End-to-end implementation loop for the os-june repo: study the prompt, ask
+  the clarifying questions that change what gets built, plan and architect on
+  the session model while delegating bulk implementation and review to cheaper
+  strong models, isolate work in git worktrees, validate with deterministic
+  checks plus agent-driven live app walkthroughs, record and upload QA video
+  evidence through os-platform, open a draft PR, run the automated Greptile and
+  Codex review loop with judgment, and mark it ready. Use when the user invokes
+  /repo-build-pr (or $repo-build-pr in Codex), or asks to build, implement,
+  ship, or fix something in os-june from a feature prompt, bug report,
+  screenshot, PR comment, or tracker task id, optionally with a cross-harness
+  implementer directive like "/repo-build-pr JUN-200 with codex".
 ---
 
 # Repo build PR
 
 Use this skill for the end-to-end implementation loop in `open-software-network/os-june`. The goal is not only to make code changes. The goal is to understand the prompt, isolate the work in worktrees, ship a coherent PR, and run the automated review loop with judgment.
 
+To hand this entire workflow to a *different* harness as orchestrator (e.g. dispatch a whole build to Codex from Claude Code, or vice versa), use the `repo-orchestrate` skill instead — it wraps this workflow in a per-harness runner with a stop-before-publish default.
+
+## Skill map
+
+This is the repo's entry-point skill; it orchestrates and defers. Each fact lives in exactly one owner — load the owner at the step that needs it, never restate its commands here:
+
+- `repo-review` — pre-publish review battery: axes, per-harness runners, disposition triage, convergence loop.
+- `repo-delegate` — single-brief implementation dispatch to another harness (the building block of the cross-harness implementer mode).
+- `repo-orchestrate` — hand this whole workflow to another harness.
+- `agent-e2e-qa` — live QA process: surface decision tree, video recording/compression, os-platform upload, PASS/FAIL/BLOCKED evidence format.
+- `browser-test-tauri-fe` — browser-surface technique: fake Tauri IPC bridge, Playwright/CDP driving, screenshot suites, PR-embeddable GIFs.
+- `os-platform` / `os-task-prep` — tracker reads, task diagnosis and enrichment (intake step 3).
+- `repo-retrospect` — post-cycle: mine the session, PR threads, and user feedback for lessons and fold them into the owning skill files.
+
 ## Intake
 
 Treat everything after `/repo-build-pr` (or `$repo-build-pr` in Codex) as the build prompt. If the user did not use the literal command but asks to build, implement, ship, or fix something in the repo, use this skill anyway.
 
-1. Read the prompt carefully and restate the concrete objective, constraints, and likely affected surface area.
+1. Read the prompt carefully and restate the concrete objective, constraints, and likely affected surface area. A trailing implementer directive (`with codex` in Claude Code, `with claude` in Codex) selects a cross-harness implementer — see Model orchestration.
 2. Read repo instructions before editing:
    - `AGENTS.md`
-   - `CLAUDE.md`
    - any referenced project plan or spec relevant to the task
-3. Inspect the current checkout with `git status -sb`. A dirty checkout is fine, but never implement in it: all work happens in a worktree branched from freshly fetched `origin/main` (see Worktree strategy).
-4. Fetch the target base branch. Use `origin/main` unless the user explicitly names another base.
-5. Search the codebase with `rg` and read the narrowest relevant files before deciding on the implementation.
+3. If the prompt names a tracker task (a `JUN-xxx` id or an os-platform issue reference — issues live on os-platform, org `june`, per `docs/agents/issue-tracker.md`): fetch it via the `os-platform` skill and validate it is actually implementable against the codebase (root cause, affected files, acceptance criteria — apply the `os-task-prep` diagnosis discipline if the issue is thin, and update the issue with what you learn). Then take it before writing code: assign it to the current user and set status to in-progress through the documented platform API (append-only, probe-then-verify). Include `Closes <TASK-ID>` in the eventual PR body.
+4. Inspect the current checkout with `git status -sb`. A dirty checkout is fine, but never implement in it: all work happens in a worktree branched from freshly fetched `origin/main` (see Worktree strategy).
+5. Fetch the target base branch. Use `origin/main` unless the user explicitly names another base.
+6. Search the codebase with `rg` and read the narrowest relevant files before deciding on the implementation.
+
+### Grill the plan against the docs
+
+Before asking the user anything, interrogate the draft plan against the repo's own documentation. Two goals: consume questions the docs already settle, and surface where the docs are stale or silent so this build can fix them.
+
+Sources, in order: `CONTEXT.md` (every term the plan uses must match the glossary; check the `_Avoid_` lists), `docs/adr/` for the touched area (does the plan re-litigate an accepted decision? will it need a new ADR per the AGENTS.md three-part test?), the subsystem doc via `docs/index.md`, `spec/` rules in scope, and any `specs/NNN-*/` feature spec.
+
+For each load-bearing decision in the plan, classify:
+
+- **Docs decide it** — adopt the documented answer and cite it in the plan; not a question.
+- **Docs contradict the plan** — one of them is wrong. Decide which with evidence; if the doc is stale, queue the doc fix. If the plan is wrong, fix the plan.
+- **Docs are silent** — that is a real clarifying question. Carry the "checked X, Y — silent" note into the question so the user sees why it is genuinely open.
+
+Queue every doc delta found here into the build itself: CONTEXT.md term updates ride in the same change (AGENTS.md convention), ADR-worthy decisions get an ADR, stale subsystem-doc claims get corrected. Small doc fixes belong in this PR; large rewrites become a linked follow-up issue.
 
 ### Clarifying questions
 
-Before writing any code, ask the questions whose answers change what gets built. A wrong guess at this stage costs an entire build-review cycle; a question costs the user seconds. Ask them as ONE batch up front (AskUserQuestion in Claude Code, a single numbered list in Codex), with a recommended option per question so the user can mostly confirm.
+Before writing any code, ask the questions whose answers change what gets built — the survivors of the docs grill. A wrong guess at this stage costs an entire build-review cycle; a question costs the user seconds. Ask them as ONE batch up front (AskUserQuestion in Claude Code, a single numbered list in Codex), with a recommended option per question so the user can mostly confirm.
 
 Worth asking:
 
@@ -47,7 +73,7 @@ Worth asking:
 
 Not worth asking:
 
-- anything the repo, issue, or git history already answers - look first
+- anything the repo, issue, or git history already answers - the docs grill above should have consumed these
 - choices with an obvious conventional default - pick it and note it in the PR
 - details that do not change the diff
 
@@ -55,16 +81,16 @@ Do not trickle questions throughout the build; front-load them. If answers do no
 
 ## Model orchestration
 
-Assume the session is running on the most capable model available (for example Fable 5 in Claude Code, GPT-5.6 in Codex). That model is expensive, so spend it where capability compounds and delegate everything else.
+Assume the session is running on the most capable model available in the current harness. That model is expensive: it is the architect and orchestrator only, and delegates everything else. (Model names version faster than this skill is edited — reason in tiers, not versions.)
 
-The top model keeps the work that determines whether the PR is right:
+The session model keeps the work that determines whether the PR is right:
 
 - intake, scoping, and the implementation plan
 - architecture and the contracts between parallel tracks (command names, request/response shapes, file ownership)
 - judgment calls: review-feedback triage, tradeoffs, anything ambiguous or irreversible
 - verification: reading delegated diffs, adversarially re-checking claimed results, deciding what is actually done
 
-Delegate the bulk of the implementation to strong but cheaper models (for example Opus 4.8 subagents via the Agent tool's `model` option in Claude Code, GPT-5.5 in Codex): writing code against a specified contract, test authoring, mechanical refactors, merge-conflict resolution with clear instructions, QA recording, and PR housekeeping.
+Everything else is delegated. Delegated work runs on a **cheaper but still strong** model — one tier below the orchestrator, never the session model itself — selected via the Agent tool's `model` option (or `--model` for headless `claude -p`; the corresponding lower tier via `codex exec` from Codex). That covers both implementation (writing code against a specified contract, test authoring, mechanical refactors, merge-conflict resolution with clear instructions, QA recording, PR housekeeping) and the review battery (Standards / Spec / adversarial axis runs).
 
 Delegation rules:
 
@@ -75,18 +101,38 @@ Delegation rules:
 - Expect subagents to die on transient failures (API overload, timeouts). Resume the same agent so it keeps its context instead of respawning from scratch; the same applies when sending follow-up scope or defect reports to an agent that already knows the code.
 - Do not delegate the plan, the contracts, or the final go/no-go. If the orchestrating model finds itself writing bulk code, delegate; if a subagent starts making architectural decisions, pull them back up.
 
+### Cross-harness implementer (`with codex` / `with claude`)
+
+When the build prompt carries an implementer directive (e.g. `/repo-build-pr JUN-200 with codex`), the named harness implements every delegated brief AND runs every review axis; the session model keeps everything that determines whether the PR is right — intake, the tracker lifecycle, architecture, chunking, verification of delegated diffs, triage of review findings, and publish.
+
+1. Plan first, as above (including clarifying questions — the session is interactive even when the implementer is not). Then split the plan into small, independently verifiable chunks: each chunk gets its own brief file written to the contract standard above, plus the narrowest gate command that proves it.
+2. Dispatch each chunk to the implementer in the active worktree via `repo-delegate`:
+   ```bash
+   .agents/skills/repo-delegate/scripts/run-codex.sh -t <chunk-brief.md> -C <worktree> -g "<chunk gate>"
+   ```
+   (`run-claude.sh` when orchestrating from Codex.) The delegate edits and runs the gate but never commits, and its runners require a clean tracked tree — so verify the diff, then commit each chunk before dispatching the next. Atomic commits fall out of the loop naturally.
+3. Chunks run sequentially in one worktree. Genuinely independent tracks get separate worktrees (strategy below), one delegate stream per worktree.
+4. Verify every chunk yourself against the diff and real gate output; a delegate report is a claim, not evidence. Route defects back as a follow-up brief that references the original chunk. For multi-chunk builds, run the adversarial review axis on each chunk right after committing it rather than only in the end-of-build battery — a defect a chunk introduces (a moved line whose consumers changed, a guard a dispatch branch bypasses) is cheapest to catch before later chunks and review rounds build on it (PR #633: a chunk-A clock-anchor regression surfaced only in external review hours later).
+5. A cross-harness implementer mode is single-harness for all delegated work, whichever direction it runs: the pre-publish battery ALSO runs on the implementer harness — every axis via `repo-review/scripts/run-codex.sh -a <axis>` for `with codex`, `run-claude.sh -a <axis>` for `with claude` — with no review sub-agents on the orchestrating side. This deliberately accepts self-review by the implementer harness (see the carve-out in docs/agents/collaboration.md); the counterweights are the regression-gated fixture tests in every fix brief and the session model's own verification and finding triage, which never delegate. Exception: repo-review's convergence re-runs alternate the reviewing harness even in this mode (see its convergence loop) — the single-harness convention covers who implements and who runs the first battery, not who re-reviews the fixes.
+
 ## Worktree strategy
 
 Always isolate implementation work from the user's active checkout.
 
-- Create a dedicated sibling worktree from the chosen base, then copy the
-  gitignored local environment files into it. Capture the main checkout path
-  first, because fresh worktrees do not inherit `.env` or `june-api/.env`:
+- Create a dedicated worktree under `.worktrees/<branch>` at the repo root —
+  gitignored, and inside the workspace so a Codex delegate's sandbox can write
+  it (a sibling `../` path sits *outside* the sandbox, so `with codex` mode
+  cannot write it). Then copy the gitignored local environment files into it.
+  Resolve the main checkout path first (via the common git dir, so this is
+  correct even when the current directory is itself a worktree), because fresh
+  worktrees do not inherit `.env` or `june-api/.env`:
   ```bash
-  MAIN="$(git rev-parse --show-toplevel)"
+  MAIN="$(cd "$(git rev-parse --git-common-dir)/.." && pwd)"
   git fetch origin main
-  git worktree add -b codex/<short-description> ../os-june-<short-description> origin/main
-  cd ../os-june-<short-description>
+  BRANCH="<user>/<short-description>"   # prefix with the user's handle, e.g. jakub/… or jun/…
+  WT="$MAIN/.worktrees/<short-description>"
+  git worktree add -b "$BRANCH" "$WT" origin/main
+  cd "$WT"
   cp "$MAIN/.env" .env 2>/dev/null || true
   cp "$MAIN/june-api/.env" june-api/.env 2>/dev/null || true
   ```
@@ -103,6 +149,8 @@ Always isolate implementation work from the user's active checkout.
 
 Before editing, tell the user which worktree or worktrees you are using and why.
 
+After the PR merges or the build is abandoned, remove the worktree so the convention dir does not accumulate stale trees (`git worktree list` shows how many are live): `git worktree remove "$WT"` — reconcile or copy out any leftover local changes first, and only add `--force` once you have — then `git worktree prune`. Do not remove the user's active checkout or an unrelated session's worktree.
+
 ## Implementation
 
 Follow the repo's existing patterns first.
@@ -110,38 +158,25 @@ Follow the repo's existing patterns first.
 - Keep edits scoped to the prompt and nearby supporting tests.
 - Use `apply_patch` for manual file edits.
 - Do not revert unrelated user changes.
-- For UI work, follow `CLAUDE.md`: sentence-case labels, design tokens from `src/styles/tokens.css`, and icons from `central-icons` or `central-icons-filled` only.
+- For UI work, follow `AGENTS.md`: sentence-case labels, design tokens from `src/styles/tokens.css`, and icons from `central-icons` or `central-icons-filled` only.
 - Do not add new dependencies, abstractions, or global behavior unless they are clearly needed for the prompt.
 - Commit only after reading the final diff and confirming every changed file belongs to the PR.
 
 ## Validation
 
-Run the smallest checks that prove the change, then broaden based on blast radius.
+Run the smallest checks that prove the change, then broaden based on blast radius. The **Makefile owns the commands** (`make help` lists every target; the pinned Rust toolchain and exact flags live there, not here) — call the narrowest target rather than copying its recipe, so this skill cannot drift from CI.
 
-Common checks in this repo:
+- **Full gate:** `make verify` — the CI-parity gate (Biome, typecheck, web tests, and fmt/clippy/test for both Rust crates). A green `make verify` should mean green CI; run it before publish for any non-trivial diff.
+- **Frontend-only:** `make check typecheck test-web`, or a single vitest file while iterating.
+- **Tauri Rust:** `make tauri-test` (add `make tauri-lint` if shared behavior changed).
+- **June API:** `make june-api-test` — uses the pinned toolchain from the Makefile.
+- **Docs or skill-only:** validate the skill's structure and that it is symlinked per `AGENTS.md`; skip expensive app builds unless touched files require them.
 
-```bash
-pnpm check
-pnpm typecheck
-pnpm test
-pnpm build
-pnpm test:rust
-cargo test --manifest-path src-tauri/Cargo.toml --locked
-cargo +1.95.0-aarch64-apple-darwin test --manifest-path june-api/Cargo.toml --all-targets --all-features --locked
-```
-
-Choose checks based on touched files. For example:
-
-- Frontend-only change: `pnpm check` and `pnpm typecheck` plus the relevant frontend test or `pnpm test`.
-- Tauri Rust change: targeted `cargo test --manifest-path src-tauri/Cargo.toml --locked`, then broader checks if shared behavior changed.
-- June API change: the pinned Rust toolchain command above.
-- Docs or skill-only change: validate the skill structure and skip expensive app builds unless related files require them.
-
-If a check cannot run because of local tooling, missing services, or credentials, say exactly what blocked it and what evidence still supports the PR.
+Judge vitest by failure count, not exit code (`hud-meeting` teardown noise can exit non-zero at zero real failures — see `AGENTS.md`). If a check cannot run because of local tooling, missing services, or credentials, say exactly what blocked it and what evidence still supports the PR.
 
 ### Live app walkthroughs
 
-Use `$agent-e2e-qa` as the default human-like validation layer whenever the change affects a user-visible workflow or would be hard to trust from code and terminal output alone. Load that skill before running the walkthrough.
+Use `$agent-e2e-qa` as the default human-like validation layer whenever the change affects a user-visible workflow or would be hard to trust from code and terminal output alone. Load that skill before running the walkthrough — it owns the surface decision tree (web preview / background browser video / native Tauri / Chrome handoff), the recording, compression, and os-platform upload pipeline, and the evidence format. For lightweight browser-only visual verification — screenshots or a PR-embeddable GIF without a full QA charter — load `$browser-test-tauri-fe` instead; it owns the technique of driving the Vite frontend in Chromium with a faked Tauri IPC bridge.
 
 Run an agent-driven walkthrough for changes that touch:
 
@@ -153,31 +188,24 @@ Run an agent-driven walkthrough for changes that touch:
 
 Skip live walkthroughs for narrow docs-only, test-only, build config, pure refactor, or low-level utility changes when no user-visible behavior is affected. Say why it was skipped in the PR validation notes.
 
-Pick the least invasive surface from `$agent-e2e-qa`: Browser or the background Playwright helper for web-reachable flows, Computer Use for native-only Tauri behavior, and Chrome only for flows that depend on the user's browser session. Do not perform live billing, enter credentials, record microphone audio, or expose private data without explicit user confirmation.
-
-For a recorded video walkthrough, default to Playwright via the bundled background helper rather than foreground screen capture:
-
-```bash
-.agents/skills/agent-e2e-qa/scripts/run_background_agent_prompt.mjs --prompt "<walkthrough goal>"
-```
-
-It drives the Vite app in headless Chromium, records Playwright video to `.tmp/qa-recordings/*.webm`, and shims only the Tauri shell calls the web surface needs, so the run does not fight the user's screen. If `playwright-core` is missing, install it outside repo dependencies with `npm install --prefix .tmp/playwright-tools playwright-core@latest`. The resulting `.webm` feeds straight into `prepare_qa_video.py` for compression and upload. Reserve Computer Use recording for native-only Tauri behavior that Playwright cannot reach.
+Pick the least invasive surface per `$agent-e2e-qa`'s decision tree. Do not perform live billing, enter credentials, record microphone audio, or expose private data without explicit user confirmation.
 
 Treat walkthrough failures as validation failures. Fix the issue, rerun the relevant deterministic checks, and rerun the live walkthrough before asking for final review. If the live surface is blocked by permissions, credentials, hardware, or unavailable services, include `BLOCKED` evidence and the remaining risk.
 
-Record, compress, upload the compressed video to os-platform, and attach the resulting remote URL to the PR when human reviewers would benefit from seeing the result, such as visual/UI changes, native interactions, agent behavior, fixed bug repros, or "the test is the demo" flows. Prefer `.agents/skills/agent-e2e-qa/scripts/prepare_qa_video.py --upload --confirm-public --comment-pr <pr-number>` after the user or task has authorized public PR sharing. Do not treat a local video path as sufficient PR evidence when video sharing was authorized; include the os-platform URL or PR comment in the validation evidence.
+What this workflow requires of the walkthrough (the commands and pipeline live in `$agent-e2e-qa`):
 
-The upload reads the os-platform API key from `june-api/.env` (`JUNE__ISSUE_REPORTS__OS_PLATFORM_API_KEY` or `OS_PLATFORM_API_KEY`), falling back to that file when the env vars are unset. Because `june-api/.env` is gitignored and absent from fresh worktrees, either copy it into the worktree (see Worktree strategy) or run `prepare_qa_video.py` with the working directory set to the main checkout while passing the worktree's raw recording path as input. If the key is still missing, the upload fails with a "set OS_PLATFORM_API_KEY" error; record that as a `BLOCKED` upload and keep the local video path in the evidence.
+- Record video when human reviewers would benefit from seeing the result (visual/UI changes, native interactions, agent behavior, fixed bug repros, "the test is the demo" flows); prefer the background browser helper over foreground screen capture so the run does not fight the user's screen.
+- When PR sharing was authorized, compress and upload the video to os-platform and put the remote URL or PR comment in the validation evidence — a local path is not sufficient. The upload key rides in `june-api/.env`, which fresh worktrees lack (see Worktree strategy); a missing key is a `BLOCKED` upload with the local path kept as evidence.
 
 ### Pre-publish review pass
 
-Green checks and a passing walkthrough are necessary, not sufficient: they prove the code does what its tests say, not that the diff is free of defects the tests never imagined. For any non-trivial diff, run an independent review pass before opening the draft PR:
+Green checks and a passing walkthrough are necessary, not sufficient: they prove the code does what its tests say, not that the diff is free of defects the tests never imagined. For any non-trivial diff, run the `repo-review` battery locally before opening the draft PR (load `.agents/skills/repo-review/SKILL.md`; `$repo-review` in Codex):
 
-1. Fan out a few cheap finder agents over the final diff, each with a distinct lens: line-by-line correctness, removed-behavior audit, cross-file callers and contracts, repo conventions.
-2. Verify every candidate finding to a CONFIRMED or REFUTED verdict with file:line evidence. Discard what does not survive verification; plausible-sounding findings that cannot name a failure scenario are noise.
-3. Route confirmed defects back to the implementer agent that owns the code, with the evidence, then re-run the relevant validation and re-review the changed area.
+1. Size and dispatch the battery per `repo-review`'s **Sizing the battery** and dispatch rules — do not restate them here (that section owns the trivial/standard/high-stakes thresholds and which axis runs on which harness). The build-specific wiring: in-session (native) builds run the sub-agent axes on the orchestrating harness and send at least the adversarial axis to the harness that did *not* write the diff; a `with codex` / `with claude` implementer runs every axis on the implementer harness (the single-harness convention in Model orchestration). Baseline is `origin/main` for a PR branch.
+2. Triage every finding to a disposition per the battery's aggregate step — fix-now, deliberate (amend the spec file), pre-existing parity (follow-up, checked against the fixed point), or refuted (with evidence). Verify before fixing; plausible-sounding findings that cannot name a failure scenario are noise.
+3. Route confirmed defects back to the implementer agent that owns the code, with the evidence, re-run the relevant validation, then re-run the adversarial axis until it approves (the battery's convergence loop).
 
-Skip this only for trivial diffs (docs, one-line fixes) and say so in the PR validation notes.
+Record the sizing you chose in the PR validation notes, and say so when a trivial diff took only the minimal pass.
 
 ## Publish
 
@@ -216,13 +244,15 @@ gh pr view <number> --comments --json comments,reviews,reviewRequests
 gh pr checks <number> --watch
 ```
 
-Poll about every 30 seconds so feedback is picked up quickly. Re-check both comments and reviews because Greptile often comments while Codex can appear as a review. Keep the user updated while waiting, but do not start duplicate polls or spam the PR with repeated bot pings.
+Poll about every 30 seconds so feedback is picked up quickly. Triage every bot at all three surfaces, not just inline threads: inline review comments (`gh api .../pulls/<n>/comments`), review bodies (`gh pr view <n> --json reviews` — Octopus hides findings in collapsed `<details>` tables there), and the bot's summary comment (Greptile places outside-the-diff findings only in its summary). A round is not "addressed" until every finding at every surface has a disposition. Keep the user updated while waiting, but do not start duplicate polls or spam the PR with repeated bot pings.
 
 For inline review threads, use GraphQL through `gh api graphql` when `gh pr view` is not enough. Inspect recent repo PRs if the current bot handles or re-trigger comments are unclear. At the time this skill was written, recent reviews used:
 
 - Greptile summary/comment author: `greptile-apps`
 - Codex review author: `chatgpt-codex-connector`
 - Codex review trigger comment: `@codex review`
+
+If a long review loop lets `origin/main` move under the branch (the mergeability check fails, or a reviewer flags drift), rebase onto freshly fetched `origin/main`, re-run the gate for the touched surfaces, and `git push --force-with-lease` before requesting the final review — a stale base can turn a green PR red after merge.
 
 Classify every bot comment before acting:
 

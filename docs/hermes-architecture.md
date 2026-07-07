@@ -5,7 +5,10 @@ For *why* it is embedded and sandboxed, see
 [ADR-0006](adr/0006-embed-hermes-sandboxed-runtime.md). For the code-level
 contract of the typed event seam, `src/lib/hermes-control-plane/README.md` is
 the best entry point. For bumping the pinned runtime, see
-[hermes-upgrade-checklist.md](hermes-upgrade-checklist.md).
+[hermes-upgrade-checklist.md](hermes-upgrade-checklist.md). For the sharp
+edges of the integration (restart discipline, the config.yaml contract, MCP
+OAuth, event types), see
+[hermes-gateway-gotchas.md](hermes-gateway-gotchas.md).
 
 ## Layers
 
@@ -15,8 +18,10 @@ June wraps Hermes in four layers, cleanly separated:
   processes under a macOS Seatbelt sandbox, injects the `SOUL.md` identity, runs
   a shared on-device provider proxy (identity stripping / retention enforcement
   before any inference leaves the device), bundles two Python MCP servers
-  (`june_context` = search the user's notes/dictation, `june_web` = web via a
-  token-gated loopback proxy), and exposes ~50 Tauri commands.
+  (`june_context` = search the user's notes/dictation plus `get_meeting_note`
+  fetch-by-id for **note references** (`@note:<id>`, see
+  [ADR-0010](adr/0010-note-references-in-agent-chat.md)), `june_web` = web via
+  a token-gated loopback proxy), and exposes ~50 Tauri commands.
 - **Gateway** (`src/lib/hermes-gateway.ts`) — `HermesGatewayClient`: pure
   JSON-RPC-over-WebSocket transport (connect coalescing, request/response
   correlation, timeouts, `4009` "session busy").
@@ -69,15 +74,20 @@ classified events into `AgentChatTurn` / `AgentChatPart[]` for rendering.
   [ADR-0007](adr/0007-model-capability-source-of-truth.md). The model catalog is
   Rust-side (`src-tauri/src/providers/mod.rs`, backed by June API's Venice
   catalog).
+- **The control plane is the sole reader of raw Hermes frames.** Every
+  consumer (`agent-chat-runtime`, `hermes-trace-buffer`, `hermes-session-steer`)
+  works from classified `JuneHermesEvent`s, never from raw frames. Every
+  normalized event carries `receivedAt`; first-party local kinds (`steering`)
+  are minted by June and never come out of `classifyHermesEvent`.
 - **Identity override.** June rewrites the runtime's persona at prompt-build time
   via an injected `SOUL.md`; June presents as June, never as Hermes.
 
 ## Slash commands
 
-Builtin composer slash commands are only **`/model`** and **`/file`**
-(`src/lib/agent-composer-slash-commands.ts`), plus **skill** slash commands
-(`skill-slash-commands.ts`). There is no `/image` builtin on `main`; image
-*generation* is an upstream Hermes tool, not a June slash command.
+Builtin composer slash commands are **`/model`**, **`/file`**, and
+**`/image`** — the last gated off behind `IMAGE_GENERATION_ENABLED`
+(`src/lib/agent-composer-slash-commands.ts`) — plus **skill** slash commands
+(`skill-slash-commands.ts`).
 
 ## Key Tauri commands
 

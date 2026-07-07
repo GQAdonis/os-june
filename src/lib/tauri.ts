@@ -183,6 +183,9 @@ export type ProviderModelSettingsDto = {
   imageModel: string;
   veniceApiKeyConfigured: boolean;
   localGeneration: LocalGenerationSettingsDto;
+  /** Venice safe mode for image generation/editing (blurs adult content). Off
+   * by default (privacy-first); the user opts in via Settings. */
+  imageSafeMode: boolean;
 };
 
 export type LocalGenerationSettingsDto = {
@@ -307,6 +310,7 @@ export type NoteDto = NoteListItemDto & {
   generatedContent?: string;
   editedContent?: string;
   transcript?: TranscriptDto;
+  transcriptCoverage?: TranscriptCoverageDto;
   sourceTranscripts?: TranscriptDto[];
   recording?: RecordingSessionDto;
   audio?: AudioArtifactDto;
@@ -315,6 +319,12 @@ export type NoteDto = NoteListItemDto & {
   lastError?: string;
   /** Recordings queued behind the one currently processing (0 when none). */
   queuedRecordings?: number;
+};
+
+export type TranscriptCoverageDto = {
+  detectedSpeechMs: number;
+  transcribedMs: number;
+  warning: boolean;
 };
 
 export type RecoverableRecordingDto = {
@@ -819,7 +829,8 @@ export async function suggestAgentSessionTitle(prompt: string) {
 
 export type SubmitIssueReportRequest = {
   /** Which kind of report this is: "bug" | "feedback" | "feature". Drives the
-   * team's triage and (server side) the no-charge waiver for the turn. */
+   * team's triage. Direct dialog reports run no model turn, so there is
+   * nothing to charge; June API creates the team-facing diagnosis. */
   category?: string;
   /** The user's report as they typed it, before the investigation wrapper. */
   description: string;
@@ -955,6 +966,12 @@ export async function downloadHermesBridgeFile(path: string) {
 
 export async function hermesBridgeFilePreview(path: string) {
   return invoke<string | null>("hermes_bridge_file_preview", {
+    request: { path },
+  });
+}
+
+export async function hermesBridgeImageDataUrl(path: string) {
+  return invoke<string | null>("hermes_bridge_image_data_url", {
     request: { path },
   });
 }
@@ -1100,8 +1117,11 @@ export async function startHermesBridge(cwd?: string, fullMode?: boolean) {
   });
 }
 
-export async function stopHermesBridge() {
-  return invoke<HermesBridgeStatus>("stop_hermes_bridge");
+/** Stops the Hermes runtime. With `mode`, stops ONLY that runtime (the MCP
+ * page's restart flow targets one mode and must not take down a live session
+ * in the other); without it, stops everything (historical behavior). */
+export async function stopHermesBridge(mode?: "sandboxed" | "unrestricted") {
+  return invoke<HermesBridgeStatus>("stop_hermes_bridge", { mode });
 }
 
 /** The redacted result of an MCP OAuth login attempt. The Rust bridge runs
@@ -1356,8 +1376,8 @@ export async function openHermesTuiDebug(input: { sessionId: string; unrestricte
   return invoke<void>("open_hermes_tui_debug", { request: input });
 }
 
-export async function listNotes(folderId?: string) {
-  return invoke<ListNotesResponse>("list_notes", { request: { folderId } });
+export async function listNotes(folderId?: string, limit?: number) {
+  return invoke<ListNotesResponse>("list_notes", { request: { folderId, limit } });
 }
 
 export async function getNote(noteId: string) {
@@ -1479,6 +1499,10 @@ export type AccountSubscription = {
   /** Trial length from the Stripe price config, available pre-subscription.
    * Absent on accounts APIs that don't expose it yet. */
   trialPeriodDays?: number;
+  /** Plan a scheduled downgrade switches to at the period end. Additive on
+   * the plan-change endpoint; absent everywhere else. */
+  scheduledPlan?: SubscriptionPlan | (string & {});
+  scheduledPlanCredits?: number;
 };
 
 export type AccountStatus = {
@@ -1540,6 +1564,15 @@ export async function osAccountsUpgrade(plan?: SubscriptionPlan) {
   return invoke<void>("os_accounts_upgrade", { plan });
 }
 
+/** Changes the plan on the caller's existing subscription in place (Pro to
+ * Max). OS Accounts prorates the charge and grants the new plan's credits
+ * immediately, so there is no browser round-trip; the resolved subscription
+ * reflects the new plan. Callers should refresh account status afterwards to
+ * pick up the freshly granted balance. */
+export async function osAccountsChangePlan(plan: SubscriptionPlan) {
+  return invoke<AccountSubscription>("os_accounts_change_plan", { plan });
+}
+
 /** Opens the accounts portal in the default browser — the webview swallows
  * target="_blank" anchors, so portal navigation must go through Rust. */
 export async function osAccountsOpenPortal() {
@@ -1588,11 +1621,44 @@ export async function clearVeniceApiKey() {
   return invoke<ProviderModelSettingsDto>("clear_venice_api_key");
 }
 
+// Toggles Venice safe mode for image generation/editing. Off by default; when
+// on, Venice blurs adult content.
+export async function setImageSafeMode(enabled: boolean) {
+  return invoke<ProviderModelSettingsDto>("set_image_safe_mode", {
+    request: { enabled },
+  });
+}
+
 // Generates an image from a prompt via the June API. `model` is optional; the
 // backend falls back to the saved default image model when it is omitted.
-export async function generateImage(prompt: string, model?: string) {
+// `safeMode` pins the safe-mode value a retry must replay; omitted uses the
+// live saved setting.
+export async function generateImage(
+  prompt: string,
+  model?: string,
+  requestId?: string,
+  safeMode?: boolean,
+) {
   return invoke<GeneratedImageDto>("generate_image", {
-    request: { prompt, model },
+    request: { prompt, model, requestId, safeMode },
+  });
+}
+
+export async function editImage(input: {
+  imageBase64: string;
+  prompt: string;
+  mimeType?: string;
+  model?: string;
+  requestId?: string;
+}) {
+  return invoke<GeneratedImageDto>("edit_image", {
+    request: {
+      image: input.imageBase64,
+      prompt: input.prompt,
+      mimeType: input.mimeType,
+      model: input.model,
+      requestId: input.requestId,
+    },
   });
 }
 

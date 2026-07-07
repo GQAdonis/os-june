@@ -5,6 +5,7 @@ mod charge_flow;
 mod dictate;
 mod error;
 mod image;
+mod issue_reports;
 mod language;
 mod metering;
 mod note_generate;
@@ -21,8 +22,10 @@ pub use dictate::{
 };
 pub use error::ServiceError;
 pub use image::{
-    ImageGenerateOutput, ImageGenerateParams, ImageModelPrice, ImageService, ImageServiceDeps,
+    ImageEditParams, ImageGenerateOutput, ImageGenerateParams, ImageModelPrice, ImageService,
+    ImageServiceDeps,
 };
+pub use issue_reports::{IssueReportService, IssueReportServiceDeps};
 pub use note_generate::{
     NOTE_GENERATE_PROMPT_VERSION, NoteGenerateOutput, NoteGenerateParams, NoteGenerateService,
     NoteGenerateServiceDeps,

@@ -7,7 +7,7 @@ use crate::{
 };
 use axum::{Json, extract::State, http::HeaderMap};
 use june_domain::GeneratedImage;
-use june_services::ImageGenerateParams;
+use june_services::{ImageEditParams, ImageGenerateParams};
 use serde::{Deserialize, Serialize};
 
 /// Bounds for an explicit `width`/`height`. We only reject values above Venice's
@@ -23,10 +23,40 @@ const MAX_IMAGE_DIMENSION: u32 = 1280;
 pub struct ImageGenerateRequest {
     pub prompt: String,
     pub model: String,
+    /// Optional client-generated id for replaying a settled image request. New
+    /// clients send a fresh id per logical call and reuse it only when retrying
+    /// a dropped response; old clients may omit it.
+    #[serde(default)]
+    pub request_id: Option<String>,
     #[serde(default)]
     pub width: Option<u32>,
     #[serde(default)]
     pub height: Option<u32>,
+    /// Venice `safe_mode`. Absent (old clients) leaves it unset so Venice applies
+    /// its default; present forces it on/off per the on-device setting.
+    #[serde(default)]
+    pub safe_mode: Option<bool>,
+}
+
+/// An image edit: the source image as raw base64 plus an instruction.
+/// `model` is optional — omitted requests use June API's default edit model
+/// (the image MCP never names one). `mimeType` describes the source bytes.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageEditRequest {
+    pub image: String,
+    pub prompt: String,
+    /// Optional client-generated id for replaying a settled image edit. New
+    /// clients send a fresh id per logical edit and reuse it only when retrying
+    /// a dropped response; old clients may omit it.
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub safe_mode: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -73,6 +103,7 @@ pub(crate) async fn generate(
         return Err(ApiError::bad_request("model_required"));
     }
     validation::validate_text_len("model", &model, validation::MAX_MODEL_CHARS)?;
+    let request_id = optional_request_id(request.request_id)?;
 
     let width = validate_dimension("width", request.width)?;
     let height = validate_dimension("height", request.height)?;
@@ -81,10 +112,68 @@ pub(crate) async fn generate(
         .image()
         .generate(ImageGenerateParams {
             user_id,
+            request_id,
             prompt,
             model,
             width,
             height,
+            safe_mode: request.safe_mode,
+            provider_credentials,
+        })
+        .await?;
+
+    Ok(Json(ApiResponse::ok(output.image.into())))
+}
+
+/// Edits an existing image via Venice. Metered like generation: the
+/// service holds an estimate, edits, then charges the edit model's flat price
+/// (a separate catalog). A user Venice key skips June credit metering. An
+/// unpriced model is rejected `model_not_priced`; an out-of-credits user
+/// without BYOK gets 402 before Venice is called.
+pub(crate) async fn edit(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<ImageEditRequest>,
+) -> Result<Json<ApiResponse<ImageGenerateResponse>>, ApiError> {
+    let user_id = authenticated_user(&state, &headers).await?;
+    let provider_credentials = provider_credentials(&headers)?;
+
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err(ApiError::bad_request("prompt_required"));
+    }
+    validation::validate_text_len("prompt", &prompt, validation::MAX_IMAGE_PROMPT_CHARS)?;
+
+    let image = request.image.trim().to_string();
+    if image.is_empty() {
+        return Err(ApiError::bad_request("image_required"));
+    }
+    let request_id = optional_request_id(request.request_id)?;
+
+    // Model is optional; an empty string is treated as absent so the service's
+    // default edit model applies. Validate length only when one is given.
+    let model = request
+        .model
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty());
+    if let Some(model) = &model {
+        validation::validate_text_len("model", model, validation::MAX_MODEL_CHARS)?;
+    }
+
+    let output = state
+        .image()
+        .edit(ImageEditParams {
+            user_id,
+            request_id,
+            image_base64: image,
+            mime_type: request
+                .mime_type
+                .map(|mime| mime.trim().to_string())
+                .filter(|mime| !mime.is_empty())
+                .unwrap_or_else(|| "image/png".to_string()),
+            prompt,
+            model,
+            safe_mode: request.safe_mode,
             provider_credentials,
         })
         .await?;
@@ -99,4 +188,15 @@ fn validate_dimension(field: &str, value: Option<u32>) -> Result<Option<u32>, Ap
         }
         other => Ok(other),
     }
+}
+
+fn optional_request_id(raw: Option<String>) -> Result<Option<String>, ApiError> {
+    let Some(request_id) = raw
+        .map(|request_id| request_id.trim().to_string())
+        .filter(|request_id| !request_id.is_empty())
+    else {
+        return Ok(None);
+    };
+    validation::validate_text_len("request_id", &request_id, validation::MAX_ID_CHARS)?;
+    Ok(Some(request_id))
 }

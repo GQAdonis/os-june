@@ -17,18 +17,46 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0005](adr/0005-source-separated-audio-capture.md) — one WAV per source, re-interleaved as turns
 - [adr/0006](adr/0006-embed-hermes-sandboxed-runtime.md) — embed the pinned Hermes runtime as sandboxed child processes
 - [adr/0007](adr/0007-model-capability-source-of-truth.md) — model capabilities come from the live Venice catalog, not marketing traits
+- [adr/0008](adr/0008-image-generation-and-editing-tools.md) — image generation/editing: `/image` fast path + LLM tools, via Venice
+- [adr/0009](adr/0009-hermes-config-shared-ownership-merge.md) — config.yaml is shared with the Hermes dashboard; June deep-merges on spawn, never overwrites
+- [adr/0010](adr/0010-note-references-in-agent-chat.md) — note references in agent chat: `@note:<id>` text token + `get_meeting_note` fetch-by-id
+- [adr/0011](adr/0011-bundled-hermes-skills.md) — selected Hermes skills ship as read-only app resources when the runtime pin cannot move
+- [adr/0012](adr/0012-direct-issue-report-submission.md) — issue reports submit directly (no client model turn, nothing to charge); June API generates the team-facing diagnosis
 
 ## Enforceable rules (spec/)
 
 Coding rules that should fail review if violated (distinct from the `specs/`
 feature specs). Full index: [spec/index.md](../spec/index.md).
 
-- UI copy: [spec/sentence-case](../spec/sentence-case.md), [spec/no-typographic-dashes](../spec/no-typographic-dashes.md)
-- UI styling: [spec/icons-central-only](../spec/icons-central-only.md), [spec/design-tokens](../spec/design-tokens.md)
+- UI copy: [spec/sentence-case](../spec/sentence-case.md), [spec/no-typographic-dashes](../spec/no-typographic-dashes.md), [spec/no-all-caps](../spec/no-all-caps.md)
+- UI styling: [spec/icons-central-only](../spec/icons-central-only.md), [spec/design-tokens](../spec/design-tokens.md), [spec/no-tabular-numerals](../spec/no-tabular-numerals.md)
+- Typography: [spec/type-scale](../spec/type-scale.md), [spec/font-weights](../spec/font-weights.md), [spec/font-families](../spec/font-families.md)
+- Controls: [spec/control-sizes](../spec/control-sizes.md)
+
+## Design system
+
+The extracted design system: tokens, primitives, and the rules around them (see
+the `spec/` entries above for the enforceable versions).
+
+- [design/foundations.md](design/foundations.md) — theming model, token roles, and the type system (scale, heading mapping, two-weight system, family roles); ends with the pass-2 deviations worklist
+- [design/components.md](design/components.md) — pattern-to-canonical-answer map for the shared `src/components/ui/` primitives, the settings markup contract, and what is not yet systematized
+- [design/conventions.md](design/conventions.md) — flat-namespace naming, interaction and visual rules, theming pipeline, and how to open or extend the styleguide page
+- [design/taste.md](design/taste.md) — the sensibility behind the rules (quiet by default, weight as punctuation, color spent not sprayed); the portable layer for other projects
+
+## Agent skill config (docs/agents/)
+
+Per-repo config the engineering skills read before acting (see the
+"Agent skills" section in [AGENTS.md](../AGENTS.md)).
+
+- [agents/issue-tracker.md](agents/issue-tracker.md) — issues live on os-platform (org `june`), read via the os-platform skill, writes append-only via the API
+- [agents/triage-labels.md](agents/triage-labels.md) — the five triage roles mapped to platform labels + statuses
+- [agents/domain.md](agents/domain.md) — single-context layout; how skills consume CONTEXT.md and ADRs
+- [agents/collaboration.md](agents/collaboration.md) — how agents build, delegate, and review across harnesses: the skill family map, reviewer-is-never-the-author, trust levels
 
 ## Subsystems
 
 - [hermes-architecture.md](hermes-architecture.md) — the agent runtime: bridge, gateway, control plane, sessions, models
+- [hermes-gateway-gotchas.md](hermes-gateway-gotchas.md) — integration gotchas: restart discipline, config contract, MCP OAuth, event types, upstream tool-schema quirks
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [june-api-prd.md](june-api-prd.md) — June API: upstream proxy + OS Accounts authorize/charge (the canonical backend spec)
 - [configuration.md](configuration.md) — env + config reference (desktop client + June API)
