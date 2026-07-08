@@ -10,6 +10,7 @@ import { createPortal } from "react-dom";
 import { modelSupportsTools, type ModelPrivacyBadge } from "../../../lib/model-privacy";
 import { suggestedModelsForMode } from "../../../lib/suggested-models";
 import type { VeniceModelDto } from "../../../lib/tauri";
+import { useScrollFade } from "../../../lib/use-scroll-fade";
 import { rectFromElement, type HoverBridgeRect } from "../../ui/hoverBridge";
 import { useCatalogHoverBridge, useModelDetailHoverBridge } from "../../ui/useModelHoverBridge";
 import { HoverTip } from "../../ui/HoverTip";
@@ -159,22 +160,8 @@ export function ComposerModelPopover({
   );
 
   const portalTarget = typeof document === "undefined" ? null : document.body;
-  // Position-aware scroll fades on the catalog list, same treatment as the
-  // artifact panel body: only when it overflows, only on edges with hidden
-  // content.
-  const [fade, setFade] = useState({ top: false, bottom: false });
-  const updateFade = useCallback(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const canScroll = el.scrollHeight - el.clientHeight > 1;
-    const atTop = el.scrollTop <= 1;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-    setFade((prev) => {
-      const top = canScroll && !atTop;
-      const bottom = canScroll && !atBottom;
-      return prev.top === top && prev.bottom === bottom ? prev : { top, bottom };
-    });
-  }, []);
+  // Position-aware scroll fades on the catalog list, via the shared primitive.
+  const fade = useScrollFade(listRef);
 
   // The all-models panel stays anchored to the menu's bottom edge and grows
   // upward, so its height is capped to the room above — clearing the titlebar
@@ -259,8 +246,8 @@ export function ComposerModelPopover({
   // Re-measure the fades whenever the list's content or cap changes: panel
   // open (after the max-height effect above), and every search keystroke.
   useLayoutEffect(() => {
-    updateFade();
-  }, [flyout, search, options, updateFade]);
+    fade.update();
+  }, [flyout, search, options, fade.update]);
 
   // Row positions shift under the pointer on filter/reflow, so a lingering
   // card would point at the wrong row.
@@ -507,18 +494,14 @@ export function ComposerModelPopover({
                 aria-label="Search models"
               />
             </label>
-            <div
-              className="agent-composer-model-list-wrap"
-              data-fade-top={fade.top || undefined}
-              data-fade-bottom={fade.bottom || undefined}
-            >
+            <div className="agent-composer-model-list-wrap scroll-fade" {...fade.props}>
               <div
                 ref={listRef}
                 className="agent-composer-model-list"
                 role="listbox"
                 aria-label="All text models"
                 onScroll={() => {
-                  updateFade();
+                  fade.update();
                   cancelHoverIntent();
                   setCatalogHover(null);
                 }}

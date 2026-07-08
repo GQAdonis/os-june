@@ -2468,9 +2468,9 @@ function ModelRow({
 function ModelSummaryHoverDetails({ model }: { model: VeniceModelDto }) {
   return (
     <div className="agent-composer-model-detail model-summary-hovercard">
-      {/* Read-only summary card: full description in one hover, no "Show more"
-          toggle to click inside a floating tip. */}
-      <ModelPickerCardContent model={model} withDescription expandable={false} />
+      {/* Read-only summary card: full description in one hover (the card shows
+          it in a capped scroll box; there is no "Show more" toggle anywhere). */}
+      <ModelPickerCardContent model={model} withDescription />
     </div>
   );
 }

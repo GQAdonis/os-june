@@ -5212,47 +5212,110 @@ input:focus-visible,
   flex: 0 0 auto;
 }
 
+/* ============================================================================
+ * Scroll fades (design system)
+ *
+ * A scroller melts its clipped edge when content is hidden above or below the
+ * viewport. Driven by the `useScrollFade` hook, which sets `data-fade-top` /
+ * `data-fade-bottom` only on the edge(s) with hidden content (so a fade never
+ * shows when everything fits). Two flavors, one contract:
+ *
+ *  - `.scroll-fade`      — contained overlays: `::before`/`::after` gradients
+ *    pinned to the wrapper's edges. WKWebView-safe for popovers (a mask on the
+ *    scroller rides the scrolled content in WebKit and bleeds past the bounds).
+ *    Put the class + data attributes on a non-scrolling wrapper; the scroller
+ *    is its child. Tunables: `--scroll-fade-size`, `--scroll-fade-color`,
+ *    `--scroll-fade-inset-right`.
+ *  - `.scroll-fade-mask` — mask-image gradient on the scroller itself. Reveals
+ *    the real content at the edge (clean in light + dark) for large panel
+ *    scrollers. Put the class + data attributes on the scroller. Tunable:
+ *    `--scroll-fade-size`.
+ * ============================================================================ */
+.scroll-fade {
+  position: relative;
+}
+
+.scroll-fade::before,
+.scroll-fade::after {
+  content: "";
+  position: absolute;
+  right: var(--scroll-fade-inset-right, 0);
+  left: 0;
+  z-index: 1;
+  height: var(--scroll-fade-size, 24px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.scroll-fade::before {
+  top: 0;
+  background: linear-gradient(to bottom, var(--scroll-fade-color, var(--popover)), transparent);
+}
+
+.scroll-fade::after {
+  bottom: 0;
+  background: linear-gradient(to top, var(--scroll-fade-color, var(--popover)), transparent);
+}
+
+.scroll-fade[data-fade-top]::before,
+.scroll-fade[data-fade-bottom]::after {
+  opacity: 1;
+}
+
+.scroll-fade-mask[data-fade-top][data-fade-bottom] {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--scroll-fade-size, 28px),
+    #000 calc(100% - var(--scroll-fade-size, 28px)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 var(--scroll-fade-size, 28px),
+    #000 calc(100% - var(--scroll-fade-size, 28px)),
+    transparent
+  );
+}
+
+.scroll-fade-mask[data-fade-top]:not([data-fade-bottom]) {
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--scroll-fade-size, 28px));
+  mask-image: linear-gradient(to bottom, transparent, #000 var(--scroll-fade-size, 28px));
+}
+
+.scroll-fade-mask:not([data-fade-top])[data-fade-bottom] {
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - var(--scroll-fade-size, 28px)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    #000 calc(100% - var(--scroll-fade-size, 28px)),
+    transparent
+  );
+}
+
+/* The card always shows the full description (no "Show more" toggle): a capped,
+ * scrollable box so the card can never grow after it opens, which keeps the
+ * open-time viewport clamp correct and the expansion keyboard-neutral. It rides
+ * the shared `.scroll-fade` primitive with a tighter fade sized for the short
+ * box. */
+.agent-composer-model-detail-desc-wrap {
+  --scroll-fade-size: 14px;
+  overflow: hidden;
+  contain: paint;
+}
+
 .agent-composer-model-detail-desc {
   margin: 0;
+  max-height: 104px;
+  overflow-y: auto;
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
   line-height: 1.5;
-}
-
-/* Clamp to three lines until expanded; the measured "Show more" toggle below
- * lifts the clamp in place. */
-.agent-composer-model-detail-desc:not([data-expanded]) {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  overflow: hidden;
-}
-
-/* Expanded, a long description scrolls inside a capped box rather than growing
- * the card unbounded. Plain overflow scroll — no mask-image fade (it clips in
- * WKWebView popover scrollers). */
-.agent-composer-model-detail-desc[data-expanded] {
-  max-height: 168px;
-  overflow-y: auto;
-}
-
-/* Text toggle. Keep it in the gray spectrum: slightly darker than the
- * description by default, then color-only darkening on hover. */
-.agent-composer-model-detail-more {
-  align-self: flex-start;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--body-copy);
-  font: inherit;
-  font-size: var(--fs-sm);
-  font-weight: 400;
-  cursor: pointer;
-  transition: color var(--t-fast) var(--ease-out);
-}
-
-.agent-composer-model-detail-more:hover {
-  color: var(--popover-foreground);
 }
 
 /* The card's spec table: pricing and context as label/value rows, set on a
@@ -5381,8 +5444,11 @@ input:focus-visible,
 /* The list's scroll viewport plus its edge fades. The wrap exists so the
  * overlays can sit at top: 0 / bottom: 0 of the exact scroll area — no
  * hand-computed offsets to drift out of place. */
+/* Catalog list scroller. Fades come from the shared `.scroll-fade` primitive
+ * (contained overlays, WKWebView-safe for this popover); only the fade size is
+ * tuned here so rows melt into the popover surface at the boundary. */
 .agent-composer-model-list-wrap {
-  position: relative;
+  --scroll-fade-size: 16px;
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
@@ -5398,38 +5464,6 @@ input:focus-visible,
   gap: var(--sp-px);
   min-height: 0;
   overflow-y: auto;
-}
-
-/* Scroll fades, contained: overlays pinned to the scroll viewport's edges
- * (a mask on the scroller rides the scrolled content in WebKit and bleeds
- * past the bounds). Rows melt into the popover surface at the boundary and
- * nothing can paint outside the panel. */
-.agent-composer-model-list-wrap::before,
-.agent-composer-model-list-wrap::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  left: 0;
-  z-index: 1;
-  height: 16px;
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--t-fast) var(--ease-out);
-}
-
-.agent-composer-model-list-wrap::before {
-  top: 0;
-  background: linear-gradient(to bottom, var(--popover), transparent);
-}
-
-.agent-composer-model-list-wrap::after {
-  bottom: 0;
-  background: linear-gradient(to top, var(--popover), transparent);
-}
-
-.agent-composer-model-list-wrap[data-fade-top="true"]::before,
-.agent-composer-model-list-wrap[data-fade-bottom="true"]::after {
-  opacity: 1;
 }
 
 .agent-composer-model-empty {

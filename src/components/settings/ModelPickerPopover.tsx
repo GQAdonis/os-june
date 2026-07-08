@@ -15,6 +15,7 @@ import { createPortal } from "react-dom";
 import { modelAvailableForMode, modelPrivacyBadge } from "../../lib/model-privacy";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
 import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
+import { useScrollFade } from "../../lib/use-scroll-fade";
 import { rectFromElement, type HoverBridgeRect } from "../ui/hoverBridge";
 import { useCatalogHoverBridge, useModelDetailHoverBridge } from "../ui/useModelHoverBridge";
 import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../ui/ModelPrivacyChip";
@@ -133,19 +134,7 @@ export function ModelPickerPopover({
 
   const portalTarget = typeof document === "undefined" ? null : document.body;
 
-  const [fade, setFade] = useState({ top: false, bottom: false });
-  const updateFade = useCallback(() => {
-    const el = listRef.current;
-    if (!el) return;
-    const canScroll = el.scrollHeight - el.clientHeight > 1;
-    const atTop = el.scrollTop <= 1;
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1;
-    setFade((prev) => {
-      const top = canScroll && !atTop;
-      const bottom = canScroll && !atBottom;
-      return prev.top === top && prev.bottom === bottom ? prev : { top, bottom };
-    });
-  }, []);
+  const fade = useScrollFade(listRef);
 
   // The direct catalog renders the searchable list straight inside the popover
   // (no flyout panel), so nothing else caps its height and a long catalog (the
@@ -271,8 +260,8 @@ export function ModelPickerPopover({
   }, [detailPos]);
 
   useLayoutEffect(() => {
-    updateFade();
-  }, [directCatalog, flyout, options, search, updateFade]);
+    fade.update();
+  }, [directCatalog, flyout, options, search, fade.update]);
 
   useEffect(() => {
     setCatalogHover(null);
@@ -403,18 +392,14 @@ export function ModelPickerPopover({
             aria-label="Search models"
           />
         </label>
-        <div
-          className="agent-composer-model-list-wrap"
-          data-fade-top={fade.top || undefined}
-          data-fade-bottom={fade.bottom || undefined}
-        >
+        <div className="agent-composer-model-list-wrap scroll-fade" {...fade.props}>
           <div
             ref={listRef}
             className="agent-composer-model-list"
             role="listbox"
             aria-label={label}
             onScroll={() => {
-              updateFade();
+              fade.update();
               cancelHoverIntent();
               setCatalogHover(null);
             }}
@@ -628,23 +613,18 @@ export function ModelPickerPopover({
   );
 }
 
-// The card: name + privacy chip, a description clamped to three lines with an
-// inline "Show more" toggle (the card is interactive, so this expands in place
-// instead of the old hover-a-tooltip-inside-the-card dance), then the
-// pricing/context facts as a compact spec list.
+// The card: name + privacy chip, the full description in a capped scroll box,
+// then the pricing/context facts as a compact spec list. The description never
+// grows the card after it opens (no "Show more" toggle), so the open-time
+// viewport clamp stays correct and there is no focusable control stranded
+// inside the portaled subtree.
 export function ModelPickerCardContent({
   model,
   withDescription,
-  // `expandable` controls the description's "Show more" toggle. The picker's
-  // hover cards keep it on so a long blurb stays compact. Read-only placements
-  // (the settings summary card) pass `expandable={false}` to show the full text
-  // in one hover — no toggle to click inside a floating card.
-  expandable = true,
   animateChange = false,
 }: {
   model: VeniceModelDto;
   withDescription?: boolean;
-  expandable?: boolean;
   animateChange?: boolean;
 }) {
   const badge = modelPrivacyBadge(model);
@@ -668,14 +648,8 @@ export function ModelPickerCardContent({
         ) : null}
       </p>
       {withDescription && model.description ? (
-        expandable ? (
-          // Keyed by model so switching rows resets the toggle and re-measures.
-          <ModelPickerDescription key={model.id} text={model.description} />
-        ) : (
-          <p className="agent-composer-model-detail-desc" data-expanded>
-            {model.description}
-          </p>
-        )
+        // Keyed by model so switching rows re-measures the fade from the top.
+        <ModelCardDescription key={model.id} text={model.description} />
       ) : null}
       {specs.length ? (
         <dl className="agent-composer-model-detail-specs">
@@ -691,39 +665,18 @@ export function ModelPickerCardContent({
   );
 }
 
-// Mirrors the app's clamp-with-toggle pattern (see NoteEditor's TranscriptTurn):
-// the description clamps to three lines until "Show more" lifts the clamp in
-// place. The toggle only appears when the collapsed text actually overflows.
-function ModelPickerDescription({ text }: { text: string }) {
+// Full description in a short capped box that scrolls when it overflows, with
+// contained top/bottom scroll fades from the shared `useScrollFade` primitive
+// (WKWebView-safe overlay flavor — never a mask on the scroller itself).
+function ModelCardDescription({ text }: { text: string }) {
   const ref = useRef<HTMLParagraphElement | null>(null);
-  const [clamped, setClamped] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  // Measure against the clamped box (only while collapsed — once expanded the
-  // clamp is gone and scrollHeight would equal clientHeight, hiding the toggle).
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el || expanded) return;
-    setClamped(el.scrollHeight - el.clientHeight > 1);
-  }, [text, expanded]);
+  const fade = useScrollFade(ref);
   return (
-    <>
-      <p
-        ref={ref}
-        className="agent-composer-model-detail-desc"
-        data-expanded={expanded || undefined}
-      >
+    <div className="agent-composer-model-detail-desc-wrap scroll-fade" {...fade.props}>
+      <p ref={ref} className="agent-composer-model-detail-desc">
         {text}
       </p>
-      {clamped || expanded ? (
-        <button
-          type="button"
-          className="agent-composer-model-detail-more"
-          onClick={() => setExpanded((value) => !value)}
-        >
-          {expanded ? "Show less" : "Show more"}
-        </button>
-      ) : null}
-    </>
+    </div>
   );
 }
 
