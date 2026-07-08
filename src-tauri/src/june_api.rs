@@ -483,12 +483,20 @@ pub async fn proxy_agent_chat_completions(
     if crate::providers::generation_provider() == PROVIDER_LOCAL {
         return proxy_local_agent_chat_completions(body).await;
     }
-    // Remote provider safety net: a Hermes session started while local mode was
-    // on keeps sending the local model id (Hermes loads its model at spawn and
-    // does not reload on a settings change), which the remote backend rejects
-    // via require_priced_model and would hard-fail every message until restart.
-    // Degrade a stale local model id to the current global model instead.
-    let local_model_id = crate::providers::local_generation_settings().model_id;
+    // Existing sessions are model-locked. A session created while local mode was
+    // active keeps sending the raw local model id even if the global default is
+    // later changed back to Venice from the new-session composer. Honor that
+    // stored model by routing it to the local proxy while the endpoint remains
+    // configured, so the locked session does not silently move off-device.
+    let local_settings = crate::providers::local_generation_settings();
+    let local_model_id = local_settings.model_id.trim().to_string();
+    if should_proxy_request_to_configured_local_model(&body, &local_settings) {
+        return proxy_local_agent_chat_completions(body).await;
+    }
+    // Legacy safety net for invalid/stale local references that cannot be
+    // served locally (for example a prefixed synthetic id after settings were
+    // cleared): degrade to the current global model rather than sending an id
+    // the remote backend rejects via require_priced_model.
     let global_model = crate::providers::generation_model();
     redirect_stale_local_model(&mut body, &local_model_id, &global_model);
     // Computed after the redirect so a degraded stale-local body is gated on the
@@ -769,14 +777,28 @@ fn is_local_model_reference(model: &str, local_model_id: &str) -> bool {
         || model.starts_with(LOCAL_GENERATION_OPTION_ID_PREFIX)
 }
 
-/// Rewrites a request that still carries a local model reference to the
-/// current global generation model, for the remote proxy path only. Mirrors
-/// the local path's unconditional model stomp: when the global provider is
-/// remote, a body still naming the local model is a stale spawn-time default
-/// from a session created while local mode was on, and the remote backend
-/// would reject it. Genuine remote per-session overrides (any non-synthetic
-/// id other than the configured local model id) are left untouched, so an
-/// explicit `/model` switch to a real remote model still wins.
+fn should_proxy_request_to_configured_local_model(
+    body: &serde_json::Value,
+    settings: &LocalGenerationSettings,
+) -> bool {
+    let local_model_id = settings.model_id.trim();
+    if settings.base_url.trim().is_empty() || local_model_id.is_empty() {
+        return false;
+    }
+    body.as_object()
+        .and_then(|object| object.get("model"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|model| is_local_model_reference(model, local_model_id))
+}
+
+/// Rewrites a request that carries an unservable local model reference to the
+/// current global generation model, for the remote proxy path only. Configured
+/// local references are routed to the local proxy before this runs; this guard
+/// remains for legacy synthetic ids or cleared local settings that would never
+/// be valid remote model ids. Genuine remote per-session overrides (any
+/// non-synthetic id other than the configured local model id) are left
+/// untouched, so an explicit `/model` switch to a real remote model still wins.
 fn redirect_stale_local_model(
     body: &mut serde_json::Value,
     local_model_id: &str,
@@ -939,7 +961,10 @@ fn drop_leading_orphan_tool_messages(messages: &mut Vec<serde_json::Value>) {
     }
 }
 
-pub async fn suggest_agent_session_title(prompt: &str) -> Result<String, AppError> {
+pub async fn suggest_agent_session_title(
+    prompt: &str,
+    response: Option<&str>,
+) -> Result<String, AppError> {
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err(AppError::new(
@@ -947,15 +972,16 @@ pub async fn suggest_agent_session_title(prompt: &str) -> Result<String, AppErro
             "Cannot title an empty agent request.",
         ));
     }
+    let user_content = agent_session_title_user_content(prompt, response);
     let response = proxy_agent_chat_completions(serde_json::json!({
         "messages": [
             {
                 "role": "system",
-                "content": "Name this agent session by the work being done, not by repeating the user's request. Return only a concrete 2 to 5 word title in sentence case: capitalize the first word and proper nouns only, never every word. Avoid first person, words like please/help/you, trailing ellipses, quotes, punctuation wrappers, markdown, or explanations."
+                "content": "Name this agent session by the work being done, not by repeating the user's request. Return only a concrete 2 to 5 word title in sentence case: capitalize the first word and proper nouns only, never every word. Avoid first person, words like please/help/you, trailing ellipses, quotes, punctuation wrappers, markdown, or explanations. When an assistant reply excerpt is provided, name the session by the work described there."
             },
             {
                 "role": "user",
-                "content": prompt
+                "content": user_content
             }
         ],
         "temperature": 0.1,
@@ -1393,6 +1419,19 @@ fn strip_source_label_prefix(value: &str) -> Option<&str> {
         }
     }
     None
+}
+
+fn agent_session_title_user_content(prompt: &str, response: Option<&str>) -> String {
+    let prompt = prompt.trim();
+    let Some(response) = response.map(str::trim).filter(|value| !value.is_empty()) else {
+        return prompt.to_string();
+    };
+    // 1200 chars keeps the excerpt a few hundred tokens: enough signal to name
+    // the work, small enough that the reply never drowns out the request or
+    // crowds the shared max_tokens budget. The frontend caps to the same
+    // length before invoking; this cap is the trust-boundary backstop.
+    let response: String = response.chars().take(1200).collect();
+    format!("User request:\n{prompt}\n\nAssistant reply excerpt:\n{response}")
 }
 
 fn clean_agent_session_title(value: &str) -> Option<String> {
@@ -2239,6 +2278,44 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"v
     }
 
     #[test]
+    fn agent_session_title_user_content_passes_through_prompt_only() {
+        assert_eq!(
+            agent_session_title_user_content("  Refactor this parser  ", None),
+            "Refactor this parser"
+        );
+    }
+
+    #[test]
+    fn agent_session_title_user_content_treats_whitespace_response_as_absent() {
+        assert_eq!(
+            agent_session_title_user_content("  Refactor this parser  ", Some(" \n\t ")),
+            "Refactor this parser"
+        );
+    }
+
+    #[test]
+    fn agent_session_title_user_content_formats_prompt_and_response() {
+        assert_eq!(
+            agent_session_title_user_content(
+                "  Refactor this parser  ",
+                Some("  I rewrote the tokenizer and added coverage.  "),
+            ),
+            "User request:\nRefactor this parser\n\nAssistant reply excerpt:\nI rewrote the tokenizer and added coverage."
+        );
+    }
+
+    #[test]
+    fn agent_session_title_user_content_truncates_response_on_char_boundary() {
+        let response = "é".repeat(1201);
+        let content = agent_session_title_user_content("Summarize the work", Some(&response));
+        let excerpt = content
+            .strip_prefix("User request:\nSummarize the work\n\nAssistant reply excerpt:\n")
+            .expect("formatted content should include assistant reply prefix");
+        assert_eq!(excerpt.chars().count(), 1200);
+        assert_eq!(excerpt, "é".repeat(1200));
+    }
+
+    #[test]
     fn parses_explicit_classification_yes_no_answers() {
         assert_eq!(parse_explicit_classification("YES"), Some(true));
         assert_eq!(parse_explicit_classification("no."), Some(false));
@@ -2325,10 +2402,61 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"v
     }
 
     #[test]
-    fn remote_proxy_redirects_stale_local_model_to_global_model() {
-        // A session started while local mode was on keeps sending the local
-        // model id; on the remote path it must degrade to the global model
-        // rather than hard-fail against require_priced_model.
+    fn remote_proxy_routes_configured_local_model_to_local_proxy() {
+        let body = serde_json::json!({
+            "model": "llama3.1:8b",
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let settings = LocalGenerationSettings {
+            base_url: "http://localhost:11434/v1".to_string(),
+            model_id: "llama3.1:8b".to_string(),
+            api_key: String::new(),
+        };
+
+        assert!(should_proxy_request_to_configured_local_model(
+            &body, &settings
+        ));
+    }
+
+    #[test]
+    fn remote_proxy_routes_configured_synthetic_local_model_to_local_proxy() {
+        let body = serde_json::json!({
+            "model": "__june_local_generation__:llama3.1%3A8b",
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let settings = LocalGenerationSettings {
+            base_url: "http://localhost:11434/v1".to_string(),
+            model_id: "llama3.1:8b".to_string(),
+            api_key: String::new(),
+        };
+
+        assert!(should_proxy_request_to_configured_local_model(
+            &body, &settings
+        ));
+    }
+
+    #[test]
+    fn remote_proxy_does_not_route_unconfigured_local_model_to_local_proxy() {
+        let body = serde_json::json!({
+            "model": "llama3.1:8b",
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let settings = LocalGenerationSettings {
+            base_url: String::new(),
+            model_id: "llama3.1:8b".to_string(),
+            api_key: String::new(),
+        };
+
+        assert!(!should_proxy_request_to_configured_local_model(
+            &body, &settings
+        ));
+    }
+
+    #[test]
+    fn remote_proxy_redirects_unservable_local_model_to_global_model() {
+        // A local model reference with no configured local endpoint cannot be
+        // served locally; on the remote path it degrades to the global model
+        // rather than hard-failing against require_priced_model.
         let mut body = serde_json::json!({
             "model": "llama3.1:8b",
             "messages": [{ "role": "user", "content": "hi" }],
