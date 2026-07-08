@@ -9,8 +9,9 @@ use crate::{
     util::sha256_hex,
 };
 use june_domain::{
-    ActionSlug, AgentChatCompleter, AgentChatCompletion, AgentChatRequest, Credits, DomainError,
-    ModelId, ModelKind, OsAccountsClient, ProviderCredentials, Receipt, TokenUsage, UserId,
+    ActionSlug, AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStreamOutcome,
+    Credits, DomainError, ModelId, ModelKind, OsAccountsClient, ProviderCredentials, Receipt,
+    UserId,
 };
 use std::sync::Arc;
 
@@ -127,7 +128,7 @@ impl AgentChatService {
                 })
                 .await?;
             tokio::spawn(async move {
-                let _ = stream.usage.await;
+                let _ = stream.outcome.await;
             });
             log_skipped_user_venice_key(ActionSlug::AgentChat, &params.user_id, &params.model_id.0);
             return Ok(AgentChatStreamOutput {
@@ -164,7 +165,7 @@ impl AgentChatService {
             cap_credits: authorization.cap_credits,
             flat_estimate_credits: self.flat_estimate_credits,
             body_digest,
-            usage: stream.usage,
+            outcome: stream.outcome,
         });
         Ok(AgentChatStreamOutput {
             content_type: stream.content_type,
@@ -207,7 +208,7 @@ struct StreamSettlement {
     cap_credits: Credits,
     flat_estimate_credits: u64,
     body_digest: String,
-    usage: tokio::sync::oneshot::Receiver<Result<TokenUsage, DomainError>>,
+    outcome: tokio::sync::oneshot::Receiver<AgentChatStreamOutcome>,
 }
 
 fn spawn_stream_settlement(params: StreamSettlement) {
@@ -217,40 +218,43 @@ fn spawn_stream_settlement(params: StreamSettlement) {
 }
 
 async fn settle_stream_charge(params: StreamSettlement) {
-    let usage_result = params.usage.await;
-    let credits = match usage_result {
-        Ok(Ok(usage)) => match params.pricing.price_token_usage(&params.model_id.0, usage) {
-            Ok(actual) => clamp_to_cap(actual, params.cap_credits),
-            Err(error) => {
-                tracing::error!(
-                    %error,
-                    user_id = %params.user_id.0,
-                    action = ActionSlug::AgentChat.as_str(),
-                    model = %params.model_id.0,
-                    "agent chat stream ended without usage; settling at flat estimate"
-                );
-                clamp_to_cap(Credits(params.flat_estimate_credits), params.cap_credits)
+    // Failed (or a dead pump) charges nothing — the buffered path errors
+    // before its charge line on the same transport failure, and the hold
+    // expires on its own. Only a DELIVERED body may bill: at metered usage
+    // when the frame arrived, at the flat estimate when it did not.
+    let credits = match params.outcome.await {
+        Ok(AgentChatStreamOutcome::Usage(usage)) => {
+            match params.pricing.price_token_usage(&params.model_id.0, usage) {
+                Ok(actual) => clamp_to_cap(actual, params.cap_credits),
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        user_id = %params.user_id.0,
+                        action = ActionSlug::AgentChat.as_str(),
+                        model = %params.model_id.0,
+                        "agent chat stream usage failed to price; settling at flat estimate"
+                    );
+                    clamp_to_cap(Credits(params.flat_estimate_credits), params.cap_credits)
+                }
             }
-        },
-        Ok(Err(error)) => {
+        }
+        Ok(AgentChatStreamOutcome::CompletedWithoutUsage) => {
             tracing::error!(
-                %error,
                 user_id = %params.user_id.0,
                 action = ActionSlug::AgentChat.as_str(),
                 model = %params.model_id.0,
-                "agent chat stream ended without usage; settling at flat estimate"
+                "agent chat stream completed without usage; settling at flat estimate"
             );
             clamp_to_cap(Credits(params.flat_estimate_credits), params.cap_credits)
         }
-        Err(error) => {
+        Ok(AgentChatStreamOutcome::Failed) | Err(_) => {
             tracing::error!(
-                %error,
                 user_id = %params.user_id.0,
                 action = ActionSlug::AgentChat.as_str(),
                 model = %params.model_id.0,
-                "agent chat stream ended without usage; settling at flat estimate"
+                "agent chat stream failed mid-transport; leaving hold unsettled"
             );
-            clamp_to_cap(Credits(params.flat_estimate_credits), params.cap_credits)
+            return;
         }
     };
     let receipt = match charge(ChargeParams {

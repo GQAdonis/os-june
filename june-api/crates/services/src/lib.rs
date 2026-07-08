@@ -53,10 +53,10 @@ mod tests {
     use june_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
     use june_domain::{
         AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream,
-        AudioDurationProbe, Authorization, AuthorizeRequest, ChargeRequest, CleanedText, Cleaner,
-        CleanupRequest, Credits, DomainError, GeneratedNote, GenerationRequest, Generator, ModelId,
-        OsAccountsClient, ProviderCredentials, Receipt, TokenUsage, Transcriber, Transcript,
-        TranscriptionRequest, UserId,
+        AgentChatStreamOutcome, AudioDurationProbe, Authorization, AuthorizeRequest, ChargeRequest,
+        CleanedText, Cleaner, CleanupRequest, Credits, DomainError, GeneratedNote,
+        GenerationRequest, Generator, ModelId, OsAccountsClient, ProviderCredentials, Receipt,
+        TokenUsage, Transcriber, Transcript, TranscriptionRequest, UserId,
     };
     use pretty_assertions::assert_eq;
     use std::{
@@ -1146,6 +1146,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_chat_stream_transport_failure_charges_nothing() {
+        let os_accounts = Arc::new(RecordingOsAccounts::with_cap(Some(40)));
+        let service = AgentChatService::new(AgentChatServiceDeps {
+            pricing: Arc::new(PricingTable::new(models([(
+                "text-model",
+                PriceUnit::Tokens,
+                1,
+                ModelType::Text,
+            )]))),
+            os_accounts: os_accounts.clone(),
+            chat_completer: Arc::new(TransportFailedAgentChatCompleter),
+            hold_ttl_seconds: 60,
+            flat_estimate_credits: 1024,
+        });
+
+        let mut output = service
+            .complete_stream(agent_chat_params())
+            .await
+            .expect("stream starts");
+        while output.chunks.recv().await.is_some() {}
+        // The settle task returns without charging on a transport failure;
+        // yield so it runs to completion before asserting absence.
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(
+            !os_accounts
+                .events()
+                .into_iter()
+                .any(|event| matches!(event, RecordedCall::Charge { .. })),
+            "a transport-failed stream must leave the hold unsettled (buffered-path parity)"
+        );
+    }
+
+    #[tokio::test]
     async fn agent_chat_stream_user_venice_key_skips_wallet_metering() {
         let os_accounts = Arc::new(RecordingOsAccounts::default());
         let service = AgentChatService::new(AgentChatServiceDeps {
@@ -1451,10 +1487,10 @@ mod tests {
             _request: AgentChatRequest,
         ) -> Result<AgentChatStream, DomainError> {
             let (chunks_tx, chunks_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (usage_tx, usage_rx) = tokio::sync::oneshot::channel();
+            let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let _ = chunks_tx.send(Ok(bytes::Bytes::from_static(br"data: hello\n\n")));
-                let _ = usage_tx.send(Ok(TokenUsage {
+                let _ = outcome_tx.send(AgentChatStreamOutcome::Usage(TokenUsage {
                     prompt_tokens: 10,
                     completion_tokens: 20,
                 }));
@@ -1463,7 +1499,7 @@ mod tests {
                 content_type: "text/event-stream".to_string(),
                 provider: "test".to_string(),
                 chunks: chunks_rx,
-                usage: usage_rx,
+                outcome: outcome_rx,
             })
         }
     }
@@ -1484,16 +1520,47 @@ mod tests {
             _request: AgentChatRequest,
         ) -> Result<AgentChatStream, DomainError> {
             let (chunks_tx, chunks_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (usage_tx, usage_rx) = tokio::sync::oneshot::channel();
+            let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
                 let _ = chunks_tx.send(Ok(bytes::Bytes::from_static(br"data: hello\n\n")));
-                let _ = usage_tx.send(Err(DomainError::UpstreamProvider));
+                let _ = outcome_tx.send(AgentChatStreamOutcome::CompletedWithoutUsage);
             });
             Ok(AgentChatStream {
                 content_type: "text/event-stream".to_string(),
                 provider: "test".to_string(),
                 chunks: chunks_rx,
-                usage: usage_rx,
+                outcome: outcome_rx,
+            })
+        }
+    }
+
+    struct TransportFailedAgentChatCompleter;
+
+    #[async_trait]
+    impl AgentChatCompleter for TransportFailedAgentChatCompleter {
+        async fn complete(
+            &self,
+            _request: AgentChatRequest,
+        ) -> Result<AgentChatCompletion, DomainError> {
+            Err(DomainError::UpstreamProvider)
+        }
+
+        async fn complete_stream(
+            &self,
+            _request: AgentChatRequest,
+        ) -> Result<AgentChatStream, DomainError> {
+            let (chunks_tx, chunks_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _ = chunks_tx.send(Ok(bytes::Bytes::from_static(br"data: hel")));
+                let _ = chunks_tx.send(Err(DomainError::UpstreamProvider));
+                let _ = outcome_tx.send(AgentChatStreamOutcome::Failed);
+            });
+            Ok(AgentChatStream {
+                content_type: "text/event-stream".to_string(),
+                provider: "test".to_string(),
+                chunks: chunks_rx,
+                outcome: outcome_rx,
             })
         }
     }

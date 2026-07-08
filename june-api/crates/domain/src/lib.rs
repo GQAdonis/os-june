@@ -91,7 +91,7 @@ pub struct AgentChatCompletion {
 
 /// A streaming agent chat completion: response headers have been received
 /// from the upstream; body chunks arrive on `chunks` as the upstream
-/// produces them, and `usage` resolves once the body has fully drained.
+/// produces them, and `outcome` resolves once the body has fully drained.
 ///
 /// `chunks` is deliberately unbounded: the producer must be able to drain the
 /// upstream to its usage frame at upstream speed even when the client reads
@@ -101,7 +101,19 @@ pub struct AgentChatStream {
     pub content_type: String,
     pub provider: String,
     pub chunks: tokio::sync::mpsc::UnboundedReceiver<Result<bytes::Bytes, DomainError>>,
-    pub usage: tokio::sync::oneshot::Receiver<Result<TokenUsage, DomainError>>,
+    pub outcome: tokio::sync::oneshot::Receiver<AgentChatStreamOutcome>,
+}
+
+/// How a streamed agent chat body ended. Settlement branches on this: a
+/// transport failure must charge nothing (matching the buffered path, which
+/// errors before its charge line on the same failure), while a body that
+/// completed but carried no usage frame settles at the flat estimate —
+/// content WAS delivered, only the meter reading is missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentChatStreamOutcome {
+    Usage(TokenUsage),
+    CompletedWithoutUsage,
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

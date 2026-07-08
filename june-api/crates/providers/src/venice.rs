@@ -3,9 +3,10 @@ use crate::transcription::TranscriptionWireResponse;
 use async_trait::async_trait;
 use june_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit, UpstreamConfig};
 use june_domain::{
-    AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream, CleanedText,
-    Cleaner, CleanupRequest, DomainError, GeneratedNote, GenerationRequest, Generator,
-    ProviderCredentials, TokenUsage, Transcriber, Transcript, TranscriptionRequest,
+    AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream,
+    AgentChatStreamOutcome, CleanedText, Cleaner, CleanupRequest, DomainError, GeneratedNote,
+    GenerationRequest, Generator, ProviderCredentials, TokenUsage, Transcriber, Transcript,
+    TranscriptionRequest,
 };
 use reqwest::{
     StatusCode,
@@ -583,7 +584,7 @@ impl VeniceChat {
         }
 
         let (chunks_tx, chunks_rx) = mpsc::unbounded_channel();
-        let (usage_tx, usage_rx) = oneshot::channel();
+        let (outcome_tx, outcome_rx) = oneshot::channel();
         let task_content_type = content_type.clone();
         let task_url = url.clone();
         let task_model = model.0.clone();
@@ -591,7 +592,7 @@ impl VeniceChat {
             pump_agent_chat_stream(StreamPump {
                 response: &mut response,
                 chunks_tx,
-                usage_tx,
+                outcome_tx,
                 content_type: task_content_type,
                 url: task_url,
                 model: task_model,
@@ -603,7 +604,7 @@ impl VeniceChat {
             content_type,
             provider: PROVIDER_NAME.to_string(),
             chunks: chunks_rx,
-            usage: usage_rx,
+            outcome: outcome_rx,
         })
     }
 }
@@ -677,7 +678,7 @@ struct AgentChatNonSuccess<'a> {
 struct StreamPump<'a> {
     response: &'a mut reqwest::Response,
     chunks_tx: mpsc::UnboundedSender<Result<bytes::Bytes, DomainError>>,
-    usage_tx: oneshot::Sender<Result<TokenUsage, DomainError>>,
+    outcome_tx: oneshot::Sender<AgentChatStreamOutcome>,
     content_type: String,
     url: String,
     model: String,
@@ -702,9 +703,19 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                         if forwarding && pump.chunks_tx.send(Ok(chunk)).is_err() {
                             forwarding = false;
                         }
+                        // Heartbeats are silence-gated: an active upstream is
+                        // its own keep-alive, so only a stall restarts the
+                        // countdown.
+                        heartbeat.reset();
                     }
                     Ok(None) => {
-                        let _ = pump.usage_tx.send(usage_from_chat_body(&accumulated, &pump.content_type));
+                        let outcome = match usage_from_chat_body(&accumulated, &pump.content_type) {
+                            Ok(usage) => AgentChatStreamOutcome::Usage(usage),
+                            // Delivered body, missing meter reading — the
+                            // service settles this at the flat estimate.
+                            Err(_) => AgentChatStreamOutcome::CompletedWithoutUsage,
+                        };
+                        let _ = pump.outcome_tx.send(outcome);
                         return;
                     }
                     Err(error) => {
@@ -712,7 +723,9 @@ async fn pump_agent_chat_stream(pump: StreamPump<'_>) {
                         if forwarding {
                             let _ = pump.chunks_tx.send(Err(DomainError::UpstreamProvider));
                         }
-                        let _ = pump.usage_tx.send(Err(DomainError::UpstreamProvider));
+                        // Transport failure: charge nothing, matching the
+                        // buffered path which errors before its charge line.
+                        let _ = pump.outcome_tx.send(AgentChatStreamOutcome::Failed);
                         return;
                     }
                 }
@@ -1318,8 +1331,8 @@ mod tests {
     use june_config::ModelType;
     use june_config::UpstreamConfig;
     use june_domain::{
-        AgentChatCompleter, AgentChatRequest, DomainError, GenerationRequest, Generator, ModelId,
-        ProviderCredentials,
+        AgentChatCompleter, AgentChatRequest, AgentChatStreamOutcome, DomainError,
+        GenerationRequest, Generator, ModelId, ProviderCredentials,
     };
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -1792,11 +1805,10 @@ mod tests {
         while let Some(chunk) = stream.chunks.recv().await {
             body.extend_from_slice(&chunk.expect("chunk succeeds"));
         }
-        let usage = stream
-            .usage
-            .await
-            .expect("usage sender resolves")
-            .expect("usage parses");
+        let outcome = stream.outcome.await.expect("outcome sender resolves");
+        let AgentChatStreamOutcome::Usage(usage) = outcome else {
+            panic!("expected usage outcome, got {outcome:?}");
+        };
 
         assert!(String::from_utf8_lossy(&body).contains("\"content\":\"hel\""));
         assert_eq!(usage.prompt_tokens, 3);
@@ -1804,7 +1816,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_chat_stream_missing_usage_resolves_usage_error() {
+    async fn agent_chat_stream_missing_usage_resolves_completed_without_usage() {
         let (base_url, _server) = stream_stub(
             200,
             "text/event-stream",
@@ -1818,9 +1830,9 @@ mod tests {
             .await
             .expect("stream starts");
 
-        let usage = stream.usage.await.expect("usage sender resolves");
+        let outcome = stream.outcome.await.expect("outcome sender resolves");
 
-        assert_eq!(usage, Err(DomainError::UpstreamProvider));
+        assert_eq!(outcome, AgentChatStreamOutcome::CompletedWithoutUsage);
     }
 
     #[tokio::test]
@@ -1859,11 +1871,10 @@ mod tests {
             .await
             .expect("stream starts");
         drop(stream.chunks);
-        let usage = stream
-            .usage
-            .await
-            .expect("usage sender resolves")
-            .expect("usage parses after disconnect");
+        let outcome = stream.outcome.await.expect("outcome sender resolves");
+        let AgentChatStreamOutcome::Usage(usage) = outcome else {
+            panic!("expected usage outcome after disconnect, got {outcome:?}");
+        };
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, 6);
@@ -1895,11 +1906,10 @@ mod tests {
             .expect("first chunk")
             .expect("heartbeat chunk");
         assert_eq!(heartbeat, bytes::Bytes::from_static(b": keep-alive\n\n"));
-        let usage = stream
-            .usage
-            .await
-            .expect("usage sender resolves")
-            .expect("usage ignores heartbeat");
+        let outcome = stream.outcome.await.expect("outcome sender resolves");
+        let AgentChatStreamOutcome::Usage(usage) = outcome else {
+            panic!("expected usage outcome, got {outcome:?}");
+        };
         assert_eq!(usage.prompt_tokens, 7);
         assert_eq!(usage.completion_tokens, 8);
     }

@@ -7,7 +7,7 @@ Status: accepted
 
 June API sits inside a TEE behind an nginx-based ingress (dstack-ingress) and
 Phala's gateway. Until this change, every inference response was fully
-buffered server-side: the agent chat proxy (`/v1/chat/completions`) read the
+buffered server-side: the agent chat route (`/v1/chat/completions`) read the
 entire upstream Venice body — even when the client had sent `stream: true` —
 and note generation (`/v1/notes/generate`) returned one JSON envelope after
 the upstream call completed. While an upstream inference ran, June API emitted
@@ -45,17 +45,32 @@ charges after the stream ends.
   comment heartbeats while generation runs, then a single terminal event
   (`event: result` carrying the exact buffered JSON envelope, or
   `event: error` carrying `{status, body}` of the exact buffered error).
-  Old clients never send the flag; old backends ignore the unknown field and
-  answer buffered, so the desktop client branches on the response content
-  type. Wire contracts stay backward compatible in both directions.
+  Old clients never send the flag; a not-yet-updated June API ignores the
+  unknown field and answers buffered, so the desktop client branches on the
+  response content type. Wire contracts stay backward compatible in both
+  directions.
 - **Billing on interrupted streams** (deliberate product calls): if the
-  client disconnects mid-stream, the provider keeps draining the upstream to
-  capture the usage frame and the charge settles normally — matching buffered
-  semantics, where a disconnect after send still charges. If a stream ends
-  without a usage frame, the charge settles at the flat authorize estimate
-  (clamped to the hold cap) with a loud error log: content was delivered and
-  June does not silently absorb upstream cost, per the pricing policy in the
-  June API PRD.
+  client disconnects mid-chat-stream, the provider keeps draining the
+  upstream to capture the usage frame and the charge settles normally —
+  matching buffered semantics, where a disconnect after send still charges.
+  A stream that completes cleanly but carries no usage frame settles at the
+  flat authorize estimate (clamped to the hold cap) with a loud error log:
+  content was delivered and June does not silently absorb upstream cost, per
+  the pricing policy in the June API PRD. A stream that dies on a transport
+  failure settles NOTHING — the buffered path errors before its charge line
+  on the same failure, and the two must not diverge on error paths. Generate
+  disconnects cancel the whole call uncharged (all-or-nothing delivery,
+  parity with the buffered handler being dropped).
+- **Hold TTLs cover the settle-after-upstream window**: agent chat and note
+  generation moved onto the same bounded metered-inference client the image
+  path uses (route timeout minus the authorize + settlement budgets), and
+  their shared authorization hold was raised from 300s to 540s (window +
+  settlement budget, inside the OS Accounts 600s cap) with a config-load
+  validation pinning the relationship. Before this, a 300-600s call —
+  unreachable while the ingress killed everything at its read timeout, but
+  exactly what streaming enables — would settle against an expired hold:
+  June pays the upstream, the charge fails, and the user sees
+  `metering_provider_failed`.
 
 ## Consequences
 
@@ -68,8 +83,9 @@ charges after the stream ends.
   embedded. Clients must map that embedded status exactly as they map a
   buffered non-2xx response.
 - The route-level tower timeout (600s) now bounds only the handler future
-  (time to response headers); the streamed body is bounded by the upstream
-  client's 600s total timeout instead.
+  (time to response headers); the streamed body is bounded by the
+  metered-inference client's total timeout (route minus the authorize +
+  settlement budgets) instead.
 - The client-facing chunk channel is unbounded so the provider can always
   drain the upstream to its usage frame at upstream speed — settlement must
   never be hostage to a slow reader. Worst-case memory equals the full

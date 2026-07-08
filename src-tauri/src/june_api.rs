@@ -1516,10 +1516,18 @@ fn parse_generate_terminal_event(
         GenerateTerminalEvent::Result(body) => {
             parse_response_body(path, reqwest::StatusCode::OK, None, &body)
         }
-        GenerateTerminalEvent::Error { status, body } => {
+        GenerateTerminalEvent::Error {
+            status,
+            body,
+            retry_after_secs,
+        } => {
             let status =
                 reqwest::StatusCode::from_u16(status).unwrap_or(reqwest::StatusCode::BAD_GATEWAY);
-            parse_response_body(path, status, None, &body.to_string())
+            // The streamed error's retry hint replaces the buffered path's
+            // Retry-After header (headers can't follow a committed 200), so
+            // both paths surface the same details.retryAfterMs.
+            let retry_after_ms = retry_after_secs.map(|secs| secs.saturating_mul(1000));
+            parse_response_body(path, status, retry_after_ms, &body.to_string())
         }
     }
 }
@@ -1537,6 +1545,7 @@ enum GenerateTerminalEvent {
     Error {
         status: u16,
         body: serde_json::Value,
+        retry_after_secs: Option<u64>,
     },
 }
 
@@ -1621,6 +1630,7 @@ impl GenerateSseParser {
                 Ok(Some(GenerateTerminalEvent::Error {
                     status: error.status,
                     body: error.body,
+                    retry_after_secs: error.retry_after_secs,
                 }))
             }
             _ => Ok(None),
@@ -1632,6 +1642,8 @@ impl GenerateSseParser {
 struct GenerateStreamError {
     status: u16,
     body: serde_json::Value,
+    #[serde(default)]
+    retry_after_secs: Option<u64>,
 }
 
 fn sse_field_value(value: &str) -> &str {
@@ -2062,6 +2074,38 @@ mod tests {
         assert_eq!(streamed.code, buffered.code);
         assert_eq!(streamed.message, buffered.message);
         assert_eq!(streamed.details, buffered.details);
+    }
+
+    #[test]
+    fn generate_sse_error_retry_hint_maps_to_retry_after_ms_details() {
+        let stream = format!(
+            "event: error\ndata: {}\n\n",
+            serde_json::json!({
+                "status": 429,
+                "body": {
+                    "success": false,
+                    "errorCode": 4401,
+                    "message": "authorization_denied"
+                },
+                "retry_after_secs": 2,
+            })
+        );
+        let event = parse_sse_chunks(&[stream.as_bytes()])
+            .expect("SSE error should parse")
+            .expect("SSE should contain a terminal event");
+        let error = expect_generate_error(
+            parse_generate_terminal_event(NOTE_GENERATE_PATH, event),
+            "streamed authorization denial should fail",
+        );
+
+        assert_eq!(
+            error
+                .details
+                .as_ref()
+                .and_then(|details| details.get("retryAfterMs").cloned()),
+            Some(serde_json::json!(2000)),
+            "the streamed retry hint must surface exactly like the buffered Retry-After header"
+        );
     }
 
     #[test]

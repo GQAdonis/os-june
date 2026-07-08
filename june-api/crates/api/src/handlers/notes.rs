@@ -124,10 +124,17 @@ fn stream_generate(state: ApiState, params: NoteGenerateParams) -> Response {
     // Keep-alives are tiny and the terminal event is a single frame, so the
     // queue cannot grow meaningfully.
     let (tx, rx) = mpsc::unbounded_channel::<Result<Bytes, Infallible>>();
-    let request_timeout = Duration::from_secs(state.limits().request_timeout_secs);
+    // Bound generation to the metered-inference window, not the full route
+    // timeout: settlement happens inside `generate()` AFTER the upstream call,
+    // and the authorization hold only covers window + settlement budget. A
+    // full-route bound would let a 390-600s generation reach `charge` with an
+    // expired hold (see validate_long_inference_hold_ttl in june-config).
+    let generation_window = Duration::from_secs(june_config::image_client_timeout_secs(
+        state.limits().request_timeout_secs,
+    ));
     tokio::spawn(async move {
         let generation =
-            tokio::time::timeout(request_timeout, state.note_generate().generate(params));
+            tokio::time::timeout(generation_window, state.note_generate().generate(params));
         tokio::pin!(generation);
         let mut keep_alive = tokio::time::interval(Duration::from_secs(10));
         keep_alive.set_missed_tick_behavior(MissedTickBehavior::Skip);

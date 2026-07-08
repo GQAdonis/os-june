@@ -9,13 +9,13 @@ use june_config::{
     DEFAULT_MAX_IMAGE_EDIT_BYTES, ModelPriceConfig, ModelProvider, ModelType, PriceUnit,
 };
 use june_domain::{
-    AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream, AudioDurationProbe,
-    AuthError, Authorization, AuthorizeRequest, CleanedText, Cleaner, CleanupRequest, Credits,
-    DomainError, GeneratedImage, GeneratedNote, GenerationRequest, Generator, ImageEditRequest,
-    ImageEditor, ImageGenerationRequest, ImageGenerator, IssueReport, IssueReportSink,
-    OsAccountsClient, Receipt, TokenUsage, Transcriber, Transcript, TranscriptionRequest, UserId,
-    WebFetchRequest, WebFetchResult, WebFetcher, WebSearchRequest, WebSearchResult,
-    WebSearchResults, WebSearcher,
+    AgentChatCompleter, AgentChatCompletion, AgentChatRequest, AgentChatStream,
+    AgentChatStreamOutcome, AudioDurationProbe, AuthError, Authorization, AuthorizeRequest,
+    CleanedText, Cleaner, CleanupRequest, Credits, DomainError, GeneratedImage, GeneratedNote,
+    GenerationRequest, Generator, ImageEditRequest, ImageEditor, ImageGenerationRequest,
+    ImageGenerator, IssueReport, IssueReportSink, OsAccountsClient, Receipt, TokenUsage,
+    Transcriber, Transcript, TranscriptionRequest, UserId, WebFetchRequest, WebFetchResult,
+    WebFetcher, WebSearchRequest, WebSearchResult, WebSearchResults, WebSearcher,
 };
 use june_services::{
     AgentChatService, AgentChatServiceDeps, DictateService, DictateServiceDeps, ImageModelPrice,
@@ -167,7 +167,9 @@ async fn integration_note_generate_stream_sends_keep_alive_before_result()
 -> Result<(), Box<dyn Error>> {
     let app = router(test_state_with_generator_and_timeout(
         Arc::new(SlowGenerator),
-        30,
+        // 12s effective window: past the 210s budgets, long enough for the
+        // 11s SlowGenerator to finish after the 10s keep-alive tick.
+        222,
     ));
     let response = match app
         .oneshot(json_request(
@@ -991,7 +993,9 @@ fn test_state_with_sinks_and_transcriber(
         attestation,
         transcriber,
         generator: Arc::new(FakeGenerator),
-        request_timeout_secs: 5,
+        // 215 = 5s effective metered-inference window past the 210s
+        // authorize + settlement budgets (image_client_timeout_secs).
+        request_timeout_secs: 215,
     })
 }
 
@@ -1510,10 +1514,10 @@ impl AgentChatCompleter for FakeChatCompleter {
         _request: AgentChatRequest,
     ) -> Result<AgentChatStream, DomainError> {
         let (chunks_tx, chunks_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (usage_tx, usage_rx) = tokio::sync::oneshot::channel();
+        let (outcome_tx, outcome_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let _ = chunks_tx.send(Ok(Vec::from(&b"data: {\"choices\":[]}\n\n"[..]).into()));
-            let _ = usage_tx.send(Ok(TokenUsage {
+            let _ = outcome_tx.send(AgentChatStreamOutcome::Usage(TokenUsage {
                 prompt_tokens: 100,
                 completion_tokens: 100,
             }));
@@ -1522,7 +1526,7 @@ impl AgentChatCompleter for FakeChatCompleter {
             content_type: "text/event-stream".to_string(),
             provider: "fake-chat".to_string(),
             chunks: chunks_rx,
-            usage: usage_rx,
+            outcome: outcome_rx,
         })
     }
 }
