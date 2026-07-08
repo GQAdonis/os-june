@@ -20445,6 +20445,128 @@ input:focus-visible,
   color: var(--foreground);
 }
 
+.onboarding-intent-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2);
+  min-inline-size: 0;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.onboarding-intent-option {
+  display: flex;
+  min-width: 0;
+  min-height: var(--control-xl);
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--card);
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  cursor: pointer;
+  /* Hover/selection carry on the fill only; the border is static chrome and
+   * never transitions (see docs/design/conventions.md). */
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.onboarding-intent-option:nth-last-child(1):nth-child(odd) {
+  grid-column: 1 / -1;
+}
+
+/* Warm-soft wash, matching the onboarding surface's own hover idiom
+ * (.onboarding-back:hover). Background only — the border stays put. */
+.onboarding-intent-option:hover {
+  background: color-mix(in oklch, var(--warm-soft) 20%, var(--card));
+}
+
+.onboarding-intent-option:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.onboarding-intent-option[aria-pressed="true"] {
+  border-color: color-mix(in oklch, var(--warm-strong) 34%, var(--border));
+  background: color-mix(in oklch, var(--warm-soft) 34%, var(--card));
+}
+
+/* Selected + hover deepens rather than lightens, so the ramp reads
+ * card -> hover -> selected -> selected-hover. */
+.onboarding-intent-option[aria-pressed="true"]:hover {
+  background: color-mix(in oklch, var(--warm-soft) 44%, var(--card));
+}
+
+.onboarding-intent-option span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A rounded-square checkbox (multiple can be picked), mirroring the
+ * canonical .folder-note-select-box: unchecked outline, filled on select. */
+.onboarding-intent-check {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-xs);
+  background: var(--card);
+  color: var(--on-solid);
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+
+.onboarding-intent-option[aria-pressed="true"] .onboarding-intent-check {
+  border-color: var(--warm-strong);
+  background: var(--warm-strong);
+}
+
+.onboarding-intent-other {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-block-start: var(--sp-3);
+  color: var(--foreground);
+  font-size: var(--fs-sm);
+}
+
+.onboarding-intent-other input {
+  height: var(--control-xl);
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--card);
+  color: var(--foreground);
+  font: inherit;
+  font-size: var(--fs-md);
+  padding: 0 var(--sp-3);
+  outline: 0;
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.onboarding-intent-other input::placeholder {
+  color: var(--muted-foreground);
+}
+
+.onboarding-intent-other input:hover {
+  border-color: var(--ring);
+}
+
+.onboarding-intent-other input:focus,
+.onboarding-intent-other input:focus-visible {
+  border-color: var(--ring-focus);
+  box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
 /* Permissions: one bordered card, one row per permission — icon chip, a
  * line of copy, the grant affordance. A granted row trades its icon for a
  * check and tints terracotta. */
