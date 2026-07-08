@@ -19913,6 +19913,29 @@ input:focus-visible,
   height: 100%;
 }
 
+/* The 3D glass June mark on the welcome / sign-in surfaces. A fixed square box
+   reserves the same footprint whether the WebGL canvas or the flat fallback mark
+   renders inside it, so degrading to the static mark never shifts layout. Kept
+   small on purpose — a hero brand moment, not a takeover. */
+.welcome-mark-glass {
+  display: inline-flex;
+  width: 112px;
+  height: 112px;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  line-height: 0;
+  margin-bottom: var(--sp-2);
+}
+
+/* Only the fallback mark is an <svg> (the glass renders a <canvas>). Size the
+   fallback up so it reads as a deliberate mark, not a shrunken glyph. */
+.welcome-mark-glass svg {
+  display: block;
+  width: 72px;
+  height: auto;
+}
+
 .welcome-title {
   margin: 0;
   font-family: var(--font-serif);
@@ -20082,7 +20105,6 @@ input:focus-visible,
  * shouldn't stretch with it — keep them in a centered, button-width column. */
 .welcome-card-intro .welcome-providers,
 .welcome-card-intro .welcome-status,
-.welcome-card-intro .onboarding-community,
 .welcome-card-intro .welcome-terms {
   width: 100%;
   max-width: 320px;
@@ -20192,9 +20214,13 @@ input:focus-visible,
     color var(--t-fast) var(--ease-out);
 }
 
+/* Same translucent-veil approach as the community link: the topbar sits on the
+ * welcome gradient, so a --card-based fill painted a mismatched patch and
+ * --warm-strong text went near-invisible in dark. Veil + --foreground blends
+ * cleanly and keeps contrast in both themes. */
 .onboarding-back:hover {
-  background: color-mix(in oklch, var(--warm-soft) 44%, var(--card));
-  color: var(--warm-strong);
+  background: color-mix(in oklch, var(--brand) 10%, transparent);
+  color: var(--foreground);
 }
 
 .onboarding-back:focus-visible {
@@ -20330,32 +20356,51 @@ input:focus-visible,
   text-wrap: pretty;
 }
 
+/* Not a boxed card — a quiet, content-width chip so it reads as an aside, not a
+ * second button competing with the sign-in action below it. */
 .onboarding-community {
   margin: var(--sp-1) 0 0;
-  padding: var(--sp-3) var(--sp-4);
-  border: 1px solid color-mix(in oklch, var(--brand) 18%, var(--border));
-  border-radius: var(--r-lg);
-  background: color-mix(in oklch, var(--warm-soft) 34%, var(--card));
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  line-height: 1.45;
   text-align: center;
 }
 
 .onboarding-community-link {
-  margin: 0;
-  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 auto;
+  padding: var(--sp-1) var(--sp-3);
   border: 0;
+  border-radius: var(--r-pill);
   background: transparent;
-  color: var(--foreground);
+  color: var(--muted-foreground);
   font: inherit;
+  font-size: var(--fs-sm);
   font-weight: 400;
-  text-decoration: underline;
-  text-underline-offset: 2px;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
 }
 
+.onboarding-community-link svg {
+  flex-shrink: 0;
+  color: var(--brand);
+}
+
+/* Hover tints the background only (never a border) — the house rule. A
+ * translucent brand veil (mixed with transparent, NOT --card) so it blends into
+ * the warm welcome gradient this sits on at any point, instead of painting a
+ * flat --card-based patch that mismatches the backdrop. Text lands on
+ * --foreground for reliable contrast in both themes. */
 .onboarding-community-link:hover {
-  color: var(--warm-strong);
+  background: color-mix(in oklch, var(--brand) 10%, transparent);
+  color: var(--foreground);
+}
+
+.onboarding-community-link:focus-visible {
+  outline: none;
+  color: var(--foreground);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .onboarding-skip {
