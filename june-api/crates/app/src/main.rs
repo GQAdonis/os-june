@@ -125,17 +125,23 @@ fn build_router(
     // image path pins (see image_client_timeout_secs and
     // validate_long_inference_hold_ttl). The full-route `upstream` client
     // would let a 300-600s call reach `charge` after its hold expired.
+    // Unmetered (user-Venice-key) requests have no hold to protect and keep
+    // the full-route client — see AgentChatRequest::unmetered.
     let generator: Arc<dyn june_domain::Generator> = Arc::new(VeniceGenerator::from_config(
         clients.metered_inference.clone(),
+        clients.upstream.clone(),
         &config.upstreams.venice,
     ));
     let cleaner: Arc<dyn june_domain::Cleaner> = Arc::new(VeniceCleaner::from_config(
         clients.upstream.clone(),
         &config.upstreams.venice,
     ));
-    let agent_chat_completer: Arc<dyn june_domain::AgentChatCompleter> = Arc::new(
-        VeniceAgentChat::from_config(clients.metered_inference.clone(), &config.upstreams.venice),
-    );
+    let agent_chat_completer: Arc<dyn june_domain::AgentChatCompleter> =
+        Arc::new(VeniceAgentChat::from_config(
+            clients.metered_inference.clone(),
+            clients.upstream.clone(),
+            &config.upstreams.venice,
+        ));
     // One client backs both web traits (search + fetch) over the same Venice
     // credential and base URL.
     let web_augment = Arc::new(VeniceAugment::from_config(

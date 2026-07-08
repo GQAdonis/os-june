@@ -56,6 +56,7 @@ impl AgentChatService {
                     body: params.body,
                     model: params.model_id.clone(),
                     provider_credentials: params.provider_credentials.clone(),
+                    unmetered: true,
                 })
                 .await?;
             log_skipped_user_venice_key(ActionSlug::AgentChat, &params.user_id, &params.model_id.0);
@@ -80,6 +81,7 @@ impl AgentChatService {
                 body: params.body,
                 model: params.model_id.clone(),
                 provider_credentials: params.provider_credentials.clone(),
+                unmetered: false,
             })
             .await?;
         let actual = self
@@ -125,6 +127,7 @@ impl AgentChatService {
                     body: params.body,
                     model: params.model_id.clone(),
                     provider_credentials: params.provider_credentials.clone(),
+                    unmetered: true,
                 })
                 .await?;
             tokio::spawn(async move {
@@ -154,6 +157,7 @@ impl AgentChatService {
                 body: params.body,
                 model: params.model_id.clone(),
                 provider_credentials: params.provider_credentials.clone(),
+                unmetered: false,
             })
             .await?;
         spawn_stream_settlement(StreamSettlement {

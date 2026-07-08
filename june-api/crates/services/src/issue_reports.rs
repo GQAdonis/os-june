@@ -112,6 +112,7 @@ impl IssueReportService {
             body: issue_report_diagnosis_body(report),
             model: model.clone(),
             provider_credentials: ProviderCredentials::default(),
+            unmetered: false,
         };
         match timeout(
             self.diagnosis_timeout,

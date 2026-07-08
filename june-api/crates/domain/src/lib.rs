@@ -222,6 +222,8 @@ pub struct GenerationRequest {
     pub model: ModelId,
     pub system_prompt: String,
     pub provider_credentials: ProviderCredentials,
+    /// See `AgentChatRequest::unmetered`.
+    pub unmetered: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -241,6 +243,11 @@ pub struct AgentChatRequest {
     pub body: serde_json::Value,
     pub model: ModelId,
     pub provider_credentials: ProviderCredentials,
+    /// True when the caller settles no OS Accounts charge for this request
+    /// (user-supplied upstream key). Providers may then use their full-route
+    /// client: the shortened metered window exists only to keep settlement
+    /// inside the authorization hold, and there is no hold to protect.
+    pub unmetered: bool,
 }
 
 /// What an image generator needs: a prompt, the model, optional pixel

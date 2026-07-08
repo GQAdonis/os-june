@@ -156,14 +156,21 @@ fn stream_generate(state: ApiState, params: NoteGenerateParams) -> Response {
                     let _ = tx.send(Ok(Bytes::from(event)));
                     break;
                 }
+                // Cancel the moment the client is gone — not at the next
+                // keep-alive tick. Generation is all-or-nothing delivery:
+                // dropping the future cancels the upstream call and no charge
+                // settles, the same semantics a buffered request has when the
+                // connection drops (and deliberately different from agent
+                // chat's drain-and-settle, where content was already
+                // streamed). Waiting for a tick left a window where a
+                // generation completing after the disconnect billed for a
+                // result nobody received.
+                () = tx.closed() => {
+                    break;
+                }
                 _ = keep_alive.tick() => {
-                    // A failed send means the client is gone (unbounded sends
-                    // never fail on backpressure). Generation is all-or-nothing
-                    // delivery: dropping the future cancels the upstream call
-                    // and no charge settles — the same semantics a buffered
-                    // request has when the connection drops. This deliberately
-                    // differs from agent chat's drain-and-settle, where content
-                    // was already streamed to the user.
+                    // Unbounded sends never fail on backpressure; a failure
+                    // means the client vanished between closed() polls.
                     if tx.send(Ok(Bytes::from_static(b": keep-alive\n\n"))).is_err() {
                         break;
                     }

@@ -241,9 +241,13 @@ pub struct VeniceGenerator {
 }
 
 impl VeniceGenerator {
-    pub fn from_config(http: reqwest::Client, config: &UpstreamConfig) -> Self {
+    pub fn from_config(
+        http: reqwest::Client,
+        unmetered_http: reqwest::Client,
+        config: &UpstreamConfig,
+    ) -> Self {
         Self {
-            chat: VeniceChat::new(http, config),
+            chat: VeniceChat::with_unmetered(http, unmetered_http, config),
         }
     }
 }
@@ -284,7 +288,10 @@ impl Generator for VeniceGenerator {
                     ],
                     temperature: None,
                 },
-                &request.provider_credentials,
+                ChatCallAuth {
+                    provider_credentials: &request.provider_credentials,
+                    unmetered: request.unmetered,
+                },
             )
             .await?;
         let content = parsed
@@ -320,9 +327,13 @@ pub struct VeniceAgentChat {
 }
 
 impl VeniceAgentChat {
-    pub fn from_config(http: reqwest::Client, config: &UpstreamConfig) -> Self {
+    pub fn from_config(
+        http: reqwest::Client,
+        unmetered_http: reqwest::Client,
+        config: &UpstreamConfig,
+    ) -> Self {
         Self {
-            chat: VeniceChat::new(http, config),
+            chat: VeniceChat::with_unmetered(http, unmetered_http, config),
         }
     }
 }
@@ -334,7 +345,14 @@ impl AgentChatCompleter for VeniceAgentChat {
         request: AgentChatRequest,
     ) -> Result<AgentChatCompletion, DomainError> {
         self.chat
-            .complete_raw(request.body, request.model, &request.provider_credentials)
+            .complete_raw(
+                request.body,
+                request.model,
+                ChatCallAuth {
+                    provider_credentials: &request.provider_credentials,
+                    unmetered: request.unmetered,
+                },
+            )
             .await
     }
 
@@ -343,7 +361,14 @@ impl AgentChatCompleter for VeniceAgentChat {
         request: AgentChatRequest,
     ) -> Result<AgentChatStream, DomainError> {
         self.chat
-            .complete_stream(request.body, request.model, &request.provider_credentials)
+            .complete_stream(
+                request.body,
+                request.model,
+                ChatCallAuth {
+                    provider_credentials: &request.provider_credentials,
+                    unmetered: request.unmetered,
+                },
+            )
             .await
     }
 }
@@ -384,7 +409,12 @@ impl Cleaner for VeniceCleaner {
                     // dictation should clean up the same way every time.
                     temperature: Some(0.0),
                 },
-                &request.provider_credentials,
+                // Dictation cleanup is short and always metered the same way;
+                // it never gets the unmetered client.
+                ChatCallAuth {
+                    provider_credentials: &request.provider_credentials,
+                    unmetered: false,
+                },
             )
             .await?;
         let cleaned = parsed
@@ -400,8 +430,23 @@ impl Cleaner for VeniceCleaner {
     }
 }
 
+/// Per-call auth context for `VeniceChat`: whose key goes upstream and whether
+/// the call settles an OS Accounts charge (which selects the client — see
+/// `AgentChatRequest::unmetered`).
+#[derive(Clone, Copy)]
+struct ChatCallAuth<'a> {
+    provider_credentials: &'a ProviderCredentials,
+    unmetered: bool,
+}
+
 struct VeniceChat {
     http: reqwest::Client,
+    /// Client for requests that settle no OS Accounts charge (user-supplied
+    /// Venice key). The metered window on `http` exists only to keep
+    /// settlement inside the authorization hold; unmetered calls have no hold
+    /// and keep the full route budget. `None` means no distinction (callers
+    /// whose requests are always metered the same way).
+    unmetered_http: Option<reqwest::Client>,
     api_key: String,
     base_url: String,
 }
@@ -410,15 +455,35 @@ impl VeniceChat {
     fn new(http: reqwest::Client, config: &UpstreamConfig) -> Self {
         Self {
             http,
+            unmetered_http: None,
             api_key: config.api_key.clone(),
             base_url: config.base_url.trim_end_matches('/').to_string(),
+        }
+    }
+
+    fn with_unmetered(
+        http: reqwest::Client,
+        unmetered_http: reqwest::Client,
+        config: &UpstreamConfig,
+    ) -> Self {
+        Self {
+            unmetered_http: Some(unmetered_http),
+            ..Self::new(http, config)
+        }
+    }
+
+    fn client(&self, unmetered: bool) -> &reqwest::Client {
+        if unmetered {
+            self.unmetered_http.as_ref().unwrap_or(&self.http)
+        } else {
+            &self.http
         }
     }
 
     async fn complete(
         &self,
         mut body: ChatCompletionRequest,
-        provider_credentials: &ProviderCredentials,
+        auth: ChatCallAuth<'_>,
     ) -> Result<ChatCompletionResponse, DomainError> {
         body.messages.insert(0, ChatMessage::safety_context());
         let url = format!("{}/chat/completions", self.base_url);
@@ -426,7 +491,7 @@ impl VeniceChat {
         // transcribers: metering settles only after success, so a replay
         // can never double-charge.
         for attempt in 0..retry::UPSTREAM_ATTEMPTS {
-            let error = match self.complete_once(&url, &body, provider_credentials).await {
+            let error = match self.complete_once(&url, &body, auth).await {
                 Ok(parsed) => return Ok(parsed),
                 Err(error) => error,
             };
@@ -449,11 +514,11 @@ impl VeniceChat {
         &self,
         url: &str,
         body: &ChatCompletionRequest,
-        provider_credentials: &ProviderCredentials,
+        auth: ChatCallAuth<'_>,
     ) -> Result<ChatCompletionResponse, UpstreamAttemptError> {
-        let api_key = venice_api_key(&self.api_key, provider_credentials);
+        let api_key = venice_api_key(&self.api_key, auth.provider_credentials);
         let response = self
-            .http
+            .client(auth.unmetered)
             .post(url)
             .bearer_auth(api_key)
             .json(body)
@@ -472,7 +537,7 @@ impl VeniceChat {
             let retryable = retry::is_retryable_status(status);
             let body_text = response.text().await.unwrap_or_default();
             tracing::error!(%status, %url, model = %body.model, body_bytes = body_text.len(), retryable, "venice: chat non-success response");
-            if let Some(error) = user_venice_key_auth_error(status, provider_credentials) {
+            if let Some(error) = user_venice_key_auth_error(status, auth.provider_credentials) {
                 return Err(UpstreamAttemptError::fatal(error));
             }
             return Err(UpstreamAttemptError {
@@ -493,14 +558,14 @@ impl VeniceChat {
         &self,
         body: serde_json::Value,
         model: june_domain::ModelId,
-        provider_credentials: &ProviderCredentials,
+        auth: ChatCallAuth<'_>,
     ) -> Result<AgentChatCompletion, DomainError> {
         let body = prepare_agent_chat_body(body, &model)?;
         let url = format!("{}/chat/completions", self.base_url);
         let response = self
-            .http
+            .client(auth.unmetered)
             .post(&url)
-            .bearer_auth(venice_api_key(&self.api_key, provider_credentials))
+            .bearer_auth(venice_api_key(&self.api_key, auth.provider_credentials))
             .json(&body)
             .send()
             .await
@@ -528,7 +593,7 @@ impl VeniceChat {
                     body_bytes: body.len(),
                     body: &body,
                 },
-                provider_credentials,
+                auth.provider_credentials,
             ));
         }
         let usage = usage_from_chat_body(&body, &content_type)?;
@@ -544,14 +609,14 @@ impl VeniceChat {
         &self,
         body: serde_json::Value,
         model: june_domain::ModelId,
-        provider_credentials: &ProviderCredentials,
+        auth: ChatCallAuth<'_>,
     ) -> Result<AgentChatStream, DomainError> {
         let body = prepare_agent_chat_body(body, &model)?;
         let url = format!("{}/chat/completions", self.base_url);
         let mut response = self
-            .http
+            .client(auth.unmetered)
             .post(&url)
-            .bearer_auth(venice_api_key(&self.api_key, provider_credentials))
+            .bearer_auth(venice_api_key(&self.api_key, auth.provider_credentials))
             .json(&body)
             .send()
             .await
@@ -579,7 +644,7 @@ impl VeniceChat {
                     body_bytes: body.len(),
                     body: &body,
                 },
-                provider_credentials,
+                auth.provider_credentials,
             ));
         }
 
@@ -1377,6 +1442,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1394,6 +1460,7 @@ mod tests {
                 model: ModelId("zai-org-glm-5".to_string()),
                 system_prompt: "system".to_string(),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await;
 
@@ -1433,6 +1500,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "shared_venice_key".to_string(),
                 base_url: server.uri(),
@@ -1452,6 +1520,7 @@ mod tests {
                 provider_credentials: ProviderCredentials {
                     venice_api_key: Some("user_venice_key".to_string()),
                 },
+                unmetered: true,
             })
             .await;
 
@@ -1479,6 +1548,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1496,6 +1566,7 @@ mod tests {
                 model: ModelId("zai-org-glm-5".to_string()),
                 system_prompt: "system".to_string(),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await
             .expect("generation should succeed");
@@ -1524,6 +1595,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1541,6 +1613,7 @@ mod tests {
                 model: ModelId("zai-org-glm-5".to_string()),
                 system_prompt: "system".to_string(),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await
             .expect("generation should succeed");
@@ -1596,6 +1669,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1613,6 +1687,7 @@ mod tests {
                 model: ModelId("zai-org-glm-5".to_string()),
                 system_prompt: "system".to_string(),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await;
 
@@ -1633,6 +1708,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1650,6 +1726,7 @@ mod tests {
                 model: ModelId("zai-org-glm-5".to_string()),
                 system_prompt: "system".to_string(),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await;
 
@@ -1721,6 +1798,7 @@ mod tests {
             .await;
         let agent = VeniceAgentChat::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1737,6 +1815,7 @@ mod tests {
                 }),
                 model: ModelId("text-model".to_string()),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await
             .expect("completion succeeds");
@@ -1758,6 +1837,7 @@ mod tests {
             .await;
         let agent = VeniceAgentChat::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "shared_venice_key".to_string(),
                 base_url: server.uri(),
@@ -1774,6 +1854,7 @@ mod tests {
                 provider_credentials: ProviderCredentials {
                     venice_api_key: Some("VENICE_INFERENCE_KEY_bad".to_string()),
                 },
+                unmetered: true,
             })
             .await
             .expect_err("bad user key should be rejected");
@@ -1939,6 +2020,7 @@ mod tests {
             .await;
         let generator = VeniceGenerator::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -1956,6 +2038,7 @@ mod tests {
                 model: ModelId("zai-org-glm-5".to_string()),
                 system_prompt: "caller system prompt".to_string(),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await
             .expect("generation succeeds");
@@ -1983,6 +2066,7 @@ mod tests {
             .await;
         let agent = VeniceAgentChat::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: server.uri(),
@@ -2000,6 +2084,7 @@ mod tests {
                 }),
                 model: ModelId("text-model".to_string()),
                 provider_credentials: ProviderCredentials::default(),
+                unmetered: false,
             })
             .await
             .expect("completion succeeds");
@@ -2018,6 +2103,7 @@ mod tests {
     fn test_agent(base_url: &str) -> VeniceAgentChat {
         VeniceAgentChat::from_config(
             http::default_client(),
+            http::default_client(),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
                 base_url: base_url.to_string(),
@@ -2027,6 +2113,7 @@ mod tests {
 
     fn short_timeout_agent(base_url: &str) -> VeniceAgentChat {
         VeniceAgentChat::from_config(
+            http::client_with_timeout(Duration::from_millis(300)),
             http::client_with_timeout(Duration::from_millis(300)),
             &UpstreamConfig {
                 api_key: "venice_key".to_string(),
@@ -2072,6 +2159,7 @@ mod tests {
             }),
             model: ModelId("text-model".to_string()),
             provider_credentials: ProviderCredentials::default(),
+            unmetered: false,
         }
     }
 
