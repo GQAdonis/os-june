@@ -6924,14 +6924,17 @@ input:focus-visible,
   cursor: pointer;
 }
 
-/* Keyboard focus (Tab) reuses the same subtle-gray highlight as arrow-key
- * activation and hover — one row treatment for every way of landing on a row,
- * no separate focus ring. */
-.command-prompt-item[data-active="true"],
-.command-prompt-item:focus-visible {
+.command-prompt-item[data-active="true"] {
   /* Same subtle gray wash as the identity/context menus — lighter than
-   * --sidebar-accent, quieter than a brand tint. */
+   * --sidebar-accent, quieter than a brand tint. The single highlight for
+   * every way of landing on a row: hover, arrow keys, and Tab focus all
+   * drive the same active index, so only one row is ever lit. */
   background: color-mix(in oklch, var(--muted) 50%, transparent);
+}
+
+/* Tab focus reuses that active-row highlight (via onFocus syncing the active
+ * index) — so the row needs no separate focus ring of its own. */
+.command-prompt-item:focus-visible {
   outline: none;
 }
 

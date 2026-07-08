@@ -1738,6 +1738,7 @@ function CommandPrompt({
                           data-active={index === activeIndex}
                           key={item.id}
                           onMouseEnter={() => onActiveIndexChange(index)}
+                          onFocus={() => onActiveIndexChange(index)}
                           onClick={() => onSelect(item)}
                         >
                           <span className="command-prompt-item-icon">{item.icon}</span>
