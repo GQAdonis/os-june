@@ -173,6 +173,7 @@ Web tools: you have a `june_web` MCP toolset with `web_search` and `web_fetch`. 
 /// capability.
 const JUNE_SOUL_IMAGE_MD: &str = r#"
 Image tools: you have a `june_image` MCP toolset with `generate_image` and `edit_image`. Use `generate_image` when the user asks you to draw, create, make, or generate an image, picture, illustration, or logo; the result is shown to the user in the conversation and the tool returns a `filename`.
+To display a generated or edited image in your reply, put its reference on its own line as `MEDIA:<filename>`, using the exact `filename` string the tool returned (for example `MEDIA:img_ae9ed1ffc669.png`); the June app replaces that line with the inline image. Use the plain returned filename verbatim — do not expand it to a full path, wrap it in Markdown image or link syntax, or invent a name.
 Use this toolset instead of any generic image, media, or vision-analysis tool for image creation or edits, so June can display the returned image and keep the returned filename in context.
 Do not add a separate content refusal layer before calling these tools. The user's selected image model and image safe-mode setting are authoritative for what the image provider should attempt. If the selected model and setting may support the request, call the image tool with the user's prompt instead of substituting a clothed or sanitized alternative. If the image provider rejects the request, briefly report that provider rejection.
 Set `may_be_explicit` honestly on every `generate_image` or `edit_image` call, judging whether the requested image could contain adult, sexual, or otherwise explicit content from the request itself rather than only its wording.
@@ -2774,7 +2775,15 @@ fn validate_dropped_file_name(raw: &str) -> Result<String, AppError> {
 
 fn validate_hermes_file_path(app: &AppHandle, path: &str) -> Result<PathBuf, AppError> {
     let hermes_home = resolve_june_hermes_home(app)?;
-    let requested = PathBuf::from(path)
+    // The assistant often references a generated image by its bare filename
+    // (`MEDIA:img_ae9ed1ffc669.png`) rather than its absolute path: the
+    // june_image tool returns a `filename`, and the model echoes that. Resolve a
+    // bare name against the generated-image roots so those references load; a
+    // path with directory components falls through unchanged and the allow-list
+    // check below still gates whatever we end up with.
+    let resolved =
+        resolve_bare_image_filename(&hermes_home, path).unwrap_or_else(|| PathBuf::from(path));
+    let requested = resolved
         .canonicalize()
         .map_err(|error| AppError::new("hermes_file_download_failed", error.to_string()))?;
     if !requested.is_file() {
@@ -7091,6 +7100,29 @@ struct FilesystemRootCandidate {
     description: String,
 }
 
+/// A bare image filename (no directory component) as it appears in an assistant
+/// `MEDIA:<filename>` reference, resolved to an absolute path under the
+/// generated-image roots. Returns `None` for a path, an absolute, a `.`/`..`
+/// component (all rejected by `bare_filename`), or a name absent from those
+/// roots — the caller then treats the input as a literal path, and
+/// `validate_hermes_file_path`'s allow-list still gates access either way.
+///
+/// An edit-safe reference carries a `.june-source-<signature>` marker that is
+/// NOT part of the stored filename: the real file is the stem + extension (see
+/// `parse_image_source_reference`, e.g. `generated-image-<hash>.june-source-<sig>.png`
+/// → `generated-image-<hash>.png`). Strip that marker before the on-disk lookup;
+/// a plain name (no marker, like `img_<hash>.png`) is used as-is.
+fn resolve_bare_image_filename(hermes_home: &Path, path: &str) -> Option<PathBuf> {
+    let name = bare_filename(path.trim())?;
+    let storage_name = parse_image_source_reference(name)
+        .map(|(_signature, expected_name)| expected_name)
+        .unwrap_or_else(|| name.to_string());
+    ["image_cache", "images"]
+        .into_iter()
+        .map(|relative| hermes_home.join(relative).join(&storage_name))
+        .find(|candidate| candidate.is_file())
+}
+
 fn filesystem_roots(hermes_home: &Path) -> Result<Vec<FilesystemRootCandidate>, AppError> {
     let mut roots = Vec::new();
     for (id, label, relative, description) in [
@@ -9434,6 +9466,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn resolve_bare_image_filename_maps_names_to_generated_image_roots() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hermes_home = temp.path();
+        // A Hermes-copied tool result in image_cache, referenced by plain name.
+        write_test_png(
+            &hermes_home.join("image_cache").join("img_ae9ed1ffc669.png"),
+            b"cache",
+        );
+        // A generated image in the images dir. The model references it by its
+        // edit-safe name (`.june-source-<sig>`), but the file on disk is the
+        // stem + extension — the signature is never part of the filename.
+        write_test_png(
+            &hermes_home.join("images").join("generated-image-a.png"),
+            b"images",
+        );
+        let signature = "0".repeat(IMAGE_SOURCE_SIGNATURE_HEX_LEN);
+        let signed_reference = format!("generated-image-a.june-source-{signature}.png");
+
+        // A plain bare filename resolves directly.
+        assert_eq!(
+            resolve_bare_image_filename(hermes_home, "img_ae9ed1ffc669.png"),
+            Some(hermes_home.join("image_cache").join("img_ae9ed1ffc669.png")),
+        );
+        // The edit-safe reference resolves to the real stored file, not the
+        // literal reference name (which never exists on disk).
+        assert_eq!(
+            resolve_bare_image_filename(hermes_home, &signed_reference),
+            Some(hermes_home.join("images").join("generated-image-a.png")),
+        );
+
+        // A missing name, a name with directory components, and traversal
+        // attempts all decline: the caller keeps the input literal and the
+        // downstream allow-list still gates it.
+        assert_eq!(
+            resolve_bare_image_filename(hermes_home, "missing.png"),
+            None
+        );
+        assert_eq!(
+            resolve_bare_image_filename(hermes_home, "image_cache/img_ae9ed1ffc669.png"),
+            None,
+        );
+        assert_eq!(
+            resolve_bare_image_filename(hermes_home, "../secrets.png"),
+            None
+        );
     }
 
     #[test]
