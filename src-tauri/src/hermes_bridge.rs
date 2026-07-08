@@ -201,6 +201,7 @@ const JUNE_SOUL_VIDEO_MD: &str = r#"
 Video tools: you have a `june_video` MCP toolset with `generate_video` and `animate_image`. Use `generate_video` when the user asks you to make, create, or generate a video, clip, or animation from a text description; the result is shown to the user in the conversation.
 Use `animate_image` when the user asks to animate a prior image into a video. Pass the exact prior image filename returned by `generate_image` or `edit_image` as `source_filename`, and describe the requested motion or change in `instruction`. Do not pass a bare disk path.
 Video generation usually takes ~1-3 minutes, so do not retry impatiently while a tool call is still running. June presents the finished video to the user; do not describe it as a Hermes result.
+The tool returns a `MEDIA:` reference to the finished video, and June renders it inline automatically. Video generation can take several minutes and may exceed the tool's time limit: if a call times out or errors, do NOT claim the video is ready or invent a result — say it may still be finishing and offer to check again. To show an already-finished video again (for example when the user asks to see it), write its `MEDIA:` reference on its own line — the video's filename, like `MEDIA:generated-video-<id>.mp4`, or its full path — and June displays it inline. Never describe a video as shown unless you have emitted its `MEDIA:` reference.
 "#;
 
 /// Appended to `SOUL.md` for every runtime. The `june_recorder` MCP server can

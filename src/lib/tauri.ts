@@ -1815,8 +1815,32 @@ export function localAudioFileSrc(path: string) {
   return convertFileSrc(path);
 }
 
+let generatedVideoDirCache: string | undefined;
+
+/** Preload the generated-videos directory so localVideoFileSrc can resolve a
+ * bare `generated-video-*.mp4` filename — the agent frequently refers to a
+ * finished video by filename only — to an absolute, asset-scoped path the
+ * webview can load. Best-effort; call once on mount. */
+export async function primeGeneratedVideoDir(): Promise<void> {
+  try {
+    generatedVideoDirCache = await invoke<string>("generated_video_dir");
+  } catch {
+    // Non-fatal: absolute MEDIA paths still resolve without the cache.
+  }
+}
+
+function isAbsoluteVideoPath(path: string) {
+  return path.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(path);
+}
+
 export function localVideoFileSrc(path: string) {
-  return convertFileSrc(path);
+  // A bare generated-video filename resolves against the cached videos dir; an
+  // absolute path (fast-path result, or an absolute MEDIA ref) is used as-is.
+  const resolved =
+    isAbsoluteVideoPath(path) || !generatedVideoDirCache
+      ? path
+      : `${generatedVideoDirCache}/${path}`;
+  return convertFileSrc(resolved);
 }
 
 export async function dictationHotkeyStatus() {

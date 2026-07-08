@@ -266,6 +266,7 @@ pub fn run() {
             providers::edit_image,
             providers::video_generate,
             providers::video_status,
+            providers::generated_video_dir,
             providers::save_local_generation_settings,
             providers::set_local_generation_enabled,
             providers::probe_local_generation_endpoint,

@@ -212,8 +212,14 @@ const MEDIA_IMAGE_REFERENCE_PATTERN = new RegExp(
 const mediaImageReferencePattern = () =>
   new RegExp(MEDIA_IMAGE_REFERENCE_PATTERN.source, MEDIA_IMAGE_REFERENCE_PATTERN.flags);
 const MEDIA_VIDEO_EXTENSION_PATTERN = "mp4|mov|webm|m4v";
+// Matches an absolute MEDIA path OR a bare June generated-video filename
+// (`generated-video-<hex>.mp4`). The agent often refers to a finished video by
+// filename only — especially when asked to show it again after a tool call
+// that timed out — and localVideoFileSrc resolves bare names against the
+// generated-videos dir. The bare alternative is pinned to June's own naming so
+// it can't swallow arbitrary prose.
 const MEDIA_VIDEO_REFERENCE_PATTERN = new RegExp(
-  `MEDIA:(/[^\\r\\n]+?\\.(?:${MEDIA_VIDEO_EXTENSION_PATTERN}))(?:[)\\].,;:]?)(?=\\s|$)`,
+  `MEDIA:((?:/[^\\r\\n]+?|generated-video-[0-9a-f]+)\\.(?:${MEDIA_VIDEO_EXTENSION_PATTERN}))(?:[)\\].,;:]?)(?=\\s|$)`,
   "gi",
 );
 export const mediaVideoReferencePattern = () =>

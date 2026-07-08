@@ -658,6 +658,20 @@ pub async fn video_status(
     video_status_with_enabled(app, request, crate::feature_flags::VIDEO_GENERATION_ENABLED).await
 }
 
+/// Absolute path of the generated-videos directory. Lets the frontend resolve a
+/// bare `generated-video-*.mp4` filename (the agent frequently names a finished
+/// video by filename only when asked to show it again) to an asset-scoped path
+/// the webview can load. Mirrors the directory `june_api::write_video_bytes`
+/// and the `june_video` MCP write into.
+#[tauri::command]
+pub fn generated_video_dir(app: AppHandle) -> Result<String, AppError> {
+    let dir = crate::app_paths::app_data_dir(&app)
+        .map_err(|error| AppError::new("video_dir_failed", error.to_string()))?
+        .join("hermes")
+        .join("videos");
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 async fn video_status_with_enabled(
     app: AppHandle,
     request: VideoStatusRequest,

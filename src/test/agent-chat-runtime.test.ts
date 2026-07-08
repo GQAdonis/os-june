@@ -178,6 +178,40 @@ describe("Agent chat runtime", () => {
     ]);
   });
 
+  it("extracts a bare generated-video filename the agent names to show a video again", () => {
+    // After a timed-out tool call, the agent often re-displays the finished
+    // video by filename only; localVideoFileSrc resolves it against the dir.
+    const content = {
+      content: [
+        {
+          type: "text",
+          text: "Here it is! MEDIA:generated-video-e697df06b60b441191a240f629e41a5e.mp4",
+        },
+      ],
+    };
+
+    expect(mediaVideoReferences(content)).toEqual([
+      "generated-video-e697df06b60b441191a240f629e41a5e.mp4",
+    ]);
+    expect(videoPartsFromHermesContent(content)).toEqual([
+      {
+        type: "video",
+        status: "complete",
+        prompt: "Generated video",
+        path: "generated-video-e697df06b60b441191a240f629e41a5e.mp4",
+        name: "generated-video-e697df06b60b441191a240f629e41a5e.mp4",
+      },
+    ]);
+  });
+
+  it("does not treat arbitrary bare filenames as video refs", () => {
+    // The bare alternative is pinned to June's naming so ordinary prose that
+    // mentions a `.mp4` filename does not spuriously render a player.
+    expect(
+      mediaVideoReferences({ content: [{ type: "text", text: "MEDIA:my-holiday.mp4" }] }),
+    ).toEqual([]);
+  });
+
   it("strips assistant video MEDIA refs but preserves user-authored refs", () => {
     const turns = buildHermesSessionChatTurns([
       {

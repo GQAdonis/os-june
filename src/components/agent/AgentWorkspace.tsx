@@ -99,6 +99,7 @@ import {
   hermesBridgeSkills,
   generateImage,
   localVideoFileSrc,
+  primeGeneratedVideoDir,
   hermesBridgeStatus,
   hermesBridgeToolsets,
   importHermesBridgeFile,
@@ -2204,6 +2205,9 @@ export function AgentWorkspace({
   );
 
   useEffect(() => {
+    // Cache the generated-videos dir so a video the agent names by bare
+    // filename (MEDIA:generated-video-*.mp4) resolves to a playable src.
+    void primeGeneratedVideoDir();
     const pending = Object.values(storedVideoSlashTurns())
       .flat()
       .filter((turn) => turn.pending && turn.jobId && turn.requestId);
