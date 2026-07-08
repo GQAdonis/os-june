@@ -11833,7 +11833,6 @@ function AgentArtifactPanel({
             className="agent-artifact-panel-body scroll-fade-mask"
             data-kind={preview.kind}
             {...fade.props}
-            onScroll={fade.update}
           >
             {preview.kind === "loading" ? (
               <Spinner />
@@ -11870,7 +11869,6 @@ function AgentArtifactPanel({
               className="agent-artifact-panel-body scroll-fade-mask"
               data-kind="list"
               {...fade.props}
-              onScroll={fade.update}
             >
               {visibleArtifacts.length ? (
                 <ul className="agent-artifact-panel-list">

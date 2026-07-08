@@ -22,9 +22,11 @@ fade paints on, and add the matching class:
 - `.scroll-fade-mask` — `mask-image` fade for large panel scrollers. Put the
   class and `props` on the scroller itself. Tune with `--scroll-fade-size`.
 
-Wire `onScroll={fade.update}` on the scroller, and call `fade.update()` from any
-effect that changes the content or size without a scroll (filtering a list,
-opening a panel). The hook owns the `ResizeObserver` and initial measure.
+The hook owns the scroll and resize listeners (and the initial measure), so you
+do not wire an `onScroll` handler — just spread `{...fade.props}` on the fade
+element and pass the `ref` to the scroller. Call `fade.update()` only from an
+effect that changes the content or size without a scroll or resize (filtering a
+list, opening a panel).
 
 **Exceptions.**
 

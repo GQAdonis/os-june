@@ -374,6 +374,8 @@ export function Sidebar({
   const [referralDialogOpen, setReferralDialogOpen] = useState(false);
   const [referralSummary, setReferralSummary] = useState<ReferralSummary | null>(null);
   const [referralLoading, setReferralLoading] = useState(false);
+  // Guards against a stale closure double-firing the summary fetch.
+  const referralLoadingRef = useRef(false);
   const [referralError, setReferralError] = useState<string | null>(null);
   // The deployment can simply not offer referrals (a 404 from /referrals/me).
   // That's not a transient failure, so it gets a calm message with no retry.
@@ -478,6 +480,8 @@ export function Sidebar({
 
   async function loadReferralSummary() {
     if (!account.signedIn || account.localDev) return;
+    if (referralLoadingRef.current) return;
+    referralLoadingRef.current = true;
     setReferralLoading(true);
     setReferralError(null);
     setReferralUnavailable(false);
@@ -487,6 +491,7 @@ export function Sidebar({
       setReferralUnavailable(errorCode(error) === "referrals_unavailable");
       setReferralError(messageFromError(error));
     } finally {
+      referralLoadingRef.current = false;
       setReferralLoading(false);
     }
   }
@@ -1636,15 +1641,19 @@ function CommandPrompt({
   // handler bound to the input alone would miss Esc once focus moves to a row,
   // the clear button, or out to the background. A window listener (mounted only
   // while the prompt is open) guarantees there's no way to get stuck in here.
+  // It runs in the capture phase and calls stopPropagation so the prompt claims
+  // Escape before any earlier-registered window handler (note chat panel, an
+  // active agent run) also reacts to it.
   useEffect(() => {
     function onWindowKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopPropagation();
         onClose();
       }
     }
-    window.addEventListener("keydown", onWindowKeyDown);
-    return () => window.removeEventListener("keydown", onWindowKeyDown);
+    window.addEventListener("keydown", onWindowKeyDown, true);
+    return () => window.removeEventListener("keydown", onWindowKeyDown, true);
   }, [onClose]);
 
   // Scroll the active row into view, but only from keyboard navigation — doing
@@ -1721,7 +1730,7 @@ function CommandPrompt({
           ) : null}
         </label>
         <div className="command-prompt-results-wrap scroll-fade" {...fade.props}>
-          <div className="command-prompt-results" ref={resultsRef} onScroll={fade.update}>
+          <div className="command-prompt-results" ref={resultsRef}>
             {groups.length > 0 ? (
               groups.map((group) => (
                 <section className="command-prompt-group" key={group.title}>

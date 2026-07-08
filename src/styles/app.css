@@ -23170,35 +23170,6 @@ input:focus-visible,
   padding: var(--sp-3) var(--note-chat-inset) var(--sp-4);
   overflow-y: auto;
   overscroll-behavior: contain;
-  --fade: 28px;
-}
-
-/* Same edge-fade recipe as the files panel body. */
-.note-chat-scroll[data-fade-top][data-fade-bottom] {
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    transparent,
-    #000 var(--fade),
-    #000 calc(100% - var(--fade)),
-    transparent
-  );
-  mask-image: linear-gradient(
-    to bottom,
-    transparent,
-    #000 var(--fade),
-    #000 calc(100% - var(--fade)),
-    transparent
-  );
-}
-
-.note-chat-scroll[data-fade-top]:not([data-fade-bottom]) {
-  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 var(--fade));
-  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade));
-}
-
-.note-chat-scroll:not([data-fade-top])[data-fade-bottom] {
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - var(--fade)), transparent);
 }
 
 .note-chat-thread {

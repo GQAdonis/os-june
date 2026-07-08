@@ -25,11 +25,14 @@ export type ScrollFade = {
  * the shared `.scroll-fade` / `.scroll-fade-mask` CSS can melt the clipped edge.
  *
  * The returned `props` carry `data-fade-top` / `data-fade-bottom`; spread them
- * onto the element the fade paints on. The hook owns the scroll listener and a
- * `ResizeObserver` (on the element and its first child, to catch content
- * growth) and re-wires them whenever `ref.current` changes, so conditionally
- * mounted or swapped scrollers stay covered. For data-driven changes that don't
- * resize the element, call `update()` from the relevant effect.
+ * onto the element the fade paints on. The hook owns the scroll listener (its
+ * single source — consumers do NOT wire an `onScroll` handler) and a
+ * `ResizeObserver` on the element plus its content child, re-pointed when that
+ * child swaps via a `childList` `MutationObserver`, to catch content growth. All
+ * listeners re-wire whenever `ref.current` changes, so conditionally mounted or
+ * swapped scrollers stay covered. Consumers only spread `props` / pass the
+ * `ref`; call `update()` only for data-driven changes that neither scroll nor
+ * resize the element (e.g. filtering a list, opening a panel).
  */
 export function useScrollFade(ref: RefObject<HTMLElement | null>): ScrollFade {
   const [fade, setFade] = useState({ top: false, bottom: false });
@@ -66,16 +69,35 @@ export function useScrollFade(ref: RefObject<HTMLElement | null>): ScrollFade {
     const frame = requestAnimationFrame(update);
     el.addEventListener("scroll", update, { passive: true });
     let observer: ResizeObserver | undefined;
+    let observedChild: Element | null = null;
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(update);
       observer.observe(el);
-      const child = el.firstElementChild;
-      if (child) observer.observe(child);
+      observedChild = el.firstElementChild;
+      if (observedChild) observer.observe(observedChild);
+    }
+    // Re-point the ResizeObserver when the scroller swaps its content child
+    // (e.g. an empty/loading body replaced by the real list). Watch only direct
+    // children — not the subtree — to stay cheap for large lists.
+    let mutationObserver: MutationObserver | undefined;
+    if (typeof MutationObserver !== "undefined") {
+      mutationObserver = new MutationObserver(() => {
+        const nextChild = el.firstElementChild;
+        if (nextChild === observedChild) return;
+        if (observer) {
+          if (observedChild) observer.unobserve(observedChild);
+          if (nextChild) observer.observe(nextChild);
+        }
+        observedChild = nextChild;
+        update();
+      });
+      mutationObserver.observe(el, { childList: true });
     }
     teardownRef.current = () => {
       cancelAnimationFrame(frame);
       el.removeEventListener("scroll", update);
       observer?.disconnect();
+      mutationObserver?.disconnect();
     };
   });
 

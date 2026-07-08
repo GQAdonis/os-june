@@ -402,7 +402,7 @@ export function NoteChatPanel({
             <IconCrossMedium size={15} />
           </button>
         </header>
-        <div ref={scrollerRef} className="note-chat-scroll" {...fade.props} onScroll={fade.update}>
+        <div ref={scrollerRef} className="note-chat-scroll scroll-fade-mask" {...fade.props}>
           {turns.length === 0 && !loading ? (
             <div className="note-chat-empty">
               <p className="note-chat-empty-lead">

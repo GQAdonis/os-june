@@ -410,12 +410,7 @@ function DictationHistoryRow({
           </button>
         }
       >
-        <div
-          className="transcript-dialog-scroll scroll-fade-mask"
-          ref={scrollRef}
-          onScroll={fade.update}
-          {...fade.props}
-        >
+        <div className="transcript-dialog-scroll scroll-fade-mask" ref={scrollRef} {...fade.props}>
           <p>{item.text}</p>
         </div>
       </Dialog>
