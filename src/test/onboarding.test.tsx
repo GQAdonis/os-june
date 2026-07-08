@@ -457,7 +457,7 @@ describe("OnboardingFlow", () => {
     await screen.findByRole("heading", { name: "Welcome to June" });
     await user.click(
       screen.getByRole("button", {
-        name: "June community on Telegram",
+        name: "Join the June community on Telegram",
       }),
     );
 
