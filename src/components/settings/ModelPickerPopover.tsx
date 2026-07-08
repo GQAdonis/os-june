@@ -1,22 +1,38 @@
 import { IconChevronRightSmall } from "central-icons/IconChevronRightSmall";
 import { IconMagnifyingGlass } from "central-icons/IconMagnifyingGlass";
 import { IconCheckmark2Small } from "central-icons-filled/IconCheckmark2Small";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { RefObject } from "react";
+import { createPortal } from "react-dom";
 import { modelAvailableForMode, modelPrivacyBadge } from "../../lib/model-privacy";
 import { suggestedModelsForMode } from "../../lib/suggested-models";
 import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
-import { HoverTip } from "../ui/HoverTip";
+import {
+  createHoverBridgeTracker,
+  pointInRect,
+  rectFromElement,
+  type HoverBridgePoint,
+  type HoverBridgeRect,
+} from "../ui/hoverBridge";
 import { ModelPrivacyChip, ModelRowPrivacyBadge } from "../ui/ModelPrivacyChip";
-import { contextLabel, pricingLabel } from "./ModelPickerDialog";
+import { modelSpecEntries } from "./ModelPickerDialog";
 import { ProviderLogo } from "./ProviderLogo";
 
 export type ModelPickerFlyout = { kind: "model"; id: string } | { kind: "all" } | null;
 
-// Deliberate hover-intent delay before a row's detail card opens, so a pointer
-// sweeping across rows doesn't flash the card on pass-over.
-const MODEL_HOVER_INTENT_MS = 260;
-const MODEL_HOVERCARD_W = 232;
+// Row hovers should feel quick while moving through models, but still keep a
+// tiny intent delay so a pointer sweep does not flash every card open.
+const MODEL_HOVER_OPEN_INTENT_MS = 45;
+const MODEL_HOVER_CLOSE_INTENT_MS = 150;
+const MODEL_HOVERCARD_W = 248;
 const MODEL_HOVERCARD_GAP = 4;
 const MODEL_HOVERCARD_VIEWPORT_MARGIN = 12;
 
@@ -58,8 +74,18 @@ export function ModelPickerPopover({
   const flyoutRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const hovercardRef = useRef<HTMLDivElement | null>(null);
+  // The suggested-row detail card is portaled to document.body (so a scroll
+  // container or panel can't clip or cover it) and positioned in viewport
+  // coordinates beside the popover — the same mechanism as the catalog
+  // hovercard below.
+  const [detailPos, setDetailPos] = useState<{
+    top: number;
+    x: number;
+    side: "left" | "right";
+  } | null>(null);
   const [catalogHover, setCatalogHover] = useState<{
     model: VeniceModelDto;
+    rowRect: HoverBridgeRect;
     top: number;
     x: number;
     side: "left" | "right";
@@ -74,7 +100,7 @@ export function ModelPickerPopover({
   const hoverIntent = useCallback(
     (action: () => void) => {
       cancelHoverIntent();
-      hoverTimerRef.current = window.setTimeout(action, MODEL_HOVER_INTENT_MS);
+      hoverTimerRef.current = window.setTimeout(action, MODEL_HOVER_OPEN_INTENT_MS);
     },
     [cancelHoverIntent],
   );
@@ -89,9 +115,40 @@ export function ModelPickerPopover({
   }, []);
   const scheduleCatalogClose = useCallback(() => {
     cancelCatalogClose();
-    closeTimerRef.current = window.setTimeout(() => setCatalogHover(null), MODEL_HOVER_INTENT_MS);
+    closeTimerRef.current = window.setTimeout(
+      () => setCatalogHover(null),
+      MODEL_HOVER_CLOSE_INTENT_MS,
+    );
   }, [cancelCatalogClose]);
   useEffect(() => cancelCatalogClose, [cancelCatalogClose]);
+
+  // While a safe-polygon traversal is in flight, a `data-hover-bridging` marker
+  // on the popover suppresses the CSS `:hover` highlight on every non-active row
+  // so only one row ever reads as active (see app.css). Toggled imperatively to
+  // avoid a re-render on every pointermove.
+  const setBridging = useCallback(
+    (on: boolean) => {
+      const el = popoverRef.current;
+      if (!el) return;
+      if (on) el.setAttribute("data-hover-bridging", "true");
+      else el.removeAttribute("data-hover-bridging");
+    },
+    [popoverRef],
+  );
+
+  // One tracker per hover surface: the suggested-row detail flyout and the
+  // catalog hovercard. `onExpire` (pointer stalled inside the wedge) routes
+  // through a ref so it always runs the latest hand-off closure.
+  const modelHandoffRef = useRef<(point: HoverBridgePoint) => void>(() => {});
+  const [modelTracker] = useState(() =>
+    createHoverBridgeTracker({ onExpire: (point) => modelHandoffRef.current(point) }),
+  );
+  const modelAnchorRef = useRef(false);
+  const catalogHandoffRef = useRef<(point: HoverBridgePoint) => void>(() => {});
+  const [catalogTracker] = useState(() =>
+    createHoverBridgeTracker({ onExpire: (point) => catalogHandoffRef.current(point) }),
+  );
+  const catalogAnchorRef = useRef(false);
 
   const [fade, setFade] = useState({ top: false, bottom: false });
   const updateFade = useCallback(() => {
@@ -109,40 +166,122 @@ export function ModelPickerPopover({
 
   // The direct catalog renders the searchable list straight inside the popover
   // (no flyout panel), so nothing else caps its height and a long catalog (the
-  // image models) would run off the bottom of the window. Anchored below the
-  // trigger and growing downward, so cap it to the room beneath its own top —
-  // clearing the viewport floor — up to a fixed ceiling. The inner list then
-  // scrolls instead of the panel overflowing.
+  // image models) would run off the bottom of the window. Prefer opening below
+  // the trigger, but flip above when the lower controls would be covered. The
+  // inner list then scrolls instead of the panel overflowing.
   useLayoutEffect(() => {
-    if (!directCatalog) return;
     const el = popoverRef.current;
     if (!el) return;
-    const room = window.innerHeight - el.getBoundingClientRect().top - 16;
-    el.style.maxHeight = `${Math.max(200, Math.min(room, 460))}px`;
+    if (!directCatalog) {
+      el.style.removeProperty("--model-direct-catalog-room");
+      el.style.top = "";
+      el.style.bottom = "";
+      return;
+    }
+    const trigger = el.parentElement?.querySelector<HTMLElement>(
+      '.model-summary-button[aria-expanded="true"]',
+    );
+    const style = getComputedStyle(el);
+    const titlebar = parseFloat(style.getPropertyValue("--titlebar-h")) || 0;
+    const viewportMargin =
+      parseFloat(style.getPropertyValue("--sp-6")) || MODEL_HOVERCARD_VIEWPORT_MARGIN;
+    const gap = MODEL_HOVERCARD_GAP;
+    const triggerRect = trigger?.getBoundingClientRect();
+    const roomBelow = triggerRect
+      ? window.innerHeight - triggerRect.bottom - gap - viewportMargin
+      : window.innerHeight - el.getBoundingClientRect().top - viewportMargin;
+    const roomAbove = triggerRect
+      ? triggerRect.top - titlebar - gap - viewportMargin
+      : Number.NEGATIVE_INFINITY;
+    el.style.removeProperty("--model-direct-catalog-room");
+    const preferredHeight = el.getBoundingClientRect().height;
+    const openUp = roomBelow < preferredHeight && roomAbove > roomBelow;
+    el.dataset.placement = openUp ? "top" : "bottom";
+    el.style.top = openUp ? "auto" : "";
+    el.style.bottom = openUp ? "calc(100% + var(--sp-1))" : "";
+    const room = openUp ? roomAbove : roomBelow;
+    el.style.setProperty("--model-direct-catalog-room", `${Math.max(0, room)}px`);
   }, [directCatalog, options, search, popoverRef]);
 
+  // The all-models panel stays anchored to the menu's bottom edge and grows
+  // upward; cap its height to the room above (clearing the titlebar strip that
+  // would otherwise cover the search field) and a fixed ceiling. (The
+  // suggested-model detail card is positioned separately, below, since it's
+  // portaled to the body.)
   useLayoutEffect(() => {
+    if (flyout?.kind !== "all") return;
     const el = flyoutRef.current;
     if (!el) return;
     el.dataset.side = "left";
-    if (flyout?.kind === "model") {
-      const row = el.parentElement?.querySelector<HTMLElement>(
-        '.agent-composer-model-row[data-active="true"]',
-      );
-      el.style.top = row ? `${row.offsetTop}px` : "";
-      el.style.bottom = row ? "auto" : "";
-      el.style.maxHeight = "";
-    } else {
-      el.style.top = "";
-      el.style.bottom = "";
-      const titlebar = parseFloat(getComputedStyle(el).getPropertyValue("--titlebar-h")) || 0;
-      const room = el.getBoundingClientRect().bottom - titlebar - 16;
-      el.style.maxHeight = `${Math.max(160, Math.min(room, 400))}px`;
-    }
+    el.style.top = "";
+    el.style.bottom = "";
+    const titlebar = parseFloat(getComputedStyle(el).getPropertyValue("--titlebar-h")) || 0;
+    const room = el.getBoundingClientRect().bottom - titlebar - 16;
+    el.style.maxHeight = `${Math.max(160, Math.min(room, 400))}px`;
     if (el.getBoundingClientRect().left < 12) {
       el.dataset.side = "right";
     }
   }, [flyout]);
+
+  // The detail card opens beside the popover, its top pinned to the active
+  // row's top. It's portaled to the body (see render), so `offsetTop` is
+  // meaningless — compute viewport-fixed coords here, the same math as
+  // `showCatalogHover`. Prefer the left side; flip right only when the card
+  // wouldn't fit on the left.
+  useLayoutEffect(() => {
+    if (flyout?.kind !== "model") {
+      setDetailPos(null);
+      return;
+    }
+    const popover = popoverRef.current;
+    const row = popover?.querySelector<HTMLElement>(
+      '.agent-composer-model-row[data-active="true"]',
+    );
+    if (!popover || !row) {
+      setDetailPos(null);
+      return;
+    }
+    const rowRect = row.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    const canOpenLeft =
+      popoverRect.left -
+        MODEL_HOVERCARD_GAP -
+        MODEL_HOVERCARD_W -
+        MODEL_HOVERCARD_VIEWPORT_MARGIN >=
+      0;
+    const canOpenRight =
+      popoverRect.right +
+        MODEL_HOVERCARD_GAP +
+        MODEL_HOVERCARD_W +
+        MODEL_HOVERCARD_VIEWPORT_MARGIN <=
+      window.innerWidth;
+    const side = canOpenLeft ? "left" : canOpenRight ? "right" : "left";
+    setDetailPos({
+      top: rowRect.top,
+      x:
+        side === "right"
+          ? popoverRect.right + MODEL_HOVERCARD_GAP
+          : popoverRect.left - MODEL_HOVERCARD_GAP,
+      side,
+    });
+  }, [flyout, popoverRef]);
+
+  // Keep the detail card on-screen: it's anchored to the active row's top, but
+  // the picker opens downward, so a row near the viewport floor (or an expanded
+  // description) would push the card off the bottom. Measure the real height
+  // and pull it up so its bottom stays visible.
+  useLayoutEffect(() => {
+    if (!detailPos) return;
+    const card = flyoutRef.current;
+    if (!card) return;
+    const height = card.getBoundingClientRect().height;
+    if (height <= 0) return;
+    const maxTop = window.innerHeight - height - MODEL_HOVERCARD_VIEWPORT_MARGIN;
+    const clampedTop = Math.max(MODEL_HOVERCARD_VIEWPORT_MARGIN, Math.min(detailPos.top, maxTop));
+    if (Math.abs(clampedTop - detailPos.top) > 0.5) {
+      setDetailPos((prev) => (prev ? { ...prev, top: clampedTop } : prev));
+    }
+  }, [detailPos]);
 
   useLayoutEffect(() => {
     updateFade();
@@ -185,45 +324,213 @@ export function ModelPickerPopover({
   const detail =
     flyout?.kind === "model" ? suggested.find((item) => item.model.id === flyout.id) : undefined;
 
-  function showCatalogHover(option: VeniceModelDto, row: HTMLElement) {
-    cancelCatalogClose();
-    const panel = flyoutRef.current ?? popoverRef.current;
-    if (!panel) return;
-    const rowRect = row.getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
-    const preferred = panel.dataset.side === "right" ? "right" : "left";
-    const canOpenLeft =
-      panelRect.left - MODEL_HOVERCARD_GAP - MODEL_HOVERCARD_W - MODEL_HOVERCARD_VIEWPORT_MARGIN >=
-      0;
-    const canOpenRight =
-      panelRect.right + MODEL_HOVERCARD_GAP + MODEL_HOVERCARD_W + MODEL_HOVERCARD_VIEWPORT_MARGIN <=
-      window.innerWidth;
-    const side =
-      preferred === "left"
-        ? canOpenLeft
-          ? "left"
+  // Latest filtered rows, read by the hand-off closure without re-subscribing
+  // the pointer listener on every keystroke.
+  const filteredOptionsRef = useRef(filteredOptions);
+  filteredOptionsRef.current = filteredOptions;
+
+  const showCatalogHover = useCallback(
+    (option: VeniceModelDto, row: HTMLElement) => {
+      cancelCatalogClose();
+      const panel = flyoutRef.current ?? popoverRef.current;
+      if (!panel) return;
+      const rowRect = row.getBoundingClientRect();
+      const panelRect = panel.getBoundingClientRect();
+      const preferred = panel.dataset.side === "right" ? "right" : "left";
+      const canOpenLeft =
+        panelRect.left -
+          MODEL_HOVERCARD_GAP -
+          MODEL_HOVERCARD_W -
+          MODEL_HOVERCARD_VIEWPORT_MARGIN >=
+        0;
+      const canOpenRight =
+        panelRect.right +
+          MODEL_HOVERCARD_GAP +
+          MODEL_HOVERCARD_W +
+          MODEL_HOVERCARD_VIEWPORT_MARGIN <=
+        window.innerWidth;
+      const side =
+        preferred === "left"
+          ? canOpenLeft
+            ? "left"
+            : canOpenRight
+              ? "right"
+              : null
           : canOpenRight
             ? "right"
-            : null
-        : canOpenRight
-          ? "right"
-          : canOpenLeft
-            ? "left"
-            : null;
-    if (!side) {
-      setCatalogHover(null);
-      return;
+            : canOpenLeft
+              ? "left"
+              : null;
+      if (!side) {
+        setCatalogHover(null);
+        return;
+      }
+      setCatalogHover({
+        model: option,
+        rowRect: rectFromElement(row),
+        top: rowRect.top,
+        x:
+          side === "right"
+            ? panelRect.right + MODEL_HOVERCARD_GAP
+            : panelRect.left - MODEL_HOVERCARD_GAP,
+        side,
+      });
+    },
+    [cancelCatalogClose, popoverRef],
+  );
+
+  // Suggested-row detail flyout: a single window listener drives the whole safe
+  // polygon. Leaving the active row anchors a fresh wedge toward the card;
+  // while the wedge holds, the card stays put and other rows' hover is
+  // suppressed. When the wedge is dropped (pointer left it or stalled), hover is
+  // handed to the row now under the pointer, which re-opens its own card.
+  useEffect(() => {
+    if (flyout?.kind !== "model") return;
+    const tracker = modelTracker;
+    // The flyout just opened because the pointer (or focus) is on a row.
+    modelAnchorRef.current = true;
+
+    const activeRow = () =>
+      popoverRef.current?.querySelector<HTMLElement>(
+        '.agent-composer-model-row[data-active="true"]',
+      );
+
+    function handoff(point: HoverBridgePoint) {
+      const target = document
+        .elementFromPoint(point.x, point.y)
+        ?.closest<HTMLElement>(".agent-composer-model-row");
+      if (target && popoverRef.current?.contains(target)) {
+        // Re-targeting another row: keep the bridging marker suppressing the new
+        // row's raw :hover through the hover-intent delay, and lift it only as
+        // the new card opens (when data-active transfers). Otherwise the still-
+        // open card's row and the freshly hovered row both read as highlighted
+        // during the delay.
+        if (target.classList.contains("agent-composer-model-all")) {
+          cancelHoverIntent();
+          onFlyoutChange({ kind: "all" });
+          setBridging(false);
+          return;
+        }
+        const id = target.getAttribute("data-model-id");
+        if (id) {
+          cancelHoverIntent();
+          onFlyoutChange({ kind: "model", id });
+          setBridging(false);
+          return;
+        }
+      }
+      // No re-target (pointer left the list): lift the suppression immediately.
+      setBridging(false);
+      onFlyoutChange(null);
     }
-    setCatalogHover({
-      model: option,
-      top: rowRect.top,
-      x:
-        side === "right"
-          ? panelRect.right + MODEL_HOVERCARD_GAP
-          : panelRect.left - MODEL_HOVERCARD_GAP,
-      side,
-    });
-  }
+    modelHandoffRef.current = handoff;
+
+    function handlePointerMove(event: PointerEvent) {
+      const point = { x: event.clientX, y: event.clientY };
+      const card = flyoutRef.current;
+      const row = activeRow();
+      if (!card || !row) return;
+      if (pointInRect(point, rectFromElement(card)) || pointInRect(point, rectFromElement(row))) {
+        modelAnchorRef.current = true;
+        cancelHoverIntent();
+        tracker.stop();
+        setBridging(false);
+        return;
+      }
+      if (tracker.isActive()) {
+        if (tracker.update(point)) setBridging(true);
+        else handoff(point);
+        return;
+      }
+      if (modelAnchorRef.current) {
+        modelAnchorRef.current = false;
+        const rowRect = rectFromElement(row);
+        const cardRect = rectFromElement(card);
+        const side = cardRect.left >= rowRect.right ? "right" : "left";
+        tracker.begin(point, rowRect, cardRect, side);
+        setBridging(true);
+      }
+    }
+    window.addEventListener("pointermove", handlePointerMove, true);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove, true);
+      tracker.stop();
+      setBridging(false);
+    };
+  }, [flyout, modelTracker, onFlyoutChange, popoverRef, cancelHoverIntent, setBridging]);
+
+  // Catalog hovercard: the same safe-polygon machine, anchored on the hovered
+  // catalog row and its card. Works for both the "All models" panel and the
+  // direct-catalog popover (the list lives under `listRef` either way).
+  useEffect(() => {
+    if (!catalogHover) return;
+    const tracker = catalogTracker;
+    catalogAnchorRef.current = true;
+    const { rowRect, side } = catalogHover;
+
+    function handoff(point: HoverBridgePoint) {
+      const target = document
+        .elementFromPoint(point.x, point.y)
+        ?.closest<HTMLElement>(".agent-composer-model-row");
+      if (target && listRef.current?.contains(target)) {
+        const id = target.getAttribute("data-model-id");
+        const option = id ? filteredOptionsRef.current.find((item) => item.id === id) : undefined;
+        if (option) {
+          cancelHoverIntent();
+          showCatalogHover(option, target);
+          setBridging(false);
+          return;
+        }
+      }
+      // No re-target: lift the suppression immediately.
+      setBridging(false);
+      scheduleCatalogClose();
+    }
+    catalogHandoffRef.current = handoff;
+
+    function handlePointerMove(event: PointerEvent) {
+      const point = { x: event.clientX, y: event.clientY };
+      const card = hovercardRef.current;
+      if (!card) return;
+      if (pointInRect(point, rectFromElement(card)) || pointInRect(point, rowRect)) {
+        catalogAnchorRef.current = true;
+        cancelHoverIntent();
+        cancelCatalogClose();
+        tracker.stop();
+        setBridging(false);
+        return;
+      }
+      if (tracker.isActive()) {
+        if (tracker.update(point)) {
+          setBridging(true);
+          cancelCatalogClose();
+        } else {
+          handoff(point);
+        }
+        return;
+      }
+      if (catalogAnchorRef.current) {
+        catalogAnchorRef.current = false;
+        tracker.begin(point, rowRect, rectFromElement(card), side);
+        setBridging(true);
+        cancelCatalogClose();
+      }
+    }
+    window.addEventListener("pointermove", handlePointerMove, true);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove, true);
+      tracker.stop();
+      setBridging(false);
+    };
+  }, [
+    catalogHover,
+    catalogTracker,
+    showCatalogHover,
+    cancelHoverIntent,
+    cancelCatalogClose,
+    scheduleCatalogClose,
+    setBridging,
+  ]);
 
   function catalogList(label: string) {
     return (
@@ -260,10 +567,15 @@ export function ModelPickerPopover({
                   key={option.id}
                   model={option}
                   selected={option.id === model?.id}
+                  active={catalogHover?.model.id === option.id}
                   onSelect={onSelect}
                   onHover={(hoverModel, row, immediate) => {
+                    if (!immediate && catalogTracker.isActive()) {
+                      catalogTracker.stop();
+                      setBridging(false);
+                    }
                     cancelCatalogClose();
-                    if (immediate) {
+                    if (immediate || catalogHover) {
                       cancelHoverIntent();
                       showCatalogHover(hoverModel, row);
                     } else {
@@ -289,9 +601,13 @@ export function ModelPickerPopover({
       role="dialog"
       aria-label={ariaLabel}
       data-direct-catalog={directCatalog || undefined}
+      // Opening/closing the detail flyout is owned by the safe-polygon listener;
+      // leaving the popover drops a not-yet-fired open intent and lifts any
+      // bridging suppression left by an abandoned re-target, so row hover
+      // feedback can never stay dead.
       onMouseLeave={() => {
         cancelHoverIntent();
-        if (flyout?.kind === "model") onFlyoutChange(null);
+        setBridging(false);
       }}
     >
       <p className="agent-composer-model-title">{title}</p>
@@ -310,10 +626,21 @@ export function ModelPickerPopover({
                   className="agent-composer-model-row"
                   role="option"
                   aria-selected={option.id === model.id}
+                  data-model-id={option.id}
                   data-active={(flyout?.kind === "model" && flyout.id === option.id) || undefined}
-                  onMouseEnter={() =>
-                    hoverIntent(() => onFlyoutChange({ kind: "model", id: option.id }))
-                  }
+                  onMouseEnter={() => {
+                    if (modelTracker.isActive()) {
+                      modelTracker.stop();
+                      setBridging(false);
+                    }
+                    const open = () => onFlyoutChange({ kind: "model", id: option.id });
+                    if (flyout) {
+                      cancelHoverIntent();
+                      open();
+                    } else {
+                      hoverIntent(open);
+                    }
+                  }}
                   onFocus={() => {
                     cancelHoverIntent();
                     onFlyoutChange({ kind: "model", id: option.id });
@@ -341,7 +668,19 @@ export function ModelPickerPopover({
             aria-haspopup="true"
             aria-expanded={flyout?.kind === "all"}
             data-active={flyout?.kind === "all" || undefined}
-            onMouseEnter={() => hoverIntent(() => onFlyoutChange({ kind: "all" }))}
+            onMouseEnter={() => {
+              if (modelTracker.isActive()) {
+                modelTracker.stop();
+                setBridging(false);
+              }
+              const open = () => onFlyoutChange({ kind: "all" });
+              if (flyout) {
+                cancelHoverIntent();
+                open();
+              } else {
+                hoverIntent(open);
+              }
+            }}
             onFocus={() => {
               cancelHoverIntent();
               onFlyoutChange({ kind: "all" });
@@ -361,109 +700,187 @@ export function ModelPickerPopover({
           </button>
         </>
       )}
-      {detail ? (
-        <div ref={flyoutRef} className="agent-composer-model-flyout agent-composer-model-detail">
-          <div className="agent-composer-model-surface">
-            <ModelPickerCardContent model={detail.model} />
-          </div>
-        </div>
-      ) : flyout?.kind === "all" ? (
+      {detail
+        ? createPortal(
+            // Portaled to the body and fixed-positioned so no scroll container
+            // or panel (e.g. the note-chat panel) can clip it or paint over it.
+            // Rendered as a .hovercard (position: fixed + z 140 + the slide
+            // animation) rather than the absolute .flyout, but keeps
+            // .agent-composer-model-detail for the card's own surface styles.
+            <div
+              ref={flyoutRef}
+              className="agent-composer-model-hovercard agent-composer-model-detail"
+              data-side={detailPos?.side ?? "left"}
+              onPointerEnter={cancelHoverIntent}
+              // Hidden for the one commit before the layout effect measures the
+              // active row (which runs before paint, so no flash reaches screen).
+              style={
+                detailPos
+                  ? detailPos.side === "right"
+                    ? { top: detailPos.top, left: detailPos.x }
+                    : { top: detailPos.top, right: window.innerWidth - detailPos.x }
+                  : { visibility: "hidden" }
+              }
+            >
+              <div className="agent-composer-model-surface">
+                <ModelPickerCardContent model={detail.model} withDescription animateChange />
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+      {flyout?.kind === "all" ? (
         <div
           ref={flyoutRef}
           className="agent-composer-model-flyout agent-composer-model-all-panel"
           role="group"
           aria-label={allModelsLabel}
-          onMouseLeave={() => {
+          // Leaving the catalog panel abandons any pending re-target hover, so
+          // also lift the bridging suppression here to keep row hover alive.
+          onPointerLeave={() => {
             cancelHoverIntent();
-            scheduleCatalogClose();
+            setBridging(false);
           }}
         >
           <div className="agent-composer-model-surface">{catalogList(allModelsLabel)}</div>
         </div>
       ) : null}
-      {(flyout?.kind === "all" || directCatalog) && catalogHover ? (
-        <div
-          ref={hovercardRef}
-          className="agent-composer-model-hovercard agent-composer-model-detail"
-          data-side={catalogHover.side}
-          onMouseEnter={cancelCatalogClose}
-          onMouseLeave={scheduleCatalogClose}
-          style={
-            catalogHover.side === "right"
-              ? { top: catalogHover.top, left: catalogHover.x }
-              : {
-                  top: catalogHover.top,
-                  right: window.innerWidth - catalogHover.x,
-                }
-          }
-        >
-          <div className="agent-composer-model-surface">
-            <ModelPickerCardContent model={catalogHover.model} withDescription />
-          </div>
-        </div>
-      ) : null}
+      {(flyout?.kind === "all" || directCatalog) && catalogHover
+        ? createPortal(
+            // Portaled alongside the detail card, for the same reason.
+            <div
+              ref={hovercardRef}
+              className="agent-composer-model-hovercard agent-composer-model-detail"
+              data-side={catalogHover.side}
+              onPointerEnter={cancelCatalogClose}
+              style={
+                catalogHover.side === "right"
+                  ? { top: catalogHover.top, left: catalogHover.x }
+                  : {
+                      top: catalogHover.top,
+                      right: window.innerWidth - catalogHover.x,
+                    }
+              }
+            >
+              <div className="agent-composer-model-surface">
+                <ModelPickerCardContent model={catalogHover.model} withDescription animateChange />
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }
 
+// The card: name + privacy chip, a description clamped to three lines with an
+// inline "Show more" toggle (the card is interactive, so this expands in place
+// instead of the old hover-a-tooltip-inside-the-card dance), then the
+// pricing/context facts as a compact spec list.
 export function ModelPickerCardContent({
   model,
   withDescription,
+  // Interactive cards clamp the description behind a "Show more" toggle; passive
+  // placements (the settings summary tip, which is pointer-events: none) opt out
+  // and show the full text — a single hover reveals everything, no dead button.
+  expandable = true,
+  animateChange = false,
 }: {
   model: VeniceModelDto;
   withDescription?: boolean;
+  expandable?: boolean;
+  animateChange?: boolean;
 }) {
   const badge = modelPrivacyBadge(model);
-  const values = [pricingLabel(model), contextLabel(model)].filter(Boolean).join(" · ");
+  const specs = modelSpecEntries(model);
   return (
-    <>
+    <div
+      key={animateChange ? model.id : undefined}
+      className="agent-composer-model-detail-content"
+      data-animate-change={animateChange || undefined}
+    >
       <p className="agent-composer-model-detail-name">
         <span>{model.name}</span>
         {badge ? (
           <ModelPrivacyChip
             badge={badge}
             withTip={false}
+            variant="themed"
+            size="sm"
             label={badge.label.replace(" mode", "")}
           />
         ) : null}
       </p>
-      {values ? <p className="agent-composer-model-detail-values">{values}</p> : null}
       {withDescription && model.description ? (
-        <ModelPickerDescription text={model.description} />
+        expandable ? (
+          // Keyed by model so switching rows resets the toggle and re-measures.
+          <ModelPickerDescription key={model.id} text={model.description} />
+        ) : (
+          <p className="agent-composer-model-detail-desc" data-expanded>
+            {model.description}
+          </p>
+        )
       ) : null}
-    </>
+      {specs.length ? (
+        <dl className="agent-composer-model-detail-specs">
+          {specs.map((spec) => (
+            <Fragment key={spec.label}>
+              <dt>{spec.label}</dt>
+              <dd>{spec.value}</dd>
+            </Fragment>
+          ))}
+        </dl>
+      ) : null}
+    </div>
   );
 }
 
+// Mirrors the app's clamp-with-toggle pattern (see NoteEditor's TranscriptTurn):
+// the description clamps to three lines until "Show more" lifts the clamp in
+// place. The toggle only appears when the collapsed text actually overflows.
 function ModelPickerDescription({ text }: { text: string }) {
-  const ref = useRef<HTMLSpanElement | null>(null);
+  const ref = useRef<HTMLParagraphElement | null>(null);
   const [clamped, setClamped] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  // Measure against the clamped box (only while collapsed — once expanded the
+  // clamp is gone and scrollHeight would equal clientHeight, hiding the toggle).
   useLayoutEffect(() => {
     const el = ref.current;
-    if (el) setClamped(el.scrollHeight - el.clientHeight > 1);
-  }, [text]);
-  const body = (
-    <span ref={ref} className="agent-composer-model-detail-desc">
-      {text}
-    </span>
-  );
-  return clamped ? (
-    <HoverTip tip={text} className="agent-composer-model-detail-desc-tip">
-      {body}
-    </HoverTip>
-  ) : (
-    body
+    if (!el || expanded) return;
+    setClamped(el.scrollHeight - el.clientHeight > 1);
+  }, [text, expanded]);
+  return (
+    <>
+      <p
+        ref={ref}
+        className="agent-composer-model-detail-desc"
+        data-expanded={expanded || undefined}
+      >
+        {text}
+      </p>
+      {clamped || expanded ? (
+        <button
+          type="button"
+          className="agent-composer-model-detail-more"
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
+      ) : null}
+    </>
   );
 }
 
 function ModelPickerOption({
   model,
   selected,
+  active,
   onSelect,
   onHover,
 }: {
   model: VeniceModelDto;
   selected: boolean;
+  active?: boolean;
   onSelect: (modelId: string) => void;
   onHover: (model: VeniceModelDto, row: HTMLElement, immediate: boolean) => void;
 }) {
@@ -473,6 +890,8 @@ function ModelPickerOption({
       className="agent-composer-model-row"
       role="option"
       aria-selected={selected}
+      data-model-id={model.id}
+      data-active={active || undefined}
       onMouseEnter={(event) => onHover(model, event.currentTarget, false)}
       onFocus={(event) => onHover(model, event.currentTarget, true)}
       onClick={() => onSelect(model.id)}

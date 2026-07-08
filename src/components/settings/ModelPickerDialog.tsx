@@ -326,6 +326,46 @@ function trimNumber(value: number) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
+// The hover card's spec list: the same pricing/context facts as the label
+// strings, split into label/value pairs so the card renders a compact spec
+// table instead of a prose sentence. Falls back to a single "Pricing" row when
+// the pricing shape has no clean input/output split.
+export function modelSpecEntries(model: VeniceModelDto): { label: string; value: string }[] {
+  const entries: { label: string; value: string }[] = [];
+  const input = priceForPath(model.pricing, ["input", "usd"]);
+  const output = priceForPath(model.pricing, ["output", "usd"]);
+  if (input !== undefined && output !== undefined) {
+    entries.push({ label: "Input", value: `$${formatUsd(input)} /1M` });
+    entries.push({ label: "Output", value: `$${formatUsd(output)} /1M` });
+  } else if (
+    model.priceUnit === "tokens" &&
+    typeof model.inputCreditsPerMillionTokens === "number" &&
+    typeof model.outputCreditsPerMillionTokens === "number"
+  ) {
+    entries.push({
+      label: "Input",
+      value: `${formatCreditsAsUsd(model.inputCreditsPerMillionTokens)} /1M`,
+    });
+    entries.push({
+      label: "Output",
+      value: `${formatCreditsAsUsd(model.outputCreditsPerMillionTokens)} /1M`,
+    });
+  } else {
+    const price = pricingLabel(model);
+    if (price) entries.push({ label: "Pricing", value: price });
+  }
+  if (model.contextTokens) {
+    const context =
+      model.contextTokens >= 1_000_000
+        ? `${trimNumber(model.contextTokens / 1_000_000)}M tokens`
+        : model.contextTokens >= 1_000
+          ? `${trimNumber(model.contextTokens / 1_000)}K tokens`
+          : `${model.contextTokens} tokens`;
+    entries.push({ label: "Context", value: context });
+  }
+  return entries;
+}
+
 export function modelOptions(models: VeniceModelDto[], selectedModel: string) {
   const modelId = selectedModel.trim();
   if (!modelId || models.some((model) => model.id === modelId)) {

@@ -94,6 +94,9 @@ type HoverTipProps = HTMLAttributes<HTMLSpanElement> & {
    * trigger's own picker popover is open, so the hover callout never fights the
    * popover for the same anchor. */
   suppressed?: boolean;
+  /** Keeps the callout alive while the pointer moves onto it. Use only for
+   * rich, card-like tips with controls inside. */
+  interactive?: boolean;
   children: ReactNode;
 };
 
@@ -114,6 +117,7 @@ export function HoverTip({
   compact = false,
   delay = HOVER_INTENT_MS,
   suppressed = false,
+  interactive = false,
   children,
   ...spanProps
 }: HoverTipProps) {
@@ -126,7 +130,7 @@ export function HoverTip({
     ...restSpanProps
   } = spanProps;
   const anchorRef = useRef<HTMLSpanElement | null>(null);
-  const tipRef = useRef<HTMLSpanElement | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
   // The side committed by the first measure pass, held for the tip's whole
@@ -196,6 +200,13 @@ export function HoverTip({
     setPhase("closing");
     cancelClose();
     closeTimerRef.current = window.setTimeout(unmount, EXIT_MS);
+  }
+
+  function hideAfterInteractiveGrace() {
+    cancelHoverIntent();
+    if (!mounted) return;
+    cancelClose();
+    closeTimerRef.current = window.setTimeout(hide, HOVER_INTENT_MS);
   }
 
   // Measure the rendered tip and clamp its centered position to the viewport,
@@ -305,7 +316,8 @@ export function HoverTip({
       }}
       onMouseLeave={(event) => {
         onMouseLeave?.(event);
-        hide();
+        if (interactive) hideAfterInteractiveGrace();
+        else hide();
       }}
       onFocus={(event) => {
         onFocus?.(event);
@@ -319,11 +331,12 @@ export function HoverTip({
       {children}
       {mounted
         ? createPortal(
-            <span
+            <div
               ref={tipRef}
               id={tooltipId}
               className={compact ? "hover-tip hover-tip-compact" : "hover-tip"}
               role="tooltip"
+              data-interactive={interactive || undefined}
               data-side={coords?.side ?? "bottom"}
               // Hidden until measured: the enter animation runs only once the
               // final position is revealed, never while offscreen.
@@ -331,6 +344,15 @@ export function HoverTip({
               onTransitionEnd={(event) => {
                 if (event.propertyName === "opacity" && phase === "closing") unmount();
               }}
+              onMouseEnter={
+                interactive
+                  ? () => {
+                      cancelClose();
+                      setPhase("open");
+                    }
+                  : undefined
+              }
+              onMouseLeave={interactive ? hide : undefined}
               style={{
                 top: coords?.top ?? anchor.bottom,
                 left: coords?.left ?? 0,
@@ -341,7 +363,7 @@ export function HoverTip({
               }}
             >
               {tip}
-            </span>,
+            </div>,
             document.body,
           )
         : null}
