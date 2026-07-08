@@ -12,10 +12,13 @@ import { OnboardingFlow } from "../components/onboarding/OnboardingFlow";
 import {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
+  AGENT_SESSION_RENAMED_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
   AgentWorkspace,
   markAgentNewSessionPending,
+  recordManualAgentSessionTitle,
   type AgentNewSessionDetail,
+  type AgentSessionRenamedDetail,
   type AgentSessionsChangedDetail,
 } from "../components/agent/AgentWorkspace";
 import { AgentSessionsList } from "../components/agent/AgentSessionsList";
@@ -89,10 +92,12 @@ import {
   AGENT_OPEN_EVENT,
   AGENT_SESSION_STATUS_EVENT,
   dispatchAgentSessionStatus,
+  emitAgentSessionsChanged,
   type AgentGalleryDetail,
   type AgentSessionStatusDetail,
 } from "../lib/agent-events";
 import { notifyAgentSessionStatus } from "../lib/agent-notifications";
+import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
 import { errorCode, messageFromError } from "../lib/errors";
 import { parseDictationHelperEvent } from "../lib/dictation-events";
 import { listHermesSessions, titleFromPrompt } from "../lib/hermes-adapter";
@@ -1955,6 +1960,44 @@ export function App() {
     }, 0);
   }, []);
 
+  /** stored session id (not the runtime session id). */
+  const handleRenameAgentSession = useCallback(
+    (sessionId: string, title: string) => {
+      const next = title.trim();
+      const currentSession = agentSessions.find((session) => session.id === sessionId);
+      const currentTitle =
+        currentSession?.title?.trim() ||
+        currentSession?.preview?.trim() ||
+        (currentSession ? "Untitled session" : "");
+      if (!next || next === currentTitle) return;
+
+      const renameSession = (session: HermesSessionInfo) =>
+        session.id === sessionId ? { ...session, title: next } : session;
+      setAgentSessions((current) => current.map(renameSession));
+      agentMenuBarSessionsRef.current = agentMenuBarSessionsRef.current.map(renameSession);
+      publishAgentMenuBarState();
+      void ensureHermesBridgeSession({ sessionId, title: next }).catch(() => {
+        setError("Could not save the session name. It may revert after a restart.");
+      });
+      rememberSessionManuallyTitled(sessionId);
+      recordManualAgentSessionTitle(sessionId, next);
+      window.dispatchEvent(
+        new CustomEvent<AgentSessionRenamedDetail>(AGENT_SESSION_RENAMED_EVENT, {
+          detail: { sessionId, title: next },
+        }),
+      );
+      // The Agent HUD is a separate window listening on the cross-window
+      // sessions channel; without this emit it would show the old title until
+      // an unrelated sessions-changed broadcast.
+      emitAgentSessionsChanged({
+        sessions: agentMenuBarSessionsRef.current,
+        workingSessionIds: [...agentMenuBarWorkingSessionIdsRef.current],
+        waitingSessionIds: [...agentMenuBarWaitingSessionIdsRef.current],
+      });
+    },
+    [agentSessions, publishAgentMenuBarState],
+  );
+
   useEffect(() => {
     if (
       appBlocked ||
@@ -3022,6 +3065,7 @@ export function App() {
           setActiveAgentSession(undefined);
           setActiveView("agent");
         }}
+        onRenameAgentSession={handleRenameAgentSession}
         onSelectAgentSession={(session) => {
           if (takeNewTabIntent()) {
             openTab({ view: "agent", agentSessionId: session.id });
@@ -3257,6 +3301,7 @@ export function App() {
                     setActiveView("agent");
                   }}
                   onNewSession={handleNewAgentSession}
+                  onRenameSession={handleRenameAgentSession}
                   onOpenMoveDialog={(sessionId) => setMoveDialogSessionIds([sessionId])}
                   onOpenMoveSessions={(sessionIds) => setMoveDialogSessionIds(sessionIds)}
                   onRemoveFromProject={(sessionId, folderId) =>

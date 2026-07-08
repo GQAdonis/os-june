@@ -830,9 +830,13 @@ export async function saveAgentHermesSession(input: { taskId: string; hermesSess
   });
 }
 
-export async function suggestAgentSessionTitle(prompt: string) {
+export async function suggestAgentSessionTitle(prompt: string, response?: string) {
+  const trimmedResponse = response?.trim();
   return invoke<SuggestAgentSessionTitleResponse>("suggest_agent_session_title", {
-    request: { prompt },
+    request: {
+      prompt,
+      ...(trimmedResponse ? { response: trimmedResponse } : {}),
+    },
   });
 }
 

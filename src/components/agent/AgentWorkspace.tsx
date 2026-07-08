@@ -182,6 +182,11 @@ import {
 } from "../../lib/hermes-image-attach";
 import { parseSessionUsage, type SessionUsage } from "../../lib/hermes-session-usage";
 import {
+  rememberSessionExchangeTitled,
+  rememberSessionManuallyTitled,
+  sessionSettledTitleKind,
+} from "../../lib/agent-session-titles";
+import {
   parseCompressSessionResult,
   type CompressSessionResult,
 } from "../../lib/hermes-session-compress";
@@ -726,6 +731,14 @@ function shuffleAgentShortcuts(): AgentShortcut[] {
   return pool;
 }
 
+export const AGENT_SESSION_RENAMED_EVENT = "june:agent:session-renamed";
+
+/** stored session id (not the runtime session id). */
+export type AgentSessionRenamedDetail = {
+  sessionId: string;
+  title: string;
+};
+
 export {
   AGENT_DELETE_SESSION_EVENT,
   AGENT_NEW_SESSION_EVENT,
@@ -1237,11 +1250,14 @@ type AgentSessionContinuity = {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, JuneHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  titleSources: Record<string, AgentSessionTitleSource>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: string[];
   submittingIssueReportSessionIds: string[];
 };
+
+type AgentSessionTitleSource = "prompt" | "exchange" | "manual";
 
 type IssueReportDeliveryResult = { sent: true } | { sent: false; errorMessage: string };
 
@@ -1379,6 +1395,7 @@ function captureSessionContinuity(state: {
   runtimeSessionIds: Record<string, string>;
   liveEvents: Record<string, JuneHermesEvent[]>;
   titleOverrides: Record<string, string>;
+  titleSources: Record<string, AgentSessionTitleSource>;
   pendingIssueReports: Record<string, PendingIssueReport>;
   reviewableIssueReports: Record<string, PendingIssueReport>;
   diagnosisRefreshIssueReportSessionIds: Set<string>;
@@ -1409,6 +1426,7 @@ function captureSessionContinuity(state: {
     runtimeSessionIds: pick(state.runtimeSessionIds),
     liveEvents: pick(state.liveEvents),
     titleOverrides: pick(state.titleOverrides),
+    titleSources: pick(state.titleSources),
     pendingIssueReports: pick(state.pendingIssueReports),
     reviewableIssueReports: pick(state.reviewableIssueReports),
     diagnosisRefreshIssueReportSessionIds: [...state.diagnosisRefreshIssueReportSessionIds].filter(
@@ -1515,6 +1533,7 @@ function updateContinuityAfterIssueReportDelivery(detail: IssueReportDeliverySet
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    titleSources: sessionContinuity.titleSources,
     pendingIssueReports,
     reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds,
@@ -1547,8 +1566,36 @@ function updateContinuityAfterIssueReportFollowUpSubmitFailed(
     runtimeSessionIds: sessionContinuity.runtimeSessionIds,
     liveEvents: sessionContinuity.liveEvents,
     titleOverrides: sessionContinuity.titleOverrides,
+    titleSources: sessionContinuity.titleSources,
     pendingIssueReports,
     reviewableIssueReports,
+    diagnosisRefreshIssueReportSessionIds: new Set(
+      sessionContinuity.diagnosisRefreshIssueReportSessionIds,
+    ),
+    submittingIssueReportSessionIds: new Set(sessionContinuity.submittingIssueReportSessionIds),
+  });
+}
+
+/** stored session id (not the runtime session id). */
+export function recordManualAgentSessionTitle(sessionId: string, title: string) {
+  if (!sessionContinuity) return;
+  sessionContinuity = captureSessionContinuity({
+    sessionItems: sessionContinuity.sessionItems.map((session) =>
+      session.id === sessionId ? { ...session, title } : session,
+    ),
+    pendingMessages: sessionContinuity.pendingMessages,
+    runtimeSessionIds: sessionContinuity.runtimeSessionIds,
+    liveEvents: sessionContinuity.liveEvents,
+    titleOverrides: {
+      ...sessionContinuity.titleOverrides,
+      [sessionId]: title,
+    },
+    titleSources: {
+      ...sessionContinuity.titleSources,
+      [sessionId]: "manual",
+    },
+    pendingIssueReports: sessionContinuity.pendingIssueReports,
+    reviewableIssueReports: sessionContinuity.reviewableIssueReports,
     diagnosisRefreshIssueReportSessionIds: new Set(
       sessionContinuity.diagnosisRefreshIssueReportSessionIds,
     ),
@@ -1833,6 +1880,7 @@ export function AgentWorkspace({
   const [hermesSessionMessages, setHermesSessionMessages] = useState<
     Record<string, HermesSessionMessage[]>
   >({});
+  const hermesSessionMessagesRef = useRef<Record<string, HermesSessionMessage[]>>({});
   const [pendingHermesMessages, setPendingHermesMessages] = useState<
     Record<string, HermesSessionMessage[]>
   >(() => continuity?.pendingMessages ?? {});
@@ -2053,7 +2101,11 @@ export function AgentWorkspace({
   // selecting an existing chat from the sidebar (that should swap instantly).
   const heroExitViaThreadRef = useRef(false);
   const sessionTitleOverridesRef = useRef<Record<string, string>>(continuity?.titleOverrides ?? {});
+  const sessionTitleSourceRef = useRef<Record<string, AgentSessionTitleSource>>(
+    continuity?.titleSources ?? {},
+  );
   const titleSuggestionSessionIdsRef = useRef<Set<string>>(new Set());
+  const titleSuggestionInFlightSessionIdsRef = useRef<Set<string>>(new Set());
   const listRef = useRef<HTMLDivElement | null>(null);
   const agentScrollRef = useRef<HTMLDivElement | null>(null);
   const composerEditorRef = useRef<ComposerEditorHandle | null>(null);
@@ -2237,9 +2289,11 @@ export function AgentWorkspace({
     workingSessionIdsRef.current = workingSessionIds;
     toolCallSessionIdsRef.current = toolCallSessionIds;
     waitingSessionIdsRef.current = waitingSessionIds;
+    hermesSessionMessagesRef.current = hermesSessionMessages;
     pendingHermesMessagesRef.current = pendingHermesMessages;
     hermesSessionItemsRef.current = hermesSessionItems;
   }, [
+    hermesSessionMessages,
     hermesSessionItems,
     pendingHermesMessages,
     selectedHermesSessionId,
@@ -2289,7 +2343,11 @@ export function AgentWorkspace({
   // Both delete paths (sidebar event and session-bar menu) run this so neither
   // leaves a phantom "working" session with a leaked listener behind.
   const scrubHermesSessionState = useCallback((sessionId: string) => {
-    setHermesSessionMessages((current) => omitRecordKey(current, sessionId));
+    setHermesSessionMessages((current) => {
+      const next = omitRecordKey(current, sessionId);
+      hermesSessionMessagesRef.current = next;
+      return next;
+    });
     setPendingHermesMessages((current) => {
       const next = omitRecordKey(current, sessionId);
       pendingHermesMessagesRef.current = next;
@@ -3281,11 +3339,13 @@ export function AgentWorkspace({
   // bridge is still { running: false }, so a post-submit loadHermesSessions
   // silently no-ops and the sidebar never refreshes after event-driven runs.
   const windowEventHandlersRef = useRef({
+    applyManualHermesSessionTitleLocally,
     startNewTask,
     removeHermesSessionLocally,
   });
   useEffect(() => {
     windowEventHandlersRef.current = {
+      applyManualHermesSessionTitleLocally,
       startNewTask,
       removeHermesSessionLocally,
     };
@@ -3311,6 +3371,15 @@ export function AgentWorkspace({
       windowEventHandlersRef.current.removeHermesSessionLocally(detail.sessionId);
     }
 
+    function handleRenameSession(event: Event) {
+      const detail = (event as CustomEvent<AgentSessionRenamedDetail>).detail;
+      if (!detail?.sessionId) return;
+      windowEventHandlersRef.current.applyManualHermesSessionTitleLocally(
+        detail.sessionId,
+        detail.title,
+      );
+    }
+
     const pending = pendingNewSessionRequest();
     if (pending) {
       void windowEventHandlersRef.current.startNewTask(pending, {
@@ -3320,9 +3389,11 @@ export function AgentWorkspace({
 
     window.addEventListener(AGENT_NEW_SESSION_EVENT, handleNewSession);
     window.addEventListener(AGENT_DELETE_SESSION_EVENT, handleDeleteSession);
+    window.addEventListener(AGENT_SESSION_RENAMED_EVENT, handleRenameSession);
     return () => {
       window.removeEventListener(AGENT_NEW_SESSION_EVENT, handleNewSession);
       window.removeEventListener(AGENT_DELETE_SESSION_EVENT, handleDeleteSession);
+      window.removeEventListener(AGENT_SESSION_RENAMED_EVENT, handleRenameSession);
     };
   }, []);
 
@@ -3337,10 +3408,14 @@ export function AgentWorkspace({
           pendingHermesMessagesRef.current[selectedHermesSessionId] ?? [],
           messages,
         );
-        setHermesSessionMessages((current) => ({
-          ...current,
-          [selectedHermesSessionId]: messages,
-        }));
+        setHermesSessionMessages((current) => {
+          const next = {
+            ...current,
+            [selectedHermesSessionId]: messages,
+          };
+          hermesSessionMessagesRef.current = next;
+          return next;
+        });
         setPendingHermesMessages((current) => {
           const next = {
             ...current,
@@ -3465,6 +3540,7 @@ export function AgentWorkspace({
         runtimeSessionIds: runtimeSessionIdsRef.current,
         liveEvents: liveEventsRef.current,
         titleOverrides: sessionTitleOverridesRef.current,
+        titleSources: sessionTitleSourceRef.current,
         pendingIssueReports: Object.fromEntries(pendingIssueReportsRef.current),
         reviewableIssueReports: reviewableIssueReportsRef.current,
         diagnosisRefreshIssueReportSessionIds: diagnosisRefreshIssueReportSessionIdsRef.current,
@@ -4831,7 +4907,11 @@ export function AgentWorkspace({
       });
       return replaced ? next : [replacement, ...next];
     });
-    setHermesSessionMessages((current) => moveRecordKey(current, fromSessionId, toSessionId));
+    setHermesSessionMessages((current) => {
+      const next = moveRecordKey(current, fromSessionId, toSessionId);
+      hermesSessionMessagesRef.current = next;
+      return next;
+    });
     setPendingHermesMessages((current) => {
       const next = moveRecordKey(current, fromSessionId, toSessionId);
       pendingHermesMessagesRef.current = next;
@@ -4855,6 +4935,7 @@ export function AgentWorkspace({
     setHermesSessionMessages((current) => {
       let next = current;
       for (const id of ids) next = omitRecordKey(next, id);
+      hermesSessionMessagesRef.current = next;
       return next;
     });
     setPendingHermesMessages((current) => {
@@ -5132,7 +5213,7 @@ export function AgentWorkspace({
     const titlePromise =
       targetSessionId || options?.issueReport
         ? undefined
-        : agentSessionTitleForPrompt(titleContent);
+        : agentSessionTitleForPrompt(titleContent).then((suggestion) => suggestion.title);
     const fallbackSessionTitle = options?.issueReport
       ? "Issue report"
       : explicitSession?.title?.trim() ||
@@ -5225,6 +5306,10 @@ export function AgentWorkspace({
       sessionTitleOverridesRef.current = {
         ...sessionTitleOverridesRef.current,
         [storedSessionId]: sessionTitle,
+      };
+      sessionTitleSourceRef.current = {
+        ...sessionTitleSourceRef.current,
+        [storedSessionId]: "prompt",
       };
       // The mount-time session load races this store: when its merge lands
       // first, the fetched placeholder title is already rendered and nothing
@@ -5721,10 +5806,14 @@ export function AgentWorkspace({
         messages,
       );
       const combined = [...messages, ...retainedPending];
-      setHermesSessionMessages((current) => ({
-        ...current,
-        [sessionId]: messages,
-      }));
+      setHermesSessionMessages((current) => {
+        const next = {
+          ...current,
+          [sessionId]: messages,
+        };
+        hermesSessionMessagesRef.current = next;
+        return next;
+      });
       setPendingHermesMessages((current) => {
         const next = {
           ...current,
@@ -6163,10 +6252,14 @@ export function AgentWorkspace({
       setDraft(branchComposerText);
       setCategory(null);
       setAttachments([]);
-      setHermesSessionMessages((current) => ({
-        ...current,
-        [result.sessionId]: branchSeedMessages,
-      }));
+      setHermesSessionMessages((current) => {
+        const next = {
+          ...current,
+          [result.sessionId]: branchSeedMessages,
+        };
+        hermesSessionMessagesRef.current = next;
+        return next;
+      });
       setPendingHermesMessages((current) => {
         const next = {
           ...current,
@@ -6703,15 +6796,38 @@ export function AgentWorkspace({
   // Manual rename. Records an override (same channel the auto-suggested titles
   // use) and marks the session so the suggester won't clobber the user's name.
   // The sessions-changed effect propagates it to the sidebar.
-  function renameHermesSession(sessionId: string, title: string) {
+  function applyManualHermesSessionTitleLocally(sessionId: string, title: string) {
+    const next = title.trim();
+    if (!next) return null;
+    rememberSessionManuallyTitled(sessionId);
     titleSuggestionSessionIdsRef.current.add(sessionId);
     sessionTitleOverridesRef.current = {
       ...sessionTitleOverridesRef.current,
-      [sessionId]: title,
+      [sessionId]: next,
     };
-    setHermesSessionItems((current) =>
-      current.map((item) => (item.id === sessionId ? { ...item, title } : item)),
-    );
+    sessionTitleSourceRef.current = {
+      ...sessionTitleSourceRef.current,
+      [sessionId]: "manual",
+    };
+    const applyTitle = (sessions: HermesSessionInfo[]) =>
+      sessions.map((item) => (item.id === sessionId ? { ...item, title: next } : item));
+    hermesSessionItemsRef.current = applyTitle(hermesSessionItemsRef.current);
+    setHermesSessionItems((current) => applyTitle(current));
+    return next;
+  }
+
+  function renameHermesSession(sessionId: string, title: string) {
+    const next = title.trim();
+    const currentTitle =
+      sessionTitleOverridesRef.current[sessionId] ??
+      hermesSessionItems.find((item) => item.id === sessionId)?.title ??
+      "";
+    if (!next || next === currentTitle.trim()) return;
+    const appliedTitle = applyManualHermesSessionTitleLocally(sessionId, next);
+    if (!appliedTitle) return;
+    void ensureHermesBridgeSession({ sessionId, title: appliedTitle }).catch(() => {
+      setError("Could not save the session name. It may revert after a restart.", { sessionId });
+    });
   }
 
   // Drops a deleted session from local state. Removing it from items fires
@@ -6763,26 +6879,104 @@ export function AgentWorkspace({
     sessionId: string,
     messages: HermesSessionMessage[],
   ) {
+    hermesSessionMessagesRef.current = {
+      ...hermesSessionMessagesRef.current,
+      [sessionId]: messages,
+    };
+    const source = sessionTitleSourceRef.current[sessionId];
+    const settledTitleKind = sessionSettledTitleKind(sessionId);
     if (
-      sessionTitleOverridesRef.current[sessionId] ||
-      titleSuggestionSessionIdsRef.current.has(sessionId)
+      source === "manual" ||
+      source === "exchange" ||
+      settledTitleKind === "manual" ||
+      settledTitleKind === "exchange"
     ) {
       return;
     }
-    const session = hermesSessionItems.find((item) => item.id === sessionId);
-    if (!session || !isReplaceableAgentSessionTitle(session.title)) return;
-    const firstUserMessage = messages.find((message) => message.role === "user");
+    if (
+      titleSuggestionSessionIdsRef.current.has(sessionId) ||
+      titleSuggestionInFlightSessionIdsRef.current.has(sessionId)
+    ) {
+      return;
+    }
+    const firstUserMessageIndex = messages.findIndex((message) => message.role === "user");
+    const firstUserMessage =
+      firstUserMessageIndex >= 0 ? messages[firstUserMessageIndex] : undefined;
     const prompt = firstUserMessage ? visibleHermesMessageText(firstUserMessage).trim() : "";
     if (!prompt) return;
-    titleSuggestionSessionIdsRef.current.add(sessionId);
-    const title = await agentSessionTitleForPrompt(prompt);
-    sessionTitleOverridesRef.current = {
-      ...sessionTitleOverridesRef.current,
-      [sessionId]: title,
-    };
-    setHermesSessionItems((current) =>
-      current.map((item) => (item.id === sessionId ? { ...item, title } : item)),
+    const firstAssistantReply =
+      firstUserMessageIndex >= 0
+        ? messages
+            .slice(firstUserMessageIndex + 1)
+            .find(
+              (message) => message.role === "assistant" && visibleHermesMessageText(message).trim(),
+            )
+        : undefined;
+    const reply = truncateAgentTitleResponseExcerpt(
+      visibleHermesMessageText(firstAssistantReply).trim(),
     );
+    const hasReply = Boolean(reply);
+    if (source === "prompt") {
+      if (!hasReply) return;
+    } else if (sessionTitleOverridesRef.current[sessionId]) {
+      return;
+    } else {
+      const session = hermesSessionItems.find((item) => item.id === sessionId);
+      if (!session || !isReplaceableAgentSessionTitle(session.title)) return;
+    }
+    titleSuggestionInFlightSessionIdsRef.current.add(sessionId);
+    let shouldRecheckLatestMessages = false;
+    try {
+      const suggestion = await agentSessionTitleForPrompt(prompt, hasReply ? reply : undefined);
+      if (titleSuggestionSessionIdsRef.current.has(sessionId)) return;
+      if (!suggestion.fromModel && sessionTitleOverridesRef.current[sessionId]) {
+        return;
+      }
+      const title = suggestion.title;
+      const nextSource: AgentSessionTitleSource =
+        suggestion.fromModel && hasReply ? "exchange" : "prompt";
+      sessionTitleOverridesRef.current = {
+        ...sessionTitleOverridesRef.current,
+        [sessionId]: title,
+      };
+      sessionTitleSourceRef.current = {
+        ...sessionTitleSourceRef.current,
+        [sessionId]: nextSource,
+      };
+      if (suggestion.fromModel && nextSource === "prompt") {
+        shouldRecheckLatestMessages = true;
+      }
+      // The durable exchange marker only lands once the title is known to be
+      // stored: marking first and failing the PATCH would freeze a stale
+      // stored title as settled on the next launch.
+      const settleExchangeAfterPersist = suggestion.fromModel && nextSource === "exchange";
+      setHermesSessionItems((current) =>
+        current.map((item) => (item.id === sessionId ? { ...item, title } : item)),
+      );
+      void ensureHermesBridgeSession({ sessionId, title })
+        .then(() => {
+          // A manual rename can land while this auto-title PATCH is in
+          // flight and finish first; the stored title must end at the
+          // user's name, so re-assert it instead of settling the auto title.
+          if (sessionTitleSourceRef.current[sessionId] === "manual") {
+            const manualTitle = sessionTitleOverridesRef.current[sessionId];
+            if (manualTitle && manualTitle !== title) {
+              void ensureHermesBridgeSession({ sessionId, title: manualTitle }).catch(() => {});
+            }
+            return;
+          }
+          if (settleExchangeAfterPersist) rememberSessionExchangeTitled(sessionId);
+        })
+        .catch(() => {});
+    } finally {
+      titleSuggestionInFlightSessionIdsRef.current.delete(sessionId);
+    }
+    if (shouldRecheckLatestMessages) {
+      const latestMessages = hermesSessionMessagesRef.current[sessionId];
+      if (latestMessages) {
+        void suggestTitleForUntitledSession(sessionId, latestMessages);
+      }
+    }
   }
 
   async function setSkillEnabled(skill: HermesSkillInfo, enabled: boolean) {
@@ -8383,8 +8577,7 @@ function AgentSessionBar({
 
   function commitRename() {
     setRenaming(false);
-    const next = draft.trim();
-    if (onRename && next && next !== title) onRename(next);
+    onRename?.(draft);
   }
 
   const hasMenu = Boolean(
@@ -8564,13 +8757,23 @@ function AgentSessionBar({
   );
 }
 
-async function agentSessionTitleForPrompt(prompt: string) {
+async function agentSessionTitleForPrompt(prompt: string, response?: string) {
   try {
-    const response = await withTimeout(suggestAgentSessionTitle(prompt), AGENT_TITLE_TIMEOUT_MS);
-    return response.title.trim() || titleFromPrompt(prompt);
+    const suggestion = await withTimeout(
+      suggestAgentSessionTitle(prompt, response),
+      AGENT_TITLE_TIMEOUT_MS,
+    );
+    const title = suggestion.title.trim();
+    return title
+      ? { title, fromModel: true }
+      : { title: titleFromPrompt(prompt), fromModel: false };
   } catch {
-    return titleFromPrompt(prompt);
+    return { title: titleFromPrompt(prompt), fromModel: false };
   }
+}
+
+function truncateAgentTitleResponseExcerpt(response: string) {
+  return Array.from(response).slice(0, 1200).join("");
 }
 
 function isReplaceableAgentSessionTitle(title: unknown) {
