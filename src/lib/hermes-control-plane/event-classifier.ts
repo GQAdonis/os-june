@@ -169,11 +169,65 @@ function classifyTool(
     text: eventText(payload),
     // Clarify tool calls are action-card plumbing in the builder, not tool rows.
     isClarify: isClarifyTool(payload),
+    content: toolImageContent(payload?.content),
     // Tool cards render arguments/output, so keep the sanitized payload in case
     // a tool's args happen to embed a secret.
     sanitizedPayload,
     receivedAt,
   };
+}
+
+function toolImageContent(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined || depth > 4) return undefined;
+  if (typeof value === "string") {
+    const parsed = parseJsonObject(value);
+    return parsed ? toolImageContent(parsed, depth + 1) : undefined;
+  }
+  if (Array.isArray(value)) {
+    const items = value
+      .map((item) => toolImageContent(item, depth + 1))
+      .filter((item) => item !== undefined);
+    return items.length ? items : undefined;
+  }
+  if (typeof value !== "object") return undefined;
+
+  const record = value as Record<string, unknown>;
+  if (record.type === "image" && typeof record.data === "string" && record.data.trim()) {
+    return {
+      type: "image",
+      data: record.data,
+      mimeType:
+        typeof record.mimeType === "string" && record.mimeType.trim()
+          ? record.mimeType
+          : "image/png",
+    };
+  }
+  if (record.type === "text" && typeof record.text === "string") {
+    const parsed = parseJsonObject(record.text);
+    if (
+      parsed &&
+      (typeof parsed.filename === "string" ||
+        typeof parsed.label === "string" ||
+        typeof parsed.mimeType === "string")
+    ) {
+      return { type: "text", text: record.text };
+    }
+  }
+  if (Array.isArray(record.content)) {
+    return toolImageContent(record.content, depth + 1);
+  }
+  return undefined;
+}
+
+function parseJsonObject(value: string): Record<string, unknown> | undefined {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function classifyPendingAction(

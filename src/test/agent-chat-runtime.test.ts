@@ -1493,6 +1493,64 @@ describe("Agent chat runtime", () => {
     expect(tool?.type === "tool" ? tool.text : "").not.toContain("aGVsbG8=");
   });
 
+  it("renders live june_image tool results inline from tool.complete content", () => {
+    const turns = buildHermesSessionChatTurns(
+      [],
+      [
+        toolEvent({
+          key: "tool-call-1",
+          name: "edit_image",
+          phase: "complete",
+          text: JSON.stringify({
+            filename: "generated-image-abc.june-source-123.png",
+            label: "make the bicycle blue",
+          }),
+          receivedAt: "2026-06-04T10:00:01.000Z",
+          content: [
+            { type: "image", data: "ZWRpdGVk", mimeType: "image/png" },
+            {
+              type: "text",
+              text: JSON.stringify({
+                filename: "generated-image-abc.june-source-123.png",
+                label: "make the bicycle blue",
+              }),
+            },
+          ],
+        }),
+        transcriptEvent({
+          receivedAt: "2026-06-04T10:00:02.000Z",
+          delta: "Done.\n\nMEDIA:generated-image-abc.june-source-123.png",
+          complete: true,
+        }),
+      ],
+    );
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "tool",
+        id: "tool-call-1",
+        name: "Working with images",
+        text: JSON.stringify({
+          filename: "generated-image-abc.june-source-123.png",
+          label: "make the bicycle blue",
+        }),
+        status: "complete",
+      },
+      {
+        type: "image",
+        status: "complete",
+        prompt: "make the bicycle blue",
+        dataUrl: "data:image/png;base64,ZWRpdGVk",
+        name: "generated-image-abc.june-source-123.png",
+      },
+      {
+        type: "text",
+        text: "Done.",
+        status: "complete",
+      },
+    ]);
+  });
+
   it("renders Hermes MEDIA image references inline instead of as visible paths", () => {
     const mediaPath =
       "/Users/alex/Library/Application Support/co.opensoftware.june-dev/hermes/image_cache/img_ce347dc6e27a.png";
@@ -1523,6 +1581,39 @@ describe("Agent chat runtime", () => {
         prompt: "Generated image",
         path: mediaPath,
         name: "img_ce347dc6e27a.png",
+      },
+    ]);
+  });
+
+  it("renders bare-filename MEDIA references inline (the june_image tool returns just a filename)", () => {
+    // The model commonly echoes the plain `filename` the tool returned rather
+    // than a full path, e.g. an edit_image result's `.june-source-` name.
+    const mediaName = "generated-image-598d46c9.june-source-c9c238d42.png";
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: [
+          "Done! Here's the edited image with another figure added:",
+          "",
+          `MEDIA:${mediaName}`,
+        ].join("\n"),
+        timestamp: "2026-06-04T10:00:00.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toEqual([
+      {
+        type: "text",
+        text: "Done! Here's the edited image with another figure added:",
+        status: "complete",
+      },
+      {
+        type: "image",
+        status: "complete",
+        prompt: "Generated image",
+        path: mediaName,
+        name: mediaName,
       },
     ]);
   });

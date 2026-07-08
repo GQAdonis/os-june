@@ -7323,6 +7323,31 @@ describe("AgentWorkspace", () => {
     expect(mocks.hermesBridgeFilePreview).toHaveBeenCalledWith(mediaPath);
   });
 
+  it("renders bare-filename MEDIA references as inline generated images", async () => {
+    // The june_image tool returns a plain `filename`, and the model echoes it as
+    // `MEDIA:<filename>` rather than an absolute path. The bare reference must
+    // still render inline (the backend resolves it against the image roots)
+    // instead of leaking as visible text.
+    const mediaName = "img_ae9ed1ffc669.png";
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "message-1",
+        role: "assistant",
+        content: ["Done! Here's the edited image:", "", `MEDIA:${mediaName}`].join("\n"),
+        timestamp: "2026-06-04T18:39:00Z",
+      },
+    ]);
+
+    render(<AgentWorkspace />);
+
+    expect(await screen.findByText("Done! Here's the edited image:")).toBeInTheDocument();
+    const image = await screen.findByRole("img", { name: "Generated image" });
+    expect(image).toHaveAttribute("src", "data:image/png;base64,cHJldmlldw==");
+    expect(screen.queryByText(/MEDIA:/)).not.toBeInTheDocument();
+    // The bare filename is passed through to the bridge, which resolves it.
+    expect(mocks.hermesBridgeFilePreview).toHaveBeenCalledWith(mediaName);
+  });
+
   it("imports dropped files into the Hermes workspace before submitting", async () => {
     const user = userEvent.setup();
     render(<AgentWorkspace />);
