@@ -149,6 +149,7 @@ export function ModelPickerPopover({
     createHoverBridgeTracker({ onExpire: (point) => catalogHandoffRef.current(point) }),
   );
   const catalogAnchorRef = useRef(false);
+  const portalTarget = typeof document === "undefined" ? null : document.body;
 
   const [fade, setFade] = useState({ top: false, bottom: false });
   const updateFade = useCallback(() => {
@@ -603,7 +604,7 @@ export function ModelPickerPopover({
       // leaving the popover drops a not-yet-fired open intent and lifts any
       // bridging suppression left by an abandoned re-target, so row hover
       // feedback can never stay dead.
-      onMouseLeave={() => {
+      onPointerLeave={() => {
         cancelHoverIntent();
         setBridging(false);
       }}
@@ -696,7 +697,7 @@ export function ModelPickerPopover({
           </button>
         </>
       )}
-      {detail
+      {detail && portalTarget
         ? createPortal(
             // Portaled to the body and fixed-positioned so no scroll container
             // or panel (e.g. the note-chat panel) can clip it or paint over it.
@@ -722,7 +723,7 @@ export function ModelPickerPopover({
                 <ModelPickerCardContent model={detail.model} withDescription animateChange />
               </div>
             </div>,
-            document.body,
+            portalTarget,
           )
         : null}
       {flyout?.kind === "all" ? (
@@ -741,7 +742,7 @@ export function ModelPickerPopover({
           <div className="agent-composer-model-surface">{catalogList(allModelsLabel)}</div>
         </div>
       ) : null}
-      {(flyout?.kind === "all" || directCatalog) && catalogHover
+      {(flyout?.kind === "all" || directCatalog) && catalogHover && portalTarget
         ? createPortal(
             // Portaled alongside the detail card, for the same reason.
             <div
@@ -762,7 +763,7 @@ export function ModelPickerPopover({
                 <ModelPickerCardContent model={catalogHover.model} withDescription animateChange />
               </div>
             </div>,
-            document.body,
+            portalTarget,
           )
         : null}
     </div>

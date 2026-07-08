@@ -176,6 +176,7 @@ export function ComposerModelPopover({
     createHoverBridgeTracker({ onExpire: (point) => catalogHandoffRef.current(point) }),
   );
   const catalogAnchorRef = useRef(false);
+  const portalTarget = typeof document === "undefined" ? null : document.body;
   // Position-aware scroll fades on the catalog list, same treatment as the
   // artifact panel body: only when it overflows, only on edges with hidden
   // content.
@@ -516,7 +517,7 @@ export function ComposerModelPopover({
       // leaving the popover drops a not-yet-fired open intent and lifts any
       // bridging suppression left by an abandoned re-target, so row hover
       // feedback can never stay dead.
-      onMouseLeave={() => {
+      onPointerLeave={() => {
         cancelHoverIntent();
         setBridging(false);
       }}
@@ -597,7 +598,7 @@ export function ComposerModelPopover({
         <span className="agent-composer-model-row-name">All models</span>
         <IconChevronRightSmall size={12} aria-hidden className="agent-composer-model-row-chevron" />
       </button>
-      {detail
+      {detail && portalTarget
         ? createPortal(
             // Portaled to the body and fixed-positioned so the note-chat panel's
             // overflow/z-index can't clip it or paint the resize divider over it.
@@ -623,7 +624,7 @@ export function ComposerModelPopover({
                 <ModelPickerCardContent model={detail.model} withDescription animateChange />
               </div>
             </div>,
-            document.body,
+            portalTarget,
           )
         : null}
       {flyout?.kind === "all" ? (
@@ -696,7 +697,7 @@ export function ComposerModelPopover({
           </div>
         </div>
       ) : null}
-      {flyout?.kind === "all" && catalogHover
+      {flyout?.kind === "all" && catalogHover && portalTarget
         ? createPortal(
             // Portaled alongside the detail card for the same reason: it's a DOM
             // descendant of the note-chat panel otherwise, trapped below the
@@ -719,7 +720,7 @@ export function ComposerModelPopover({
                 <ModelPickerCardContent model={catalogHover.model} withDescription animateChange />
               </div>
             </div>,
-            document.body,
+            portalTarget,
           )
         : null}
     </div>

@@ -134,6 +134,7 @@ export function HoverTip({
   const tipRef = useRef<HTMLDivElement | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const closeTimerRef = useRef<number | null>(null);
+  const resizeFrameRef = useRef<number | null>(null);
   // The side committed by the first measure pass, held for the tip's whole
   // mounted lifetime: a re-hover or a content swap (e.g. "Copy message" →
   // "Copied") re-measures, and re-deciding the side then would visibly
@@ -144,10 +145,12 @@ export function HoverTip({
   const [anchor, setAnchor] = useState<TipAnchor>();
   // The final clamped coordinates, set after measuring the rendered tip.
   const [coords, setCoords] = useState<TipCoords>();
+  const [measureVersion, setMeasureVersion] = useState(0);
   // "open" once revealed (enter animation runs), "closing" during the exit
   // fade. Absent while measuring or unmounted.
   const [phase, setPhase] = useState<"open" | "closing">();
   const mounted = anchor !== undefined;
+  const portalTarget = typeof document === "undefined" ? null : document.body;
   const describedBy = [ariaDescribedBy, mounted ? tooltipId : null].filter(Boolean).join(" ");
 
   const cancelHoverIntent = useCallback(() => {
@@ -224,6 +227,13 @@ export function HoverTip({
     );
   }
 
+  const cancelResizeMeasure = useCallback(() => {
+    if (resizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(resizeFrameRef.current);
+      resizeFrameRef.current = null;
+    }
+  }, []);
+
   // Measure the rendered tip and clamp its centered position to the viewport,
   // all before paint, so the reveal never jumps. jsdom reports a zero-width
   // rect (no layout); that still resolves to a positioned, visible tip.
@@ -288,15 +298,43 @@ export function HoverTip({
       Math.max(anchor.centerX - boxWidth / 2, VIEWPORT_MARGIN),
       Math.max(window.innerWidth - boxWidth - VIEWPORT_MARGIN, VIEWPORT_MARGIN),
     );
-    setCoords({ side, top: side === "bottom" ? anchor.bottom : anchor.top, left, width });
-  }, [anchor, tip]);
+    const rawTop = side === "bottom" ? anchor.bottom : anchor.top;
+    let top = rawTop;
+    if (tipHeight > 0) {
+      top =
+        side === "bottom"
+          ? Math.min(rawTop, window.innerHeight - tipHeight - VIEWPORT_MARGIN)
+          : Math.max(rawTop, tipHeight + VIEWPORT_MARGIN);
+      top = Math.max(VIEWPORT_MARGIN, Math.min(top, window.innerHeight - VIEWPORT_MARGIN));
+    }
+    setCoords({ side, top, left, width });
+  }, [anchor, tip, measureVersion]);
+
+  useLayoutEffect(() => {
+    if (!interactive || !mounted || typeof ResizeObserver === "undefined") return;
+    const node = tipRef.current;
+    if (!node) return;
+    const observer = new ResizeObserver(() => {
+      cancelResizeMeasure();
+      resizeFrameRef.current = window.requestAnimationFrame(() => {
+        resizeFrameRef.current = null;
+        setMeasureVersion((version) => version + 1);
+      });
+    });
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+      cancelResizeMeasure();
+    };
+  }, [interactive, mounted, cancelResizeMeasure]);
 
   useEffect(
     () => () => {
       cancelHoverIntent();
       cancelClose();
+      cancelResizeMeasure();
     },
-    [cancelHoverIntent, cancelClose],
+    [cancelHoverIntent, cancelClose, cancelResizeMeasure],
   );
 
   // Force-close the moment suppression turns on (the picker popover opened over
@@ -367,7 +405,7 @@ export function HoverTip({
       }}
     >
       {children}
-      {mounted
+      {mounted && portalTarget
         ? createPortal(
             <div
               ref={tipRef}
@@ -415,7 +453,7 @@ export function HoverTip({
             >
               {tip}
             </div>,
-            document.body,
+            portalTarget,
           )
         : null}
     </span>
