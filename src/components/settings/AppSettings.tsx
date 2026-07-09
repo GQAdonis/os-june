@@ -2329,7 +2329,11 @@ function sourcePermissionStatus(
   source?: RecordingSourceReadinessDto["sources"][number],
 ): PermissionStatusView {
   if (!source) return { label: "Checking", tone: "unknown" };
-  if (source.ready) return { label: "Allowed", tone: "allowed" };
+  // `ready` only says this Mac is capable of the capture; the grant lives in
+  // permissionState, and a microphone-only check never asks for it.
+  if (source.ready && source.permissionState === "granted") {
+    return { label: "Allowed", tone: "allowed" };
+  }
   return permissionStatus(source.permissionState);
 }
 

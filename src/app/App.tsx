@@ -416,8 +416,13 @@ export function App() {
   const [preparingUpdate, setPreparingUpdate] = useState(false);
   const [relaunchingUpdate, setRelaunchingUpdate] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<UpdateInstallProgress | null>(null);
-  const systemGranted = !!sourceReadiness?.sources.find((source) => source.source === "system")
-    ?.ready;
+  // `ready` only says this Mac is capable of system capture; the grant is the
+  // permission state, which only a microphone-plus-system probe establishes.
+  const systemSourceReadiness = sourceReadiness?.sources.find(
+    (source) => source.source === "system",
+  );
+  const systemGranted =
+    systemSourceReadiness?.ready === true && systemSourceReadiness.permissionState === "granted";
   const recordingState = state.recordingStatus?.state;
   const captureActive =
     recordingState === "recording" ||

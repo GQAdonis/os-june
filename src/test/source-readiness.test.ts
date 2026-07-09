@@ -82,4 +82,19 @@ describe("mergeSourceReadiness", () => {
       "unsupported",
     );
   });
+
+  it("never reports a grant from an unassessed capable Mac", () => {
+    // Recording can start before the mount-time probe answers, so nothing has
+    // been assessed yet and the payload carries capability, not a verdict.
+    const next = readiness("microphoneOnly", [
+      microphone(),
+      system({ ready: true, captureAvailable: true, deviceAvailable: true }),
+    ]);
+
+    const merged = mergeSourceReadiness(undefined, next);
+    const mergedSystem = merged.sources.find((source) => source.source === "system");
+
+    expect(mergedSystem?.ready).toBe(true);
+    expect(mergedSystem?.permissionState).not.toBe("granted");
+  });
 });
