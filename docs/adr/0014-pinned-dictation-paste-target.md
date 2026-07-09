@@ -16,10 +16,11 @@ paste at all: it leaves the transcript on the clipboard and tells the user to
 paste it themselves, the same way it behaves when Accessibility trust is
 missing.
 
-The helper also waits for the pinned app to actually become frontmost before
-posting Cmd+V (bounded, then it posts anyway), and it measures the
-clipboard-restore delay from the keystroke rather than from the start of the
-paste.
+The helper also waits (bounded) for the pinned app to actually become
+frontmost, and posts Cmd+V **only** if it is frontmost at that moment. If the
+app never comes forward, the paste is abandoned to the clipboard rather than
+typed somewhere else. The clipboard-restore delay is measured from the
+keystroke rather than from the start of the paste.
 
 ## Why
 
@@ -90,3 +91,16 @@ back.
 - The helper's paste path is now the only place that decides the target.
   `activateLastExternalApp()` is gone; `lastExternalApp` remains only as the
   live source that `pinCurrentTarget()` samples.
+- A pinned app that refuses to come forward (a modal, another full-screen
+  space, a refused cooperative activation) now yields `paste_target_unavailable`
+  instead of a paste. That is the intended trade: activation is a request, not
+  a command, and typing a private transcript into the wrong window is worse
+  than asking for a manual Cmd+V.
+- The guarantee is "frontmost when we posted the keystroke", not "frontmost
+  when the keystroke was delivered". The remaining window is the time to post a
+  CGEvent, versus the multi-second window this ADR removes. It cannot be closed
+  from outside the window server.
+- `paste_text` carries no state guard, so if the helper crashes and respawns
+  while Rust is still transcribing, the replacement process has no pin and
+  reports `paste_target_unavailable`. The transcript is still on the clipboard
+  and in dictation history, so nothing is lost.

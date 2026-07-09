@@ -650,7 +650,7 @@ function startMeetingPromptTimer() {
 }
 
 function clearLongDictationNotice() {
-  if (longDictationNoticeTimer) {
+  if (longDictationNoticeTimer !== undefined) {
     window.clearTimeout(longDictationNoticeTimer);
     longDictationNoticeTimer = undefined;
   }

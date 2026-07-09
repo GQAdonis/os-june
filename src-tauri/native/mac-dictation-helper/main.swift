@@ -2033,8 +2033,13 @@ enum PasteboardInserter {
         waitForActivation(
             of: target,
             deadline: DispatchTime.now() + activationTimeout
-        ) { targetAvailable in
-            guard targetAvailable, !target.isTerminated else {
+        ) { targetIsFrontmost in
+            // Cmd+V goes wherever the window server thinks focus is, so posting
+            // it while the pinned app is not frontmost types the transcript
+            // into somebody else's window. If the activation never landed,
+            // abandon the paste rather than guess: the transcript is already on
+            // the clipboard, and a manual Cmd+V beats text in the wrong app.
+            guard targetIsFrontmost else {
                 emitPasteTargetUnavailable()
                 return
             }
@@ -2050,10 +2055,15 @@ enum PasteboardInserter {
         }
     }
 
+    /// Calls `completion(true)` only when `target` is alive and frontmost at
+    /// that moment. `NSRunningApplication.isActive` means "currently
+    /// frontmost", so a read taken right before the keystroke is the strongest
+    /// guarantee available: it shrinks the gap between deciding and typing to
+    /// the time it takes to post the event, rather than closing it outright.
     private static func waitForActivation(
         of target: NSRunningApplication,
         deadline: DispatchTime,
-        completion: @escaping (_ targetAvailable: Bool) -> Void
+        completion: @escaping (_ targetIsFrontmost: Bool) -> Void
     ) {
         guard !target.isTerminated else {
             completion(false)
@@ -2062,13 +2072,16 @@ enum PasteboardInserter {
 
         if target.isActive {
             DispatchQueue.main.asyncAfter(deadline: .now() + activationSettleDelay) {
-                completion(!target.isTerminated)
+                completion(!target.isTerminated && target.isActive)
             }
             return
         }
 
+        // The app never came forward. Activation is a request, not a command:
+        // a modal, a full-screen space, or a refused cooperative activation can
+        // all outlast the deadline.
         guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds else {
-            completion(!target.isTerminated)
+            completion(false)
             return
         }
 

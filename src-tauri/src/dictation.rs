@@ -2726,9 +2726,9 @@ struct DictationTranscriptionOutcome {
 struct RecordingReadyInfo {
     audio_path: PathBuf,
     observed_audio_level: Option<f32>,
-    /// Bundle id of the paste target as tracked by the helper's
-    /// FocusTargetController: the same app activateLastExternalApp() will
-    /// paste into. None with older helper builds that predate the field.
+    /// Bundle id of the paste target the helper pinned when the recording
+    /// stopped: the same app it will paste into once we hand back a
+    /// transcript. None with older helper builds that predate the field.
     target_bundle_id: Option<String>,
 }
 
