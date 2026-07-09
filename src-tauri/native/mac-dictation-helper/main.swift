@@ -1973,8 +1973,9 @@ enum PasteboardInserter {
     /// The activation observer is cheap, and 20 ms keeps long dictation paste
     /// handoff responsive without blocking the main run loop.
     private static let activationPollInterval: TimeInterval = 0.02
-    /// Activation is asynchronous; after one second we still post Cmd+V so a
-    /// transient false or delayed state update does not silently drop text.
+    /// Activation is asynchronous. If the pinned app has not come forward
+    /// within a second, abandon the automatic paste rather than post Cmd+V into
+    /// whichever app is frontmost instead.
     private static let activationTimeout: TimeInterval = 1.0
     /// Frontmost app activation and key-window focus do not land at the same
     /// instant, so a short settle delay protects the synthetic Cmd+V target.

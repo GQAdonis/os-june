@@ -8,8 +8,10 @@ date: 2026-07-09
 The **dictation helper** delivers a transcript by writing it to the clipboard
 and posting a synthetic Cmd+V. It chooses the app that receives that keystroke
 by **pinning** the frontmost app at the instant the recording stops
-(`FocusTargetController.pinCurrentTarget()`, called from
-`emitRecordingReady()`), and it pastes into that pinned app and no other.
+(`FocusTargetController.pinCurrentTarget()`, called from `stopActiveRecording()`
+before the recorder is torn down), and it pastes into that pinned app and no
+other. The pin must precede teardown: the selected-microphone recorder stops
+asynchronously, so pinning after it would reopen the drift window.
 
 If the pinned app has quit by the time the transcript comes back, June does not
 paste at all: it leaves the transcript on the clipboard and tells the user to
