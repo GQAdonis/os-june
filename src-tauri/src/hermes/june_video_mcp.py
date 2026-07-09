@@ -35,7 +35,13 @@ REQUEST_TIMEOUT_SECONDS = 120
 REQUEST_MAX_ATTEMPTS = 3
 REQUEST_RETRY_DELAY_SECONDS = 0.25
 POLL_INTERVAL_SECONDS = 4
-POLL_MAX_SECONDS = 470
+# Mirror the backend video job budget (`DEFAULT_VIDEO_JOB_MAX_SECS` = 750 in
+# june-api config) plus a small margin, so a supported clip that runs to the
+# full job budget is not abandoned here before it can finish. Kept under the
+# 900s `june_video` MCP tool timeout (with headroom for a final in-flight
+# request at REQUEST_TIMEOUT_SECONDS) so this returns a real result before
+# Hermes cancels the call. Keep in lockstep with the Rust job budget.
+POLL_MAX_SECONDS = 770
 TOKEN_ENV_VAR = "JUNE_VIDEO_PROXY_TOKEN"
 VIDEO_EXTENSIONS = {"mp4", "webm", "mov"}
 
