@@ -25,8 +25,8 @@ use crate::{
         types::{
             AgentMessageRole, AgentTaskDto, AgentTaskListResponse, AgentTaskRequest,
             AgentTaskStatus, AgentToolEventDto, AgentToolEventStatus, AppError,
-            AssignNoteToFolderRequest, AssignSessionToFolderRequest, BootstrapResponse,
-            CheckRecordingSourceReadinessRequest, CreateAgentTaskRequest,
+            AssignNoteToFolderRequest, AssignSessionToFolderRequest, AssignSessionToProfileRequest,
+            BootstrapResponse, CheckRecordingSourceReadinessRequest, CreateAgentTaskRequest,
             CreateDictionaryEntryRequest, CreateFolderRequest, CreateNoteRequest,
             DeleteDictionaryEntryRequest, DeleteFolderRequest, DeleteNoteRequest,
             DeleteNotesRequest, DictionaryEntryDto, ExplainAgentApprovalRequest,
@@ -37,8 +37,8 @@ use crate::{
             RemoveNoteFromFolderRequest, RemoveSessionFromFolderRequest, RenameFolderRequest,
             RetryProcessingRequest, SaveAgentAssistantMessageRequest,
             SaveAgentHermesSessionRequest, SendAgentMessageRequest, SessionFolderDto,
-            SessionRequest, SourceReadinessDto, StartRecordingRequest, SubmitIssueReportRequest,
-            SubmitIssueReportResponse, SuggestAgentSessionTitleRequest,
+            SessionProfileDto, SessionRequest, SourceReadinessDto, StartRecordingRequest,
+            SubmitIssueReportRequest, SubmitIssueReportResponse, SuggestAgentSessionTitleRequest,
             SuggestAgentSessionTitleResponse, UpdateDictionaryEntryRequest, UpdateNoteRequest,
         },
     },
@@ -280,6 +280,22 @@ pub async fn assign_session_to_folder(
     Ok(repositories(&app)
         .await?
         .assign_session_to_folder(&request.session_id, &request.folder_id)
+        .await?)
+}
+
+#[tauri::command]
+pub async fn list_session_profiles(app: AppHandle) -> Result<Vec<SessionProfileDto>, AppError> {
+    Ok(repositories(&app).await?.list_session_profiles().await?)
+}
+
+#[tauri::command]
+pub async fn assign_session_to_profile(
+    app: AppHandle,
+    request: AssignSessionToProfileRequest,
+) -> Result<(), AppError> {
+    Ok(repositories(&app)
+        .await?
+        .assign_session_to_profile(&request.session_id, &request.profile)
         .await?)
 }
 

@@ -84,6 +84,7 @@ import { toast } from "../ui/Toaster";
 import { Spinner } from "../ui/Spinner";
 import { Switch } from "../ui/Switch";
 import {
+  assignSessionToProfile,
   cancelAgentTask,
   dictationHelperCommand,
   explainAgentApproval,
@@ -5146,58 +5147,60 @@ export function AgentWorkspace({
     // the mode its session was created with. Without this, one Unrestricted
     // session would leave the runtime unsandboxed under every other
     // session's follow-ups.
-    const { created, gateway, sessionTitle, storedSessionId } = await (async () => {
-      const [nextGateway, nextSessionTitle] = await Promise.all([
-        ensureHermesGateway(
-          targetSessionId ? sessionUnrestricted(targetSessionId) : fullModeDraftRef.current,
-        ),
-        titlePromise ?? Promise.resolve(undefined),
-        // Re-read the sticky active profile for every brand-new session so an
-        // out-of-band switch (Hermes CLI, upstream dashboard) is honored
-        // without a workspace remount. Runs in parallel with gateway setup
-        // (no added wall-clock) and never throws; the store keeps the
-        // last-known value on failure. Both runtimes share one Hermes home,
-        // so the value is mode-independent.
-        targetSessionId
-          ? Promise.resolve()
-          : refreshActiveHermesProfile({
-              mode: fullModeDraftRef.current ? "unrestricted" : "sandboxed",
-            }),
-      ]);
-      const nextCreated = targetSessionId
-        ? undefined
-        : await nextGateway.request<HermesRuntimeSessionResponse>(
-            "session.create",
-            (() => {
-              const activeProfile = getActiveHermesProfileName();
-              const underProfile = activeProfile !== "default";
-              return {
-                title: nextSessionTitle ?? fallbackSessionTitle,
-                cols: 96,
-                // The composer's model IS June's global generation selection
-                // (there is no separate per-chat pick), and session.create
-                // treats `model` as a per-session override. Under a named
-                // profile the override would silently bypass the profile's own
-                // configured text model - the point of profiles - so it is
-                // omitted and the profile's model applies.
-                ...(targetSessionModelId && !underProfile ? { model: targetSessionModelId } : {}),
-                ...(underProfile ? { profile: activeProfile } : {}),
-              };
-            })(),
-          );
-      const nextStoredSessionId =
-        targetSessionId ?? nextCreated?.stored_session_id ?? nextCreated?.session_id;
-      if (!nextStoredSessionId) {
-        throw new Error("Hermes did not create a session.");
-      }
-      return {
-        created: nextCreated,
-        gateway: nextGateway,
-        sessionTitle: nextSessionTitle,
-        storedSessionId: nextStoredSessionId,
-      };
-    })().catch(rollbackOptimisticBeforePrompt);
+    const { created, createdUnderProfile, gateway, sessionTitle, storedSessionId } =
+      await (async () => {
+        const [nextGateway, nextSessionTitle] = await Promise.all([
+          ensureHermesGateway(
+            targetSessionId ? sessionUnrestricted(targetSessionId) : fullModeDraftRef.current,
+          ),
+          titlePromise ?? Promise.resolve(undefined),
+          // Re-read the sticky active profile for every brand-new session so an
+          // out-of-band switch (Hermes CLI, upstream dashboard) is honored
+          // without a workspace remount. Runs in parallel with gateway setup
+          // (no added wall-clock) and never throws; the store keeps the
+          // last-known value on failure. Both runtimes share one Hermes home,
+          // so the value is mode-independent.
+          targetSessionId
+            ? Promise.resolve()
+            : refreshActiveHermesProfile({
+                mode: fullModeDraftRef.current ? "unrestricted" : "sandboxed",
+              }),
+        ]);
+        const createdUnderProfile = targetSessionId ? undefined : getActiveHermesProfileName();
+        const underProfile = createdUnderProfile !== undefined && createdUnderProfile !== "default";
+        const nextCreated = targetSessionId
+          ? undefined
+          : await nextGateway.request<HermesRuntimeSessionResponse>("session.create", {
+              title: nextSessionTitle ?? fallbackSessionTitle,
+              cols: 96,
+              // The composer's model IS June's global generation selection
+              // (there is no separate per-chat pick), and session.create
+              // treats `model` as a per-session override. Under a named
+              // profile the override would silently bypass the profile's own
+              // configured text model - the point of profiles - so it is
+              // omitted and the profile's model applies.
+              ...(targetSessionModelId && !underProfile ? { model: targetSessionModelId } : {}),
+              ...(underProfile ? { profile: createdUnderProfile } : {}),
+            });
+        const nextStoredSessionId =
+          targetSessionId ?? nextCreated?.stored_session_id ?? nextCreated?.session_id;
+        if (!nextStoredSessionId) {
+          throw new Error("Hermes did not create a session.");
+        }
+        return {
+          created: nextCreated,
+          createdUnderProfile: underProfile ? createdUnderProfile : undefined,
+          gateway: nextGateway,
+          sessionTitle: nextSessionTitle,
+          storedSessionId: nextStoredSessionId,
+        };
+      })().catch(rollbackOptimisticBeforePrompt);
     storedSessionIdForRollback = storedSessionId;
+    if (createdUnderProfile) {
+      await assignSessionToProfile(storedSessionId, createdUnderProfile).catch(
+        rollbackOptimisticBeforePrompt,
+      );
+    }
     const queuedIssueReport = options?.issueReport;
     if (queuedIssueReport && targetSessionId) {
       queuedIssueReport.diagnosisStartedAt = new Date().toISOString();

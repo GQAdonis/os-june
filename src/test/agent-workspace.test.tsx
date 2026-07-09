@@ -36,6 +36,7 @@ const HERO_GREETING = new RegExp(
 );
 
 const mocks = vi.hoisted(() => ({
+  assignSessionToProfile: vi.fn(),
   invoke: vi.fn(),
   cancelAgentTask: vi.fn(),
   createAgentTask: vi.fn(),
@@ -97,6 +98,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../lib/tauri", () => ({
   // The pending skill-writes tray loads through the Rust bridge via this named
   // `invoke`. A quiet stub keeps these workspace tests off that path.
+  assignSessionToProfile: mocks.assignSessionToProfile,
   invoke: mocks.invoke,
   cancelAgentTask: mocks.cancelAgentTask,
   createAgentTask: mocks.createAgentTask,
@@ -448,6 +450,7 @@ describe("AgentWorkspace", () => {
       previewDataUrl: null,
     }));
     mocks.downloadHermesBridgeFile.mockResolvedValue("/Users/alex/Downloads/sample.pdf");
+    mocks.assignSessionToProfile.mockResolvedValue(undefined);
     mocks.ensureHermesBridgeSession.mockResolvedValue({});
     mocks.finalizeHermesBridgeBranch.mockResolvedValue({
       branchSessionId: "session-fork",
@@ -6243,6 +6246,9 @@ describe("AgentWorkspace", () => {
         // the profile's own configured text model (the point of profiles).
         profile: "research",
       }),
+    );
+    await waitFor(() =>
+      expect(mocks.assignSessionToProfile).toHaveBeenCalledWith("session-2", "research"),
     );
   });
 

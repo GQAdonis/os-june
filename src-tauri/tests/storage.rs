@@ -95,6 +95,47 @@ async fn p3a_counters_increment_and_clear() {
 }
 
 #[tokio::test]
+async fn session_profiles_list_and_upsert_by_session_id() {
+    let repos = test_repositories().await;
+
+    repos
+        .assign_session_to_profile("session-a", "a")
+        .await
+        .expect("session a profile should save");
+    repos
+        .assign_session_to_profile("session-b", "b")
+        .await
+        .expect("session b profile should save");
+
+    let mut profiles = repos
+        .list_session_profiles()
+        .await
+        .expect("session profiles should list");
+    profiles.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0].session_id, "session-a");
+    assert_eq!(profiles[0].profile, "a");
+    assert_eq!(profiles[1].session_id, "session-b");
+    assert_eq!(profiles[1].profile, "b");
+
+    repos
+        .assign_session_to_profile("session-a", "b")
+        .await
+        .expect("session a profile should upsert");
+
+    let mut profiles = repos
+        .list_session_profiles()
+        .await
+        .expect("session profiles should list after upsert");
+    profiles.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles[0].session_id, "session-a");
+    assert_eq!(profiles[0].profile, "b");
+    assert_eq!(profiles[1].session_id, "session-b");
+    assert_eq!(profiles[1].profile, "b");
+}
+
+#[tokio::test]
 async fn migrations_tolerate_concurrent_startup() {
     let dir = tempdir().expect("tempdir");
     let database_path = dir.path().join("notes.sqlite3");

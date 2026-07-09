@@ -69,6 +69,7 @@ import {
   LIVE_TRANSCRIPT_EVENT,
   listNotes,
   listSessionFolders,
+  listSessionProfiles,
   openPrivacySettings,
   osAccountsLogout,
   pauseRecording,
@@ -102,6 +103,15 @@ import { rememberSessionManuallyTitled } from "../lib/agent-session-titles";
 import { errorCode, messageFromError } from "../lib/errors";
 import { parseDictationHelperEvent } from "../lib/dictation-events";
 import { listHermesSessions, titleFromPrompt } from "../lib/hermes-adapter";
+import {
+  getActiveHermesProfileName,
+  useActiveHermesProfileName,
+} from "../lib/active-hermes-profile";
+import {
+  filterAgentSessionsForProfile,
+  sessionProfileMap,
+  type SessionProfileMap,
+} from "../lib/session-profile-filter";
 import { upsertLiveTranscriptEvent } from "../lib/live-transcript-preview";
 import {
   RECORDING_INACTIVITY_RESPONSE_MS,
@@ -192,6 +202,7 @@ const AGENT_MENU_BAR_SESSION_RETRY_DELAYS_MS = [250, 500, 1000, 2000, 4000, 8000
 const ACCESSIBILITY_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_INTERVAL_MS = 1000;
 const SYSTEM_AUDIO_PERMISSION_REFRESH_TIMEOUT_MS = 120_000;
+
 // Floor for the note card so the sidebar can't be dragged wide enough to
 // crush it into a sliver — it always keeps a usable width plus its gutters.
 const MAIN_PANEL_MIN_WIDTH = 420;
@@ -308,6 +319,7 @@ function tabMeta(
 
 export function App() {
   const replayOnboarding = shouldReplayOnboarding();
+  const activeHermesProfileName = useActiveHermesProfileName();
   const [state, dispatch] = useReducer(notesReducer, undefined, createInitialState);
   const [error, setError] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -358,6 +370,7 @@ export function App() {
   // sessionId -> project (folder) ids. Sessions live in Hermes, so their
   // project assignments are tracked separately from the notes state.
   const [sessionFolders, setSessionFolders] = useState<Record<string, string[]>>({});
+  const sessionProfilesRef = useRef<SessionProfileMap>({});
   const [moveDialogSessionIds, setMoveDialogSessionIds] = useState<string[] | null>(null);
   // Where an open agent session was drilled into from — a project or the
   // Routines run history — drives the breadcrumb above the agent workspace,
@@ -634,6 +647,27 @@ export function App() {
       }),
     );
   }, []);
+  const profileScopedAgentSessions = useCallback(
+    (sessions: readonly HermesSessionInfo[], profiles = sessionProfilesRef.current) => {
+      const activeProfile = getActiveHermesProfileName().trim() || activeHermesProfileName;
+      return filterAgentSessionsForProfile(sessions, profiles, activeProfile);
+    },
+    [activeHermesProfileName],
+  );
+  const refreshSessionProfiles = useCallback(async () => {
+    const profiles = sessionProfileMap(await listSessionProfiles());
+    sessionProfilesRef.current = profiles;
+    return profiles;
+  }, []);
+  const commitAgentSessions = useCallback(
+    (sessions: readonly HermesSessionInfo[], profiles = sessionProfilesRef.current) => {
+      const scopedSessions = profileScopedAgentSessions(sessions, profiles);
+      agentMenuBarSessionsRef.current = scopedSessions;
+      setAgentSessions(scopedSessions);
+      publishAgentMenuBarState();
+    },
+    [profileScopedAgentSessions, publishAgentMenuBarState],
+  );
   const applyAgentHudVisibility = useCallback(
     (enabled: boolean) => {
       if (agentHudEnabledRef.current === enabled) return;
@@ -1345,12 +1379,13 @@ export function App() {
     let retryTimeout: number | undefined;
 
     function loadAgentMenuBarSessions(attempt: number) {
-      listHermesSessions({ limit: AGENT_MENU_BAR_SESSION_FETCH_LIMIT })
-        .then((sessions) => {
+      Promise.all([
+        listHermesSessions({ limit: AGENT_MENU_BAR_SESSION_FETCH_LIMIT }),
+        refreshSessionProfiles(),
+      ])
+        .then(([sessions, profiles]) => {
           if (cancelled) return;
-          agentMenuBarSessionsRef.current = sessions;
-          setAgentSessions(sessions);
-          publishAgentMenuBarState();
+          commitAgentSessions(sessions, profiles);
         })
         .catch(() => {
           if (cancelled) return;
@@ -1368,7 +1403,7 @@ export function App() {
         window.clearTimeout(retryTimeout);
       }
     };
-  }, [appBlocked, bootstrapped, publishAgentMenuBarState]);
+  }, [appBlocked, bootstrapped, commitAgentSessions, refreshSessionProfiles]);
 
   // Project assignments for agent sessions, loaded once storage is up.
   useEffect(() => {
@@ -1393,11 +1428,20 @@ export function App() {
   }, [appBlocked, bootstrapped]);
 
   useEffect(() => {
+    let cancelled = false;
+
     function handleSessionsChanged(event: Event) {
       const detail = (event as CustomEvent<AgentSessionsChangedDetail>).detail;
       if (!detail) return;
-      agentMenuBarSessionsRef.current = detail.sessions;
-      setAgentSessions(detail.sessions);
+      void refreshSessionProfiles()
+        .then((profiles) => {
+          if (cancelled) return;
+          commitAgentSessions(detail.sessions, profiles);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          commitAgentSessions(detail.sessions);
+        });
       if (activeViewRef.current === "agent") {
         const selectedSessionId = detail.selectedSessionId;
         if (selectedSessionId) {
@@ -1474,11 +1518,12 @@ export function App() {
     window.addEventListener(AGENT_SESSION_STATUS_EVENT, handleAgentStatusForMenuBar);
     window.addEventListener(AGENT_DELETE_SESSION_EVENT, handleAgentSessionDeleted);
     return () => {
+      cancelled = true;
       window.removeEventListener(AGENT_SESSIONS_CHANGED_EVENT, handleSessionsChanged);
       window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleAgentStatusForMenuBar);
       window.removeEventListener(AGENT_DELETE_SESSION_EVENT, handleAgentSessionDeleted);
     };
-  }, [publishAgentMenuBarState]);
+  }, [commitAgentSessions, publishAgentMenuBarState, refreshSessionProfiles]);
 
   useEffect(() => {
     let aborted = false;
@@ -1550,10 +1595,11 @@ export function App() {
         setActiveView("agent");
         return;
       }
-      void listHermesSessions({ limit: 100 })
-        .then((sessions) => {
-          agentMenuBarSessionsRef.current = sessions;
-          const session = sessions.find((item) => item.id === sessionId);
+      void Promise.all([listHermesSessions({ limit: 100 }), refreshSessionProfiles()])
+        .then(([sessions, profiles]) => {
+          const scopedSessions = profileScopedAgentSessions(sessions, profiles);
+          agentMenuBarSessionsRef.current = scopedSessions;
+          const session = scopedSessions.find((item) => item.id === sessionId);
           if (session) setActiveAgentSession(session);
           setActiveView("agent");
           publishAgentMenuBarState();
@@ -1572,7 +1618,12 @@ export function App() {
       aborted = true;
       for (const unlisten of unlisteners) unlisten();
     };
-  }, [handleAgentHudVisibilityRequest, publishAgentMenuBarState]);
+  }, [
+    handleAgentHudVisibilityRequest,
+    profileScopedAgentSessions,
+    publishAgentMenuBarState,
+    refreshSessionProfiles,
+  ]);
 
   // Dev-tools response gallery (window.__agentGallery): showing it jumps to the
   // Agent view so the command works no matter which view is active.

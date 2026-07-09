@@ -3,7 +3,8 @@ use crate::domain::types::{
     AgentTaskStatus, AgentToolEventDto, AgentToolEventStatus, AppError, AudioArtifactDto,
     AudioValidationDto, DictationHistoryItemDto, DictionaryEntryDto, FolderDto,
     ListDictationHistoryResponse, ListNotesResponse, NoteDto, NoteListItemDto, ProcessingStatus,
-    RecordingSourceMode, RecordingState, SessionFolderDto, TranscriptCoverageDto, TranscriptDto,
+    RecordingSourceMode, RecordingState, SessionFolderDto, SessionProfileDto,
+    TranscriptCoverageDto, TranscriptDto,
 };
 use chrono::{Duration, SecondsFormat, Utc};
 use sqlx::query::query;
@@ -445,6 +446,45 @@ impl Repositories {
         )
         .bind(session_id)
         .bind(folder_id)
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn list_session_profiles(
+        &self,
+    ) -> Result<Vec<SessionProfileDto>, sqlx::error::Error> {
+        let rows = query(
+            "SELECT session_id, profile
+             FROM session_profiles
+             ORDER BY assigned_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SessionProfileDto {
+                session_id: row.get("session_id"),
+                profile: row.get("profile"),
+            })
+            .collect())
+    }
+
+    pub async fn assign_session_to_profile(
+        &self,
+        session_id: &str,
+        profile: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
+            "INSERT INTO session_profiles (session_id, profile, assigned_at)
+             VALUES (?, ?, ?)
+             ON CONFLICT(session_id) DO UPDATE SET
+               profile = excluded.profile,
+               assigned_at = excluded.assigned_at",
+        )
+        .bind(session_id)
+        .bind(profile)
         .bind(timestamp())
         .execute(&self.pool)
         .await?;

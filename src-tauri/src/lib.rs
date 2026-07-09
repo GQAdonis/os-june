@@ -151,6 +151,8 @@ pub fn run() {
             commands::remove_note_from_folder,
             commands::list_session_folders,
             commands::assign_session_to_folder,
+            commands::list_session_profiles,
+            commands::assign_session_to_profile,
             commands::remove_session_from_folder,
             commands::list_dictionary_entries,
             commands::create_dictionary_entry,

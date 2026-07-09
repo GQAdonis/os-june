@@ -30,6 +30,13 @@ export type SessionFolderDto = {
   folderId: string;
 };
 
+/** Which Hermes profile an agent session was created under. Sessions live in
+ * Hermes, so only the assignment is stored locally. */
+export type SessionProfileDto = {
+  sessionId: string;
+  profile: string;
+};
+
 export type DictionaryEntryDto = {
   id: string;
   phrase: string;
@@ -770,6 +777,16 @@ export async function listSessionFolders() {
 export async function assignSessionToFolder(sessionId: string, folderId: string) {
   return invoke<void>("assign_session_to_folder", {
     request: { sessionId, folderId },
+  });
+}
+
+export async function listSessionProfiles() {
+  return invoke<SessionProfileDto[]>("list_session_profiles");
+}
+
+export async function assignSessionToProfile(sessionId: string, profile: string) {
+  return invoke<void>("assign_session_to_profile", {
+    request: { sessionId, profile },
   });
 }
 

@@ -193,11 +193,27 @@ pub struct SessionFolderDto {
     pub folder_id: String,
 }
 
+// Agent sessions are owned by Hermes; this records which Hermes profile a
+// session was created under, keyed by the Hermes stored session id.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionProfileDto {
+    pub session_id: String,
+    pub profile: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssignSessionToFolderRequest {
     pub session_id: String,
     pub folder_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssignSessionToProfileRequest {
+    pub session_id: String,
+    pub profile: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
