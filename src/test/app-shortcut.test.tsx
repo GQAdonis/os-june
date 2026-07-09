@@ -87,9 +87,11 @@ const mocks = vi.hoisted(() => ({
   listHermesSessions: vi.fn(),
   listVeniceModels: vi.fn(),
   localVideoFileSrc: vi.fn((path: string) => `asset://${path}`),
+  p3aSettings: vi.fn(),
   playRecordingSound: vi.fn(),
   preloadRecordingSounds: vi.fn(),
   providerModelSettings: vi.fn(),
+  setP3aEnabled: vi.fn(),
   videoGenerate: vi.fn(),
   videoStatus: vi.fn(),
   startHermesBridge: vi.fn(),
@@ -189,7 +191,9 @@ vi.mock("../lib/tauri", () => ({
   hermesBridgeStatus: mocks.hermesBridgeStatus,
   listAgentTasks: mocks.listAgentTasks,
   juneVerifyUrl: vi.fn(async () => ""),
+  p3aSettings: mocks.p3aSettings,
   providerModelSettings: mocks.providerModelSettings,
+  setP3aEnabled: mocks.setP3aEnabled,
   listVeniceModels: mocks.listVeniceModels,
   localVideoFileSrc: mocks.localVideoFileSrc,
   videoGenerate: mocks.videoGenerate,
@@ -350,6 +354,20 @@ describe("App shortcuts", () => {
     });
     mocks.providerModelSettings.mockResolvedValue({
       settings: { generationModel: "" },
+    });
+    mocks.p3aSettings.mockResolvedValue({
+      settings: {
+        enabled: false,
+        consentedAtWeek: null,
+        consentVersion: 1,
+      },
+    });
+    mocks.setP3aEnabled.mockResolvedValue({
+      settings: {
+        enabled: false,
+        consentedAtWeek: null,
+        consentVersion: 1,
+      },
     });
     mocks.startHermesBridge.mockResolvedValue({
       running: false,

@@ -277,7 +277,7 @@ the same two ways as image generation — an explicit `/video` command (a fast,
 no-model shot) or the assistant calling it as a tool mid-conversation — but the
 Venice call is **asynchronous** (queue a job, poll until ready) and **priced per
 request** from a live quote, not flat per model. Distinct from **image-to-video**.
-See [ADR 0013](docs/adr/0013-video-generation-tools.md).
+See [ADR 0014](docs/adr/0014-video-generation-tools.md).
 _Avoid_: txt2vid jargon, rendering (say **video generation**).
 
 **Image-to-video**:
@@ -302,7 +302,7 @@ than adding a second toggle, but Venice video has no `safe_mode` parameter, so
 for a potentially explicit /video prompt keeping safe mode on *skips* the
 generation (there is no blurred fallback), and turning it off proceeds.
 See [ADR 0008](docs/adr/0008-image-generation-and-editing-tools.md) and the
-[ADR 0013 addendum](docs/adr/0013-video-generation-tools.md).
+[ADR 0014 addendum](docs/adr/0014-video-generation-tools.md).
 _Avoid_: NSFW filter/toggle (say **safe mode**), censorship, "video safe
 mode" (there is only one safe mode).
 
