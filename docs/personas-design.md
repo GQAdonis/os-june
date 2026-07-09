@@ -51,7 +51,7 @@ between meetings, and June does nothing to prepare them.
 
 A **Persona** is a person June knows. One persona = one human = one dossier,
 however many hats the relationship holds ("peer at Alongside; also client
-contact at Acme"). Three layers:
+at Acme"). Three layers:
 
 | Layer | Holds | Source |
 |---|---|---|
@@ -59,8 +59,8 @@ contact at Acme"). Three layers:
 | Relationship | who they are to the user, plain language, multiple hats | user tells June; June's agent interprets, no role taxonomy |
 | Memory | dossier: prose + structured Commitments | June's agent extracts after each meeting they appear in |
 
-The flywheel: **Recognize → Accumulate → Prepare.** More meetings → more voice
-samples and richer dossiers → better recognition and sharper briefs.
+The flywheel: **Recognize → Accumulate → Prepare.** More meetings → more
+Voiceprints and richer dossiers → better recognition and sharper briefs.
 
 ## Functional specification
 
@@ -75,14 +75,14 @@ recognition assigns identity to turns afterwards. Per ADR-0016:
 2. Embed each cluster; match against the local Voiceprint registry.
 3. Apply **confidence bands**:
    - **Auto band** (high): turn is auto-named, with visible provenance (subtle
-     "auto" marker) and one-click correction ("not Jun").
+     "Auto" marker) and one-click correction ("Not Jun").
    - **Suggest band** (ambiguous): suggestion chip on the note ("Is this
      Jun?"); turns stay "Speaker N" until confirmed.
    - **Anonymous** (low): "Speaker N" plus a "Tag this voice?" affordance.
 4. **First-match rule:** the first cross-meeting recognition of any persona is
    always a suggestion, never silent — one confirmation per person calibrates
    the system, then auto applies.
-5. Corrections feed back: "not X" stores a negative example against that
+5. Corrections feed back: "Not X" stores a negative example against that
    voiceprint.
 
 The user's own voiceprint is a first-class registry entry (implicitly
