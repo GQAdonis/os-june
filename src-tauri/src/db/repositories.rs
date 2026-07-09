@@ -287,8 +287,11 @@ impl Repositories {
         Ok(())
     }
 
-    /// Remove the account row plus everything keyed to it (triggers and
-    /// polling cursors) in one transaction.
+    /// Remove the account row plus everything keyed to it (triggers, polling
+    /// cursors, and autonomy grants) in one transaction. Clearing the grants
+    /// matters for security: without it, reconnecting the same email would
+    /// silently revive the per-job autonomous action servers the user granted
+    /// to the old connection.
     pub async fn delete_connector_account(
         &self,
         account_id: &str,
@@ -299,6 +302,10 @@ impl Repositories {
             .execute(&mut *tx)
             .await?;
         query("DELETE FROM trigger_cursors WHERE account_id = ?")
+            .bind(account_id)
+            .execute(&mut *tx)
+            .await?;
+        query("DELETE FROM connector_grants WHERE account_id = ?")
             .bind(account_id)
             .execute(&mut *tx)
             .await?;
@@ -3483,6 +3490,20 @@ mod tests {
             .set_trigger_cursor("user@example.com", "email_received", "12345")
             .await
             .expect("set cursor");
+        repos
+            .set_connector_grant(
+                &super::ConnectorGrant {
+                    job_id: "job-1".to_string(),
+                    provider: "gmail".to_string(),
+                    server_name: "june_gmail_auto_job1".to_string(),
+                    token: "grant-token".to_string(),
+                    tools: scopes(&["send_email"]),
+                    account_id: "user@example.com".to_string(),
+                },
+                "2026-07-09T00:00:00.000Z",
+            )
+            .await
+            .expect("set grant");
 
         repos
             .delete_connector_account("user@example.com")
@@ -3504,6 +3525,13 @@ mod tests {
             .await
             .expect("cursor")
             .is_none());
+        // Autonomy grants must not survive a disconnect; reconnecting the same
+        // email should require the user to re-earn autonomous access.
+        assert!(repos
+            .list_connector_grants()
+            .await
+            .expect("grants")
+            .is_empty());
     }
 
     #[tokio::test]

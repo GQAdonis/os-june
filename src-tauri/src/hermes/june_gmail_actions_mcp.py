@@ -27,7 +27,11 @@ from typing import Any
 
 PROTOCOL_VERSION = "2025-03-26"
 SERVER_INFO = {"name": "june-gmail-actions", "version": "0.1.0"}
-REQUEST_TIMEOUT_SECONDS = 60
+# Action calls park at the proxy until the user approves them, up to the Rust
+# APPROVAL_TIMEOUT (600s). This timeout must outlast that window plus the Google
+# round trip, and stay under the Hermes tool timeout (660s), so a slow approval
+# resolves here rather than failing the tool while the mutation still runs.
+REQUEST_TIMEOUT_SECONDS = 630
 TOKEN_ENV_VAR = "JUNE_CONNECTOR_PROXY_TOKEN"
 ACCOUNT_ENV_VAR = "JUNE_CONNECTOR_ACCOUNT"
 # Set only on a per-job earned-autonomy (auto) server. When present, the proxy

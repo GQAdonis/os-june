@@ -183,17 +183,39 @@ async fn call_gmail_history(
     token: &str,
     cursor: &str,
 ) -> Result<google::HistoryDelta, AppError> {
-    match google::history_list(token, cursor, None).await {
-        Ok(delta) => Ok(delta),
-        Err(GoogleApiError::Unauthorized) => {
-            let token =
-                crate::connectors::force_refresh_google_access_token(app, account_id).await?;
-            google::history_list(&token, cursor, None)
-                .await
-                .map_err(Into::into)
+    // history.list is paginated; a busy inbox spreads new mail across several
+    // pages. Drain every page before the caller advances the cursor, otherwise
+    // mail beyond the first page is silently skipped and its trigger never fires.
+    let mut token = token.to_string();
+    let mut page_token: Option<String> = None;
+    let mut added = Vec::new();
+    let mut history_id: Option<String> = None;
+    loop {
+        let delta = match google::history_list(&token, cursor, page_token.as_deref()).await {
+            Ok(delta) => delta,
+            Err(GoogleApiError::Unauthorized) => {
+                token =
+                    crate::connectors::force_refresh_google_access_token(app, account_id).await?;
+                google::history_list(&token, cursor, page_token.as_deref()).await?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        added.extend(delta.added);
+        // The top-level historyId is the mailbox's latest and is stable across
+        // pages; keep the newest one seen as the cursor to persist.
+        if delta.history_id.is_some() {
+            history_id = delta.history_id;
         }
-        Err(error) => Err(error.into()),
+        match delta.next_page_token {
+            Some(next) => page_token = Some(next),
+            None => break,
+        }
     }
+    Ok(google::HistoryDelta {
+        added,
+        next_page_token: None,
+        history_id,
+    })
 }
 
 // --- Calendar -----------------------------------------------------------------
@@ -206,6 +228,7 @@ async fn poll_event_trigger(
     let account_id = &trigger.account_id;
     let job_id = &trigger.job_id;
     let lead_minutes = lead_minutes_from_config(&trigger.config);
+    let external_only = external_only_from_config(&trigger.config);
     let cursor_kind = format!("{EVENT_KIND}:{job_id}");
 
     let token = crate::connectors::google_access_token(app, account_id).await?;
@@ -248,7 +271,10 @@ async fn poll_event_trigger(
             .attendees
             .iter()
             .any(|attendee| !attendee.is_self && attendee.email.is_some());
-        if starts_soon && has_external {
+        // When the routine opts out of external-only, internal and solo events
+        // fire too; otherwise a meeting needs at least one outside attendee.
+        let passes_audience = !external_only || has_external;
+        if starts_soon && passes_audience {
             fired.insert(event.id.clone(), start.timestamp());
             should_fire = true;
             changed = true;
@@ -317,6 +343,20 @@ fn lead_minutes_from_config(config: &str) -> i64 {
         .and_then(serde_json::Value::as_i64)
         .filter(|minutes| *minutes > 0)
         .unwrap_or(DEFAULT_LEAD_MINUTES)
+}
+
+fn external_only_from_config(config: &str) -> bool {
+    // Defaults to true so a legacy config missing the field keeps the safer
+    // external-only behavior; the picker sends `externalOnly: false` explicitly
+    // when the user opts internal meetings in.
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config) else {
+        return true;
+    };
+    value
+        .get("externalOnly")
+        .or_else(|| value.get("external_only"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
 }
 
 fn parse_event_start(start: &str) -> Option<DateTime<Utc>> {
@@ -397,5 +437,17 @@ mod tests {
     fn parses_timed_event_start_but_not_all_day() {
         assert!(parse_event_start("2026-07-10T09:00:00-07:00").is_some());
         assert!(parse_event_start("2026-07-11").is_none());
+    }
+
+    #[test]
+    fn external_only_defaults_true_but_honors_an_explicit_false() {
+        // Missing field or unparseable config keeps the safer external-only gate.
+        assert!(external_only_from_config("{}"));
+        assert!(external_only_from_config("not json"));
+        assert!(external_only_from_config(r#"{"leadMinutes": 30}"#));
+        // The picker opts internal meetings in by sending an explicit false.
+        assert!(!external_only_from_config(r#"{"externalOnly": false}"#));
+        assert!(!external_only_from_config(r#"{"external_only": false}"#));
+        assert!(external_only_from_config(r#"{"externalOnly": true}"#));
     }
 }
