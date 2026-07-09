@@ -653,6 +653,9 @@ describe("AppSettings", () => {
         />,
       );
 
+      // Theme, accent, and text size live on their own Appearance tab.
+      fireEvent.click(screen.getByRole("tab", { name: "Appearance" }));
+
       // The accessible name carries the current selection so screen readers
       // announce the active accent, not just the static "Accent color" label.
       const trigger = (label: string) =>
