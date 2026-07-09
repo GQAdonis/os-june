@@ -1,6 +1,6 @@
 //! Venice video generation: proxies the async `/video/*` endpoints.
 //!
-//! Video is Venice's asynchronous, dynamically priced surface (ADR 0014). A
+//! Video is Venice's asynchronous, dynamically priced surface (ADR 0015). A
 //! `quote` is the free price oracle, `queue` starts a job and returns a queue
 //! handle, and `retrieve` polls it — returning either JSON progress or, when
 //! COMPLETED and non-VPS, the raw `video/mp4` bytes (discriminated by response

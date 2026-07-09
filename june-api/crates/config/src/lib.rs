@@ -64,7 +64,7 @@ const IMAGE_EDIT_JSON_OVERHEAD_BYTES: usize = 16 * 1024;
 pub const DEFAULT_MAX_IMAGE_EDIT_BYTES: usize =
     base64_encoded_len(IMAGE_EDIT_SOURCE_MAX_BYTES) + IMAGE_EDIT_JSON_OVERHEAD_BYTES;
 
-// --- Video generation (ADR 0014) ---------------------------------------------
+// --- Video generation (ADR 0015) ---------------------------------------------
 //
 // Video is an async job billed at completion: the hold is minted at
 // `/v1/video/generate` and must stay valid until the completing status poll
@@ -73,7 +73,7 @@ pub const DEFAULT_MAX_IMAGE_EDIT_BYTES: usize =
 // yet OS Accounts still rejects any hold above 600s (`invalid_ttl`). So the
 // per-job budget is CAPPED so `job budget + settlement margin <= 600`; the
 // first-cut supported models/durations are chosen to complete within that
-// budget (ADR 0014 Decision 2). Widening it needs durable job state (#613).
+// budget (ADR 0015 Decision 2). Widening it needs durable job state (#613).
 /// Worst-case seconds a supported video job may take from queue to a completing
 /// poll. The first-cut allowlist/durations are picked to finish within this.
 pub const DEFAULT_VIDEO_JOB_MAX_SECS: u64 = 450;
@@ -88,7 +88,7 @@ pub const DEFAULT_VIDEO_HOLD_TTL_SECS: u64 =
 /// Defensive per-request credit ceiling: Venice caps a video at $10/request; at
 /// the 2.0x default markup that is 20000 credits (`$1 = 1000 credits`). A quote
 /// above this is rejected before authorize so a catalog change cannot authorize
-/// an unbounded hold (ADR 0014 Decision 1).
+/// an unbounded hold (ADR 0015 Decision 1).
 pub const DEFAULT_VIDEO_MAX_CREDITS_PER_REQUEST: u64 = 20_000;
 /// Maximum raw video body June API will buffer from Venice retrieve.
 pub const DEFAULT_VIDEO_MAX_RESPONSE_BYTES: u64 = 100 * 1024 * 1024;
@@ -149,7 +149,7 @@ pub struct AppConfig {
     /// Markup (fixed-point thousandths, `2000` = 2.0x) applied to the live Venice
     /// quote for each text-to-video model, keyed by model id. Video is
     /// quote-priced, not flat-priced: `credits = ceil(quote_usd * markup_millis)`
-    /// (ADR 0014 Decision 1). A model absent here is rejected `model_not_priced`
+    /// (ADR 0015 Decision 1). A model absent here is rejected `model_not_priced`
     /// at the `/video/generate` boundary before the wallet or Venice is touched,
     /// so this doubles as the allowlist. `$1 = 1000 credits`.
     #[serde(default = "default_video_pricing")]
@@ -427,7 +427,7 @@ pub struct OsAccountsConfig {
     /// async job billed at completion, so the hold must cover the whole job
     /// lifetime (queue -> completing poll -> charge), not a single request. Sized
     /// to the job budget plus the settlement margin and capped at the platform
-    /// max (ADR 0014 Decision 2).
+    /// max (ADR 0015 Decision 2).
     #[serde(default = "default_video_hold_ttl_secs")]
     pub authorize_hold_ttl_video_secs: u64,
 }
@@ -780,7 +780,7 @@ fn default_image_edit_model() -> String {
 /// Curated text-to-video allowlist with per-model markups (`2000` = 2.0x, the
 /// image margin). Every id must be a current Venice text-to-video model, and its
 /// worst-case run at the supported durations must fit `DEFAULT_VIDEO_JOB_MAX_SECS`
-/// so the hold covers the whole job (ADR 0014). `credits = ceil(quote_usd * markup)`.
+/// so the hold covers the whole job (ADR 0015). `credits = ceil(quote_usd * markup)`.
 ///
 /// First-cut curation: every model here must accept the desktop fast-path's fixed
 /// default duration/resolution (5s / 720p) that the proxy injects when the client
@@ -791,7 +791,7 @@ fn default_image_edit_model() -> String {
 fn default_video_pricing() -> BTreeMap<String, u32> {
     // The curated text-to-video allowlist: every id June's picker offers must be
     // here or it is rejected `model_not_priced` at `/video/generate`. Markup is a
-    // uniform 2.0x on the live Venice quote (ADR 0014 Decision 1) — the per-clip
+    // uniform 2.0x on the live Venice quote (ADR 0015 Decision 1) — the per-clip
     // credit price still comes from the quote, so pricier models cost more
     // without a per-model markup table. Mirrors `VIDEO_MODELS` in
     // src/lib/video-models.ts and `KNOWN_VIDEO_MODELS` in the desktop providers
@@ -1141,7 +1141,7 @@ fn validate_request_limits(config: &AppConfig) -> Result<(), ConfigError> {
 
 /// The video hold has to cover the whole async job: the per-job budget plus the
 /// settlement margin for the completing poll's charge. A hold below that would
-/// expire mid-job and strand the charge (ADR 0014 Decision 2).
+/// expire mid-job and strand the charge (ADR 0015 Decision 2).
 fn validate_video_hold_ttl(config: &AppConfig) -> Result<(), ConfigError> {
     let minimum = DEFAULT_VIDEO_JOB_MAX_SECS.saturating_add(VIDEO_SETTLEMENT_TIMEOUT_MARGIN_SECS);
     if config.os_accounts.authorize_hold_ttl_video_secs < minimum {
