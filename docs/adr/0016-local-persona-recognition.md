@@ -1,7 +1,7 @@
 # Local persona recognition over diarized saved audio
 
 June recognizes who spoke in a meeting by diarizing the saved audio locally and
-matching voice embeddings against an on-device persona registry — on both
+matching voice embeddings against an on-device Voiceprint registry — on both
 lanes (system and microphone), in post-processing only. This supersedes the
 scope line in [ADR-0005](0005-source-separated-audio-capture.md) that put
 speaker identity within a source out of scope; the one-WAV-per-source
@@ -35,19 +35,21 @@ Forces:
 
 - **Diarization and embedding run locally**, on saved audio, inside the
   existing post-recording pipeline — a bundled, pinned model (same
-  bundle-and-pin discipline as the Hermes runtime). No audio or embedding
-  leaves the device.
+  bundle-and-pin discipline as the Hermes runtime). Persona recognition sends
+  no audio, Voiceprints, or embeddings off-device. Existing note transcription
+  still sends turn audio to June API; this decision adds no new audio-derived
+  outbound payload.
 - **Recognition annotates turns; detection is untouched.** Turn detection
   stays energy-based. Diarized, matched speech assigns personas to turns (or
   subdivides a turn's attribution) strictly after detection.
 - **Both lanes.** System lane (remote voices) and microphone lane (user +
   in-room guests). The user's own voiceprint is a first-class registry entry.
-  Phasing: remote lane plus the user's own mic voiceprint first; in-room guest
-  diarization gated on the first phase's quality read (far-field audio is a
-  different quality regime and is judged separately).
+  Phasing: the System source plus the user's own Microphone Voiceprint first;
+  in-room guest diarization gated on the first phase's quality read (far-field
+  audio is a different quality regime and is judged separately).
 - **Post-processing only.** Live "who is speaking" labels are explicitly
   deferred; they are an upgrade, not a foundation.
-- **The registry is local-only and user-owned**: multiple voiceprints per
+- **The Voiceprint registry is local-only and user-owned**: multiple Voiceprints per
   persona, negative examples from corrections, excluded from any future
   sync/backup unless end-to-end encrypted; delete offers real erasure.
 

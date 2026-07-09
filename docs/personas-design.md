@@ -3,8 +3,9 @@
 Status: design accepted (grill session 2026-07-09). Governing ADR:
 [0016-local-persona-recognition.md](adr/0016-local-persona-recognition.md).
 Canonical vocabulary: CONTEXT.md § Personas — terms there are binding for all
-naming in this feature (Persona, Voiceprint, Persona recognition, Tagging,
-Dossier, Commitment, Participant, Roster, Prep brief, Archive).
+naming in this feature (Persona, Voiceprint, Voiceprint registry, Persona
+recognition, Tagging, Dossier, Commitment, Participant, Roster, Prep brief,
+Archive).
 
 ## One-liner
 
@@ -52,8 +53,8 @@ contact at Acme"). Three layers:
 | Layer | Holds | Source |
 |---|---|---|
 | Identity | name, voiceprints (several per persona + negative examples) | user tags a speaker cluster in a finished note |
-| Relationship | who they are to the user, plain language, multiple hats | user tells June; agent interprets, no role taxonomy |
-| Memory | dossier: prose + structured Commitments | agent extraction after each meeting they appear in |
+| Relationship | who they are to the user, plain language, multiple hats | user tells June; June's agent interprets, no role taxonomy |
+| Memory | dossier: prose + structured Commitments | June's agent extracts after each meeting they appear in |
 
 The flywheel: **Recognize → Accumulate → Prepare.** More meetings → more voice
 samples and richer dossiers → better recognition and sharper briefs.
@@ -68,7 +69,7 @@ recognition assigns identity to turns afterwards. Per ADR-0016:
 
 1. Diarize **both lanes** (system = remote voices; microphone = user +
    possible in-room guests) → anonymous speaker clusters.
-2. Embed each cluster; match against the local voice registry.
+2. Embed each cluster; match against the local Voiceprint registry.
 3. Apply **confidence bands**:
    - **Auto band** (high): turn is auto-named, with visible provenance (subtle
      "auto" marker) and one-click correction ("not Jun").
@@ -98,12 +99,12 @@ note's participants; prep looks up recent notes by participant.
 
 ### 3. Accumulation (dossiers)
 
-After note generation, an agent pass updates the dossier of each participant:
+After note generation, a June agent pass updates the dossier of each participant:
 
-- Dossier = agent-maintained **prose** + exactly one structured type:
+- Dossier = **prose maintained by June's agent** + exactly one structured type:
   **Commitment** (who owes whom, what, due, status: open → done/dropped,
   source note).
-- Commitments are agent-proposed, visible in the dossier, deletable, and show
+- Commitments are proposed by June's agent, visible in the dossier, deletable, and show
   their source note. No per-item confirmation nag.
 - **Trust gate:** only auto-band or user-confirmed speech feeds the dossier.
   Suggest-band speech never enters persona memory until confirmed — a
@@ -113,9 +114,9 @@ After note generation, an agent pass updates the dossier of each participant:
   never drop open Commitments (they're structured precisely so consolidation
   can't lose them).
 
-### 4. Agent integration
+### 4. June agent integration
 
-- **Roster injected:** the agent's standing context carries a compact index —
+- **Roster injected:** the standing context for June's agent carries a compact index —
   name + one-line relationship per persona. A few hundred tokens; makes
   name-dropping ("what's James up to?") resolvable. Consequence accepted: no
   dormant personas; everyone June knows is visible to every chat.
@@ -132,7 +133,7 @@ After note generation, an agent pass updates the dossier of each participant:
   detection. Detection guesses attendees from recurring patterns (same app,
   same time slot, same participants as last time) plus the roster. Calendar
   is a later upgrade, adopted only after briefs prove they change behavior.
-- **The brief is a note the agent writes** — reviewable, editable,
+- **The brief is a note June's agent writes** — reviewable, editable,
   dismissible. Not a popup, not a meeting entity. Content: who's expected,
   last time (discussed/decided), open commitments both directions, suggested
   asks shaped by relationship ("as James's manager, you wanted status on…").
@@ -157,12 +158,12 @@ commitments, voiceprint count, last seen. Lifecycle:
 
 ```
 ┌────────────────────────────────────────────────────┐
-│ local, on-device — nothing leaves the machine       │
+│ persona recognition + memory are local-only          │
 │                                                      │
 │  saved meeting audio (both lanes)                    │
 │        │ diarize (bundled, pinned model)             │
 │        ▼                                             │
-│  speaker clusters ──embed──► VOICE REGISTRY          │
+│  speaker clusters ──embed──► VOICEPRINT REGISTRY     │
 │                               (voiceprints ↔ persona,│
 │                                negative examples)    │
 │        │ confidence-banded matches                   │
@@ -170,7 +171,7 @@ commitments, voiceprint count, last seen. Lifecycle:
 │  speaker-resolved transcript + note participants     │
 │        │                                             │
 │        ▼                                             │
-│  AGENT ◄── june_* MCP ──► PERSONA STORE              │
+│  JUNE AGENT ◄── june_* MCP ──► PERSONA STORE         │
 │   • dossier update         (identity, relationship,  │
 │   • prep brief              dossier prose,           │
 │   • chat over people        commitments)             │
@@ -206,7 +207,7 @@ analysis.
 
 | Phase | Ships | Proves | Gate |
 |---|---|---|---|
-| **1 — Identity** | diarize + tag + registry + auto-name on remote lane; user's own voiceprint on mic lane; participants on notes | recognition quality on real call audio; tag-once promise | **spike first**: run candidate diarizers on real saved `system.wav` recordings; if match quality disappoints, everything above changes shape |
+| **1 — Identity** | diarize + tag + registry + auto-name on the System source; user's own Voiceprint on the Microphone source; participants on notes | recognition quality on real call audio; tag-once promise | **spike first**: run candidate diarizers on real saved `system.wav` recordings; if match quality disappoints, everything above changes shape |
 | **1.5 — In-room guests** | guest diarization on the mic lane (far-field regime) | in-room quality, judged separately from call audio | Phase 1 quality read |
 | **2 — Memory** | dossier updates post-meeting; Commitments; "People June knows"; roster + `june_*` MCP tools | dossiers accurate and useful, not noise | Phase 1 shipped |
 | **3 — Preparation** | prep briefs (manual + detection-triggered); relationship-aware asks | briefs change how the user enters meetings | Phase 2 shipped |
@@ -216,14 +217,14 @@ analysis.
 
 - In a finished note, an anonymous speaker cluster can be tagged with a name;
   tagging creates the persona and stores the voiceprint.
-- In the *next* recording where that person speaks (remote lane), their turns
+- In the *next* recording where that person speaks on the System source, their turns
   are suggested (first match) then auto-named (subsequent), per the bands.
 - Auto-named turns show provenance and support one-click correction; a
   correction stores a negative example.
 - Notes carry a participant list from confirmed recognitions + manual tags.
-- Zero audio or embeddings leave the device (verifiable: no new June API
-  endpoints are called with audio-derived payloads beyond existing
-  transcription).
+- Zero recognition-derived audio, Voiceprints, or embeddings leave the device.
+  Existing note-transcription audio uploads remain unchanged; no new June API
+  endpoint or audio-derived outbound payload is added.
 - Old notes are untouched.
 
 ### Phase 2 acceptance criteria
@@ -255,7 +256,7 @@ analysis.
 4. **Model bundle size/packaging** (~30–40 MB weights + runtime) — follows the
    Hermes bundling precedent; runtime choice decided in the spike.
 
-## Implementation notes for the next agent
+## Implementation notes for the next implementer
 
 - Read CONTEXT.md § Personas and ADR-0016 before naming anything; the _Avoid_
   lists are binding.

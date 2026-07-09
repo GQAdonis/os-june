@@ -3,6 +3,6 @@
   "fangjun-test-sr-1.wav": { "1": "fangjun" },
   "leijun-sr-1.wav": { "1": "leijun" },
   "leijun-test-sr-1.wav": { "1": "leijun" },
-  "liudehua-sr-1.wav": { "1": "liudehua" },
+  "liudehua-sr-1.wav": { "1": "liudehua", "2": "liudehua" },
   "liudehua-test-sr-1.wav": { "1": "liudehua" }
 }

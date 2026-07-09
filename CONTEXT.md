@@ -154,6 +154,13 @@ hold several (voices vary by device and day) plus negative examples from
 corrections. Biometric data: never leaves the device.
 _Avoid_: voice sample (that is audio, not the embedding), fingerprint.
 
+**Voiceprint registry**:
+The local-only index that matches Voiceprints to personas for recognition.
+It contains several positive Voiceprints per persona plus negative examples
+from corrections; it is distinct from the Persona store that holds
+relationships and dossiers.
+_Avoid_: voice registry, persona registry.
+
 **Persona recognition**:
 Matching diarized speech against voiceprints to name who spoke, in
 post-processing on saved audio. Three confidence bands: auto-name, suggestion,
@@ -170,8 +177,8 @@ enrollment ceremony.
 _Avoid_: enrollment (as a distinct user-facing step).
 
 **Dossier**:
-A persona's living memory, maintained by the agent as prose plus exactly one
-structured type: **Commitments**. Fed only by auto-band or user-confirmed
+A persona's living memory, maintained by June's agent as prose plus exactly
+one structured type: **Commitments**. Fed only by auto-band or user-confirmed
 speech, never by unconfirmed suggestions.
 _Avoid_: profile, CRM record, contact card.
 
@@ -190,12 +197,12 @@ _Avoid_: meeting object, attendee list (as a standalone entity).
 
 **Roster**:
 The compact persona index (name + one-line relationship each) injected into
-the agent's standing context. Everything deeper is fetched through persona
-tools on demand.
+the standing context for June's agent. Everything deeper is fetched through
+persona tools on demand.
 _Avoid_: injecting dossiers wholesale.
 
 **Prep brief**:
-A note the agent writes before an expected meeting: last time, open
+A note June's agent writes before an expected meeting: last time, open
 commitments, suggested asks shaped by relationship. Triggered manually or by
 meeting detection; a brief is a note, not a popup and not a meeting entity.
 _Avoid_: meeting agenda (June does not own the agenda).

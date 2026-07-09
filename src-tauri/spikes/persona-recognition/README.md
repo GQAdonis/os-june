@@ -5,7 +5,7 @@
 
 ## Question
 
-Can local diarization split June's saved remote-lane audio into useful speaker
+Can local diarization split June's saved System source audio into useful speaker
 clusters, and do embeddings re-extracted from those clusters separate the same
 person across meetings from different people well enough to support the
 suggest/auto confidence bands?
@@ -35,15 +35,24 @@ It never contains embedding vectors or audio bytes. Input audio is never
 uploaded. The public smoke fixture proves mechanics only; the PRD gate requires
 real `system.wav` recordings from different meetings and devices.
 
+A quality PASS requires every evaluation cluster to be labeled, no cluster
+marked `mixed`, no identity split across multiple clusters in one recording,
+an embedding for every labeled cluster, and complete separation between the
+observed genuine and impostor scores. Mixed or fragmented diarization fails;
+unknown clusters or missing score pairs make the result inconclusive.
+
 ## Runtime choice
 
 The spike uses `sherpa-onnx` 1.13.4 because its current Rust API exposes both
 offline speaker diarization and reusable speaker embeddings, and it publishes
-native artifacts for macOS arm64/x86_64 and Windows x86_64. The high-level
+native artifacts for macOS arm64/x86_64 and Windows x86_64. The wrapper pins
+and verifies the selected native archive before Cargo can use it. The high-level
 diarizer returns speaker segments, not embeddings, so this prototype
 re-extracts one normalized embedding from each cluster. The isolated lockfile
 pins `url` 2.5.2 and `zeroize` 1.8.1 so the graph remains compatible with
 June's Rust 1.80 minimum; `cargo +1.80.0 check --locked` passes.
+Use the pnpm command above, not a direct `cargo run`: the wrapper supplies the
+verified native archive and the binary refuses to run without that evidence.
 
 Alternatives remain useful baselines but are not the production-shaped first
 choice:
@@ -65,7 +74,7 @@ converted ONNX assets.
 
 If the quality gate passes, persona recognition composes with
 `process_saved_source_audio` after `detect_turns_with_report` and before turn
-WAV extraction/transcription. It annotates or subdivides detected turns; it
+WAV extraction/note transcription. It annotates or subdivides detected turns; it
 does not change energy-based turn detection.
 
 Before shipping, prove all of the following:

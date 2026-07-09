@@ -32,6 +32,7 @@ struct Args {
     output_dir: PathBuf,
     label_map: LabelMap,
     non_interactive: bool,
+    resampler_smoke: bool,
     wavs: Vec<PathBuf>,
 }
 
@@ -54,6 +55,7 @@ struct Report {
     prototype: &'static str,
     runtime: RuntimeReport,
     recordings: Vec<RecordingReport>,
+    cluster_quality: ClusterQualityReport,
     scores: ScoreReport,
     verdict: VerdictReport,
     privacy: &'static str,
@@ -63,9 +65,12 @@ struct Report {
 #[serde(rename_all = "camelCase")]
 struct RuntimeReport {
     sherpa_onnx_version: &'static str,
+    native_archive: String,
+    native_archive_sha256: String,
     segmentation_model_bytes: u64,
     embedding_model_bytes: u64,
     provider: &'static str,
+    resampler_smoke: Option<ResamplerSmokeReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,6 +96,29 @@ struct ClusterReport {
     mixed: bool,
     embedding_available: bool,
     listening_wav: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClusterQualityReport {
+    total_clusters: usize,
+    labeled_clusters: usize,
+    unknown_clusters: usize,
+    mixed_clusters: usize,
+    missing_embeddings: usize,
+    fragmented_identities: usize,
+    scored_cluster_coverage: f32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResamplerSmokeReport {
+    input_sample_rate: u32,
+    output_sample_rate: u32,
+    passband_tone_hz: u32,
+    passband_rms: f32,
+    rejected_tone_hz: u32,
+    rejected_tone_rms: f32,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,6 +149,11 @@ struct VerdictReport {
 
 fn main() -> Result<()> {
     let args = parse_args()?;
+    let native_archive = env::var("SHERPA_ONNX_ARCHIVE_NAME")
+        .context("run through scripts/persona-recognition-spike.sh so native code is pinned")?;
+    let native_archive_sha256 = env::var("SHERPA_ONNX_ARCHIVE_SHA256")
+        .context("run through scripts/persona-recognition-spike.sh so native code is pinned")?;
+    let resampler_smoke = args.resampler_smoke.then(run_resampler_smoke).transpose()?;
     fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("create output dir {}", args.output_dir.display()))?;
 
@@ -247,17 +280,22 @@ fn main() -> Result<()> {
         });
     }
 
+    let cluster_quality = cluster_quality(&reports);
     let (genuine, impostor) = pairwise_scores(&labeled_embeddings);
-    let verdict = verdict(&genuine, &impostor);
+    let verdict = verdict(&genuine, &impostor, &cluster_quality);
     let report = Report {
         prototype: "persona-recognition-phase-1",
         runtime: RuntimeReport {
             sherpa_onnx_version: SHERPA_VERSION,
+            native_archive,
+            native_archive_sha256,
             segmentation_model_bytes: file_len(&args.segmentation_model)?,
             embedding_model_bytes: file_len(&args.embedding_model)?,
             provider: "cpu",
+            resampler_smoke,
         },
         recordings: reports,
+        cluster_quality,
         scores: ScoreReport {
             genuine: summarize(&genuine),
             impostor: summarize(&impostor),
@@ -279,6 +317,7 @@ fn parse_args() -> Result<Args> {
     let mut output_dir = None;
     let mut label_map = HashMap::new();
     let mut non_interactive = false;
+    let mut resampler_smoke = false;
     let mut wavs = Vec::new();
     while let Some(value) = values.next() {
         match value.as_str() {
@@ -293,9 +332,10 @@ fn parse_args() -> Result<Args> {
                 label_map = raw;
             }
             "--non-interactive" => non_interactive = true,
+            "--resampler-smoke" => resampler_smoke = true,
             "--help" | "-h" => {
                 println!(
-                    "persona-recognition-spike --segmentation-model PATH --embedding-model PATH --output DIR [--labels JSON] [--non-interactive] WAV..."
+                    "persona-recognition-spike --segmentation-model PATH --embedding-model PATH --output DIR [--labels JSON] [--non-interactive] [--resampler-smoke] WAV..."
                 );
                 std::process::exit(0);
             }
@@ -312,6 +352,7 @@ fn parse_args() -> Result<Args> {
         output_dir: output_dir.context("missing --output")?,
         label_map,
         non_interactive,
+        resampler_smoke,
         wavs,
     })
 }
@@ -350,28 +391,131 @@ fn read_and_prepare_wav(path: &Path) -> Result<PreparedWave> {
         .chunks(channels)
         .map(|frame| frame.iter().sum::<f32>() / channels as f32)
         .collect::<Vec<_>>();
-    let samples = resample_linear(&mono, spec.sample_rate, TARGET_SAMPLE_RATE);
+    let samples = resample_band_limited(&mono, spec.sample_rate, TARGET_SAMPLE_RATE);
     Ok(PreparedWave {
         duration_seconds: samples.len() as f64 / f64::from(TARGET_SAMPLE_RATE),
         samples,
     })
 }
 
-fn resample_linear(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
+fn resample_band_limited(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
     if source_rate == target_rate || input.is_empty() {
         return input.to_vec();
     }
+    let filtered = if source_rate > target_rate {
+        low_pass_for_downsampling(input, source_rate, target_rate)
+    } else {
+        input.to_vec()
+    };
     let output_len =
-        ((input.len() as u128 * u128::from(target_rate)) / u128::from(source_rate)) as usize;
+        ((filtered.len() as u128 * u128::from(target_rate)) / u128::from(source_rate)) as usize;
     (0..output_len)
         .map(|index| {
             let source_position = index as f64 * f64::from(source_rate) / f64::from(target_rate);
             let left = source_position.floor() as usize;
-            let right = (left + 1).min(input.len() - 1);
+            let right = (left + 1).min(filtered.len() - 1);
             let fraction = (source_position - left as f64) as f32;
-            input[left] + (input[right] - input[left]) * fraction
+            filtered[left] + (filtered[right] - filtered[left]) * fraction
         })
         .collect()
+}
+
+fn low_pass_for_downsampling(input: &[f32], source_rate: u32, target_rate: u32) -> Vec<f32> {
+    // An eighth-order Butterworth cascade removes energy above the target
+    // Nyquist limit before interpolation. June's saved WAVs are commonly
+    // 44.1/48 kHz, so unfiltered sample picking would alias into Voiceprints.
+    const BUTTERWORTH_Q: [f64; 4] = [0.509_795_579, 0.601_344_887, 0.899_976_223, 2.562_915_448];
+    let cutoff_hz = f64::from(target_rate) * 0.4;
+    let mut filters = BUTTERWORTH_Q.map(|q| Biquad::low_pass(source_rate, cutoff_hz, q));
+    input
+        .iter()
+        .map(|sample| {
+            filters
+                .iter_mut()
+                .fold(f64::from(*sample), |value, filter| filter.process(value)) as f32
+        })
+        .collect()
+}
+
+#[derive(Debug)]
+struct Biquad {
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    z1: f64,
+    z2: f64,
+}
+
+impl Biquad {
+    fn low_pass(sample_rate: u32, cutoff_hz: f64, q: f64) -> Self {
+        let omega = 2.0 * std::f64::consts::PI * cutoff_hz / f64::from(sample_rate);
+        let cosine = omega.cos();
+        let alpha = omega.sin() / (2.0 * q);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: ((1.0 - cosine) / 2.0) / a0,
+            b1: (1.0 - cosine) / a0,
+            b2: ((1.0 - cosine) / 2.0) / a0,
+            a1: (-2.0 * cosine) / a0,
+            a2: (1.0 - alpha) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    fn process(&mut self, input: f64) -> f64 {
+        let output = self.b0 * input + self.z1;
+        self.z1 = self.b1 * input - self.a1 * output + self.z2;
+        self.z2 = self.b2 * input - self.a2 * output;
+        output
+    }
+}
+
+fn run_resampler_smoke() -> Result<ResamplerSmokeReport> {
+    const INPUT_RATE: u32 = 48_000;
+    const PASSBAND_HZ: u32 = 1_000;
+    const REJECTED_HZ: u32 = 12_000;
+    let passband = sine_wave(INPUT_RATE, PASSBAND_HZ);
+    let rejected = sine_wave(INPUT_RATE, REJECTED_HZ);
+    let passband_rms = rms(&resample_band_limited(
+        &passband,
+        INPUT_RATE,
+        TARGET_SAMPLE_RATE,
+    ));
+    let rejected_rms = rms(&resample_band_limited(
+        &rejected,
+        INPUT_RATE,
+        TARGET_SAMPLE_RATE,
+    ));
+    if !(0.65..=0.75).contains(&passband_rms) || rejected_rms >= 0.02 {
+        bail!(
+            "resampler smoke failed: passband RMS {passband_rms:.4}, rejected-tone RMS {rejected_rms:.4}"
+        );
+    }
+    Ok(ResamplerSmokeReport {
+        input_sample_rate: INPUT_RATE,
+        output_sample_rate: TARGET_SAMPLE_RATE,
+        passband_tone_hz: PASSBAND_HZ,
+        passband_rms,
+        rejected_tone_hz: REJECTED_HZ,
+        rejected_tone_rms: rejected_rms,
+    })
+}
+
+fn sine_wave(sample_rate: u32, frequency_hz: u32) -> Vec<f32> {
+    (0..sample_rate)
+        .map(|index| {
+            (std::f32::consts::TAU * frequency_hz as f32 * index as f32 / sample_rate as f32).sin()
+        })
+        .collect()
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    let edge = 256.min(samples.len() / 4);
+    let body = &samples[edge..samples.len().saturating_sub(edge)];
+    (body.iter().map(|sample| sample * sample).sum::<f32>() / body.len() as f32).sqrt()
 }
 
 fn collect_cluster_samples(samples: &[f32], segments: &[(f32, f32)]) -> Vec<f32> {
@@ -502,8 +646,96 @@ fn summarize(values: &[f32]) -> Distribution {
     }
 }
 
-fn verdict(genuine: &[f32], impostor: &[f32]) -> VerdictReport {
+fn cluster_quality(recordings: &[RecordingReport]) -> ClusterQualityReport {
+    let mut total_clusters = 0;
+    let mut labeled_clusters = 0;
+    let mut unknown_clusters = 0;
+    let mut mixed_clusters = 0;
+    let mut missing_embeddings = 0;
+    let mut fragmented_identities = 0;
+    for recording in recordings {
+        let mut labels = HashMap::<&str, usize>::new();
+        for cluster in &recording.clusters {
+            total_clusters += 1;
+            if cluster.mixed {
+                mixed_clusters += 1;
+            } else if let Some(label) = cluster.label.as_deref() {
+                labeled_clusters += 1;
+                *labels.entry(label).or_default() += 1;
+                if !cluster.embedding_available {
+                    missing_embeddings += 1;
+                }
+            } else {
+                unknown_clusters += 1;
+            }
+        }
+        fragmented_identities += labels.values().filter(|count| **count > 1).count();
+    }
+    ClusterQualityReport {
+        total_clusters,
+        labeled_clusters,
+        unknown_clusters,
+        mixed_clusters,
+        missing_embeddings,
+        fragmented_identities,
+        scored_cluster_coverage: if total_clusters == 0 {
+            0.0
+        } else {
+            labeled_clusters as f32 / total_clusters as f32
+        },
+    }
+}
+
+fn verdict(genuine: &[f32], impostor: &[f32], quality: &ClusterQualityReport) -> VerdictReport {
     let caveat = "Spike evidence only. Real June system.wav recordings across devices, codecs, and meetings are required before production thresholds or a ship decision.";
+    if quality.mixed_clusters > 0 {
+        return VerdictReport {
+            status: "FAIL",
+            reason: format!(
+                "{} cluster(s) were marked mixed; score separation cannot redeem impure diarization.",
+                quality.mixed_clusters
+            ),
+            suggest_threshold_ballpark: None,
+            auto_threshold_ballpark: None,
+            caveat,
+        };
+    }
+    if quality.fragmented_identities > 0 {
+        return VerdictReport {
+            status: "FAIL",
+            reason: format!(
+                "{} identity/recording pair(s) were split across multiple clusters.",
+                quality.fragmented_identities
+            ),
+            suggest_threshold_ballpark: None,
+            auto_threshold_ballpark: None,
+            caveat,
+        };
+    }
+    if quality.unknown_clusters > 0 {
+        return VerdictReport {
+            status: "INCONCLUSIVE",
+            reason: format!(
+                "{} of {} clusters remain unknown; label every evaluation cluster or mark it mixed before judging quality.",
+                quality.unknown_clusters, quality.total_clusters
+            ),
+            suggest_threshold_ballpark: None,
+            auto_threshold_ballpark: None,
+            caveat,
+        };
+    }
+    if quality.missing_embeddings > 0 {
+        return VerdictReport {
+            status: "INCONCLUSIVE",
+            reason: format!(
+                "{} labeled cluster(s) did not yield an embedding.",
+                quality.missing_embeddings
+            ),
+            suggest_threshold_ballpark: None,
+            auto_threshold_ballpark: None,
+            caveat,
+        };
+    }
     let Some(min_genuine) = genuine.iter().copied().reduce(f32::min) else {
         return VerdictReport {
             status: "INCONCLUSIVE",
