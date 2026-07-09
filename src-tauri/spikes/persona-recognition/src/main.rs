@@ -233,7 +233,7 @@ fn main() -> Result<()> {
             write_wav(&listening_wav, &cluster_samples)?;
             let label_value = label_for_cluster(
                 &args,
-                &filename,
+                recording_index,
                 speaker_index,
                 &listening_wav,
                 &speaker_segments,
@@ -560,14 +560,14 @@ fn write_wav(path: &Path, samples: &[f32]) -> Result<()> {
 
 fn label_for_cluster(
     args: &Args,
-    filename: &str,
+    recording_index: usize,
     speaker_index: i32,
     listening_wav: &Path,
     segments: &[(f32, f32)],
 ) -> Result<String> {
     if let Some(label) = args
         .label_map
-        .get(filename)
+        .get(&recording_index.to_string())
         .and_then(|labels| labels.get(&speaker_index.to_string()))
     {
         return Ok(label.trim().to_string());

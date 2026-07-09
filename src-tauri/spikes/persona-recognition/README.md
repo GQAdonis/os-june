@@ -35,6 +35,18 @@ It never contains embedding vectors or audio bytes. Input audio is never
 uploaded. The public smoke fixture proves mechanics only; the PRD gate requires
 real `system.wav` recordings from different meetings and devices.
 
+For a repeatable non-interactive real-audio run, pass `--labels labels.json`.
+The outer JSON keys are zero-based input positions in the command and the inner
+keys are diarized speaker indices, so recordings with the same `system.wav`
+basename cannot collide:
+
+```json
+{
+  "0": { "1": "James" },
+  "1": { "1": "James", "2": "Priya" }
+}
+```
+
 A quality PASS requires distinct WAV contents, at least one labeled and
 embeddable cluster from every evaluation recording, every evaluation cluster
 to be labeled, no cluster marked `mixed`, no identity split across multiple
