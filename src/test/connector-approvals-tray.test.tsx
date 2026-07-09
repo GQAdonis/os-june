@@ -82,6 +82,11 @@ describe("ConnectorApprovalsTray", () => {
     await screen.findByText("Send reply to Dana");
     expect(screen.getByText("Approvals needed (2)")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Deny all" }));
-    expect(tauriMocks.connectorApprovalsRespondAll).toHaveBeenCalledWith({ approve: false });
+    // Only the ids actually rendered are answered, so a later-enqueued action
+    // can't be swept into the bulk response.
+    expect(tauriMocks.connectorApprovalsRespondAll).toHaveBeenCalledWith({
+      approve: false,
+      approvalIds: ["a1", "a2"],
+    });
   });
 });

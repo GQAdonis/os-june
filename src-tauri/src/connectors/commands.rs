@@ -6,6 +6,7 @@ use crate::db::repositories::{ConnectorGrant, Repositories, RoutineTrustRecord};
 use crate::domain::types::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 
 use super::{
     begin_connect, disconnect, list_accounts, scopes::ScopeBundle, ConnectFlow, ConnectorAccount,
@@ -225,15 +226,28 @@ fn provider_for_tool(tool: &str) -> Option<&'static str> {
     }
 }
 
-/// First 8 chars of a sanitized job id (lowercase, `[a-z0-9]` only). Shared
-/// deterministically with the frontend/bridge server-name pattern.
-fn jobid8(job_id: &str) -> String {
-    job_id
+/// A collision-free, deterministic suffix for a job's auto MCP server name.
+/// A short sanitized prefix keeps the name recognizable, and a hash of the full
+/// job id disambiguates ids that share a prefix or sanitize alike, so two
+/// autonomous routines can never mint the same `june_<provider>_auto_<...>`
+/// server name and clobber each other's grant (and token) in `config.yaml`.
+/// The bridge reads the stored `server_name`, so this authoring is the single
+/// source of truth; no other layer re-derives it.
+fn job_server_suffix(job_id: &str) -> String {
+    let readable: String = job_id
         .chars()
         .map(|ch| ch.to_ascii_lowercase())
         .filter(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
         .take(8)
-        .collect()
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    job_id.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+    if readable.is_empty() {
+        hash
+    } else {
+        format!("{readable}_{hash}")
+    }
 }
 
 fn tools_match(existing: &[String], wanted: &[String]) -> bool {
@@ -264,7 +278,7 @@ async fn mint_autonomy_grants(
     record: &RoutineTrustRecord,
 ) -> Result<Vec<String>, AppError> {
     let account_id = first_connected_account_email(app).await;
-    let jobid8 = jobid8(&record.job_id);
+    let job_suffix = job_server_suffix(&record.job_id);
 
     // Granted mutating tools grouped by provider (deduped, sorted, ordered).
     let mut by_provider: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
@@ -295,7 +309,7 @@ async fn mint_autonomy_grants(
     let created_at = crate::db::repositories::timestamp();
     let mut server_names = Vec::with_capacity(by_provider.len());
     for (provider, tools) in &by_provider {
-        let server_name = format!("june_{provider}_auto_{jobid8}");
+        let server_name = format!("june_{provider}_auto_{job_suffix}");
         let token = match existing.get(*provider) {
             Some(previous) if tools_match(&previous.tools, tools) => previous.token.clone(),
             _ => super::random_b64url(32),
@@ -532,20 +546,29 @@ mod tests {
     }
 
     #[test]
-    fn jobid8_sanitizes_and_truncates() {
-        assert_eq!(jobid8("Job-ABC-123456789"), "jobabc12");
-        assert_eq!(jobid8("cron_job_42"), "cronjob4");
-        assert_eq!(jobid8("ab"), "ab");
-        assert_eq!(jobid8("UUID-1234"), "uuid1234");
-        // Deterministic.
-        assert_eq!(jobid8("job-1"), jobid8("job-1"));
+    fn job_server_suffix_is_deterministic_and_collision_free() {
+        // Deterministic for a given id.
+        assert_eq!(job_server_suffix("job-1"), job_server_suffix("job-1"));
+        // Distinct ids that share the first 8 sanitized chars still differ,
+        // because the hash of the full id disambiguates them.
+        let a = job_server_suffix("routine-abcdefgh-1111");
+        let b = job_server_suffix("routine-abcdefgh-2222");
+        assert_ne!(a, b);
+        // And ids that sanitize to the same readable prefix differ too.
+        assert_ne!(job_server_suffix("job-1"), job_server_suffix("job_1x"));
     }
 
     #[test]
-    fn server_name_pattern_matches_contract() {
-        let jobid8 = jobid8("job-1");
-        assert_eq!(format!("june_gmail_auto_{jobid8}"), "june_gmail_auto_job1");
-        assert_eq!(format!("june_gcal_auto_{jobid8}"), "june_gcal_auto_job1");
+    fn server_name_stays_a_safe_mcp_key() {
+        for id in ["job-1", "Routine ABC 12345678 xyz", "!!!", "cron_job_42"] {
+            let name = format!("june_gmail_auto_{}", job_server_suffix(id));
+            assert!(name.starts_with("june_gmail_auto_"));
+            assert!(name.contains("_auto_"));
+            assert!(name.len() <= 64);
+            assert!(name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.'));
+        }
     }
 
     #[test]

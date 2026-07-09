@@ -67,15 +67,20 @@ export function ConnectorApprovalsTray() {
 
   const respondAll = useCallback(
     async (approve: boolean) => {
+      // Answer only the actions currently on screen. An action enqueued after
+      // this snapshot has not been reviewed, so it must stay pending rather than
+      // be swept into a bulk approve.
+      const approvalIds = pending.map((item) => item.approvalId);
+      if (approvalIds.length === 0) return;
       setBusy(true);
       try {
-        await connectorApprovalsRespondAll({ approve });
+        await connectorApprovalsRespondAll({ approve, approvalIds });
       } finally {
         if (mounted.current) setBusy(false);
         void refresh();
       }
     },
-    [refresh],
+    [pending, refresh],
   );
 
   if (pending.length === 0) return null;

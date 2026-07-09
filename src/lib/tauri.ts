@@ -2085,8 +2085,14 @@ export async function connectorApprovalRespond(input: { approvalId: string; appr
   });
 }
 
-export async function connectorApprovalsRespondAll(input: { approve: boolean }) {
-  return invoke<void>("connector_approvals_respond_all", { approve: input.approve });
+export async function connectorApprovalsRespondAll(input: {
+  approve: boolean;
+  approvalIds: string[];
+}) {
+  return invoke<void>("connector_approvals_respond_all", {
+    approve: input.approve,
+    approvalIds: input.approvalIds,
+  });
 }
 
 export async function biographyGet() {

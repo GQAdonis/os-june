@@ -296,21 +296,35 @@ pub fn connector_approval_respond(
     Ok(())
 }
 
-/// Resolve every pending approval at once, matching the frontend's
-/// `connector_approvals_respond_all({ approve })` shape.
+/// Resolve a specific set of pending approvals at once, matching the frontend's
+/// `connector_approvals_respond_all({ approve, approvalIds })` shape. Only the
+/// ids the tray actually rendered are answered: an action enqueued after the UI
+/// snapshotted its list is left pending so a bulk approve can never wave through
+/// an action the user never saw.
 #[tauri::command]
-pub fn connector_approvals_respond_all(app: AppHandle, approve: bool) -> Result<(), AppError> {
-    let entries: Vec<PendingEntry> = {
-        let mut reg = registry()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        reg.drain().map(|(_, entry)| entry).collect()
-    };
-    for entry in entries {
-        let _ = entry.responder.send(approve);
-    }
+pub fn connector_approvals_respond_all(
+    app: AppHandle,
+    approve: bool,
+    approval_ids: Vec<String>,
+) -> Result<(), AppError> {
+    respond_to_ids(&approval_ids, approve);
     emit_changed(&app);
     Ok(())
+}
+
+/// Answer only the named approvals, returning how many were still pending.
+/// Anything not named (for example an action enqueued after the tray snapshot)
+/// is left in the registry untouched. Split out so the selection logic is
+/// testable without a Tauri `AppHandle`.
+fn respond_to_ids(approval_ids: &[String], approve: bool) -> usize {
+    let mut resolved = 0;
+    for approval_id in approval_ids {
+        if let Some(entry) = remove_entry(approval_id) {
+            let _ = entry.responder.send(approve);
+            resolved += 1;
+        }
+    }
+    resolved
 }
 
 #[cfg(test)]
@@ -372,5 +386,53 @@ mod tests {
         assert!(!grant_authorizes(&grant, "user@example.com", "archive"));
         // Empty account -> would park.
         assert!(!grant_authorizes(&grant, "", "send_email"));
+    }
+
+    fn park_test_entry(approval_id: &str) -> oneshot::Receiver<bool> {
+        let (responder, receiver) = oneshot::channel();
+        let approval = PendingApproval {
+            approval_id: approval_id.to_string(),
+            tool: "send_email".to_string(),
+            server: "june_gmail_actions".to_string(),
+            account_email: "user@example.com".to_string(),
+            summary: String::new(),
+            args_preview: String::new(),
+            requested_at_ms: 0,
+        };
+        registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                approval_id.to_string(),
+                PendingEntry {
+                    approval,
+                    responder,
+                },
+            );
+        receiver
+    }
+
+    #[test]
+    fn respond_to_ids_answers_only_named_and_leaves_others_pending() {
+        // Unique ids keep this isolated from any other test touching the global
+        // registry.
+        let seen = "respond-all-seen-1";
+        let unseen = "respond-all-unseen-1";
+        let mut seen_rx = park_test_entry(seen);
+        let _unseen_rx = park_test_entry(unseen);
+
+        // Approve only the id the tray rendered.
+        let resolved = respond_to_ids(&[seen.to_string()], true);
+        assert_eq!(resolved, 1);
+
+        // The rendered action got its approval...
+        assert_eq!(seen_rx.try_recv(), Ok(true));
+        // ...and the action enqueued after the snapshot is still pending.
+        let mut reg = registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(reg.contains_key(unseen));
+        assert!(!reg.contains_key(seen));
+        reg.remove(unseen);
     }
 }

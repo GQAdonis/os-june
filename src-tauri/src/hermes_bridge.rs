@@ -1444,11 +1444,15 @@ pub async fn connectors_apply_runtime(
     app: AppHandle,
     bridge: State<'_, HermesBridge>,
 ) -> Result<(), AppError> {
-    let modes: Vec<bool> = live_connections(&bridge)?
+    // Capture each live runtime's working directory alongside its mode so the
+    // restart lands in the same project the user was in. Restarting with
+    // cwd: None would drop a custom cwd back to the default workspace, so a
+    // connector settings change would silently relocate the agent's files.
+    let connections: Vec<(bool, Option<String>)> = live_connections(&bridge)?
         .iter()
-        .map(|connection| connection.full_mode)
+        .map(|connection| (connection.full_mode, connection.cwd.clone()))
         .collect();
-    for full_mode in modes {
+    for (full_mode, cwd) in connections {
         // Mode-scoped restart (same path the MCP admin uses): stop that one
         // runtime, then re-start it so `sync_hermes_config` re-renders the
         // connector MCP servers into config.yaml.
@@ -1457,7 +1461,7 @@ pub async fn connectors_apply_runtime(
             &app,
             &bridge,
             StartHermesBridgeRequest {
-                cwd: None,
+                cwd,
                 full_mode: Some(full_mode),
             },
         )
