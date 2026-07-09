@@ -2255,7 +2255,7 @@ describe("AppSettings", () => {
 
     // The primary pickers are visible, but advanced local controls are hidden
     // behind a collapsed "More options" disclosure by default.
-    const trigger = await screen.findByRole("button", { name: /More options/ });
+    const trigger = await screen.findByRole("button", { name: "More options for AI models" });
     expect(trigger).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByRole("switch", { name: "Use local text model" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Base URL")).not.toBeInTheDocument();
@@ -2317,7 +2317,7 @@ describe("AppSettings", () => {
     expect(await screen.findByRole("switch", { name: "Use local text model" })).toBeInTheDocument();
     expect(screen.getByLabelText("Base URL")).toBeInTheDocument();
     expect(screen.getByLabelText("Model ID")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /More options/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "More options for AI models" })).toHaveAttribute(
       "aria-expanded",
       "true",
     );
@@ -2344,7 +2344,7 @@ describe("AppSettings", () => {
 
       await user.click(await screen.findByRole("tab", { name: "Models" }));
       // The local model config lives behind the "More options" disclosure.
-      await user.click(await screen.findByRole("button", { name: /More options/ }));
+      await user.click(await screen.findByRole("button", { name: "More options for AI models" }));
       await user.click(await screen.findByRole("switch", { name: "Use local text model" }));
       await user.type(await screen.findByLabelText("Base URL"), "http://localhost:11434/v1");
       await user.type(screen.getByLabelText("Model ID"), "llama3.1:8b");
@@ -2633,7 +2633,7 @@ describe("AppSettings", () => {
     expect(mocks.setLocalGenerationEnabled).not.toHaveBeenCalled();
     expect(
       await screen.findByText(
-        "This endpoint is not on this machine. Requests will leave your device. Confirm in the Local model section to enable it.",
+        "This endpoint is not on this machine. Requests will leave your device. Confirm in More options to enable it.",
       ),
     ).toBeInTheDocument();
     const confirm = await screen.findByRole("button", {
@@ -2667,7 +2667,7 @@ describe("AppSettings", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Models" }));
     // The local model config lives behind the "More options" disclosure.
-    await user.click(await screen.findByRole("button", { name: /More options/ }));
+    await user.click(await screen.findByRole("button", { name: "More options for AI models" }));
     await user.click(await screen.findByRole("switch", { name: "Use local text model" }));
     await user.type(await screen.findByLabelText("Base URL"), "http://localhost:11434/v1");
     await user.click(screen.getByRole("button", { name: "Test connection" }));
@@ -2702,7 +2702,7 @@ describe("AppSettings", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Models" }));
     // The local model config lives behind the "More options" disclosure.
-    await user.click(await screen.findByRole("button", { name: /More options/ }));
+    await user.click(await screen.findByRole("button", { name: "More options for AI models" }));
     await user.click(await screen.findByRole("switch", { name: "Use local text model" }));
     await user.type(await screen.findByLabelText("Base URL"), "https://models.example.com/v1");
     await user.type(screen.getByLabelText("Model ID"), "llama3.1:8b");
@@ -2756,7 +2756,7 @@ describe("AppSettings", () => {
     // The Venice API key lives behind "More options" so the average user never
     // has to reason about it. It should be hidden until the row is expanded.
     expect(screen.queryByLabelText("Venice API key")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /More options/ }));
+    await user.click(screen.getByRole("button", { name: "More options for AI models" }));
 
     const input = await screen.findByLabelText("Venice API key");
     await user.type(input, "  vc_test_key  ");
@@ -2829,21 +2829,22 @@ describe("AppSettings", () => {
 
     await user.click(await screen.findByRole("tab", { name: "Models" }));
 
-    // #640 placement (restored, JUN-209): the image model lives inside the
-    // shared "AI models" card, not a standalone "Image generation" section.
-    expect(screen.queryByRole("heading", { name: "Image generation" })).toBeNull();
-    const modelsSection = screen.getByRole("heading", { name: "AI models" }).closest("section");
-    expect(modelsSection).not.toBeNull();
+    // Image generation is its own section with the model row up top; Safe mode
+    // lives behind that section's own "More options" disclosure (defaults on).
+    const imageSection = screen
+      .getByRole("heading", { name: "Image generation" })
+      .closest("section");
+    expect(imageSection).not.toBeNull();
     expect(
-      within(modelsSection as HTMLElement).getByRole("button", { name: "Change image model" }),
+      within(imageSection as HTMLElement).getByRole("button", { name: "Change image model" }),
     ).toBeInTheDocument();
-    expect(within(modelsSection as HTMLElement).getByText("Venice SD3.5")).toBeInTheDocument();
-    // Safe mode moved into the advanced "More options" disclosure (collapsed by
-    // default) and still defaults on (JUN-209).
+    expect(within(imageSection as HTMLElement).getByText("Venice SD3.5")).toBeInTheDocument();
     expect(
-      screen.queryByRole("switch", { name: "Blur adult content in images" }),
+      within(imageSection as HTMLElement).queryByRole("switch", {
+        name: "Blur adult content in images",
+      }),
     ).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /More options/ }));
+    await user.click(screen.getByRole("button", { name: "More options for image generation" }));
     expect(screen.getByRole("switch", { name: "Blur adult content in images" })).toBeChecked();
 
     // The picker opens with the curated image options (no backend fetch) and,
