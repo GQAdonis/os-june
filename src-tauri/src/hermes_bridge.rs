@@ -6815,10 +6815,15 @@ async fn sync_june_connector_mcps(
     hermes_command: &str,
 ) -> Result<Option<ConnectorMcpConfigs>, AppError> {
     // Listing reads the non-secret DB index only (no keychain prompt). v1 uses
-    // the FIRST connected account for the base servers; multi-account is a
-    // documented follow-up.
+    // the first CONNECTED account for the base servers; multi-account is a
+    // documented follow-up. A `reconnect_required` account is skipped so a
+    // stale first account does not hand the base servers a dead email while a
+    // healthy account exists.
     let account_email = match crate::connectors::list_accounts(app).await {
-        Ok(accounts) => accounts.into_iter().next().map(|account| account.email),
+        Ok(accounts) => accounts
+            .into_iter()
+            .find(|account| account.status == crate::connectors::ConnectorAccountStatus::Connected)
+            .map(|account| account.email),
         Err(error) => {
             // A DB read failure must not wedge the whole bridge start; skip the
             // connector servers and log a code only.

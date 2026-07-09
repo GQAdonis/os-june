@@ -271,6 +271,24 @@ const ACTION_TOOL_LABELS: Readonly<Record<string, string>> = Object.freeze(
   Object.fromEntries(CONNECTOR_ACTION_TOOLS.map((tool) => [tool.id, tool.label])),
 );
 
+/** A scheduled run that counts toward earned autonomy: one the routine
+ * finished without failing. Active runs and error/cancelled runs do not count
+ * ("run correctly under approval"). Field names cover both the snake_case and
+ * camelCase shapes the session record can arrive in. */
+export function isCreditableRun(run: {
+  active?: boolean;
+  is_active?: boolean;
+  status?: string;
+  ended_at?: string | null;
+  endedAt?: string | null;
+}): boolean {
+  if (run.active || run.is_active) return false;
+  const ended = run.ended_at ?? run.endedAt;
+  if (!ended) return false;
+  const status = (run.status ?? "").toLowerCase();
+  return status !== "failed" && status !== "error" && status !== "cancelled";
+}
+
 /** A human label for a connector action tool id, for the approvals surface.
  * Falls back to a spaced form of the raw name for any unmapped tool. */
 export function actionToolLabel(tool: string): string {

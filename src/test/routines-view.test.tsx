@@ -38,6 +38,7 @@ const tauriMocks = vi.hoisted(() => ({
   connectorsConnect: vi.fn(),
   connectorsApplyRuntime: vi.fn(),
   routineTrustGet: vi.fn(),
+  routineTrustRecordRun: vi.fn(),
   routineTrustSet: vi.fn(),
   connectorTriggersList: vi.fn(),
   connectorTriggerSet: vi.fn(),
@@ -129,6 +130,8 @@ beforeEach(() => {
   tauriMocks.connectorsConnect.mockResolvedValue(googleAccount());
   tauriMocks.connectorsApplyRuntime.mockResolvedValue(undefined);
   tauriMocks.routineTrustGet.mockResolvedValue(null);
+  tauriMocks.routineTrustRecordRun.mockResolvedValue(undefined);
+  window.localStorage.removeItem("connector-credited-run-ids");
   tauriMocks.routineTrustSet.mockImplementation(
     async (input: { trustMode: string; autonomousTools?: string[] }) => ({
       trustMode: input.trustMode,
@@ -588,6 +591,47 @@ describe("RoutinesView connector templates", () => {
     );
     // Event-driven jobs never queue an immediate scheduler run.
     expect(mocks.triggerRoutine).not.toHaveBeenCalled();
+  });
+
+  it("credits a finished approval-mode run toward earned autonomy", async () => {
+    // Baseline already seeded, so this run is fresh and gets counted.
+    window.localStorage.setItem("connector-credited-run-ids", "[]");
+    mocks.listRoutines.mockResolvedValue([job()]);
+    tauriMocks.routineTrustGet.mockResolvedValue({
+      trustMode: "approval",
+      approvalRunCount: 1,
+      autonomousTools: [],
+      autonomousServers: [],
+    });
+    adapterMocks.listScheduledRunSessions.mockResolvedValue([
+      {
+        id: "cron_abc123_20260709_100000",
+        status: "completed",
+        ended_at: "2026-07-09T10:05:00Z",
+        active: false,
+      },
+    ]);
+    renderView();
+    await waitFor(() => expect(tauriMocks.routineTrustRecordRun).toHaveBeenCalledWith("abc123"));
+  });
+
+  it("does not credit a still-running or failed run", async () => {
+    window.localStorage.setItem("connector-credited-run-ids", "[]");
+    mocks.listRoutines.mockResolvedValue([job()]);
+    tauriMocks.routineTrustGet.mockResolvedValue({
+      trustMode: "approval",
+      approvalRunCount: 0,
+      autonomousTools: [],
+      autonomousServers: [],
+    });
+    adapterMocks.listScheduledRunSessions.mockResolvedValue([
+      { id: "cron_abc123_20260709_090000", status: "running", active: true },
+      { id: "cron_abc123_20260709_100000", status: "failed", ended_at: "2026-07-09T10:05:00Z" },
+    ]);
+    renderView();
+    await waitFor(() => expect(adapterMocks.listScheduledRunSessions).toHaveBeenCalled());
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(tauriMocks.routineTrustRecordRun).not.toHaveBeenCalled();
   });
 
   it("badges rows whose toolsets imply an action-capable trust mode", async () => {

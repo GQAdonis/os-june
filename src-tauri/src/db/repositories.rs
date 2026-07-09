@@ -401,8 +401,11 @@ impl Repositories {
         Ok(rows.into_iter().map(connector_trigger_from_row).collect())
     }
 
-    /// Set the trigger for (job, kind, account): updates the config in place
-    /// when one exists, inserts a new row otherwise.
+    /// Set the trigger for a routine. A routine has exactly one trigger, so any
+    /// existing trigger for the job (whatever its kind or account) is removed
+    /// first: without this, editing a routine from `email_received` to
+    /// `event_upcoming` (or to another account) would leave the old row behind,
+    /// and the daemon would fire the routine from both.
     pub async fn set_connector_trigger(
         &self,
         job_id: &str,
@@ -410,42 +413,24 @@ impl Repositories {
         account_id: &str,
         config_json: &str,
     ) -> Result<ConnectorTriggerRecord, sqlx::error::Error> {
-        let existing = query(
-            "SELECT id FROM connector_triggers WHERE job_id = ? AND kind = ? AND account_id = ?",
+        query("DELETE FROM connector_triggers WHERE job_id = ?")
+            .bind(job_id)
+            .execute(&self.pool)
+            .await?;
+        let id = Uuid::new_v4().to_string();
+        let now = timestamp();
+        query(
+            "INSERT INTO connector_triggers (id, job_id, kind, account_id, config, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
+        .bind(&id)
         .bind(job_id)
         .bind(kind)
         .bind(account_id)
-        .fetch_optional(&self.pool)
+        .bind(config_json)
+        .bind(&now)
+        .execute(&self.pool)
         .await?;
-        let id = match existing {
-            Some(row) => {
-                let id: String = row.get("id");
-                query("UPDATE connector_triggers SET config = ? WHERE id = ?")
-                    .bind(config_json)
-                    .bind(&id)
-                    .execute(&self.pool)
-                    .await?;
-                id
-            }
-            None => {
-                let id = Uuid::new_v4().to_string();
-                let now = timestamp();
-                query(
-                    "INSERT INTO connector_triggers (id, job_id, kind, account_id, config, created_at)
-                     VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .bind(&id)
-                .bind(job_id)
-                .bind(kind)
-                .bind(account_id)
-                .bind(config_json)
-                .bind(&now)
-                .execute(&self.pool)
-                .await?;
-                id
-            }
-        };
         let row = query(
             "SELECT id, job_id, kind, account_id, config, created_at
              FROM connector_triggers WHERE id = ?",
@@ -3559,7 +3544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connector_trigger_set_updates_in_place_per_job_kind_account() {
+    async fn connector_trigger_set_keeps_one_trigger_per_job() {
         let repos = test_repositories().await;
         let first = repos
             .set_connector_trigger(
@@ -3570,44 +3555,37 @@ mod tests {
             )
             .await
             .expect("set trigger");
-        let second = repos
-            .set_connector_trigger(
-                "job-1",
-                "email_received",
-                "user@example.com",
-                r#"{"query":"label:work"}"#,
-            )
-            .await
-            .expect("update trigger");
-        assert_eq!(first.id, second.id);
-        assert_eq!(second.config, r#"{"query":"label:work"}"#);
 
-        // A different kind (or account) is a separate trigger row.
-        repos
-            .set_connector_trigger("job-1", "event_upcoming", "user@example.com", "{}")
+        // Changing the kind (or account) replaces the routine's single trigger
+        // rather than adding a second row the daemon would also fire.
+        let replaced = repos
+            .set_connector_trigger("job-1", "event_upcoming", "other@example.com", "{}")
             .await
-            .expect("second trigger");
-        let all = repos.list_connector_triggers(None).await.expect("list");
-        assert_eq!(all.len(), 2);
+            .expect("replace trigger");
+        assert_ne!(first.id, replaced.id);
+
         let for_job = repos
             .list_connector_triggers(Some("job-1"))
             .await
             .expect("list by job");
-        assert_eq!(for_job.len(), 2);
-        assert!(repos
-            .list_connector_triggers(Some("job-2"))
-            .await
-            .expect("list other job")
-            .is_empty());
+        assert_eq!(for_job.len(), 1);
+        assert_eq!(for_job[0].kind, "event_upcoming");
+        assert_eq!(for_job[0].account_id, "other@example.com");
 
-        assert!(repos
-            .delete_connector_trigger(&first.id)
-            .await
-            .expect("delete"));
+        // The stale row is gone, so deleting the original id now no-ops.
         assert!(!repos
             .delete_connector_trigger(&first.id)
             .await
-            .expect("delete idempotent"));
+            .expect("delete stale idempotent"));
+        assert!(repos
+            .delete_connector_trigger(&replaced.id)
+            .await
+            .expect("delete current"));
+        assert!(repos
+            .list_connector_triggers(Some("job-1"))
+            .await
+            .expect("list after delete")
+            .is_empty());
     }
 
     #[tokio::test]

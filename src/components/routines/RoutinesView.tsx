@@ -18,6 +18,7 @@ import { describeHermesError } from "../../lib/errors";
 import {
   TRUST_MODE_META,
   eventTriggerScheduleDraft,
+  isCreditableRun,
   routineToolsetsFor,
   routineTrustModeFromToolsets,
   triggerConfigFromDraft,
@@ -42,7 +43,13 @@ import {
 } from "../../lib/hermes-routines";
 import { compactScheduleLabel, humanizeSchedule } from "../../lib/routine-schedule";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
-import { connectorTriggerSet, routineTrustSet, type HermesSessionInfo } from "../../lib/tauri";
+import {
+  connectorTriggerSet,
+  routineTrustGet,
+  routineTrustRecordRun,
+  routineTrustSet,
+  type HermesSessionInfo,
+} from "../../lib/tauri";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { HoverTip } from "../ui/HoverTip";
 import { RoutineCreate, type RoutineCreateInput } from "./RoutineCreate";
@@ -54,6 +61,64 @@ import { ROUTINE_TEMPLATES, type RoutineTemplate } from "./routine-templates";
 const NO_ROUTINES: RoutineJob[] = [];
 const NO_RUNS: HermesSessionInfo[] = [];
 const RUN_HISTORY_REFRESH_MS = 10000;
+
+// Session ids already counted toward earned autonomy, so a run is credited
+// once even though the history is re-polled every few seconds. Capped well
+// above the run-history window so ids never fall out and get re-credited.
+const CREDITED_RUNS_KEY = "connector-credited-run-ids";
+const CREDITED_RUNS_CAP = 500;
+
+function readCreditedRuns(): { set: Set<string>; seeded: boolean } {
+  try {
+    const raw = window.localStorage.getItem(CREDITED_RUNS_KEY);
+    if (raw === null) return { set: new Set(), seeded: false };
+    return { set: new Set(JSON.parse(raw) as string[]), seeded: true };
+  } catch {
+    return { set: new Set(), seeded: false };
+  }
+}
+
+function writeCreditedRuns(set: Set<string>): void {
+  try {
+    const ids = [...set].slice(-CREDITED_RUNS_CAP);
+    window.localStorage.setItem(CREDITED_RUNS_KEY, JSON.stringify(ids));
+  } catch {
+    // Non-fatal: crediting simply retries on the next run-history refresh.
+  }
+}
+
+/**
+ * Advances the earned-autonomy counter: for each newly finished run of a
+ * routine currently in the approval trust mode, records one approval-mode run
+ * so autonomy can unlock after the threshold. The very first observation seeds
+ * a baseline (existing runs are not credited retroactively), so counting
+ * begins from when the routine is first watched with this build. Best-effort:
+ * a failure just retries on the next poll.
+ */
+async function creditApprovalRuns(runs: HermesSessionInfo[]): Promise<void> {
+  const finished = runs.filter(isCreditableRun);
+  const { set, seeded } = readCreditedRuns();
+  if (!seeded) {
+    for (const run of finished) set.add(run.id);
+    writeCreditedRuns(set);
+    return;
+  }
+  const fresh = finished.filter((run) => !set.has(run.id));
+  if (fresh.length === 0) return;
+  for (const run of fresh) {
+    set.add(run.id);
+    const jobId = scheduledRunJobId(run.id);
+    if (!jobId) continue;
+    try {
+      const trust = await routineTrustGet(jobId);
+      if (trust?.trustMode === "approval") await routineTrustRecordRun(jobId);
+    } catch {
+      // Leave the id marked so a transient trust-read error does not double
+      // count later; the run still completed.
+    }
+  }
+  writeCreditedRuns(set);
+}
 
 type RoutinesViewProps = {
   /** The chat-first creation path: hands off a composed agent prompt and the
@@ -135,6 +200,7 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
       if (runLoadSequenceRef.current !== sequence) return;
       setRuns(nextRuns);
       setRunsUnavailable(false);
+      void creditApprovalRuns(nextRuns);
     } catch {
       if (runLoadSequenceRef.current !== sequence) return;
       setRunsUnavailable(true);

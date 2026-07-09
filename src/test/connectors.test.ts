@@ -18,6 +18,7 @@ import {
   extractBiographyMarkdown,
   grantedFeatureLabels,
   isConnectorNotConfiguredError,
+  isCreditableRun,
   routineToolsetsFor,
   routineTrustModeFromToolsets,
   scopesCoverBundles,
@@ -56,6 +57,17 @@ describe("scope bundles", () => {
   it("checks scope coverage per bundle", () => {
     expect(scopesCoverBundles([GMAIL_READONLY, CALENDAR_EVENTS], ["gmail_read"])).toBe(true);
     expect(scopesCoverBundles([GMAIL_READONLY], ["gmail_read", "calendar_events"])).toBe(false);
+  });
+
+  it("credits only finished, non-failed runs toward autonomy", () => {
+    expect(isCreditableRun({ status: "completed", ended_at: "2026-07-09T10:00:00Z" })).toBe(true);
+    expect(isCreditableRun({ status: "completed", endedAt: "2026-07-09T10:00:00Z" })).toBe(true);
+    // Still running: no end timestamp, or flagged active.
+    expect(isCreditableRun({ status: "running" })).toBe(false);
+    expect(isCreditableRun({ active: true, ended_at: "2026-07-09T10:00:00Z" })).toBe(false);
+    // Finished but not "correctly".
+    expect(isCreditableRun({ status: "failed", ended_at: "2026-07-09T10:00:00Z" })).toBe(false);
+    expect(isCreditableRun({ status: "cancelled", ended_at: "2026-07-09T10:00:00Z" })).toBe(false);
   });
 
   it("treats a broader granted scope as covering a narrower read need", () => {
