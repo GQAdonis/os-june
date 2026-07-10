@@ -1453,13 +1453,21 @@ export function readCommandAllowlist(config: Record<string, unknown>): string[] 
     if (!record) return [];
     cursor = record[segment];
   }
-  if (typeof cursor === "string") {
-    const single = cursor.trim();
+  return commandAllowlistValue(cursor);
+}
+
+/** The value-level half of {@link readCommandAllowlist}: normalizes whatever
+ * sits at the `command_allowlist` key (absent, a bare string, a list with junk
+ * entries) into a clean string list. Exposed so a single-snapshot config
+ * transform (`config.updateValue`) can parse the value it is handed. Total. */
+export function commandAllowlistValue(value: unknown): string[] {
+  if (typeof value === "string") {
+    const single = value.trim();
     return single.length > 0 ? [single] : [];
   }
-  if (!Array.isArray(cursor)) return [];
+  if (!Array.isArray(value)) return [];
   const out: string[] = [];
-  for (const entry of cursor) {
+  for (const entry of value) {
     const str = nonEmptyString(entry);
     if (str) out.push(str);
   }

@@ -27,7 +27,11 @@ import { createHermesAdminClient, type HermesAdminClient } from "./client";
 import { HermesAdminError } from "./errors";
 import { GatewayLifecycle, type GatewayLifecycleSnapshot } from "./gateway-lifecycle";
 import { createRustAdminFetch } from "./rust-transport";
-import { COMMAND_ALLOWLIST_CONFIG_PATH, readCommandAllowlist } from "./schemas";
+import {
+  COMMAND_ALLOWLIST_CONFIG_PATH,
+  commandAllowlistValue,
+  readCommandAllowlist,
+} from "./schemas";
 import { adminTargetForMode, type HermesAdminMode, type HermesAdminTarget } from "./target";
 import { removeAllowedCommand } from "./access-grants-view";
 
@@ -166,10 +170,11 @@ export class AccessGrantsController {
     }
   }
 
-  /** Revokes one pattern: re-reads the LIVE allowlist, prunes the pattern from
-   * that fresh list, and writes it through `config.setValue`. Pruning the
-   * controller's last loaded snapshot instead would silently drop any grant
-   * another session persisted after this page loaded. New sessions no longer
+  /** Revokes one pattern by pruning it INSIDE the config snapshot that is
+   * written (`config.updateValue`): the transform receives the allowlist from
+   * the same freshly fetched tree the PUT persists, so a grant another session
+   * added at any point before the write survives — pruning a list read earlier
+   * (even moments earlier) could silently drop it. New sessions no longer
    * auto-allow matching commands; a matching request will prompt again. */
   async revoke(pattern: string): Promise<void> {
     // A no-op revoke (pattern not on screen) does nothing.
@@ -179,17 +184,18 @@ export class AccessGrantsController {
     this.error = undefined;
     this.recompute();
     try {
+      // Pre-check against the live list so a pattern already revoked elsewhere
+      // skips the write entirely (no spurious "applies next session" notice).
       const current = await this.engine.client.config.get();
       if (this.disposed) return;
-      const fresh = readCommandAllowlist(current.config);
-      const next = removeAllowedCommand(fresh, pattern);
-      if (next.length === fresh.length) {
-        // Already revoked elsewhere: nothing to write, just catch the page up.
+      if (!readCommandAllowlist(current.config).includes(pattern)) {
         this.busy = false;
         await this.load();
         return;
       }
-      const outcome = await this.engine.client.config.setValue(COMMAND_ALLOWLIST_PATH, next);
+      const outcome = await this.engine.client.config.updateValue(COMMAND_ALLOWLIST_PATH, (value) =>
+        removeAllowedCommand(commandAllowlistValue(value), pattern),
+      );
       if (this.disposed) return;
       this.engine.cache.afterMutation(outcome.mutation, "always allowed commands");
       this.engine.lifecycle.noteMutation(outcome.mutation);

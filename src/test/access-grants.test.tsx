@@ -164,6 +164,22 @@ function engineFor(config: Record<string, unknown>): {
   return { engine: harness, harness };
 }
 
+describe("access grants — single-snapshot config update", () => {
+  it("updateValue transforms the value from the same tree it persists", async () => {
+    const { engine } = engineFor({ command_allowlist: ["A"], other: { keep: true } });
+    let received: unknown;
+    await engine.client.config.updateValue("command_allowlist", (value) => {
+      received = value;
+      return ["B"];
+    });
+    // The transform saw the live value, the write landed, siblings survived.
+    expect(received).toEqual(["A"]);
+    const after = await engine.client.config.get();
+    expect(readCommandAllowlist(after.config)).toEqual(["B"]);
+    expect((after.config as { other?: unknown }).other).toEqual({ keep: true });
+  });
+});
+
 describe("access grants — controller", () => {
   it("loads the configured allowlist", async () => {
     const { engine } = engineFor({ command_allowlist: ["Sudo"] });
