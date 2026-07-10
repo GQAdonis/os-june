@@ -182,6 +182,7 @@ import {
   markMaxGrantWaitSlow,
   markMaxGrantWaitWaiting,
   maxGrantLanded,
+  maxGrantWaitForAccount,
   maxUpgradeSlowStatus,
   pollForMaxGrant,
 } from "../lib/max-upgrade";
@@ -599,6 +600,19 @@ export function App() {
   }, []);
   const confirmMaxUpgrade = useCallback(async () => {
     if (!maxUpgradePrompt) return;
+    // A wait can begin on another surface while this dialog sits open (an
+    // upgrade confirmed in Billing settings). Never stack a second purchase
+    // on it; adopt the wait and show its status. A slow wait stays
+    // retryable - the dispatch below supersedes it.
+    const pendingWait = maxGrantWaitForAccount(account.user?.id);
+    if (pendingWait && pendingWait.phase !== "slow") {
+      setMaxUpgradePrompt(null);
+      appMaxGrantWaitRef.current = pendingWait;
+      showBillingNotice(
+        pendingWait.phase === "browser" ? MAX_UPGRADE_BROWSER_STATUS : MAX_UPGRADE_WAITING_STATUS,
+      );
+      return;
+    }
     if (depletedBalanceAction(account) !== maxUpgradePrompt.action) {
       // The account reclassified between click and confirm (plan changed,
       // subscription lapsed). Never dispatch the stale intent - and never
@@ -689,6 +703,19 @@ export function App() {
   }, [account, showBillingNotice]);
 
   const handleTopUp = useCallback(() => {
+    // An upgrade already waiting for this account (started here or on any
+    // other surface) must never be offered a second purchase: adopt the wait
+    // and re-show its status instead of opening a new confirm. A slow wait
+    // (an abandoned Stripe page) keeps the retry path - reopening a hosted
+    // session charges nothing until the Stripe confirm.
+    const pendingWait = maxGrantWaitForAccount(account.user?.id);
+    if (pendingWait && pendingWait.phase !== "slow") {
+      appMaxGrantWaitRef.current = pendingWait;
+      showBillingNotice(
+        pendingWait.phase === "browser" ? MAX_UPGRADE_BROWSER_STATUS : MAX_UPGRADE_WAITING_STATUS,
+      );
+      return;
+    }
     // Tier-aware: Max tops up, Pro changes its plan in place, Free subscribes.
     // The Max path routes through an explicit confirmation. A stale top-up
     // gate refreshes the snapshot so the surface can render the right prompt
@@ -704,7 +731,7 @@ export function App() {
         if (outcome !== "opened_browser") void refreshAccount();
       })
       .catch((err: unknown) => setError(messageFromError(err)));
-  }, [account, refreshAccount]);
+  }, [account, refreshAccount, showBillingNotice]);
   const [onboardingDone, setOnboardingDone] = useState(() => {
     applyOnboardingReplayFlag();
     return isOnboardingComplete();

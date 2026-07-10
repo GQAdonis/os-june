@@ -385,7 +385,10 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
           )}
         </div>
 
-        {billingStatus && !grantNotConfirmed ? (
+        {/* Suppress only the duplicate of the subtitle (the slow phase writes
+         * the same copy to both); real failures - a portal open that did not
+         * launch - must stay visible in every phase. */}
+        {billingStatus && billingStatus !== copy.subtitle ? (
           <p className="welcome-status">{billingStatus}</p>
         ) : null}
         {grantNotConfirmed ? (

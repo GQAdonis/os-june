@@ -483,6 +483,17 @@ describe("FundingGate", () => {
       fireEvent.click(screen.getByRole("button", { name: "Open billing" }));
       expect(mocks.osAccountsOpenPortal).toHaveBeenCalledOnce();
 
+      // A failed portal open must stay visible even while the slow copy
+      // occupies the subtitle - a dead link with no feedback is the worst
+      // outcome on the one remediation path this wall offers.
+      mocks.osAccountsOpenPortal.mockRejectedValueOnce({
+        code: "network_error",
+        message: "Could not reach OS Accounts.",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Open billing" }));
+      await act(async () => {});
+      expect(screen.getByText("Could not reach OS Accounts.")).toBeInTheDocument();
+
       view.rerender(
         <FundingGate
           account={{

@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
-import { clearMaxGrantWait } from "../lib/max-upgrade";
+import { beginMaxGrantWait, clearMaxGrantWait } from "../lib/max-upgrade";
 import type {
   AccountStatus,
   BootstrapResponse,
@@ -1058,5 +1058,54 @@ describe("notes recording reliability", () => {
     expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
     expect(mocks.osAccountsUpgradeSession).not.toHaveBeenCalled();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+  });
+
+  it("adopts a pending upgrade wait instead of offering a second purchase", async () => {
+    const failedNote = {
+      ...first,
+      processingStatus: "failed" as const,
+      lastError: "Your balance is too low. Upgrade to continue.",
+    };
+    const proAccount: AccountStatus = {
+      signedIn: true,
+      configured: true,
+      user: { id: "usr_123", handle: "alex" },
+      balance: { credits: 10, usdMillis: 10 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    mocks.osAccountsStatus.mockResolvedValue(proAccount);
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [failedNote, second],
+      activeRecoveries: [],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) =>
+      noteId === "note-2" ? second : failedNote,
+    );
+    // An upgrade already in flight for this account, started on another
+    // surface (Billing settings, the funding gate).
+    beginMaxGrantWait(10, "usr_123", "browser");
+
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
+
+    // No second confirm, no second session: the surface adopts the wait and
+    // re-shows its status.
+    expect(
+      await screen.findByText("Waiting for you to confirm in the browser"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Max is $100 per month. A secure Stripe page will open in your browser so you can review and confirm the prorated charge.",
+      ),
+    ).toBeNull();
+    expect(mocks.osAccountsUpgradeSession).not.toHaveBeenCalled();
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
   });
 });
