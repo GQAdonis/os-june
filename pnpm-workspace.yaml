@@ -1,5 +1,11 @@
 # pnpm settings (pnpm 11 no longer reads the "pnpm" field in package.json).
 
+# Supply-chain cooldown: refuse package versions published less than 7 days
+# ago (value is in minutes). Applies to all dependencies, including transitive
+# ones. For an urgent security patch inside the window, `pnpm audit --fix`
+# adds the patched version to minimumReleaseAgeExclude.
+minimumReleaseAge: 10080
+
 # Dependency build scripts are ignored unless explicitly allowed here.
 allowBuilds:
   '@central-icons-react/round-outlined-radius-3-stroke-2': false
