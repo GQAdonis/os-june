@@ -171,7 +171,8 @@ See `docs/agents/collaboration.md` for the map.
 
 Package manager: `pnpm`, the only package manager for this repo, pinned by the
 `packageManager` field in `package.json` (CI's `pnpm/action-setup` reads the
-same pin — bump it in one place). Supply-chain rules — the `sfw` install
+same pin — bump it in one place, to the newest release at least 7 days old).
+Supply-chain rules — the `sfw` install
 wrapper, the 7-day `minimumReleaseAge` cooldown, and deny-by-default dependency
 build scripts in `pnpm-workspace.yaml` — live in
 [spec/package-install-security.md](spec/package-install-security.md).

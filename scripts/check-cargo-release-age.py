@@ -80,6 +80,42 @@ def discover_lockfiles(base):
     return lockfiles
 
 
+def discover_manifests():
+    """Every tracked Cargo manifest, including new standalone Rust trees."""
+    result = subprocess.run(
+        ["git", "ls-files", "*Cargo.toml"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"failed to discover Cargo.toml files: {result.stderr}")
+    manifests = sorted(path for path in result.stdout.splitlines() if path)
+    if not manifests:
+        raise RuntimeError("no Cargo.toml files found in the repo")
+    return manifests
+
+
+def verify_manifests_locked(manifests=None):
+    """Fail when any tracked manifest would resolve without a committed lock."""
+    manifests = manifests or discover_manifests()
+    for manifest in manifests:
+        result = subprocess.run(
+            [
+                "cargo",
+                "metadata",
+                "--locked",
+                "--format-version",
+                "1",
+                "--manifest-path",
+                manifest,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(f"{manifest} is not locked: {detail}")
+    return len(manifests)
+
+
 def load_exclusions():
     try:
         lines = open(EXCLUDE_FILE).read().splitlines()
@@ -130,11 +166,18 @@ def main():
         print(f"error: base ref {args.base!r} does not resolve", file=sys.stderr)
         return 1
 
+    try:
+        manifest_count = verify_manifests_locked()
+        lockfiles = discover_lockfiles(args.base)
+    except RuntimeError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 1
+
     excluded = load_exclusions()
     now = datetime.datetime.now(datetime.timezone.utc)
     cutoff = datetime.timedelta(days=args.min_age_days)
     new_packages = set()
-    for path in discover_lockfiles(args.base):
+    for path in lockfiles:
         try:
             current = parse_lock(open(path).read())
         except FileNotFoundError:
@@ -179,7 +222,8 @@ def main():
         )
         return 1
     print(
-        f"cargo release-age check passed: {len(new_packages)} new crate "
+        f"cargo release-age check passed: {manifest_count} manifest(s) locked, "
+        f"{len(new_packages)} new crate "
         f"version(s) vs {args.base}, {checked} checked, "
         f"{len(new_packages) - checked} excluded"
     )

@@ -56,17 +56,10 @@ jobs:
             base="$BEFORE"
           fi
           echo "base=$base" >> "$GITHUB_OUTPUT"
-      # A manifest-only change with a stale (or deleted) Cargo.lock would let
-      # later builds resolve fresh crates that never saw the cooldown check,
-      # so lockfiles must exist and match their manifests.
-      - name: Verify lockfiles are in sync with manifests
-        run: |
-          set -euo pipefail
-          git ls-files '*Cargo.lock' | while read -r lock; do
-            cargo metadata --locked --format-version 1 \
-              --manifest-path "$(dirname "$lock")/Cargo.toml" > /dev/null
-          done
-      - name: Check release age of new crate versions
+      # The script verifies every tracked Cargo.toml with `cargo metadata
+      # --locked` before diffing lockfiles, so a new standalone manifest cannot
+      # defer resolution to an unchecked later build.
+      - name: Verify manifests and check release age of new crate versions
         env:
           BASE_REF: ${{ steps.base.outputs.base }}
         run: python3 scripts/check-cargo-release-age.py --base "$BASE_REF"

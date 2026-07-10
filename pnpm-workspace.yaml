@@ -2,9 +2,11 @@
 
 # Supply-chain cooldown: refuse package versions published less than 7 days
 # ago (value is in minutes). Applies to all dependencies, including transitive
-# ones. For an urgent security patch inside the window, `pnpm audit --fix`
+# ones. Fail closed when registry metadata omits publication times. For an
+# urgent security patch inside the window, `sfw pnpm audit --fix`
 # adds the patched version to minimumReleaseAgeExclude.
 minimumReleaseAge: 10080
+minimumReleaseAgeIgnoreMissingTime: false
 
 # enableGlobalVirtualStore was tried and reverted: with the global virtual
 # store, tsc stops resolving @react-three/fiber's JSX type augmentation
