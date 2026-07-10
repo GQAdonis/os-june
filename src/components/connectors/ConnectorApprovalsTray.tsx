@@ -1,6 +1,6 @@
 import { IconChecklist } from "central-icons/IconChecklist";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { actionToolLabel } from "../../lib/connectors";
+import { actionToolLabel, providerFromServer } from "../../lib/connectors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
   CONNECTOR_APPROVALS_CHANGED_EVENT,
@@ -9,6 +9,7 @@ import {
   connectorApprovalsPending,
   connectorApprovalsRespondAll,
 } from "../../lib/tauri";
+import { ConnectorProviderIcon } from "./ConnectorProviderIcon";
 
 /**
  * Always-mounted surface for connector action calls parked in the Rust proxy
@@ -95,23 +96,49 @@ export function ConnectorApprovalsTray() {
     return () => cancelAnimationFrame(id);
   }, [pending, fade.update]);
 
+  // Dev console driver (window.__connectorApprovals) that parks synthetic
+  // approvals in the tray so its styling can be inspected without a live
+  // routine proposing actions.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    let cancelled = false;
+    let dispose: (() => void) | undefined;
+    void import("../../lib/connector-approvals-demo").then(({ registerConnectorApprovalsDemo }) => {
+      if (cancelled) return;
+      ({ dispose } = registerConnectorApprovalsDemo({ setPending }));
+    });
+    return () => {
+      cancelled = true;
+      dispose?.();
+    };
+  }, []);
+
   if (pending.length === 0) return null;
 
   return (
     <aside
       className="connector-approvals"
       aria-label="Connector approvals"
-      // biome-ignore lint/a11y/useSemanticElements: a status role fits a
-      // passive, self-updating queue better than a live region alert.
+      // A status role fits a passive, self-updating queue better than a live
+      // region alert.
       role="status"
     >
       <header className="connector-approvals-header">
         <span className="connector-approvals-title">
           <IconChecklist size={16} aria-hidden />
-          Approvals needed ({pending.length})
+          Approvals needed
+          <span className="status-pill">{pending.length}</span>
         </span>
         {pending.length > 1 ? (
           <span className="connector-approvals-bulk">
+            <button
+              type="button"
+              className="btn btn-ghost connector-approvals-deny"
+              disabled={busy}
+              onClick={() => void respondAll(false)}
+            >
+              Deny all
+            </button>
             <button
               type="button"
               className="btn btn-ghost"
@@ -120,51 +147,53 @@ export function ConnectorApprovalsTray() {
             >
               Approve all
             </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={() => void respondAll(false)}
-            >
-              Deny all
-            </button>
           </span>
         ) : null}
       </header>
       <ul className="connector-approvals-list scroll-fade-mask" ref={listRef} {...fade.props}>
-        {pending.map((item) => (
-          <li key={item.approvalId} className="connector-approvals-item">
-            <div className="connector-approvals-info">
-              <p className="connector-approvals-summary">
-                {item.summary || actionToolLabel(item.tool)}
-              </p>
-              <p className="connector-approvals-meta">
-                {actionToolLabel(item.tool)} · {item.accountEmail}
-              </p>
-              {item.argsPreview ? (
-                <p className="connector-approvals-preview">{item.argsPreview}</p>
-              ) : null}
-            </div>
-            <div className="connector-approvals-actions">
-              <button
-                type="button"
-                className="btn btn-secondary"
-                disabled={busy}
-                onClick={() => void respondOne(item.approvalId, false)}
-              >
-                Deny
-              </button>
-              <button
-                type="button"
-                className="btn primary-action primary-solid"
-                disabled={busy}
-                onClick={() => void respondOne(item.approvalId, true)}
-              >
-                Approve
-              </button>
-            </div>
-          </li>
-        ))}
+        {pending.map((item) => {
+          const provider = providerFromServer(item.server);
+          return (
+            <li key={item.approvalId} className="connector-approvals-item">
+              <span className="connector-approvals-mark" aria-hidden>
+                {provider ? (
+                  <ConnectorProviderIcon provider={provider} size={14} />
+                ) : (
+                  <IconChecklist size={14} aria-hidden />
+                )}
+              </span>
+              <div className="connector-approvals-info">
+                <p className="connector-approvals-summary">
+                  {item.summary || actionToolLabel(item.tool)}
+                </p>
+                <p className="connector-approvals-meta">
+                  {actionToolLabel(item.tool)} · {item.accountEmail}
+                </p>
+                {item.argsPreview ? (
+                  <p className="connector-approvals-preview">{item.argsPreview}</p>
+                ) : null}
+              </div>
+              <div className="connector-approvals-actions">
+                <button
+                  type="button"
+                  className="btn btn-ghost connector-approvals-deny"
+                  disabled={busy}
+                  onClick={() => void respondOne(item.approvalId, false)}
+                >
+                  Deny
+                </button>
+                <button
+                  type="button"
+                  className="connector-approvals-approve"
+                  disabled={busy}
+                  onClick={() => void respondOne(item.approvalId, true)}
+                >
+                  Approve
+                </button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </aside>
   );

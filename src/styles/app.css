@@ -24447,6 +24447,7 @@ input:focus-visible,
   color: var(--foreground);
   font-size: var(--fs-sm);
   line-height: 1.45;
+  cursor: pointer;
 }
 
 /* Event-trigger picker: the "When" control's extra pieces beside the reused
@@ -24469,6 +24470,7 @@ input:focus-visible,
   color: var(--foreground);
   font-size: var(--fs-sm);
   line-height: 1.45;
+  cursor: pointer;
 }
 
 /* The house checkbox (ui/Checkbox): the notes list's rounded-square select
@@ -24678,6 +24680,7 @@ input:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-2);
+  padding: 0 var(--sp-1);
 }
 
 .connector-approvals-title {
@@ -24693,25 +24696,56 @@ input:focus-visible,
   gap: var(--sp-1);
 }
 
+/* Compact controls throughout: the tray is a floating queue, so its buttons
+ * sit at the small control height and body type size. */
+.connector-approvals .btn {
+  height: var(--control-sm);
+  padding: 0 var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+/* Deny is the quiet choice (the agent approval-card language): muted at rest,
+ * firming to the soft subtle-gray hover — never red, which stays reserved for
+ * genuinely destructive states. */
+.connector-approvals-deny {
+  color: var(--muted-foreground);
+}
+
+.connector-approvals .btn-ghost:hover:not(:disabled) {
+  background: var(--surface-subtle);
+}
+
 .connector-approvals-list {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
   max-height: min(420px, 50vh);
   overflow-y: auto;
 }
 
+/* Rows separated by hairlines rather than nested cards: the tray is already
+ * one popover surface, so a bordered card per item read as a card-in-card. */
 .connector-approvals-item {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3);
-  border: 1px solid var(--border-subtle, var(--border));
-  border-radius: var(--r-md);
-  background: var(--card);
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: var(--sp-2) var(--sp-3);
+  padding: var(--sp-3) var(--sp-1);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.connector-approvals-item:first-child {
+  border-top: 0;
+}
+
+/* The provider's monochrome mark, aligned with the summary's first line. */
+.connector-approvals-mark {
+  display: inline-grid;
+  place-items: center;
+  margin-top: 2px;
+  color: var(--muted-foreground);
 }
 
 .connector-approvals-info {
@@ -24731,8 +24765,14 @@ input:focus-visible,
   color: var(--muted-foreground);
 }
 
+/* The redacted args preview clamps: a long draft body must not blow the tray
+ * up to its scroll cap on its own. */
 .connector-approvals-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   margin: 0;
+  overflow: hidden;
   font-size: var(--fs-xs);
   color: var(--muted-foreground);
   white-space: pre-wrap;
@@ -24740,7 +24780,32 @@ input:focus-visible,
 }
 
 .connector-approvals-actions {
+  grid-column: 2;
   display: flex;
   justify-content: flex-end;
   gap: var(--sp-2);
+}
+
+/* Approve reads as primary by being filled (the agent approval-card recipe):
+ * solid subtle-gray at rest, firming to --muted on hover. No brand solid — a
+ * batch of five approvals should not shout five times. */
+.connector-approvals-approve {
+  height: var(--control-sm);
+  padding: 0 var(--sp-3);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
+  color: var(--secondary-foreground);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+
+.connector-approvals-approve:hover:not(:disabled) {
+  background: var(--muted);
+}
+
+.connector-approvals-approve:disabled {
+  opacity: 0.55;
+  cursor: default;
 }

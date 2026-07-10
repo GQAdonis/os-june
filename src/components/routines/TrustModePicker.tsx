@@ -6,6 +6,7 @@ import {
   CONNECTOR_ACTION_TOOLS,
   TRUST_MODE_META,
 } from "../../lib/connectors";
+import { Checkbox } from "../ui/Checkbox";
 import { SegmentedControl } from "../ui/SegmentedControl";
 
 const TRUST_MODES: readonly RoutineTrustMode[] = ["read_only", "approval", "autonomous"];
@@ -83,9 +84,9 @@ export function TrustModePicker({
         <fieldset className="trust-mode-grants">
           <legend className="trust-mode-grants-legend">Tools this routine may run unasked</legend>
           {CONNECTOR_ACTION_TOOLS.map((tool) => (
-            <label key={tool.id} className="trust-mode-grant">
-              <input
-                type="checkbox"
+            <label key={tool.id} className="trust-mode-grant" htmlFor={`trust-grant-${tool.id}`}>
+              <Checkbox
+                id={`trust-grant-${tool.id}`}
                 checked={autonomousTools.includes(tool.id)}
                 onChange={(event) => toggleTool(tool.id, event.currentTarget.checked)}
               />

@@ -1,5 +1,6 @@
 import { TRIGGER_META, type TriggerDraft, DEFAULT_EVENT_LEAD_MINUTES } from "../../lib/connectors";
 import type { ScheduleDraft } from "../../lib/routine-schedule";
+import { Checkbox } from "../ui/Checkbox";
 import { InlineNotice } from "../ui/InlineNotice";
 import { Select } from "../ui/Select";
 import { SchedulePicker } from "./SchedulePicker";
@@ -87,9 +88,9 @@ export function TriggerPicker({
       )}
 
       {trigger.source === "event_upcoming" ? (
-        <label className="trigger-picker-toggle">
-          <input
-            type="checkbox"
+        <label className="trigger-picker-toggle" htmlFor="trigger-external-only">
+          <Checkbox
+            id="trigger-external-only"
             checked={trigger.externalOnly}
             onChange={(event) =>
               onTriggerChange({ ...trigger, externalOnly: event.currentTarget.checked })

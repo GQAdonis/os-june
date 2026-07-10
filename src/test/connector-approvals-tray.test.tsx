@@ -59,7 +59,10 @@ describe("ConnectorApprovalsTray", () => {
     expect(await screen.findByText("Send reply to Dana")).toBeInTheDocument();
     expect(screen.getByText(/Send email/)).toBeInTheDocument();
     expect(screen.getByText(/jo@example.com/)).toBeInTheDocument();
-    expect(screen.getByText("Approvals needed (1)")).toBeInTheDocument();
+    const title = screen.getByText("Approvals needed");
+    expect(title).toBeInTheDocument();
+    // The count rides in a quiet status-pill badge next to the title.
+    expect(title.querySelector(".status-pill")).toHaveTextContent("1");
   });
 
   it("approves a single item and refreshes", async () => {
@@ -80,7 +83,9 @@ describe("ConnectorApprovalsTray", () => {
       .mockResolvedValue([]);
     render(<ConnectorApprovalsTray />);
     await screen.findByText("Send reply to Dana");
-    expect(screen.getByText("Approvals needed (2)")).toBeInTheDocument();
+    expect(screen.getByText("Approvals needed").querySelector(".status-pill")).toHaveTextContent(
+      "2",
+    );
     await userEvent.click(screen.getByRole("button", { name: "Deny all" }));
     // Only the ids actually rendered are answered, so a later-enqueued action
     // can't be swept into the bulk response.

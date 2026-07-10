@@ -18,6 +18,7 @@ import {
   grantedFeatureLabels,
   isConnectorNotConfiguredError,
   isCreditableRun,
+  providerFromServer,
   routineToolsetsFor,
   routineTrustModeFromToolsets,
   scopesCoverBundles,
@@ -291,5 +292,16 @@ describe("event triggers", () => {
     expect(triggerScopeWarning({ source: "schedule" }, [])).toBeNull();
     // No account connected: the picker owns the "connect an account" notice.
     expect(triggerScopeWarning({ source: "email_received" }, null)).toBeNull();
+  });
+});
+
+describe("providerFromServer", () => {
+  it("maps connector MCP server names to their provider", () => {
+    expect(providerFromServer("june_gmail_actions")).toBe("google");
+    expect(providerFromServer("june_gcal")).toBe("google");
+    expect(providerFromServer("june_gcal_auto_abc123")).toBe("google");
+    expect(providerFromServer("june_notion_actions")).toBe("notion");
+    expect(providerFromServer("june_linear_auto_xyz")).toBe("linear");
+    expect(providerFromServer("web")).toBeNull();
   });
 });

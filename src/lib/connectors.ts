@@ -340,6 +340,16 @@ export function actionToolLabel(tool: string): string {
   return ACTION_TOOL_LABELS[tool] ?? tool.replace(/_/g, " ");
 }
 
+/** The provider behind a connector MCP server name (june_gmail_actions,
+ * june_gcal, june_notion_auto_x, ...), for provider marks on the approvals
+ * surface. Null for non-connector servers. */
+export function providerFromServer(server: string): ConnectorProvider | null {
+  if (server.startsWith("june_gmail") || server.startsWith("june_gcal")) return "google";
+  if (server.startsWith("june_notion")) return "notion";
+  if (server.startsWith("june_linear")) return "linear";
+  return null;
+}
+
 /**
  * Composes a routine's enabled_toolsets for a trust mode, per the connectors
  * design:

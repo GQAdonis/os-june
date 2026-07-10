@@ -1,8 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
-import { IconGoogle } from "central-icons/IconGoogle";
-import { IconLinear } from "central-icons/IconLinear";
-import { IconNotion } from "central-icons/IconNotion";
 import { useCallback, useEffect, useState } from "react";
+import { ConnectorProviderIcon } from "../connectors/ConnectorProviderIcon";
 import {
   ALL_SCOPE_BUNDLES,
   BUNDLE_META,
@@ -48,12 +46,6 @@ const PROVIDER_BLURBS: Readonly<Record<ConnectorProvider, string>> = {
   notion: "Search, read, and create pages in your workspace.",
   linear: "Read issues, create issues and comments, and watch assignments.",
 };
-
-function ProviderIcon({ provider, size = 18 }: { provider: ConnectorProvider; size?: number }) {
-  if (provider === "notion") return <IconNotion size={size} aria-hidden />;
-  if (provider === "linear") return <IconLinear size={size} aria-hidden />;
-  return <IconGoogle size={size} aria-hidden />;
-}
 
 function featureSummary(account: ConnectorAccount): string {
   if (account.provider === "google") {
@@ -272,7 +264,7 @@ export function ConnectorsSection() {
             return (
               <li key={provider} className="connector-row">
                 <span className="connector-logo" aria-hidden>
-                  <ProviderIcon provider={provider} />
+                  <ConnectorProviderIcon provider={provider} />
                 </span>
                 <div className="connector-main">
                   <span className="connector-name">{name}</span>
