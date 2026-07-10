@@ -3,7 +3,7 @@
 # `make verify` locally should mean green CI. Use `make dev` to run june-api
 # and the desktop app together locally; production builds use `pnpm tauri:build`.
 .PHONY: help install \
-	dev dev-api \
+	dev dev-staging dev-api \
 	check format typecheck test-web \
 	tauri-fmt tauri-fmt-check tauri-lint tauri-test \
 	june-api-fmt june-api-fmt-check june-api-lint june-api-test \
@@ -30,6 +30,15 @@ install:  ## Install frontend deps (Rust builds via cargo)
 # one command.
 dev:  ## Run the desktop app + june-api together (Ctrl-C stops both)
 	pnpm tauri:dev
+
+# Uses real staging OS Accounts login; the local-dev bearer does not work against staging.
+dev-staging:  ## Run the desktop app against staging June API (real OS Accounts login)
+	JUNE_API_URL=https://june-api-staging.opensoftware.co \
+		OS_JUNE_LOCAL_DEV=0 \
+		OS_ACCOUNTS_URL=https://os-accounts-portal-staging.up.railway.app \
+		OS_ACCOUNTS_API_URL=https://os-accounts-api-staging.up.railway.app \
+		JUNE_DEV_SKIP_LOCAL_API=1 \
+		pnpm tauri:dev
 
 dev-api:  ## Run only june-api locally on :8080 (loads june-api/.env)
 	cd june-api && cargo run
