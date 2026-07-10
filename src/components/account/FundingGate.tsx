@@ -220,7 +220,17 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
       // still landing (poll) and a long-settled Max account, where a poll
       // could never succeed and the gate must re-derive its prompt instead.
       const refreshed = await onRefresh();
-      if (!accountLooksPreGrant(refreshed, baselineCredits)) return;
+      if (!accountLooksPreGrant(refreshed, baselineCredits)) {
+        // Settled: any wait for this account is obsolete and must not keep
+        // suppressing the re-derived prompt. A retry dispatched from the
+        // slow phase lands here - without the clear it would loop straight
+        // back into the "waiting for payment" wall.
+        const staleWait = maxGrantWaitForAccount(account.user?.id);
+        if (staleWait) clearMaxGrantWait(staleWait);
+        setMaxGrantWait(undefined);
+        setBillingStatus(undefined);
+        return;
+      }
     }
     const hostedReview = !chargeNow && !alreadyOnPlan;
     const grantWait = beginMaxGrantWait(

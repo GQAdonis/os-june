@@ -648,7 +648,17 @@ export function App() {
       // still landing (poll) and a long-settled Max account, where a poll
       // could never succeed and the surface must re-derive its prompt.
       const refreshed = await refreshAccount();
-      if (!accountLooksPreGrant(refreshed, baselineCredits)) return;
+      if (!accountLooksPreGrant(refreshed, baselineCredits)) {
+        // Settled: any wait for this account is obsolete and must not keep
+        // suppressing the depleted-balance surfaces. A retry dispatched from
+        // a slow wait lands here.
+        const staleWait = maxGrantWaitForAccount(account.user?.id);
+        if (staleWait) clearMaxGrantWait(staleWait);
+        appMaxGrantWaitRef.current = undefined;
+        window.clearTimeout(billingNoticeTimerRef.current);
+        setBillingNotice(null);
+        return;
+      }
     } else if (outcome !== "opened_upgrade_session" && outcome !== "changed_plan") {
       // The server no longer sees an active subscription. Refresh and let
       // the depleted-balance surface render the correct subscribe action.

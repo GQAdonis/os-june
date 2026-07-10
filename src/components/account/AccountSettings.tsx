@@ -260,6 +260,12 @@ export function BillingSettingsSection({
       // could never succeed and the card must re-derive from the snapshot.
       const refreshed = await onRefresh();
       if (!accountLooksPreGrant(refreshed, baselineCredits)) {
+        // Settled: any wait for this account is obsolete and must not keep
+        // suppressing the card's plan claim or upgrade CTAs. A retry
+        // dispatched from the slow phase lands here.
+        const staleWait = maxGrantWaitForAccount(account.user?.id);
+        if (staleWait) clearMaxGrantWait(staleWait);
+        setMaxGrantWait(undefined);
         setBillingStatus(undefined);
         return;
       }
@@ -332,6 +338,18 @@ export function BillingSettingsSection({
         } else if (grantWait.phase === "browser" && next?.subscription?.plan === "max") {
           markMaxGrantWaitWaiting(grantWait);
           setBillingStatus(MAX_UPGRADE_WAITING_STATUS);
+        } else {
+          // An adopted wait's phase can advance under another surface's poll
+          // (browser -> waiting -> slow) without notifying this one; the copy
+          // snapshotted at mount would otherwise stick. Re-derive it here so
+          // an explicit refresh always reflects the live phase.
+          setBillingStatus(
+            grantWait.phase === "browser"
+              ? MAX_UPGRADE_BROWSER_STATUS
+              : grantWait.phase === "slow"
+                ? maxUpgradeSlowStatus(grantWait)
+                : MAX_UPGRADE_WAITING_STATUS,
+          );
         }
         return;
       }

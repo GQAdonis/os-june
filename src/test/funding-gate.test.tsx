@@ -2,7 +2,12 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FundingGate } from "../components/account/FundingGate";
-import { beginMaxGrantWait, clearMaxGrantWait, currentMaxGrantWait } from "../lib/max-upgrade";
+import {
+  beginMaxGrantWait,
+  clearMaxGrantWait,
+  currentMaxGrantWait,
+  markMaxGrantWaitSlow,
+} from "../lib/max-upgrade";
 import type { AccountStatus } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
@@ -302,6 +307,35 @@ describe("FundingGate", () => {
     expect(currentMaxGrantWait()).toBeUndefined();
     expect(screen.queryByText("Upgrade started. Waiting for payment confirmation.")).toBeNull();
     expect(screen.queryByText("Waiting for payment confirmation")).toBeNull();
+  });
+
+  it("clears a stale slow wait when already_on_plan reveals a settled Max account", async () => {
+    const user = userEvent.setup();
+    // A slow wait left behind by an abandoned checkout. The retry it offers
+    // resolves already_on_plan against a long-settled Max account and must
+    // not loop back into the "waiting for payment" wall - the stale wait has
+    // to clear so the gate can re-derive its prompt.
+    const staleWait = beginMaxGrantWait(-1, "usr_123", "browser");
+    markMaxGrantWaitSlow(staleWait);
+    mocks.osAccountsUpgradeSession.mockRejectedValueOnce({
+      code: "already_on_plan",
+      message: "You are already on this plan.",
+    });
+    const settledMaxAccount: AccountStatus = {
+      ...baseAccount,
+      balance: { credits: -800, usdMillis: -800 },
+      subscription: { subscribed: true, status: "active", plan: "max" },
+    };
+    renderDepletedProGate(vi.fn(async () => settledMaxAccount));
+
+    expect(screen.getByText("Waiting for payment confirmation")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
+    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
+
+    await waitFor(() => expect(currentMaxGrantWait()).toBeUndefined());
+    expect(screen.queryByText("Waiting for payment confirmation")).toBeNull();
+    expect(screen.getByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 
   it("starts the grant poll when already_on_plan still looks pre-grant after one refresh", async () => {
