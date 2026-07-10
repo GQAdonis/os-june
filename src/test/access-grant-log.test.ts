@@ -5,6 +5,7 @@ import {
   createAccessGrantLog,
   grantDuration,
   grantScope,
+  redactGrantText,
 } from "../lib/access-grant-log";
 
 beforeEach(() => {
@@ -34,6 +35,38 @@ describe("access grant log — pattern key extraction", () => {
     expect(approvalPatternKeys("nope")).toEqual([]);
     expect(approvalPatternKeys({ pattern_keys: [1, null, ""] })).toEqual([]);
     expect(approvalPatternKeys([])).toEqual([]);
+  });
+});
+
+describe("access grant log — free-text redaction", () => {
+  it("masks bearer tokens, credential key pairs, and secret-shaped runs", () => {
+    expect(redactGrantText('curl -H "Authorization: Bearer sk-abc123"')).not.toContain("sk-abc123");
+    expect(redactGrantText("OPENAI_API_KEY=sk-live-123 python train.py")).toBe(
+      "OPENAI_API_KEY=[redacted] python train.py",
+    );
+    const longSecret = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
+    expect(redactGrantText(`deploy --auth ${longSecret}`)).toBe("deploy --auth [redacted]");
+  });
+
+  it("leaves ordinary commands and paths intact", () => {
+    expect(redactGrantText("rm -rf build")).toBe("rm -rf build");
+    expect(
+      redactGrantText("cp /Users/me/a-very-long-path-name-over-32-characters/file.txt ."),
+    ).toContain("a-very-long-path-name-over-32-characters");
+    expect(redactGrantText(undefined)).toBeUndefined();
+  });
+
+  it("scrubs at record time so secrets never reach storage", () => {
+    const log = createAccessGrantLog();
+    log.record({
+      sessionId: "s1",
+      requestId: "r1",
+      choice: "once",
+      command: "curl -H 'Authorization: Bearer sk-secret-token-value'",
+      patternKeys: [],
+    });
+    expect(log.list()[0].command).not.toContain("sk-secret-token-value");
+    expect(localStorage.getItem("june.agent.accessGrants")).not.toContain("sk-secret-token-value");
   });
 });
 

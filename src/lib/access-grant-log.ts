@@ -94,6 +94,41 @@ export function approvalPatternKeys(payload: unknown): string[] {
   return [];
 }
 
+const REDACTED = "[redacted]";
+
+/**
+ * Masks credential-shaped content in a grant's free text (the command or
+ * description) BEFORE it is persisted: an approval prompt can be for a shell
+ * command that embeds a secret (an `Authorization: Bearer ...` header, an
+ * inline `API_KEY=...`), and this log writes to localStorage, so storing the
+ * raw text would create a durable copy of that secret. Mirrors the admin
+ * transport's redaction heuristics for free text: bearer tokens, `key=value`
+ * pairs under credential-ish key names, and long separator-free alphanumeric
+ * runs (paths/URLs exempt). Total: junk in, string out; never throws.
+ */
+export function redactGrantText(text: string): string;
+export function redactGrantText(text: string | undefined): string | undefined;
+export function redactGrantText(text: string | undefined): string | undefined {
+  if (!text) return text;
+  const keyish =
+    /\b([A-Za-z0-9_-]*(?:token|api[_-]?key|secret|password|passphrase|credential|authorization)[A-Za-z0-9_-]*)(=|:\s*)("[^"]*"|'[^']*'|\S+)/gi;
+  return text
+    .replace(/\bbearer\s+\S+/gi, `Bearer ${REDACTED}`)
+    .replace(keyish, (_match, key: string, sep: string) => `${key}${sep}${REDACTED}`)
+    .split(/(\s+)/)
+    .map((part) => (isCredentialShaped(part) ? REDACTED : part))
+    .join("");
+}
+
+/** Value-shape secret heuristic, mirroring the admin redactor: a long
+ * (>= 32 chars), separator-free, alphanumeric run is almost never meaningful
+ * copy. A path or URL is a location, not a credential, so it is exempt. */
+function isCredentialShaped(value: string): boolean {
+  const stripped = value.replace(/^["']+|["']+$/g, "");
+  if (stripped.includes("/") || stripped.includes("\\")) return false;
+  return stripped.length >= 32 && /[A-Za-z0-9]/.test(stripped);
+}
+
 export type AccessGrantLog = {
   /** Logs a grant. Total: never throws. A re-record of the same session +
    * request (e.g. a retried respond) replaces the earlier entry. */
@@ -187,8 +222,10 @@ export function createAccessGrantLog(): AccessGrantLog {
         requestId,
         choice: entry.choice,
         toolName: entry.toolName,
-        command: entry.command,
-        description: entry.description,
+        // Free text can embed a secret (a bearer header, an inline API key);
+        // scrub it before it lands in durable storage.
+        command: redactGrantText(entry.command),
+        description: redactGrantText(entry.description),
         patternKeys: entry.patternKeys.filter((key) => typeof key === "string" && key.length > 0),
         grantedAt: entry.grantedAt ?? Date.now(),
       };
