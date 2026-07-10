@@ -5912,11 +5912,15 @@ export function AgentWorkspace({
       targetSessionId || options?.issueReport
         ? undefined
         : agentSessionTitleForPrompt(titleContent).then((suggestion) => suggestion.title);
-    const fallbackSessionTitle = options?.issueReport
-      ? "Issue report"
-      : explicitSession?.title?.trim() ||
-        explicitSession?.preview?.trim() ||
-        titleFromPrompt(titleContent);
+    const fallbackSessionTitle = targetSessionId
+      ? explicitSession?.title?.trim() ||
+        hermesSessionItemsRef.current
+          .find((session) => session.id === targetSessionId)
+          ?.title?.trim() ||
+        "Untitled session"
+      : options?.issueReport
+        ? "Issue report"
+        : titleFromPrompt(titleContent);
     const optimisticSession =
       targetSessionId || options?.skipPrompt
         ? undefined
@@ -5986,7 +5990,7 @@ export function AgentWorkspace({
     const ensureStoredHermesSession = () =>
       ensureHermesBridgeSession({
         sessionId: storedSessionId,
-        title: sessionDisplayTitle,
+        ...(!targetSessionId ? { title: sessionDisplayTitle } : {}),
         ...(targetSessionModelId ? { model: targetSessionModelId } : {}),
       });
     if (optimisticSession) {
