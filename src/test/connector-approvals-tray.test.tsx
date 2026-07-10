@@ -59,10 +59,30 @@ describe("ConnectorApprovalsTray", () => {
     expect(await screen.findByText("Send reply to Dana")).toBeInTheDocument();
     expect(screen.getByText(/Send email/)).toBeInTheDocument();
     expect(screen.getByText(/jo@example.com/)).toBeInTheDocument();
-    const title = screen.getByText("Approvals needed");
-    expect(title).toBeInTheDocument();
-    // The count rides in a quiet status-pill badge next to the title.
-    expect(title.querySelector(".status-pill")).toHaveTextContent("1");
+    expect(screen.getByRole("button", { name: /Approvals needed/ })).toBeInTheDocument();
+  });
+
+  it("collapses to a header line with the count and re-expands", async () => {
+    tauriMocks.connectorApprovalsPending.mockResolvedValue([
+      approval(),
+      approval({ approvalId: "a2", summary: "Draft to Sam" }),
+    ]);
+    render(<ConnectorApprovalsTray />);
+    await screen.findByText("Send reply to Dana");
+
+    // Expanded: the list carries the count, so the header shows no pill.
+    const trigger = screen.getByRole("button", { name: /Approvals needed/ });
+    expect(trigger.querySelector(".status-pill")).toBeNull();
+
+    await userEvent.click(trigger);
+    // Collapsed: items and bulk actions fold away; the count pill appears.
+    expect(screen.queryByText("Send reply to Dana")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Deny all" })).toBeNull();
+    expect(trigger.querySelector(".status-pill")).toHaveTextContent("2");
+    expect(screen.getByRole("button", { name: "Expand approvals" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Expand approvals" }));
+    expect(await screen.findByText("Send reply to Dana")).toBeInTheDocument();
   });
 
   it("approves a single item and refreshes", async () => {
@@ -83,9 +103,6 @@ describe("ConnectorApprovalsTray", () => {
       .mockResolvedValue([]);
     render(<ConnectorApprovalsTray />);
     await screen.findByText("Send reply to Dana");
-    expect(screen.getByText("Approvals needed").querySelector(".status-pill")).toHaveTextContent(
-      "2",
-    );
     await userEvent.click(screen.getByRole("button", { name: "Deny all" }));
     // Only the ids actually rendered are answered, so a later-enqueued action
     // can't be swept into the bulk response.

@@ -24657,7 +24657,12 @@ input:focus-visible,
 }
 
 /* Connector approvals tray: a shell-level queue for parked action calls under
-   the approval trust mode. Fixed bottom-right, above the toast host. */
+   the approval trust mode. Fixed bottom-right — the only fixed occupant of
+   that corner (toasts live top-right) — under the dialog layer (z 112) and the
+   panel resize handles. Wears the floating-surface recipe the steer queue and
+   funding notice share (solid card, hairline ring folded into the shadow),
+   and collapses to its header line so an unanswered batch stops covering the
+   composer corner. */
 .connector-approvals {
   position: fixed;
   right: var(--sp-4);
@@ -24666,13 +24671,34 @@ input:focus-visible,
   width: min(360px, calc(100vw - var(--sp-8)));
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-3);
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg);
-  background: var(--popover);
-  color: var(--popover-foreground);
-  box-shadow: var(--shadow-lg);
+  gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: 1px solid transparent;
+  border-radius: var(--r-xl);
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
+  animation: connector-approvals-settle var(--t-med) var(--ease-out) both;
+}
+
+/* The funding notice's settle: a short rise as the tray appears. */
+@keyframes connector-approvals-settle {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connector-approvals {
+    animation: none;
+  }
 }
 
 .connector-approvals-header {
@@ -24680,15 +24706,67 @@ input:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-2);
-  padding: 0 var(--sp-1);
 }
 
-.connector-approvals-title {
+/* The title doubles as the collapse trigger (the steer queue's fold): its
+ * hover wash hugs the button, and the count pill appears only while
+ * collapsed — expanded, the list itself carries the count. */
+.connector-approvals-trigger {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+  min-height: var(--control-sm);
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--foreground);
   font-weight: var(--fw-medium);
   font-size: var(--fs-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--t-fast) var(--ease-out);
+}
+
+.connector-approvals-trigger:hover {
+  background: var(--secondary);
+}
+
+.connector-approvals-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.connector-approvals-chevron-button {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-sm);
+  height: var(--control-sm);
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color var(--t-fast) var(--ease-out),
+    color var(--t-fast) var(--ease-out);
+}
+
+.connector-approvals-chevron-button:hover {
+  background: var(--secondary);
+  color: var(--foreground);
+}
+
+/* Open, the chevron points down (fold the list away); collapsed it turns up,
+ * toward where the queue reopens. */
+.connector-approvals-chevron {
+  transition: rotate var(--t-med) var(--ease-out);
+}
+
+.connector-approvals-chevron[data-expanded="false"] {
+  rotate: 180deg;
 }
 
 .connector-approvals-bulk {
@@ -24732,7 +24810,9 @@ input:focus-visible,
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
   gap: var(--sp-2) var(--sp-3);
-  padding: var(--sp-3) var(--sp-1);
+  /* Inline inset matches the trigger's padding so the provider mark lands on
+   * the same left edge as the header's checklist icon. */
+  padding: var(--sp-3) var(--sp-2);
   border-top: 1px solid var(--border-subtle);
 }
 

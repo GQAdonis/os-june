@@ -1,4 +1,5 @@
 import { IconChecklist } from "central-icons/IconChecklist";
+import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { actionToolLabel, providerFromServer } from "../../lib/connectors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
@@ -24,6 +25,11 @@ import { ConnectorProviderIcon } from "./ConnectorProviderIcon";
 export function ConnectorApprovalsTray() {
   const [pending, setPending] = useState<PendingConnectorApproval[]>([]);
   const [busy, setBusy] = useState(false);
+  // Collapsed parks the tray as a single header line (the steer queue's
+  // fold), so a batch the user isn't ready to answer stops covering the
+  // composer corner. A fresh batch re-expands: new approvals demand eyes.
+  const [collapsed, setCollapsed] = useState(false);
+  const previousCount = useRef(0);
   const mounted = useRef(true);
   // The list clips to a max-height once a batch is long; the shared scroll
   // fade signals that more approvals are hidden below (spec/scroll-fade.md).
@@ -113,6 +119,13 @@ export function ConnectorApprovalsTray() {
     };
   }, []);
 
+  // Re-expand when a batch arrives on an empty tray; a collapse mid-batch
+  // sticks until the queue drains.
+  useEffect(() => {
+    if (pending.length > 0 && previousCount.current === 0) setCollapsed(false);
+    previousCount.current = pending.length;
+  }, [pending.length]);
+
   if (pending.length === 0) return null;
 
   return (
@@ -124,77 +137,100 @@ export function ConnectorApprovalsTray() {
       role="status"
     >
       <header className="connector-approvals-header">
-        <span className="connector-approvals-title">
+        <button
+          type="button"
+          className="connector-approvals-trigger"
+          aria-expanded={!collapsed}
+          onClick={() => setCollapsed((current) => !current)}
+        >
           <IconChecklist size={16} aria-hidden />
           Approvals needed
-          <span className="status-pill">{pending.length}</span>
+          {collapsed ? <span className="status-pill">{pending.length}</span> : null}
+        </button>
+        <span className="connector-approvals-header-actions">
+          {!collapsed && pending.length > 1 ? (
+            <span className="connector-approvals-bulk">
+              <button
+                type="button"
+                className="btn btn-ghost connector-approvals-deny"
+                disabled={busy}
+                onClick={() => void respondAll(false)}
+              >
+                Deny all
+              </button>
+              <button
+                type="button"
+                className="btn btn-ghost"
+                disabled={busy}
+                onClick={() => void respondAll(true)}
+              >
+                Approve all
+              </button>
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className="connector-approvals-chevron-button"
+            aria-label={collapsed ? "Expand approvals" : "Collapse approvals"}
+            aria-expanded={!collapsed}
+            onClick={() => setCollapsed((current) => !current)}
+          >
+            <IconChevronDownSmall
+              size={13}
+              className="connector-approvals-chevron"
+              data-expanded={!collapsed}
+              aria-hidden
+            />
+          </button>
         </span>
-        {pending.length > 1 ? (
-          <span className="connector-approvals-bulk">
-            <button
-              type="button"
-              className="btn btn-ghost connector-approvals-deny"
-              disabled={busy}
-              onClick={() => void respondAll(false)}
-            >
-              Deny all
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost"
-              disabled={busy}
-              onClick={() => void respondAll(true)}
-            >
-              Approve all
-            </button>
-          </span>
-        ) : null}
       </header>
-      <ul className="connector-approvals-list scroll-fade-mask" ref={listRef} {...fade.props}>
-        {pending.map((item) => {
-          const provider = providerFromServer(item.server);
-          return (
-            <li key={item.approvalId} className="connector-approvals-item">
-              <span className="connector-approvals-mark" aria-hidden>
-                {provider ? (
-                  <ConnectorProviderIcon provider={provider} size={14} />
-                ) : (
-                  <IconChecklist size={14} aria-hidden />
-                )}
-              </span>
-              <div className="connector-approvals-info">
-                <p className="connector-approvals-summary">
-                  {item.summary || actionToolLabel(item.tool)}
-                </p>
-                <p className="connector-approvals-meta">
-                  {actionToolLabel(item.tool)} · {item.accountEmail}
-                </p>
-                {item.argsPreview ? (
-                  <p className="connector-approvals-preview">{item.argsPreview}</p>
-                ) : null}
-              </div>
-              <div className="connector-approvals-actions">
-                <button
-                  type="button"
-                  className="btn btn-ghost connector-approvals-deny"
-                  disabled={busy}
-                  onClick={() => void respondOne(item.approvalId, false)}
-                >
-                  Deny
-                </button>
-                <button
-                  type="button"
-                  className="connector-approvals-approve"
-                  disabled={busy}
-                  onClick={() => void respondOne(item.approvalId, true)}
-                >
-                  Approve
-                </button>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+      {collapsed ? null : (
+        <ul className="connector-approvals-list scroll-fade-mask" ref={listRef} {...fade.props}>
+          {pending.map((item) => {
+            const provider = providerFromServer(item.server);
+            return (
+              <li key={item.approvalId} className="connector-approvals-item">
+                <span className="connector-approvals-mark" aria-hidden>
+                  {provider ? (
+                    <ConnectorProviderIcon provider={provider} size={14} />
+                  ) : (
+                    <IconChecklist size={14} aria-hidden />
+                  )}
+                </span>
+                <div className="connector-approvals-info">
+                  <p className="connector-approvals-summary">
+                    {item.summary || actionToolLabel(item.tool)}
+                  </p>
+                  <p className="connector-approvals-meta">
+                    {actionToolLabel(item.tool)} · {item.accountEmail}
+                  </p>
+                  {item.argsPreview ? (
+                    <p className="connector-approvals-preview">{item.argsPreview}</p>
+                  ) : null}
+                </div>
+                <div className="connector-approvals-actions">
+                  <button
+                    type="button"
+                    className="btn btn-ghost connector-approvals-deny"
+                    disabled={busy}
+                    onClick={() => void respondOne(item.approvalId, false)}
+                  >
+                    Deny
+                  </button>
+                  <button
+                    type="button"
+                    className="connector-approvals-approve"
+                    disabled={busy}
+                    onClick={() => void respondOne(item.approvalId, true)}
+                  >
+                    Approve
+                  </button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </aside>
   );
 }
