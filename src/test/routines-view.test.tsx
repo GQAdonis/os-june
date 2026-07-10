@@ -620,6 +620,37 @@ describe("RoutinesView connector templates", () => {
     await waitFor(() => expect(mocks.triggerRoutine).toHaveBeenCalledWith("abc123"));
   });
 
+  it("removes a newly created routine when trust setup fails", async () => {
+    tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
+    mocks.listRoutines.mockResolvedValue([]);
+    tauriMocks.routineTrustSet.mockRejectedValueOnce(new Error("trust store unavailable"));
+    renderView();
+    await screen.findByText("Morning briefing");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add Morning briefing" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("trust store unavailable")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.removeRoutine).toHaveBeenCalledWith("abc123"));
+    expect(mocks.triggerRoutine).not.toHaveBeenCalled();
+  });
+
+  it("removes a paused placeholder when event trigger setup fails", async () => {
+    tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
+    mocks.listRoutines.mockResolvedValue([]);
+    tauriMocks.connectorTriggerSet.mockRejectedValueOnce(new Error("trigger store unavailable"));
+    renderView();
+    await screen.findByText("Auto-inbox");
+
+    await userEvent.click(screen.getByRole("button", { name: "Add Auto-inbox" }));
+    await userEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("trigger store unavailable")).toBeInTheDocument();
+    await waitFor(() => expect(mocks.pauseRoutine).toHaveBeenCalledWith("abc123"));
+    expect(mocks.removeRoutine).toHaveBeenCalledWith("abc123");
+    expect(mocks.triggerRoutine).not.toHaveBeenCalled();
+  });
+
   it("reports a finished run to the backend crediting path with its id and end time", async () => {
     // The backend decides whether to credit (approval mode + after the window);
     // the view just reports every finished run once, id and end time included.
@@ -787,6 +818,74 @@ describe("RoutinesView detail", () => {
     // was attempted, so nothing needs rolling back.
     expect(tauriMocks.routineTrustSet).not.toHaveBeenCalled();
     expect(mocks.updateRoutine).not.toHaveBeenCalled();
+  });
+
+  it("keeps the event trigger when resuming its scheduled replacement fails", async () => {
+    const storedTrigger = {
+      id: "trig-1",
+      jobId: "abc123",
+      kind: "email_received" as const,
+      accountId: "acc-1",
+      config: {},
+    };
+    tauriMocks.connectorTriggersList.mockResolvedValue([storedTrigger]);
+    tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
+    mocks.listRoutines.mockResolvedValue([
+      job({ schedule: "2099-01-01T09:00:00Z", state: "paused" }),
+    ]);
+    mocks.resumeRoutine.mockRejectedValueOnce(new Error("gateway down"));
+    renderView();
+    await openDetail("Morning summary");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Trigger type" })).toHaveTextContent(
+        "When new email arrives",
+      ),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Trigger type" }));
+    await userEvent.click(screen.getByRole("option", { name: "On a schedule" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("gateway down")).toBeInTheDocument();
+    expect(mocks.updateRoutine).toHaveBeenCalledWith("abc123", {
+      schedule: "0 9 * * *",
+    });
+    expect(mocks.resumeRoutine).toHaveBeenCalledWith("abc123");
+    expect(tauriMocks.connectorTriggerDelete).not.toHaveBeenCalled();
+    expect(tauriMocks.connectorTriggerSet).not.toHaveBeenCalled();
+  });
+
+  it("re-pauses an event routine when deleting its trigger fails", async () => {
+    tauriMocks.connectorTriggersList.mockResolvedValue([
+      {
+        id: "trig-1",
+        jobId: "abc123",
+        kind: "email_received",
+        accountId: "acc-1",
+        config: {},
+      },
+    ]);
+    tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
+    tauriMocks.connectorTriggerDelete.mockRejectedValueOnce(new Error("trigger delete failed"));
+    mocks.listRoutines.mockResolvedValue([
+      job({ schedule: "2099-01-01T09:00:00Z", state: "paused" }),
+    ]);
+    renderView();
+    await openDetail("Morning summary");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Trigger type" })).toHaveTextContent(
+        "When new email arrives",
+      ),
+    );
+
+    await userEvent.click(screen.getByRole("button", { name: "Trigger type" }));
+    await userEvent.click(screen.getByRole("option", { name: "On a schedule" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("trigger delete failed")).toBeInTheDocument();
+    expect(mocks.resumeRoutine).toHaveBeenCalledWith("abc123");
+    expect(tauriMocks.connectorTriggerDelete).toHaveBeenCalledWith("trig-1");
+    expect(mocks.pauseRoutine).toHaveBeenCalledWith("abc123");
   });
 
   it("restores a blank local name after saving unrelated changes", async () => {

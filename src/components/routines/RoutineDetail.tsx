@@ -228,6 +228,20 @@ export function RoutineDetail({
     trustChanged ||
     triggerChanged;
 
+  function changeTrigger(next: TriggerDraft) {
+    // Event routines store a far-future one-off schedule only as a dormant
+    // Hermes placeholder. Do not expose or resume that placeholder when the
+    // user switches back to scheduling; start from a useful daily default.
+    if (
+      trigger.source !== "schedule" &&
+      next.source === "schedule" &&
+      scheduleFromDraft(draft) === eventTriggerScheduleDraft().schedule
+    ) {
+      setDraft({ kind: "daily", time: "09:00" });
+    }
+    setTrigger(next);
+  }
+
   async function save() {
     const updates: RoutineUpdates = {};
     if (nameChanged) updates.name = name.trim();
@@ -359,9 +373,27 @@ export function RoutineDetail({
     if (triggerChanged) {
       try {
         if (trigger.source === "schedule") {
-          if (storedTrigger) await connectorTriggerDelete(storedTrigger.id);
+          // Resume first so a gateway failure leaves the existing event
+          // trigger untouched. Only remove that fallback after the scheduled
+          // job is live again.
+          await resumeRoutine(routine.job_id);
+          try {
+            if (storedTrigger) {
+              await connectorTriggerDelete(storedTrigger.id);
+            }
+          } catch (deleteError) {
+            // The trigger still exists. Restore the previous paused state so
+            // schedule and event sources cannot both fire this routine.
+            try {
+              await pauseRoutine(routine.job_id);
+            } catch (restoreError) {
+              toast.error(
+                `June could not restore the previous paused state: ${messageFromError(restoreError)}`,
+              );
+            }
+            throw deleteError;
+          }
           setStoredTrigger(null);
-          await resumeRoutine(routine.job_id).catch(() => {});
         } else if (triggerAccount) {
           const stored = await connectorTriggerSet({
             jobId: routine.job_id,
@@ -599,7 +631,7 @@ export function RoutineDetail({
                     trigger,
                     accounts.find((entry) => entry.status === "connected")?.scopes ?? null,
                   )}
-                  onTriggerChange={setTrigger}
+                  onTriggerChange={changeTrigger}
                   onScheduleChange={setDraft}
                 />
               </div>

@@ -329,19 +329,34 @@ export function RoutinesView({ onCreateRoutine, onOpenRun }: RoutinesViewProps) 
             },
       );
       if (connectorAware) {
-        await routineTrustSet({
-          jobId: created.job_id,
-          trustMode: input.trustMode,
-          autonomousTools: input.trustMode === "autonomous" ? input.autonomousTools : undefined,
-        });
-        if (eventTrigger && input.triggerAccountId) {
-          await pauseRoutine(created.job_id).catch(() => {});
-          await connectorTriggerSet({
+        try {
+          await routineTrustSet({
             jobId: created.job_id,
-            kind: eventTrigger.source,
-            accountId: input.triggerAccountId,
-            config: triggerConfigFromDraft(eventTrigger),
+            trustMode: input.trustMode,
+            autonomousTools: input.trustMode === "autonomous" ? input.autonomousTools : undefined,
           });
+          if (eventTrigger && input.triggerAccountId) {
+            // Pausing and subscribing are required setup, not best-effort. If
+            // either fails, removeRoutine below deletes the Hermes job and all
+            // connector rows so retrying cannot create a duplicate or leave a
+            // dormant 2099 placeholder behind.
+            await pauseRoutine(created.job_id);
+            await connectorTriggerSet({
+              jobId: created.job_id,
+              kind: eventTrigger.source,
+              accountId: input.triggerAccountId,
+              config: triggerConfigFromDraft(eventTrigger),
+            });
+          }
+        } catch (setupError) {
+          try {
+            await removeRoutine(created.job_id);
+          } catch (cleanupError) {
+            throw new Error(
+              `${describeRoutineError(setupError)} June also could not remove the partially created routine: ${describeRoutineError(cleanupError)}`,
+            );
+          }
+          throw setupError;
         }
         // The first run fires right away (still under the chosen trust mode, so
         // any actions wait for approval), so an install shows value in the first
