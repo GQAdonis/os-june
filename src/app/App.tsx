@@ -71,6 +71,7 @@ import {
   listSessionFolders,
   openPrivacySettings,
   osAccountsLogout,
+  osAccountsOpenPortal,
   pauseRecording,
   removeNoteFromFolder,
   removeSessionFromFolder,
@@ -153,7 +154,6 @@ import {
 import {
   depletedBalanceAction,
   depletedBalanceActionLabel,
-  isOnMaxPlan,
   shouldBlockOnFunding,
   shouldBlockOnSignIn,
 } from "../lib/account-gate";
@@ -163,8 +163,17 @@ import {
   MAX_UPGRADE_CONFIRM_BODY,
   MAX_UPGRADE_CONFIRM_LABEL,
   MAX_UPGRADE_CONFIRM_TITLE,
+  MAX_UPGRADE_PORTAL_LABEL,
   MAX_UPGRADE_READY_STATUS,
+  MAX_UPGRADE_SLOW_STATUS,
   MAX_UPGRADE_WAITING_STATUS,
+  type MaxGrantWait,
+  beginMaxGrantWait,
+  clearMaxGrantWait,
+  isMaxGrantWaitCurrent,
+  markMaxGrantWaitSlow,
+  maxGrantLanded,
+  pollForMaxGrant,
 } from "../lib/max-upgrade";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { checkJuneUpdate, reconcileToStable, relaunchJune, type JuneUpdate } from "../lib/updater";
@@ -554,17 +563,19 @@ export function App() {
   const fundingRequired =
     !devAccountsUnconfigured && !signInRequired && shouldBlockOnFunding(account);
   const topUpLabel = depletedBalanceActionLabel(account);
-  // Confirm gate for the Pro -> Max checkout reached from depleted-balance
-  // surfaces (note failure banner, agent workspace notice). June only opens
-  // OS Accounts' hosted checkout here; it never grants or assumes Max.
+  // Confirm gate for the Pro -> Max plan change reached from depleted-balance
+  // surfaces (note failure banner, agent workspace notice). Capture the action
+  // at click time so a later account refresh cannot reroute confirmation to a
+  // different billing transport.
   const [maxUpgradePrompt, setMaxUpgradePrompt] = useState<{
     action: "upgrade_to_max";
     plan: "max";
   } | null>(null);
   const [maxUpgradeError, setMaxUpgradeError] = useState<string>();
   // Transient billing feedback shown beside the error banner. Success is only
-  // announced after the focus-driven OS Accounts refresh reports Max.
+  // announced after the credit grant poll observes a higher credit balance.
   const [billingNotice, setBillingNotice] = useState<string | null>(null);
+  const appMaxGrantWaitRef = useRef<MaxGrantWait>();
   const billingNoticeTimerRef = useRef<number | undefined>(undefined);
   const showBillingNotice = useCallback((notice: string, autoClearMs?: number) => {
     window.clearTimeout(billingNoticeTimerRef.current);
@@ -578,15 +589,16 @@ export function App() {
       setMaxUpgradePrompt(null);
       return;
     }
+    const baselineCredits = account.balance?.credits ?? 0;
     try {
       const outcome = await runDepletedBalanceAction(
         account,
         maxUpgradePrompt.action,
         maxUpgradePrompt.plan,
       );
-      if (outcome !== "opened_browser") {
-        // A stale top-up gate cannot normally arise from this confirmed Pro
-        // branch, but refresh rather than guessing if the snapshot changed.
+      if (outcome !== "changed_plan") {
+        // The server no longer sees an active subscription. Refresh and let
+        // the depleted-balance surface render the correct subscribe action.
         void refreshAccount();
         return;
       }
@@ -595,24 +607,45 @@ export function App() {
       setMaxUpgradeError(messageFromError(err));
       throw err;
     }
-    // Match the existing subscribe checkout round trip: opening the browser
-    // only enters a waiting state. useAccountStatus refreshes on window focus.
+    // The PATCH only starts the upgrade. Payment confirmation and the credit
+    // grant arrive asynchronously, so stay neutral while the account refresh
+    // poll waits for the credits change.
+    const grantWait = beginMaxGrantWait(baselineCredits, account.user?.id);
+    appMaxGrantWaitRef.current = grantWait;
     showBillingNotice(MAX_UPGRADE_WAITING_STATUS);
+    void pollForMaxGrant(refreshAccount, baselineCredits).then((landed) => {
+      if (!isMaxGrantWaitCurrent(grantWait)) return;
+      if (landed) {
+        clearMaxGrantWait(grantWait);
+        appMaxGrantWaitRef.current = undefined;
+        showBillingNotice(MAX_UPGRADE_READY_STATUS, 8000);
+      } else {
+        markMaxGrantWaitSlow(grantWait);
+        showBillingNotice(MAX_UPGRADE_SLOW_STATUS);
+      }
+    });
   }, [account, maxUpgradePrompt, refreshAccount, showBillingNotice]);
 
   useEffect(() => {
-    if (billingNotice !== MAX_UPGRADE_WAITING_STATUS || !isOnMaxPlan(account)) return;
-    // The refreshed account snapshot is the only authority for success. If
-    // checkout is canceled, the account remains Pro, this never fires, and the
-    // existing depleted-balance card remains without a client-invented error.
+    const grantWait = appMaxGrantWaitRef.current;
+    if (grantWait && grantWait.accountId !== account.user?.id) {
+      clearMaxGrantWait(grantWait);
+      appMaxGrantWaitRef.current = undefined;
+      window.clearTimeout(billingNoticeTimerRef.current);
+      setBillingNotice(null);
+      return;
+    }
+    if (!grantWait || !maxGrantLanded(account, grantWait.baselineCredits)) return;
+    clearMaxGrantWait(grantWait);
+    appMaxGrantWaitRef.current = undefined;
     showBillingNotice(MAX_UPGRADE_READY_STATUS, 8000);
-  }, [account, billingNotice, showBillingNotice]);
+  }, [account, showBillingNotice]);
 
   const handleTopUp = useCallback(() => {
-    // Tier-aware: Max tops up, Pro opens Max checkout, Free subscribes. The
-    // Max path routes through an explicit confirmation before opening the
-    // external browser. A stale top-up gate refreshes the account snapshot so
-    // the surfaces re-render the right prompt without an automatic purchase.
+    // Tier-aware: Max tops up, Pro changes its plan in place, Free subscribes.
+    // The Max path routes through an explicit confirmation. A stale top-up
+    // gate refreshes the snapshot so the surface can render the right prompt
+    // without an automatic purchase.
     const action = depletedBalanceAction(account);
     if (action === "upgrade_to_max") {
       setMaxUpgradeError(undefined);
@@ -3190,7 +3223,18 @@ export function App() {
             {error ? <p className="error-banner">{error}</p> : null}
             {billingNotice ? (
               <p className="notice-banner" role="status">
-                {billingNotice}
+                {billingNotice}{" "}
+                {appMaxGrantWaitRef.current?.phase === "slow" ? (
+                  <button
+                    type="button"
+                    className="funding-gate-link"
+                    onClick={() => {
+                      void osAccountsOpenPortal().catch((err) => setError(messageFromError(err)));
+                    }}
+                  >
+                    {MAX_UPGRADE_PORTAL_LABEL}
+                  </button>
+                ) : null}
               </p>
             ) : null}
             <div className="workspace">

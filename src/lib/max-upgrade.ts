@@ -1,30 +1,74 @@
 import type { AccountStatus } from "./tauri";
 
-// Single source of truth for Max upgrade confirm and status copy. June never
-// grants, announces, or assumes Max when checkout opens. The waiting copy is
-// neutral until a refreshed OS Accounts account snapshot reports Max.
+// Single source of truth for Max upgrade confirm and status copy. The plan
+// change returns before payment is confirmed and the credit grant lands, so
+// only the grant poll may advance the copy from waiting to active.
 export const MAX_UPGRADE_CONFIRM_TITLE = "Upgrade to Max?";
 export const MAX_UPGRADE_CONFIRM_BODY =
-  "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.";
-export const MAX_UPGRADE_CONFIRM_LABEL = "Open checkout";
-export const MAX_UPGRADE_BUSY_LABEL = "Opening checkout...";
-export const MAX_UPGRADE_WAITING_STATUS = "Waiting for checkout to complete in your browser.";
+  "Max is $100 per month. Your saved card will be charged a prorated amount for the rest of this billing cycle.";
+export const MAX_UPGRADE_CONFIRM_LABEL = "Upgrade now";
+export const MAX_UPGRADE_BUSY_LABEL = "Upgrading...";
+export const MAX_UPGRADE_WAITING_STATUS = "Upgrade started. Waiting for payment confirmation.";
 export const MAX_UPGRADE_READY_STATUS = "Max is active.";
-export const MAX_UPGRADE_SLOW_STATUS = "Still waiting for OS Accounts to confirm Max.";
+export const MAX_UPGRADE_SLOW_STATUS =
+  "Payment not confirmed yet. Check billing in your account portal.";
+export const MAX_UPGRADE_PORTAL_LABEL = "Open billing";
 
 export const MAX_GRANT_POLL_INTERVAL_MS = 2500;
 export const MAX_GRANT_POLL_TIMEOUT_MS = 30_000;
 
+type MutableMaxGrantWait = {
+  readonly accountId: string | undefined;
+  readonly baselineCredits: number;
+  phase: "waiting" | "slow";
+};
+
+export type MaxGrantWait = Readonly<MutableMaxGrantWait>;
+
+// The account snapshot is shared across views, so the pending grant must be
+// shared too. This session-only record keeps an optimistic plan mirror from
+// being announced if the user moves between an upgrade surface and Billing.
+let activeMaxGrantWait: MutableMaxGrantWait | undefined;
+
+export function beginMaxGrantWait(
+  baselineCredits: number,
+  accountId: string | undefined,
+): MaxGrantWait {
+  activeMaxGrantWait = { accountId, baselineCredits, phase: "waiting" };
+  return activeMaxGrantWait;
+}
+
+export function currentMaxGrantWait(): MaxGrantWait | undefined {
+  return activeMaxGrantWait;
+}
+
+export function maxGrantWaitForAccount(accountId: string | undefined): MaxGrantWait | undefined {
+  return activeMaxGrantWait?.accountId === accountId ? activeMaxGrantWait : undefined;
+}
+
+export function isMaxGrantWaitCurrent(wait: MaxGrantWait): boolean {
+  return activeMaxGrantWait === wait;
+}
+
+export function markMaxGrantWaitSlow(wait: MaxGrantWait): void {
+  if (activeMaxGrantWait === wait) activeMaxGrantWait.phase = "slow";
+}
+
+export function clearMaxGrantWait(wait?: MaxGrantWait): void {
+  if (wait === undefined || activeMaxGrantWait === wait) activeMaxGrantWait = undefined;
+}
+
 /** Whether a refreshed snapshot shows the Max credit grant landed: the plan
- * flipped to Max AND the balance rose above where it stood before the
- * upgrade (a depleted account crossing back over zero also qualifies). */
+ * flipped to Max AND the credit balance rose above where it stood before the
+ * upgrade. The grant can land without making a deeply negative credit balance
+ * positive, so the credits delta itself is the anchor. */
 export function maxGrantLanded(
   account: AccountStatus | undefined,
   baselineCredits: number,
 ): boolean {
   if (account?.subscription?.plan !== "max") return false;
   const credits = account.balance?.credits;
-  return typeof credits === "number" && credits > Math.max(baselineCredits, 0);
+  return typeof credits === "number" && credits > baselineCredits;
 }
 
 export type MaxGrantPollOptions = {
@@ -34,7 +78,7 @@ export type MaxGrantPollOptions = {
 
 /** Polls `refresh` until the Max grant lands or the timeout passes. The plan
  * change PATCH resolves before the webhook grants the new credits, so
- * surfaces poll briefly instead of parking on a stale balance. Resolves true
+ * surfaces poll briefly instead of parking on a stale credit balance. Resolves true
  * once the grant is visible (the last `refresh` has already pushed the fresh
  * snapshot to the caller's state), false on timeout.
  *

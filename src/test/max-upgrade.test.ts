@@ -1,15 +1,23 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_UPGRADE_BUSY_LABEL,
   MAX_UPGRADE_CONFIRM_BODY,
   MAX_UPGRADE_CONFIRM_LABEL,
+  MAX_UPGRADE_PORTAL_LABEL,
   MAX_UPGRADE_READY_STATUS,
   MAX_UPGRADE_SLOW_STATUS,
   MAX_UPGRADE_WAITING_STATUS,
+  beginMaxGrantWait,
+  clearMaxGrantWait,
+  currentMaxGrantWait,
+  markMaxGrantWaitSlow,
+  maxGrantWaitForAccount,
   maxGrantLanded,
   pollForMaxGrant,
 } from "../lib/max-upgrade";
 import type { AccountStatus } from "../lib/tauri";
+
+beforeEach(() => clearMaxGrantWait());
 
 function account(plan: string, credits: number): AccountStatus {
   return {
@@ -22,14 +30,42 @@ function account(plan: string, credits: number): AccountStatus {
 }
 
 describe("Max upgrade copy", () => {
-  it("describes hosted checkout without announcing Max before account refresh", () => {
-    expect(MAX_UPGRADE_CONFIRM_BODY).toContain("Checkout opens in your browser");
-    expect(MAX_UPGRADE_CONFIRM_LABEL).toBe("Open checkout");
-    expect(MAX_UPGRADE_BUSY_LABEL).toBe("Opening checkout...");
-    expect(MAX_UPGRADE_WAITING_STATUS).toBe("Waiting for checkout to complete in your browser.");
+  it("describes the prorated card charge without announcing Max before the grant", () => {
+    expect(MAX_UPGRADE_CONFIRM_BODY).toContain("saved card");
+    expect(MAX_UPGRADE_CONFIRM_BODY).toContain("prorated amount");
+    expect(MAX_UPGRADE_CONFIRM_LABEL).toBe("Upgrade now");
+    expect(MAX_UPGRADE_BUSY_LABEL).toBe("Upgrading...");
+    expect(MAX_UPGRADE_WAITING_STATUS).toBe("Upgrade started. Waiting for payment confirmation.");
     expect(MAX_UPGRADE_WAITING_STATUS).not.toContain("Max is active");
     expect(MAX_UPGRADE_SLOW_STATUS).not.toContain("Max is active");
+    expect(MAX_UPGRADE_SLOW_STATUS).toContain("Payment not confirmed yet");
+    expect(MAX_UPGRADE_PORTAL_LABEL).toBe("Open billing");
     expect(MAX_UPGRADE_READY_STATUS).toBe("Max is active.");
+  });
+});
+
+describe("shared Max grant wait", () => {
+  it("preserves waiting and timeout phases across upgrade surfaces", () => {
+    const wait = beginMaxGrantWait(1200, "usr_1");
+
+    expect(currentMaxGrantWait()).toBe(wait);
+    expect(maxGrantWaitForAccount("usr_1")).toBe(wait);
+    expect(maxGrantWaitForAccount("usr_2")).toBeUndefined();
+    expect(currentMaxGrantWait()).toMatchObject({
+      accountId: "usr_1",
+      baselineCredits: 1200,
+      phase: "waiting",
+    });
+
+    markMaxGrantWaitSlow(wait);
+    expect(currentMaxGrantWait()).toMatchObject({
+      accountId: "usr_1",
+      baselineCredits: 1200,
+      phase: "slow",
+    });
+
+    clearMaxGrantWait(wait);
+    expect(currentMaxGrantWait()).toBeUndefined();
   });
 });
 
@@ -44,9 +80,9 @@ describe("maxGrantLanded", () => {
     expect(maxGrantLanded(account("max", 50_000), 4000)).toBe(true);
   });
 
-  it("treats crossing back over zero as landed for depleted accounts", () => {
-    // Depleted baseline is negative; any positive balance means the grant hit.
+  it("detects a grant even when a depleted credit balance remains negative", () => {
     expect(maxGrantLanded(account("max", -120), -120)).toBe(false);
+    expect(maxGrantLanded(account("max", -20), -120)).toBe(true);
     expect(maxGrantLanded(account("max", 49_880), -120)).toBe(true);
   });
 

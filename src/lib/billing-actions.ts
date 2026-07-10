@@ -1,39 +1,56 @@
 import { depletedBalanceAction, type DepletedBalanceAction } from "./account-gate";
-import { isTopUpRequiresMaxError } from "./errors";
-import { osAccountsOpenPortal, osAccountsUpgrade } from "./tauri";
+import { errorCode, isTopUpRequiresMaxError } from "./errors";
+import { osAccountsChangePlan, osAccountsOpenPortal, osAccountsUpgrade } from "./tauri";
 import type { AccountStatus } from "./tauri";
 
 /** How the resolved action ended:
+ * - `changed_plan`: the existing subscription now matches the requested plan
+ *   (changed in place, or the server reported `already_on_plan` for a stale
+ *   snapshot); refresh until the associated credit grant lands.
  * - `opened_browser`: checkout or the portal opened; the window focus-refresh
  *   reconciles the balance later.
  * - `upgrade_required`: the backend gated a top-up behind Max, meaning the
  *   local snapshot was stale (it said Max; the server disagrees). The caller
  *   should refresh the account snapshot so the depleted-balance surfaces
  *   re-render as the explicit upgrade-to-Max prompt; the raw gate error is
- *   never surfaced. */
-export type DepletedBalanceOutcome = "opened_browser" | "upgrade_required";
+ *   never surfaced.
+ * - `subscribe_required`: the plan change was rejected because there is no
+ *   active subscription server-side; refresh to show the subscribe path. */
+export type DepletedBalanceOutcome =
+  | "changed_plan"
+  | "opened_browser"
+  | "upgrade_required"
+  | "subscribe_required";
 
 /** Runs the one correct depleted-balance action for the account's tier:
  * - Max tops up (opens the account portal),
- * - Pro starts hosted Max checkout in the external browser,
+ * - Pro upgrades its existing subscription in place to Max,
  * - everyone else starts a checkout.
  *
- * June never grants or assumes Max here. Only a refreshed OS Accounts account
- * snapshot may establish that the plan changed after checkout. June also
- * never builds checkout UI: `osAccountsUpgrade` opens OS Accounts' hosted URL.
- * The existing subscribe and top-up branches remain checkout and portal
- * handoffs respectively. A caller dispatching a confirmed intent passes its
- * captured action and plan so this helper does not reclassify it. */
+ * Stale-snapshot rejections resolve as outcomes rather than throwing, and
+ * never trigger a different billed action. A caller dispatching a confirmed
+ * intent passes its captured action and plan so this helper does not
+ * reclassify it after an account refresh. */
 export async function runDepletedBalanceAction(
   account: AccountStatus,
   action: DepletedBalanceAction = depletedBalanceAction(account),
   upgradePlan: "max" = "max",
 ): Promise<DepletedBalanceOutcome> {
+  if (action === "upgrade_to_max") {
+    try {
+      await osAccountsChangePlan(upgradePlan);
+      return "changed_plan";
+    } catch (err) {
+      const code = errorCode(err);
+      if (code === "already_on_plan") return "changed_plan";
+      if (code === "subscription_required") return "subscribe_required";
+      throw err;
+    }
+  }
+
   try {
     if (action === "top_up") {
       await osAccountsOpenPortal();
-    } else if (action === "upgrade_to_max") {
-      await osAccountsUpgrade(upgradePlan);
     } else {
       await osAccountsUpgrade();
     }

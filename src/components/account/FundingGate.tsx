@@ -1,14 +1,24 @@
 import { useEffect, useState } from "react";
 import { hasLiveSubscription, isOnMaxPlan } from "../../lib/account-gate";
+import { errorCode } from "../../lib/errors";
 import {
   MAX_UPGRADE_BUSY_LABEL,
   MAX_UPGRADE_CONFIRM_BODY,
   MAX_UPGRADE_CONFIRM_LABEL,
   MAX_UPGRADE_CONFIRM_TITLE,
+  MAX_UPGRADE_PORTAL_LABEL,
   MAX_UPGRADE_READY_STATUS,
+  MAX_UPGRADE_SLOW_STATUS,
   MAX_UPGRADE_WAITING_STATUS,
+  type MaxGrantWait,
+  beginMaxGrantWait,
+  clearMaxGrantWait,
+  isMaxGrantWaitCurrent,
+  markMaxGrantWaitSlow,
+  maxGrantLanded,
+  pollForMaxGrant,
 } from "../../lib/max-upgrade";
-import { osAccountsOpenPortal, osAccountsUpgrade } from "../../lib/tauri";
+import { osAccountsChangePlan, osAccountsOpenPortal, osAccountsUpgrade } from "../../lib/tauri";
 import type { AccountStatus, SubscriptionPlan } from "../../lib/tauri";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Spinner } from "../ui/Spinner";
@@ -26,20 +36,20 @@ type GateCopy = {
   title: string;
   subtitle: string;
   cta: string;
-  /** Copy for the waiting-on-the-browser panel. */
+  /** Copy for a browser handoff such as checkout or billing management. */
   waiting?: string;
   reopen?: string;
 };
 
 export function FundingGate({ account, onRefresh, onSignOut }: Props) {
-  const [openedBillingPage, setOpenedBillingPage] = useState(false);
+  const [openedPortal, setOpenedPortal] = useState(false);
   const [checking, setChecking] = useState(false);
-  // Max checkout only opens from an explicit confirm dialog.
+  // The in-place Max upgrade only starts from an explicit confirm dialog.
   const [confirmingUpgrade, setConfirmingUpgrade] = useState(false);
   const [confirmError, setConfirmError] = useState<string>();
-  // Opening checkout is not proof of an upgrade. Stay neutral until a
-  // refreshed OS Accounts snapshot reports Max.
-  const [awaitingMaxConfirmation, setAwaitingMaxConfirmation] = useState(false);
+  const [maxGrantWait, setMaxGrantWait] = useState<MaxGrantWait>();
+  const awaitingGrant = maxGrantWait?.phase === "waiting";
+  const grantNotConfirmed = maxGrantWait?.phase === "slow";
   const [billingStatus, setBillingStatus] = useState<string>();
   // Remembered so "Reopen checkout" lands on the same plan the user picked.
   const [chosenPlan, setChosenPlan] = useState<SubscriptionPlan>("pro");
@@ -51,42 +61,57 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
   const billingRecovery =
     subscribed && typeof status === "string" && status.length > 0 && !hasLiveSubscription(account);
   const topUpRequired = subscribed && !billingRecovery && negativeBalance;
-  // Only Max may buy credits. A depleted Pro subscriber's one path is hosted
-  // Max checkout; a depleted Max subscriber tops up through the portal.
+  // Only Max may buy credits. A depleted Pro subscriber's one path is an
+  // in-place upgrade; a depleted Max subscriber tops up through the portal.
   const proUpgradeRequired = topUpRequired && !isOnMaxPlan(account);
   const maxTopUpRequired = topUpRequired && isOnMaxPlan(account);
 
-  const copy: GateCopy = billingRecovery
+  // This waiting state wins over branch derivation. The optimistic PATCH
+  // mirror can report a depleted Max plan before the webhook grant arrives,
+  // which must not turn the in-flight upgrade into a top-up prompt.
+  const copy: GateCopy = awaitingGrant
     ? {
-        title: "Update billing",
-        subtitle: "Your payment needs attention. Update billing to keep using June.",
-        cta: "Manage billing",
-        waiting: "Waiting for your billing update",
-        reopen: "Reopen billing",
+        title: "Upgrade in progress",
+        subtitle: MAX_UPGRADE_WAITING_STATUS,
+        cta: "",
       }
-    : proUpgradeRequired
+    : grantNotConfirmed
       ? {
-          title: "Upgrade to Max",
-          subtitle:
-            "You have used your Pro credits for this cycle. Upgrade to Max for 5x the monthly usage.",
-          cta: "Upgrade to Max",
+          title: "Payment not confirmed",
+          subtitle: MAX_UPGRADE_SLOW_STATUS,
+          cta: "",
         }
-      : maxTopUpRequired
+      : billingRecovery
         ? {
-            title: "Top up credits",
-            subtitle: "Your credit balance is below zero. Top up credits to keep using June.",
-            cta: "Top up credits",
-            waiting: "Waiting for your top-up",
-            reopen: "Reopen account portal",
+            title: "Update billing",
+            subtitle: "Your payment needs attention. Update billing to keep using June.",
+            cta: "Manage billing",
+            waiting: "Waiting for your billing update",
+            reopen: "Reopen billing",
           }
-        : {
-            title: "Upgrade to continue",
-            subtitle:
-              "Your starter credits are used up. Upgrade to a paid plan to keep using June.",
-            cta: "Upgrade to Pro",
-            waiting: "Waiting for your upgrade",
-            reopen: "Reopen checkout",
-          };
+        : proUpgradeRequired
+          ? {
+              title: "Upgrade to Max",
+              subtitle:
+                "You have used your Pro credits for this cycle. Upgrade to Max for 5x the monthly usage.",
+              cta: "Upgrade to Max",
+            }
+          : maxTopUpRequired
+            ? {
+                title: "Top up credits",
+                subtitle: "Your credit balance is below zero. Top up credits to keep using June.",
+                cta: "Top up credits",
+                waiting: "Waiting for your top-up",
+                reopen: "Reopen account portal",
+              }
+            : {
+                title: "Upgrade to continue",
+                subtitle:
+                  "Your starter credits are used up. Upgrade to a paid plan to keep using June.",
+                cta: "Upgrade to Pro",
+                waiting: "Waiting for your upgrade",
+                reopen: "Reopen checkout",
+              };
   // The Max upsell link only belongs on the Free/subscribe path; a depleted Pro
   // user already has exactly one path (upgrade to Max), and depleted Max users
   // top up. Neither shows a second affordance.
@@ -99,15 +124,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
     return () => window.clearInterval(interval);
   }, [onRefresh]);
 
-  useEffect(() => {
-    if (!awaitingMaxConfirmation || !isOnMaxPlan(account)) return;
-    // Match App's checkout confirmation mechanism: only the refreshed account
-    // snapshot may turn neutral waiting copy into success copy.
-    setAwaitingMaxConfirmation(false);
-    setBillingStatus(MAX_UPGRADE_READY_STATUS);
-  }, [account, awaitingMaxConfirmation]);
-
-  async function handleOpenBillingPage(plan: SubscriptionPlan = chosenPlan) {
+  async function handleOpenPortal(plan: SubscriptionPlan = chosenPlan) {
     setBillingStatus(undefined);
     try {
       if (billingRecovery || maxTopUpRequired) {
@@ -116,26 +133,68 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
         setChosenPlan(plan);
         await osAccountsUpgrade(plan);
       }
-      setOpenedBillingPage(true);
+      setOpenedPortal(true);
     } catch (error) {
       setBillingStatus(messageFromError(error));
     }
   }
 
-  // Hosted Pro -> Max checkout, run from the confirm dialog only. Opening the
-  // browser enters a neutral waiting state; refreshed OS Accounts status is
-  // the only authority for announcing Max. Real failures rethrow so the
-  // dialog stays open showing the error next to its retry affordance.
-  async function handleUpgradeToMax() {
+  async function handleManageBilling() {
     try {
-      await osAccountsUpgrade("max");
+      await osAccountsOpenPortal();
     } catch (error) {
-      setConfirmError(messageFromError(error));
-      throw error;
+      setBillingStatus(messageFromError(error));
     }
-    setChosenPlan("max");
-    setAwaitingMaxConfirmation(true);
   }
+
+  // In-place Pro -> Max upgrade, run from the confirm dialog only. The PATCH
+  // can optimistically mirror the plan before payment is confirmed, so the
+  // credit grant poll is the only authority for announcing Max.
+  async function handleUpgradeToMax() {
+    const baselineCredits = account.balance?.credits ?? 0;
+    try {
+      await osAccountsChangePlan("max");
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "already_on_plan") {
+        // Continue into the grant poll. A stale local snapshot may still be
+        // waiting for the payment-backed credit balance update.
+      } else if (code === "subscription_required") {
+        await onRefresh();
+        return;
+      } else {
+        setConfirmError(messageFromError(error));
+        throw error;
+      }
+    }
+    const grantWait = beginMaxGrantWait(baselineCredits, account.user?.id);
+    setMaxGrantWait(grantWait);
+    setBillingStatus(undefined);
+    void pollForMaxGrant(onRefresh, baselineCredits).then((landed) => {
+      if (!isMaxGrantWaitCurrent(grantWait)) return;
+      if (landed) {
+        clearMaxGrantWait(grantWait);
+        setMaxGrantWait(undefined);
+      } else {
+        markMaxGrantWaitSlow(grantWait);
+      }
+      setBillingStatus(landed ? MAX_UPGRADE_READY_STATUS : MAX_UPGRADE_SLOW_STATUS);
+    });
+  }
+
+  useEffect(() => {
+    if (!maxGrantWait) return;
+    if (maxGrantWait.accountId !== account.user?.id) {
+      clearMaxGrantWait(maxGrantWait);
+      setMaxGrantWait(undefined);
+      setBillingStatus(undefined);
+      return;
+    }
+    if (!maxGrantLanded(account, maxGrantWait.baselineCredits)) return;
+    clearMaxGrantWait(maxGrantWait);
+    setMaxGrantWait(undefined);
+    setBillingStatus(MAX_UPGRADE_READY_STATUS);
+  }, [account, maxGrantWait]);
 
   async function handleCheckNow() {
     setChecking(true);
@@ -156,34 +215,22 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
         <p className="welcome-subtitle">{copy.subtitle}</p>
 
         <div className="welcome-providers">
-          {awaitingMaxConfirmation ? (
-            <>
-              <div className="welcome-auth-progress" role="status" aria-live="polite">
-                <span className="welcome-progress-label">
-                  <Spinner className="welcome-spinner" aria-hidden />
-                  <span>{MAX_UPGRADE_WAITING_STATUS}</span>
-                </span>
-                <button
-                  type="button"
-                  className="welcome-cancel-btn"
-                  disabled={checking}
-                  onClick={() => void handleCheckNow()}
-                >
-                  {checking ? "Checking..." : "Check again"}
-                </button>
-              </div>
-              <p className="funding-hint">
-                Nothing happening?{" "}
-                <button
-                  type="button"
-                  className="funding-gate-link"
-                  onClick={() => void handleOpenBillingPage("max")}
-                >
-                  Reopen checkout
-                </button>
-              </p>
-            </>
-          ) : proUpgradeRequired ? (
+          {awaitingGrant ? (
+            <div className="welcome-auth-progress" role="status" aria-live="polite">
+              <span className="welcome-progress-label">
+                <Spinner className="welcome-spinner" aria-hidden />
+                <span>Waiting for payment confirmation</span>
+              </span>
+              <button
+                type="button"
+                className="welcome-cancel-btn"
+                disabled={checking}
+                onClick={() => void handleCheckNow()}
+              >
+                {checking ? "Checking..." : "Check again"}
+              </button>
+            </div>
+          ) : grantNotConfirmed ? null : proUpgradeRequired ? (
             <button
               type="button"
               className="primary-action"
@@ -194,7 +241,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
             >
               {copy.cta}
             </button>
-          ) : openedBillingPage ? (
+          ) : openedPortal ? (
             <>
               <div className="welcome-auth-progress" role="status" aria-live="polite">
                 <span className="welcome-progress-label">
@@ -215,7 +262,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
                 <button
                   type="button"
                   className="funding-gate-link"
-                  onClick={() => void handleOpenBillingPage()}
+                  onClick={() => void handleOpenPortal()}
                 >
                   {copy.reopen}
                 </button>
@@ -226,7 +273,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
               <button
                 type="button"
                 className="primary-action"
-                onClick={() => void handleOpenBillingPage(offerMaxPlan ? "pro" : chosenPlan)}
+                onClick={() => void handleOpenPortal(offerMaxPlan ? "pro" : chosenPlan)}
               >
                 {copy.cta}
               </button>
@@ -236,7 +283,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
                   <button
                     type="button"
                     className="funding-gate-link"
-                    onClick={() => void handleOpenBillingPage("max")}
+                    onClick={() => void handleOpenPortal("max")}
                   >
                     Upgrade to Max
                   </button>
@@ -246,7 +293,20 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
           )}
         </div>
 
-        {billingStatus ? <p className="welcome-status">{billingStatus}</p> : null}
+        {billingStatus && !grantNotConfirmed ? (
+          <p className="welcome-status">{billingStatus}</p>
+        ) : null}
+        {grantNotConfirmed ? (
+          <p className="funding-hint">
+            <button
+              type="button"
+              className="funding-gate-link"
+              onClick={() => void handleManageBilling()}
+            >
+              {MAX_UPGRADE_PORTAL_LABEL}
+            </button>
+          </p>
+        ) : null}
 
         <p className="welcome-terms">
           {handle ? <>Signed in as @{handle}. </> : null}

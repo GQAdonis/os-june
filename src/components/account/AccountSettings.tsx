@@ -1,14 +1,24 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { hasLiveSubscription, isOnMaxPlan } from "../../lib/account-gate";
+import { hasLiveSubscription } from "../../lib/account-gate";
+import { errorCode } from "../../lib/errors";
 import {
   MAX_UPGRADE_BUSY_LABEL,
   MAX_UPGRADE_CONFIRM_BODY,
   MAX_UPGRADE_CONFIRM_LABEL,
   MAX_UPGRADE_CONFIRM_TITLE,
   MAX_UPGRADE_READY_STATUS,
+  MAX_UPGRADE_SLOW_STATUS,
   MAX_UPGRADE_WAITING_STATUS,
+  type MaxGrantWait,
+  beginMaxGrantWait,
+  clearMaxGrantWait,
+  isMaxGrantWaitCurrent,
+  markMaxGrantWaitSlow,
+  maxGrantLanded,
+  maxGrantWaitForAccount,
+  pollForMaxGrant,
 } from "../../lib/max-upgrade";
 import {
   BILLING_DEMO_FIXTURES,
@@ -17,6 +27,7 @@ import {
 } from "../../lib/billing-demo";
 import {
   osAccountsCancelLogin,
+  osAccountsChangePlan,
   osAccountsLogin,
   osAccountsLogout,
   osAccountsOpenPortal,
@@ -170,10 +181,16 @@ export function BillingSettingsSection({
   onRefresh,
 }: Pick<Props, "account" | "onRefresh">) {
   const [refreshing, setRefreshing] = useState(false);
-  const [billingStatus, setBillingStatus] = useState<string>();
+  const [maxGrantWait, setMaxGrantWait] = useState<MaxGrantWait | undefined>(() =>
+    maxGrantWaitForAccount(account.user?.id),
+  );
+  const [billingStatus, setBillingStatus] = useState<string | undefined>(() => {
+    if (!maxGrantWait) return undefined;
+    return maxGrantWait.phase === "slow" ? MAX_UPGRADE_SLOW_STATUS : MAX_UPGRADE_WAITING_STATUS;
+  });
   const [spins, setSpins] = useState(0);
-  // The plan awaiting an explicit confirm. Hosted checkout never opens
-  // straight from the card CTA.
+  // The plan awaiting an explicit confirm. A plan change can charge the saved
+  // card, so it never starts straight from the card CTA.
   const [planToConfirm, setPlanToConfirm] = useState<SubscriptionPlan | null>(null);
   const [confirmError, setConfirmError] = useState<string>();
   const demoPlan = useForcedBillingPlan();
@@ -187,27 +204,60 @@ export function BillingSettingsSection({
     }
   }
 
-  // Hosted upgrade for a paid subscriber (currently Pro -> Max), run from the
-  // confirm dialog only. Opening checkout enters neutral waiting copy; a
-  // refreshed OS Accounts snapshot is the only authority for success.
-  async function handleConfirmedUpgrade(plan: SubscriptionPlan) {
+  // In-place upgrade for a paid subscriber (currently Pro -> Max), run from
+  // the confirm dialog only. The PATCH can optimistically mirror the plan
+  // before payment is confirmed; only the credit grant poll announces Max.
+  async function handleChangePlan(plan: SubscriptionPlan) {
+    const baselineCredits = account.balance?.credits ?? 0;
     try {
-      await osAccountsUpgrade(plan);
+      await osAccountsChangePlan(plan);
     } catch (error) {
-      // Keep the dialog open (ConfirmDialog swallows the rethrow but stays
-      // up) and show the failure inside it, next to the retry affordance.
-      setConfirmError(messageFromError(error));
-      throw error;
+      const code = errorCode(error);
+      if (code === "already_on_plan") {
+        // Continue into the grant poll. A stale local snapshot may still be
+        // waiting for the payment-backed credit balance update.
+      } else if (code === "subscription_required") {
+        setBillingStatus(messageFromError(error));
+        await onRefresh();
+        return;
+      } else {
+        // Keep the dialog open (ConfirmDialog swallows the rethrow but stays
+        // up) and show the failure inside it, next to the retry affordance.
+        setConfirmError(messageFromError(error));
+        throw error;
+      }
     }
+    const grantWait = beginMaxGrantWait(baselineCredits, account.user?.id);
+    setMaxGrantWait(grantWait);
     setBillingStatus(MAX_UPGRADE_WAITING_STATUS);
+    void pollForMaxGrant(onRefresh, baselineCredits).then((landed) => {
+      // Ignore a stale poll from an earlier attempt or one superseded by a
+      // manual refresh that already observed the grant.
+      if (!isMaxGrantWaitCurrent(grantWait)) return;
+      if (landed) {
+        clearMaxGrantWait(grantWait);
+        setMaxGrantWait(undefined);
+        setBillingStatus(MAX_UPGRADE_READY_STATUS);
+      } else {
+        markMaxGrantWaitSlow(grantWait);
+        setBillingStatus(MAX_UPGRADE_SLOW_STATUS);
+      }
+    });
   }
 
   useEffect(() => {
-    if (billingStatus !== MAX_UPGRADE_WAITING_STATUS || !isOnMaxPlan(account)) return;
-    // Match App's checkout confirmation mechanism: opening the browser is not
-    // success. Only refreshed OS Accounts status can announce Max.
+    if (!maxGrantWait) return;
+    if (maxGrantWait.accountId !== account.user?.id) {
+      clearMaxGrantWait(maxGrantWait);
+      setMaxGrantWait(undefined);
+      setBillingStatus(undefined);
+      return;
+    }
+    if (!maxGrantLanded(account, maxGrantWait.baselineCredits)) return;
+    clearMaxGrantWait(maxGrantWait);
+    setMaxGrantWait(undefined);
     setBillingStatus(MAX_UPGRADE_READY_STATUS);
-  }, [account, billingStatus]);
+  }, [account, maxGrantWait]);
 
   async function handleManageSubscription() {
     try {
@@ -219,15 +269,20 @@ export function BillingSettingsSection({
   }
 
   async function handleRefresh() {
-    const preserveMaxConfirmation = billingStatus === MAX_UPGRADE_WAITING_STATUS;
     setRefreshing(true);
     setSpins((turns) => turns + 1);
     try {
-      await onRefresh();
-      // The account update from this refresh drives the Max confirmation
-      // effect. Do not erase its waiting state (or freshly confirmed result)
-      // as the refresh promise settles.
-      if (!preserveMaxConfirmation) setBillingStatus(undefined);
+      const next = await onRefresh();
+      const grantWait = maxGrantWait;
+      if (grantWait !== undefined) {
+        if (maxGrantLanded(next, grantWait.baselineCredits)) {
+          clearMaxGrantWait(grantWait);
+          setMaxGrantWait(undefined);
+          setBillingStatus(MAX_UPGRADE_READY_STATUS);
+        }
+        return;
+      }
+      setBillingStatus(undefined);
     } catch (error) {
       setBillingStatus(messageFromError(error));
     } finally {
@@ -247,9 +302,11 @@ export function BillingSettingsSection({
   const cardProps = {
     refreshing,
     spins,
+    maxGrantPending: maxGrantWait !== undefined,
     onRefresh: () => void handleRefresh(),
     onUpgrade: (plan: SubscriptionPlan) => void handleUpgrade(plan),
-    onConfirmUpgrade: (plan: SubscriptionPlan) => {
+    // Confirm first because the change may charge the saved card.
+    onChangePlan: (plan: SubscriptionPlan) => {
       setConfirmError(undefined);
       setPlanToConfirm(plan);
     },
@@ -281,7 +338,7 @@ export function BillingSettingsSection({
         open={planToConfirm !== null}
         onClose={() => setPlanToConfirm(null)}
         onConfirm={async () => {
-          if (planToConfirm) await handleConfirmedUpgrade(planToConfirm);
+          if (planToConfirm) await handleChangePlan(planToConfirm);
         }}
         title={MAX_UPGRADE_CONFIRM_TITLE}
         description={confirmError ?? MAX_UPGRADE_CONFIRM_BODY}
@@ -296,9 +353,10 @@ type BillingCardProps = {
   account: AccountStatus;
   refreshing: boolean;
   spins: number;
+  maxGrantPending: boolean;
   onRefresh: () => void;
   onUpgrade: (plan: SubscriptionPlan) => void;
-  onConfirmUpgrade: (plan: SubscriptionPlan) => void;
+  onChangePlan: (plan: SubscriptionPlan) => void;
   onManage: () => void;
 };
 
@@ -306,9 +364,10 @@ function BillingCard({
   account,
   refreshing,
   spins,
+  maxGrantPending,
   onRefresh,
   onUpgrade,
-  onConfirmUpgrade,
+  onChangePlan,
   onManage,
 }: BillingCardProps) {
   const subscription = account.subscription;
@@ -330,7 +389,10 @@ function BillingCard({
 
   // Legacy subscription rows predate plan tiers and carry no slug; they are
   // all Pro, so anything that isn't explicitly "max" reads as Pro.
-  const onMaxPlan = onPaidPlan && subscription?.plan === "max";
+  // PATCH may optimistically mirror `plan: max` before payment and its credit
+  // grant land. Keep the card on Pro until the grant poll confirms the credit balance
+  // change, so "Max plan" and "Active" cannot leak early as a paired claim.
+  const onMaxPlan = onPaidPlan && subscription?.plan === "max" && !maxGrantPending;
   const planName = onPaidPlan ? (onMaxPlan ? MAX_PLAN_NAME : PRO_PLAN_NAME) : FREE_PLAN_NAME;
   const planDetail = !onPaidPlan
     ? "No credit card required."
@@ -340,15 +402,15 @@ function BillingCard({
         ? (describeEnd("Billing starts", subscription.trialEnd) ?? "Free trial")
         : (describeEnd("Renews", subscription?.currentPeriodEnd) ?? "Active");
   const ctas: { label: string; onClick: () => void; title?: string }[] = onPaidPlan
-    ? onMaxPlan
+    ? onMaxPlan || maxGrantPending
       ? [{ label: "Manage billing", onClick: onManage }]
-      : // Pro subscribers keep billing management and gain hosted Max
-        // checkout (only Max may buy credits); this is their path beyond Pro.
+      : // Pro subscribers keep billing management and can upgrade their
+        // existing subscription in place; this is their path beyond Pro.
         [
           { label: "Manage billing", onClick: onManage },
           {
             label: "Upgrade to Max",
-            onClick: () => onConfirmUpgrade("max"),
+            onClick: () => onChangePlan("max"),
             title: "For those who want to go beyond Pro",
           },
         ]

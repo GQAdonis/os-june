@@ -1,7 +1,8 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FundingGate } from "../components/account/FundingGate";
+import { clearMaxGrantWait } from "../lib/max-upgrade";
 import type { AccountStatus } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
@@ -32,6 +33,7 @@ function renderFundingGate(account: AccountStatus = baseAccount) {
 
 describe("FundingGate", () => {
   beforeEach(() => {
+    clearMaxGrantWait();
     vi.clearAllMocks();
     mocks.osAccountsChangePlan.mockResolvedValue({ subscribed: true, plan: "max" });
     mocks.osAccountsOpenPortal.mockResolvedValue(undefined);
@@ -129,7 +131,7 @@ describe("FundingGate", () => {
   });
 
   const MAX_CONFIRM_BODY =
-    "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.";
+    "Max is $100 per month. Your saved card will be charged a prorated amount for the rest of this billing cycle.";
 
   function renderDepletedProGate(onRefresh = vi.fn(async () => baseAccount)) {
     render(
@@ -146,7 +148,7 @@ describe("FundingGate", () => {
     return onRefresh;
   }
 
-  it("offers a depleted Pro subscriber exactly one path: hosted Max checkout", async () => {
+  it("offers a depleted Pro subscriber exactly one path: upgrade to Max in place", async () => {
     const user = userEvent.setup();
     const onRefresh = renderDepletedProGate();
 
@@ -160,28 +162,27 @@ describe("FundingGate", () => {
     expect(screen.queryByRole("button", { name: "Top up credits" })).not.toBeInTheDocument();
     expect(screen.queryByText("Want to go beyond Pro?")).not.toBeInTheDocument();
 
-    // The CTA opens the checkout confirm; no checkout starts until confirmed.
+    // The CTA opens the charge confirm; no plan change starts until confirmed.
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
     expect(await screen.findByText(MAX_CONFIRM_BODY)).toBeInTheDocument();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
     expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Open checkout" }));
-    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
-    expect(mocks.osAccountsUpgrade).toHaveBeenCalledTimes(1);
-    // An upgrade never uses the immediate plan-change PATCH.
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Upgrade now" }));
+    expect(mocks.osAccountsChangePlan).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsChangePlan).toHaveBeenCalledTimes(1);
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
     expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
     expect(
-      await screen.findByText("Waiting for checkout to complete in your browser."),
+      await screen.findByText("Upgrade started. Waiting for payment confirmation."),
     ).toBeInTheDocument();
-    // Opening checkout is not proof that the plan changed.
+    // A successful PATCH is not proof that the credit grant landed.
     expect(screen.queryByText("Max is active.")).toBeNull();
     expect(screen.queryByText("Top up credits")).toBeNull();
-    expect(onRefresh).not.toHaveBeenCalled();
+    await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1));
   });
 
-  it("cancelling the upgrade confirm never opens checkout", async () => {
+  it("cancelling the upgrade confirm never changes the plan", async () => {
     const user = userEvent.setup();
     renderDepletedProGate();
 
@@ -196,56 +197,126 @@ describe("FundingGate", () => {
     expect(screen.getByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
   });
 
-  it("keeps the confirm open showing the failure when checkout cannot open", async () => {
+  it("keeps the confirm open showing the failure when the plan change fails", async () => {
     const user = userEvent.setup();
-    mocks.osAccountsUpgrade.mockRejectedValueOnce({
+    mocks.osAccountsChangePlan.mockRejectedValueOnce({
       code: "network_error",
       message: "Could not reach OS Accounts.",
     });
     renderDepletedProGate();
 
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
-    await user.click(await screen.findByRole("button", { name: "Open checkout" }));
+    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
 
     expect(await screen.findByText("Could not reach OS Accounts.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Open checkout" })).toBeEnabled();
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Upgrade now" })).toBeEnabled();
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
   });
 
-  it("announces Max only after a refreshed account snapshot confirms it", async () => {
+  it("announces Max only after a refreshed account snapshot shows the grant", async () => {
     const user = userEvent.setup();
-    const onRefresh = vi.fn(async () => baseAccount);
     const depletedProAccount: AccountStatus = {
       ...baseAccount,
       balance: { credits: -1, usdMillis: -1 },
       subscription: { subscribed: true, status: "active", plan: "pro" },
     };
+    const optimisticMaxAccount: AccountStatus = {
+      ...depletedProAccount,
+      subscription: { subscribed: true, status: "active", plan: "max" },
+    };
+    const grantedMaxAccount: AccountStatus = {
+      ...optimisticMaxAccount,
+      balance: { credits: 50_000, usdMillis: 50_000 },
+    };
+    let resolveGrantRefresh: ((account: AccountStatus) => void) | undefined;
+    const onRefresh = vi.fn<() => Promise<AccountStatus | undefined>>(
+      () =>
+        new Promise((resolve) => {
+          resolveGrantRefresh = resolve;
+        }),
+    );
     const view = render(
       <FundingGate account={depletedProAccount} onRefresh={onRefresh} onSignOut={vi.fn()} />,
     );
 
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
-    await user.click(await screen.findByRole("button", { name: "Open checkout" }));
+    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
 
     expect(
-      await screen.findByText("Waiting for checkout to complete in your browser."),
+      await screen.findByText("Upgrade started. Waiting for payment confirmation."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Max is active.")).toBeNull();
 
     view.rerender(
-      <FundingGate
-        account={{
-          ...depletedProAccount,
-          subscription: { subscribed: true, status: "active", plan: "max" },
-        }}
-        onRefresh={onRefresh}
-        onSignOut={vi.fn()}
-      />,
+      <FundingGate account={optimisticMaxAccount} onRefresh={onRefresh} onSignOut={vi.fn()} />,
     );
+    expect(screen.queryByText("Max is active.")).toBeNull();
+
+    view.rerender(
+      <FundingGate account={grantedMaxAccount} onRefresh={onRefresh} onSignOut={vi.fn()} />,
+    );
+    resolveGrantRefresh?.(grantedMaxAccount);
 
     expect(await screen.findByText("Max is active.")).toBeInTheDocument();
-    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    expect(mocks.osAccountsChangePlan).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
+  });
+
+  it("shows billing recovery when payment is not confirmed before polling ends", async () => {
+    vi.useFakeTimers();
+    const optimisticMaxAccount: AccountStatus = {
+      ...baseAccount,
+      balance: { credits: -1, usdMillis: -1 },
+      subscription: { subscribed: true, status: "active", plan: "max" },
+    };
+    const onRefresh = vi.fn(async () => optimisticMaxAccount);
+
+    try {
+      const depletedProAccount: AccountStatus = {
+        ...baseAccount,
+        balance: { credits: -1, usdMillis: -1 },
+        subscription: { subscribed: true, status: "active", plan: "pro" },
+      };
+      const view = render(
+        <FundingGate account={depletedProAccount} onRefresh={onRefresh} onSignOut={vi.fn()} />,
+      );
+
+      fireEvent.click(screen.getByRole("button", { name: "Upgrade to Max" }));
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
+        await Promise.resolve();
+      });
+      expect(
+        screen.getByText("Upgrade started. Waiting for payment confirmation."),
+      ).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(35_000);
+      });
+
+      expect(
+        screen.getByText("Payment not confirmed yet. Check billing in your account portal."),
+      ).toBeInTheDocument();
+      expect(screen.queryByText("Max is active.")).toBeNull();
+
+      fireEvent.click(screen.getByRole("button", { name: "Open billing" }));
+      expect(mocks.osAccountsOpenPortal).toHaveBeenCalledOnce();
+
+      view.rerender(
+        <FundingGate
+          account={{
+            ...optimisticMaxAccount,
+            balance: { credits: 50_000, usdMillis: 50_000 },
+          }}
+          onRefresh={onRefresh}
+          onSignOut={vi.fn()}
+        />,
+      );
+      expect(screen.getByText("Max is active.")).toBeInTheDocument();
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+    }
   });
 
   it("does not show top-up copy for subscribed users with positive credits", async () => {

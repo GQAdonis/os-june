@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
+import { clearMaxGrantWait } from "../lib/max-upgrade";
 import type {
   AccountStatus,
   BootstrapResponse,
@@ -206,6 +207,7 @@ describe("notes recording reliability", () => {
   });
 
   beforeEach(() => {
+    clearMaxGrantWait();
     vi.clearAllMocks();
     mocks.listeners.clear();
 
@@ -924,7 +926,7 @@ describe("notes recording reliability", () => {
     );
   });
 
-  it("opens Max checkout and only announces success after refreshed account status", async () => {
+  it("changes to Max in place and announces success only after the credit grant", async () => {
     const failedNote = {
       ...first,
       processingStatus: "failed" as const,
@@ -953,48 +955,40 @@ describe("notes recording reliability", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
     await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
 
-    // The banner's action requires confirmation before opening hosted checkout.
+    // The banner's action requires confirmation before changing the plan.
     await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
     expect(
       await screen.findByText(
-        "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.",
+        "Max is $100 per month. Your saved card will be charged a prorated amount for the rest of this billing cycle.",
       ),
     ).toBeInTheDocument();
     expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
 
-    await userEvent.click(screen.getByRole("button", { name: "Open checkout" }));
-
-    expect(mocks.osAccountsUpgrade).toHaveBeenCalledTimes(1);
-    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
-    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
-    expect(
-      await screen.findByText("Waiting for checkout to complete in your browser."),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Max is active.")).toBeNull();
-
-    // Returning without completing checkout refreshes the unchanged Pro
-    // snapshot. June shows no error or false success, and the depleted card
-    // remains available.
-    const callsBeforeCanceledReturn = mocks.osAccountsStatus.mock.calls.length;
-    window.dispatchEvent(new Event("focus"));
-    await waitFor(() =>
-      expect(mocks.osAccountsStatus.mock.calls.length).toBeGreaterThan(callsBeforeCanceledReturn),
+    let resolveGrantRefresh: ((account: AccountStatus) => void) | undefined;
+    mocks.osAccountsStatus.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveGrantRefresh = resolve;
+        }),
     );
+    await userEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
+
+    expect(mocks.osAccountsChangePlan).toHaveBeenCalledTimes(1);
+    expect(mocks.osAccountsChangePlan).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
     expect(
-      screen.getByText("Waiting for checkout to complete in your browser."),
+      await screen.findByText("Upgrade started. Waiting for payment confirmation."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Max is active.")).toBeNull();
-    expect(screen.getByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
 
-    // A later browser round trip reports Max. Only that refreshed OS Accounts
-    // snapshot allows June to announce success.
-    mocks.osAccountsStatus.mockResolvedValue({
+    // The waiting refresh resolves only after the payment-backed credit balance
+    // change. That landed grant is what allows the active announcement.
+    resolveGrantRefresh?.({
       ...proAccount,
       balance: { credits: 50_000, usdMillis: 50_000 },
       subscription: { subscribed: true, status: "active", plan: "max" },
     });
-    window.dispatchEvent(new Event("focus"));
     expect(await screen.findByText("Max is active.")).toBeInTheDocument();
   });
 
@@ -1030,7 +1024,7 @@ describe("notes recording reliability", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
     expect(
       await screen.findByText(
-        "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.",
+        "Max is $100 per month. Your saved card will be charged a prorated amount for the rest of this billing cycle.",
       ),
     ).toBeInTheDocument();
 
@@ -1045,12 +1039,12 @@ describe("notes recording reliability", () => {
     );
     expect(await screen.findByRole("button", { name: "Upgrade" })).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Open checkout" }));
+    await userEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
 
     await waitFor(() =>
       expect(
         screen.queryByText(
-          "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.",
+          "Max is $100 per month. Your saved card will be charged a prorated amount for the rest of this billing cycle.",
         ),
       ).toBeNull(),
     );

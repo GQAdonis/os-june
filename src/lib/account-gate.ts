@@ -24,8 +24,8 @@ export function isOnMaxPlan(account: AccountStatus): boolean {
 /** The single action a signed-in user with a depleted balance can take to keep
  * going, decided by their tier:
  * - `top_up`: Max subscribers buy more credits (only Max may buy credits).
- * - `upgrade_to_max`: Pro subscribers open hosted checkout for Max. This is a
- *   Pro user's ONLY path once their monthly credits run out; no top-up is offered.
+ * - `upgrade_to_max`: Pro subscribers upgrade in place to Max. This is a Pro
+ *   user's ONLY path once their monthly credits run out; no top-up is offered.
  * - `subscribe`: everyone else (Free / signed-out-of-plan) starts a checkout. */
 export type DepletedBalanceAction = "top_up" | "upgrade_to_max" | "subscribe";
 
@@ -46,7 +46,8 @@ export function depletedBalanceActionLabel(account: AccountStatus) {
 }
 
 /** True only when the depleted-balance action opens the account portal (the Max
- * top-up path). Pro and Free users go to checkout, so neither opens the portal. */
+ * top-up path). Pro subscribers upgrade in place instead, and Free users go to
+ * checkout, so neither opens the portal. */
 export function shouldOpenPortalForDepletedBalance(account: AccountStatus) {
   return depletedBalanceAction(account) === "top_up";
 }
