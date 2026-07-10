@@ -8,6 +8,7 @@ import {
   subscribeSessionModes,
   unrestrictedSessionIds,
 } from "../../lib/agent-session-modes";
+import { pendingActionStore, type PendingActionStore } from "../../lib/hermes-pending-actions";
 import {
   buildAllowedCommandRows,
   buildSessionGrantRows,
@@ -59,7 +60,7 @@ export function AccessGrantsSection({ mode = "sandboxed" }: AccessGrantsSectionP
   }, []);
 
   const revokeUnrestricted = useCallback((sessionId: string) => {
-    forgetSessionMode(sessionId);
+    revokeUnrestrictedSession(sessionId);
     setUnrestricted(unrestrictedSessionIds());
   }, []);
 
@@ -84,6 +85,24 @@ export function AccessGrantsSection({ mode = "sandboxed" }: AccessGrantsSectionP
       onRevokeUnrestricted={revokeUnrestricted}
     />
   );
+}
+
+/**
+ * Revokes a session's full access and retires any of its still-open pending
+ * actions. The retire matters: once the mode flag is gone,
+ * `sessionUnrestricted()` reads false and a later Approve/Deny/answer would be
+ * routed to the sandboxed gateway while the blocked request lives in the
+ * unrestricted runtime, a dead end that fails as the wrong session. Resolving
+ * the session's pending records clears its "Needs you" rows instead of
+ * offering that dead-end respond; the runtime denies unanswered requests on
+ * its own session cleanup. Exported for tests (store injectable).
+ */
+export function revokeUnrestrictedSession(
+  sessionId: string,
+  store: PendingActionStore = pendingActionStore,
+) {
+  forgetSessionMode(sessionId);
+  store.resolveSession(sessionId);
 }
 
 /** Binds an {@link AccessGrantLog} to React. Exported for tests. */

@@ -19,7 +19,11 @@ import {
   subscribeSessionModes,
   unrestrictedSessionIds,
 } from "../lib/agent-session-modes";
-import { AccessGrantsView } from "../components/settings/AccessGrantsSection";
+import {
+  AccessGrantsView,
+  revokeUnrestrictedSession,
+} from "../components/settings/AccessGrantsSection";
+import { createPendingActionStore } from "../lib/hermes-pending-actions";
 import { makeAdminHarness } from "./fixtures/hermes-admin-harness";
 
 /** A log record with sensible defaults a test can override. */
@@ -148,6 +152,30 @@ describe("access grants — session mode change notification", () => {
     rememberSessionMode("sess-2", true);
 
     expect(seen).toEqual([["sess-1"], []]);
+    localStorage.clear();
+  });
+
+  it("revoking full access retires the session's pending actions", () => {
+    localStorage.clear();
+    rememberSessionMode("sess-full", true);
+    const store = createPendingActionStore();
+    store.record(
+      {
+        kind: "pending_action",
+        receivedAt: new Date().toISOString(),
+        sessionId: "sess-full",
+        action: { kind: "approval", requestId: "req-9", allowPermanent: true },
+      },
+      "unrestricted",
+    );
+    expect(store.openCount()).toBe(1);
+
+    revokeUnrestrictedSession("sess-full", store);
+
+    // The mode flag is gone AND the blocked request no longer offers a
+    // dead-end respond (it would route to the wrong gateway).
+    expect(unrestrictedSessionIds()).toEqual([]);
+    expect(store.openCount()).toBe(0);
     localStorage.clear();
   });
 });
