@@ -1,20 +1,16 @@
 import type { AccountStatus } from "./tauri";
 
-// Single source of truth for the Max upgrade confirm and status copy. The
-// charge semantics live in the backend (today: full charge with the billing
-// cycle restarting immediately); if they shift, this is the ONE place the
-// wording changes.
+// Single source of truth for Max upgrade confirm and status copy. June never
+// grants, announces, or assumes Max when checkout opens. The waiting copy is
+// neutral until a refreshed OS Accounts account snapshot reports Max.
 export const MAX_UPGRADE_CONFIRM_TITLE = "Upgrade to Max?";
 export const MAX_UPGRADE_CONFIRM_BODY =
-  "Max is $100 per month, charged to your saved card now. Your billing cycle restarts today.";
-export const MAX_UPGRADE_CONFIRM_LABEL = "Upgrade now";
-export const MAX_UPGRADE_BUSY_LABEL = "Upgrading...";
-// The PATCH returns before the credit grant lands (it arrives via webhook a
-// moment later), so success feedback comes in two steps.
-export const MAX_UPGRADE_WAITING_STATUS = "You are on Max now. Your new credits are on the way.";
-export const MAX_UPGRADE_READY_STATUS = "You are on Max now. Your new credits are ready.";
-export const MAX_UPGRADE_SLOW_STATUS =
-  "You are on Max now. Credits are taking longer than usual; refresh in a moment.";
+  "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.";
+export const MAX_UPGRADE_CONFIRM_LABEL = "Open checkout";
+export const MAX_UPGRADE_BUSY_LABEL = "Opening checkout...";
+export const MAX_UPGRADE_WAITING_STATUS = "Waiting for checkout to complete in your browser.";
+export const MAX_UPGRADE_READY_STATUS = "Max is active.";
+export const MAX_UPGRADE_SLOW_STATUS = "Still waiting for OS Accounts to confirm Max.";
 
 export const MAX_GRANT_POLL_INTERVAL_MS = 2500;
 export const MAX_GRANT_POLL_TIMEOUT_MS = 30_000;

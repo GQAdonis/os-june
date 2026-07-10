@@ -153,6 +153,7 @@ import {
 import {
   depletedBalanceAction,
   depletedBalanceActionLabel,
+  isOnMaxPlan,
   shouldBlockOnFunding,
   shouldBlockOnSignIn,
 } from "../lib/account-gate";
@@ -163,9 +164,7 @@ import {
   MAX_UPGRADE_CONFIRM_LABEL,
   MAX_UPGRADE_CONFIRM_TITLE,
   MAX_UPGRADE_READY_STATUS,
-  MAX_UPGRADE_SLOW_STATUS,
   MAX_UPGRADE_WAITING_STATUS,
-  pollForMaxGrant,
 } from "../lib/max-upgrade";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { checkJuneUpdate, reconcileToStable, relaunchJune, type JuneUpdate } from "../lib/updater";
@@ -555,14 +554,13 @@ export function App() {
   const fundingRequired =
     !devAccountsUnconfigured && !signInRequired && shouldBlockOnFunding(account);
   const topUpLabel = depletedBalanceActionLabel(account);
-  // Confirm gate for the Pro -> Max upgrade reached from depleted-balance
-  // surfaces (note failure banner, agent workspace notice). The change
-  // charges the saved card the moment it runs, so it never fires straight
-  // from those buttons.
+  // Confirm gate for the Pro -> Max checkout reached from depleted-balance
+  // surfaces (note failure banner, agent workspace notice). June only opens
+  // OS Accounts' hosted checkout here; it never grants or assumes Max.
   const [maxUpgradePromptOpen, setMaxUpgradePromptOpen] = useState(false);
   const [maxUpgradeError, setMaxUpgradeError] = useState<string>();
-  // Transient billing feedback ("You are on Max now...") shown beside the
-  // error banner; cleared automatically once it has been seen.
+  // Transient billing feedback shown beside the error banner. Success is only
+  // announced after the focus-driven OS Accounts refresh reports Max.
   const [billingNotice, setBillingNotice] = useState<string | null>(null);
   const billingNoticeTimerRef = useRef<number | undefined>(undefined);
   const showBillingNotice = useCallback((notice: string, autoClearMs?: number) => {
@@ -573,12 +571,11 @@ export function App() {
     }
   }, []);
   const confirmMaxUpgrade = useCallback(async () => {
-    const baselineCredits = account.balance?.credits ?? 0;
     try {
       const outcome = await runDepletedBalanceAction(account);
-      if (outcome !== "changed_plan") {
-        // Stale snapshot resolved another way (subscribe prompt): refresh and
-        // let the surfaces re-render; nothing was charged.
+      if (outcome !== "opened_browser") {
+        // A stale top-up gate cannot normally arise from this confirmed Pro
+        // branch, but refresh rather than guessing if the snapshot changed.
         void refreshAccount();
         return;
       }
@@ -587,24 +584,24 @@ export function App() {
       setMaxUpgradeError(messageFromError(err));
       throw err;
     }
-    // The PATCH resolves before the webhook grants the credits: show interim
-    // feedback and poll briefly until the new balance lands.
+    // Match the existing subscribe checkout round trip: opening the browser
+    // only enters a waiting state. useAccountStatus refreshes on window focus.
     showBillingNotice(MAX_UPGRADE_WAITING_STATUS);
-    // No separate refresh: the poll's first tick refreshes immediately, and a
-    // parallel request could resolve out of order and overwrite the poll's
-    // fresher snapshot with a stale pre-grant one.
-    void pollForMaxGrant(refreshAccount, baselineCredits).then((landed) => {
-      showBillingNotice(landed ? MAX_UPGRADE_READY_STATUS : MAX_UPGRADE_SLOW_STATUS, 8000);
-    });
   }, [account, refreshAccount, showBillingNotice]);
+
+  useEffect(() => {
+    if (billingNotice !== MAX_UPGRADE_WAITING_STATUS || !isOnMaxPlan(account)) return;
+    // The refreshed account snapshot is the only authority for success. If
+    // checkout is canceled, the account remains Pro, this never fires, and the
+    // existing depleted-balance card remains without a client-invented error.
+    showBillingNotice(MAX_UPGRADE_READY_STATUS, 8000);
+  }, [account, billingNotice, showBillingNotice]);
+
   const handleTopUp = useCallback(() => {
-    // Tier-aware: Max tops up, Pro upgrades in place to Max, Free subscribes.
-    // The upgrade is a charge, so it routes through an explicit confirm
-    // dialog. upgrade_required / subscribe_required mean the server proved
-    // our snapshot stale (top-up gated behind Max, or no active
-    // subscription): refresh so the depleted-balance surfaces re-render as
-    // the right prompt and the user chooses explicitly; no raw error, and
-    // never an automatic purchase.
+    // Tier-aware: Max tops up, Pro opens Max checkout, Free subscribes. The
+    // Max path routes through an explicit confirmation before opening the
+    // external browser. A stale top-up gate refreshes the account snapshot so
+    // the surfaces re-render the right prompt without an automatic purchase.
     if (depletedBalanceAction(account) === "upgrade_to_max") {
       setMaxUpgradeError(undefined);
       setMaxUpgradePromptOpen(true);

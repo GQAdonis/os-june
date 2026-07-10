@@ -1,5 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { maxGrantLanded, pollForMaxGrant } from "../lib/max-upgrade";
+import {
+  MAX_UPGRADE_BUSY_LABEL,
+  MAX_UPGRADE_CONFIRM_BODY,
+  MAX_UPGRADE_CONFIRM_LABEL,
+  MAX_UPGRADE_READY_STATUS,
+  MAX_UPGRADE_SLOW_STATUS,
+  MAX_UPGRADE_WAITING_STATUS,
+  maxGrantLanded,
+  pollForMaxGrant,
+} from "../lib/max-upgrade";
 import type { AccountStatus } from "../lib/tauri";
 
 function account(plan: string, credits: number): AccountStatus {
@@ -11,6 +20,18 @@ function account(plan: string, credits: number): AccountStatus {
     subscription: { subscribed: true, status: "active", plan },
   };
 }
+
+describe("Max upgrade copy", () => {
+  it("describes hosted checkout without announcing Max before account refresh", () => {
+    expect(MAX_UPGRADE_CONFIRM_BODY).toContain("Checkout opens in your browser");
+    expect(MAX_UPGRADE_CONFIRM_LABEL).toBe("Open checkout");
+    expect(MAX_UPGRADE_BUSY_LABEL).toBe("Opening checkout...");
+    expect(MAX_UPGRADE_WAITING_STATUS).toBe("Waiting for checkout to complete in your browser.");
+    expect(MAX_UPGRADE_WAITING_STATUS).not.toContain("Max is active");
+    expect(MAX_UPGRADE_SLOW_STATUS).not.toContain("Max is active");
+    expect(MAX_UPGRADE_READY_STATUS).toBe("Max is active.");
+  });
+});
 
 describe("maxGrantLanded", () => {
   it("requires the plan to be Max", () => {

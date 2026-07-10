@@ -924,7 +924,7 @@ describe("notes recording reliability", () => {
     );
   });
 
-  it("confirms before upgrading a Pro subscriber to Max from the failure banner", async () => {
+  it("opens Max checkout and only announces success after refreshed account status", async () => {
     const failedNote = {
       ...first,
       processingStatus: "failed" as const,
@@ -953,29 +953,48 @@ describe("notes recording reliability", () => {
     await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
     await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
 
-    // The banner's action is the tier-correct in-place upgrade, and it never
-    // charges without an explicit confirm.
+    // The banner's action requires confirmation before opening hosted checkout.
     await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
     expect(
       await screen.findByText(
-        "Max is $100 per month, charged to your saved card now. Your billing cycle restarts today.",
+        "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.",
       ),
     ).toBeInTheDocument();
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
 
-    // After the PATCH, the post-upgrade poll's refresh already reports the
-    // granted Max balance, so the success feedback lands immediately.
+    await userEvent.click(screen.getByRole("button", { name: "Open checkout" }));
+
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledTimes(1);
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("Waiting for checkout to complete in your browser."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Max is active.")).toBeNull();
+
+    // Returning without completing checkout refreshes the unchanged Pro
+    // snapshot. June shows no error or false success, and the depleted card
+    // remains available.
+    const callsBeforeCanceledReturn = mocks.osAccountsStatus.mock.calls.length;
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() =>
+      expect(mocks.osAccountsStatus.mock.calls.length).toBeGreaterThan(callsBeforeCanceledReturn),
+    );
+    expect(
+      screen.getByText("Waiting for checkout to complete in your browser."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Max is active.")).toBeNull();
+    expect(screen.getByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
+
+    // A later browser round trip reports Max. Only that refreshed OS Accounts
+    // snapshot allows June to announce success.
     mocks.osAccountsStatus.mockResolvedValue({
       ...proAccount,
       balance: { credits: 50_000, usdMillis: 50_000 },
       subscription: { subscribed: true, status: "active", plan: "max" },
     });
-    await userEvent.click(screen.getByRole("button", { name: "Upgrade now" }));
-
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledTimes(1);
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledWith("max");
-    expect(
-      await screen.findByText("You are on Max now. Your new credits are ready."),
-    ).toBeInTheDocument();
+    window.dispatchEvent(new Event("focus"));
+    expect(await screen.findByText("Max is active.")).toBeInTheDocument();
   });
 });

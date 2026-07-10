@@ -203,7 +203,7 @@ describe("depletedBalanceAction", () => {
     ).toBe("subscribe");
   });
 
-  it("upgrades Pro (and legacy) subscribers in place to Max", () => {
+  it("routes Pro (and legacy) subscribers to Max checkout", () => {
     expect(
       depletedBalanceAction({
         signedIn: true,
@@ -274,7 +274,7 @@ describe("shouldOpenPortalForDepletedBalance", () => {
     ).toBe(false);
   });
 
-  it("keeps Pro subscribers off the portal (they upgrade in place)", () => {
+  it("keeps Pro subscribers off the portal (they use checkout)", () => {
     expect(
       shouldOpenPortalForDepletedBalance({
         signedIn: true,

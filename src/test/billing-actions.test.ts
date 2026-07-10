@@ -27,7 +27,6 @@ function account(overrides: Partial<AccountStatus> = {}): AccountStatus {
 describe("runDepletedBalanceAction", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.osAccountsChangePlan.mockResolvedValue({ subscribed: true, plan: "max" });
     mocks.osAccountsOpenPortal.mockResolvedValue(undefined);
     mocks.osAccountsUpgrade.mockResolvedValue(undefined);
   });
@@ -39,18 +38,19 @@ describe("runDepletedBalanceAction", () => {
 
     expect(outcome).toBe("opened_browser");
     expect(mocks.osAccountsUpgrade).toHaveBeenCalledOnce();
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
     expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
   });
 
-  it("upgrades a Pro subscriber in place to Max", async () => {
+  it("upgrades a Pro subscriber to Max through hosted checkout", async () => {
     const outcome = await runDepletedBalanceAction(
       account({ subscription: { subscribed: true, status: "active", plan: "pro" } }),
     );
 
-    expect(outcome).toBe("changed_plan");
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledWith("max");
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
+    expect(outcome).toBe("opened_browser");
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
     expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
   });
 
@@ -66,9 +66,9 @@ describe("runDepletedBalanceAction", () => {
 
   it("reports upgrade_required for a Max-gated top-up and never auto-buys a plan change", async () => {
     // The server gating a top-up behind Max means the local Max snapshot was
-    // stale. A plan change is a billed action: it must come from an explicit
-    // user click on the upgrade prompt (which the caller surfaces after a
-    // refresh), never from this error handler.
+    // stale. Hosted checkout must come from an explicit user click on the
+    // upgrade prompt (which the caller surfaces after a refresh), never from
+    // this error handler.
     mocks.osAccountsOpenPortal.mockRejectedValueOnce({
       code: "top_up_requires_max",
       message: "Buying credits requires the Max plan.",
@@ -98,40 +98,6 @@ describe("runDepletedBalanceAction", () => {
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 
-  it("treats already_on_plan as a benign completed change (stale snapshot)", async () => {
-    mocks.osAccountsChangePlan.mockRejectedValueOnce({
-      code: "already_on_plan",
-      message: "You are already on this plan.",
-    });
-
-    const outcome = await runDepletedBalanceAction(
-      account({ subscription: { subscribed: true, status: "active", plan: "pro" } }),
-    );
-
-    // Caller refreshes and shows the current plan; nothing else is invoked.
-    expect(outcome).toBe("changed_plan");
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledTimes(1);
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-    expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
-  });
-
-  it("falls back to the subscribe prompt when the plan change needs a subscription", async () => {
-    mocks.osAccountsChangePlan.mockRejectedValueOnce({
-      code: "subscription_required",
-      message: "You need an active subscription to change plans.",
-    });
-
-    const outcome = await runDepletedBalanceAction(
-      account({ subscription: { subscribed: true, status: "active", plan: "pro" } }),
-    );
-
-    // No auto-checkout from the error handler: the caller refreshes and the
-    // surfaces re-render as the subscribe prompt for an explicit click.
-    expect(outcome).toBe("subscribe_required");
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-    expect(mocks.osAccountsOpenPortal).not.toHaveBeenCalled();
-  });
-
   it("rethrows other failures untouched", async () => {
     mocks.osAccountsUpgrade.mockRejectedValueOnce({ code: "network_error", message: "offline" });
 
@@ -140,8 +106,8 @@ describe("runDepletedBalanceAction", () => {
     ).rejects.toMatchObject({ code: "network_error" });
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
 
-    // Plan-change rejections that are not stale-state recoveries also rethrow.
-    mocks.osAccountsChangePlan.mockRejectedValueOnce({
+    // Max checkout failures also rethrow without falling back to PATCH.
+    mocks.osAccountsUpgrade.mockRejectedValueOnce({
       code: "plan_not_enabled",
       message: "That plan is not available yet.",
     });
@@ -150,6 +116,7 @@ describe("runDepletedBalanceAction", () => {
         account({ subscription: { subscribed: true, status: "active", plan: "pro" } }),
       ),
     ).rejects.toMatchObject({ code: "plan_not_enabled" });
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 });
 
