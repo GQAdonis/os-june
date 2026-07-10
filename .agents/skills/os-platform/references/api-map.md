@@ -5,6 +5,7 @@ Use this map when the command shape is unclear. All routes are prefixed by the c
 ## Authentication
 
 - All skill API calls require `OS_PLATFORM_API_KEY`, sent as `Authorization: Bearer ...`.
+- Requests use `os-platform-cli/2.0 (+https://opensoftware.co)` as the default User-Agent. `OS_PLATFORM_USER_AGENT` overrides it.
 - A missing or malformed API key can produce `401`.
 - A `404` can mean missing, private, or inaccessible.
 
@@ -35,10 +36,14 @@ Use `real_paths` and `fixture_paths` from that response to decide whether a resu
 | `issues list <org>` | `GET /v1/orgs/{org}/bounties` |
 | `issues search <org> "<query>"` | `GET /v1/orgs/{org}/bounties`, then local relevance ranking |
 | `issues show <org> <number>` | `GET /v1/orgs/{org}/bounties/{number}` |
+| `issues create <org> --title <title> --body <body>` | `POST /v1/orgs/{org}/bounties` with `{"title":"...","body_markdown":"..."}` plus optional `type` and `priority` |
+| `issues assign <org> <number>` | `GET /v1/users/me`, then `PATCH /v1/orgs/{org}/bounties/{number}` with `{"assignee_user_id":"usr_xxx"}` |
+| `issues status <org> <number> <status>` | `POST /v1/orgs/{org}/bounties/{number}/status` with `{"status":"..."}` |
 | `issues take <org> <number>` | `GET /v1/orgs/{org}/bounties/{number}`; if unassigned, `GET /v1/users/me` and `PATCH /v1/orgs/{org}/bounties/{number}` with `{"assignee_user_id":"usr_xxx"}`; then `POST /v1/orgs/{org}/bounties/{number}/status` with `{"status":"in_progress"}` |
 | `submissions list <org> <number>` | `GET /v1/orgs/{org}/bounties/{number}/submissions` |
 | `activity list <org> <number>` | `GET /v1/orgs/{org}/bounties/{number}/activity` |
 | `comments list issue <org> <number>` | `GET /v1/orgs/{org}/bounties/{number}/comments` |
+| `comments add <org> <number> --body <body>` | `POST /v1/orgs/{org}/bounties/{number}/comments` with `{"body_markdown":"..."}` |
 | `contributors list <org>` | `GET /v1/orgs/{org}/contributors` |
 | `contributors show <org> <user>` | `GET /v1/orgs/{org}/contributors/{user}` |
 | `raw GET /v1/...` | Any read-only GET path |
@@ -68,13 +73,53 @@ python3 scripts/os_platform.py issues list open-software --status todo,in_progre
 python3 scripts/os_platform.py issues list open-software --assignee me --status todo,in_progress
 python3 scripts/os_platform.py issues list open-software --project os-forge --q "wallet"
 python3 scripts/os_platform.py issues search open-software "wallet bug" --status todo --assignee none
+python3 scripts/os_platform.py issues create open-software --title "Fix wallet sync" --body "Issue details" --type bug --priority high
+python3 scripts/os_platform.py issues assign open-software 123
+python3 scripts/os_platform.py issues status open-software 123 in_review
 python3 scripts/os_platform.py issues take open-software 123 --yes
+python3 scripts/os_platform.py comments add open-software 123 --body "Opened PR #456."
 python3 scripts/os_platform.py issues list open-software --labels good-first-issue --sort status_grouped
 ```
 
-## Controlled Issue write
+## Controlled Issue writes
 
-`issues take <org> <number>` is the only write command. It fetches the Issue first and refuses non-`todo` Issues. When the Issue has no assignee, it reads the authenticated API user through:
+`issues create <org> --title <title> --body <body>` creates an Org-scoped Issue through:
+
+```text
+POST /v1/orgs/{org}/bounties
+{"title":"...","body_markdown":"...","type":"bug","priority":"high"}
+```
+
+`type` and `priority` are omitted when their flags are not provided.
+
+`issues assign <org> <number>` reads the authenticated API user through:
+
+```text
+GET /v1/users/me
+```
+
+Then it assigns the Issue to that user through:
+
+```text
+PATCH /v1/orgs/{org}/bounties/{number}
+{"assignee_user_id":"usr_xxx"}
+```
+
+`issues status <org> <number> <status>` accepts `todo`, `in_progress`, `in_review`, `completed`, or `cancelled` and sends:
+
+```text
+POST /v1/orgs/{org}/bounties/{number}/status
+{"status":"in_review"}
+```
+
+`comments add <org> <number> --body <body>` sends:
+
+```text
+POST /v1/orgs/{org}/bounties/{number}/comments
+{"body_markdown":"..."}
+```
+
+`issues take <org> <number>` remains the confirmed shortcut for starting todo work. It fetches the Issue first and refuses non-`todo` Issues. When the Issue has no assignee, it reads the authenticated API user through:
 
 ```text
 GET /v1/users/me

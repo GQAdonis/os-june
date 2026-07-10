@@ -1,11 +1,11 @@
 ---
 name: os-platform
-description: Query live Open Software os-platform production data through the platform API. Use when an agent needs current Issues/Bounties, Orgs, Projects, Submissions, Comments, Activity, Contributors, or API status instead of inspecting repo files, fixtures, screenshots, or stale docs.
+description: Query and update live Open Software os-platform production data through the platform API. Use when an agent needs current Issues/Bounties, Orgs, Projects, Submissions, Comments, Activity, Contributors, or API status, or needs to create, assign, move, or comment on tracked work.
 ---
 
 # os-platform
 
-Use this skill when the user asks about current Open Software / os-platform state: Issues, Bounties, Projects, Orgs, Submissions, Comments, Activity, Contributors, or whether API endpoints are real-backed. Prefer the bundled script over reading code, seed data, frontend fixtures, or docs when the question is about production data.
+Use this skill when the user asks about current Open Software / os-platform state or an agent needs to keep tracked work current: Issues, Bounties, Projects, Orgs, Submissions, Comments, Activity, Contributors, or whether API endpoints are real-backed. Prefer the bundled script over reading code, seed data, frontend fixtures, or docs when the question is about production data.
 
 ## Quick Start
 
@@ -17,7 +17,11 @@ python3 scripts/os_platform.py issues list open-software --q "wallet" --limit 10
 python3 scripts/os_platform.py issues list open-software --assignee me --status todo,in_progress
 python3 scripts/os_platform.py issues search open-software "wallet bug" --status todo
 python3 scripts/os_platform.py issues show open-software 123
+python3 scripts/os_platform.py issues create open-software --title "Fix wallet sync" --body "Issue details" --type bug --priority high
+python3 scripts/os_platform.py issues assign open-software 123
+python3 scripts/os_platform.py issues status open-software 123 in_review
 python3 scripts/os_platform.py issues take open-software 123 --yes
+python3 scripts/os_platform.py comments add open-software 123 --body "Opened PR #456."
 ```
 
 Configuration:
@@ -25,13 +29,14 @@ Configuration:
 - The default API base URL is `https://app.opensoftware.co/api`.
 - `OS_PLATFORM_API_BASE_URL` can override the default unless `--base-url` is passed.
 - `OS_PLATFORM_API_KEY` is required unless `--api-key` is passed. The script sends it as `Authorization: Bearer ...`.
+- `OS_PLATFORM_USER_AGENT` can override the default `os-platform-cli/2.0 (+https://opensoftware.co)` User-Agent.
 - Optional project defaults can be stored in `os-platform.json` in the workspace root or a parent directory. Supported fields are `org` and `limit`; both are optional.
 - Never ask the user to paste an API key into chat. Ask them to set the environment variable in their shell or agent runtime.
 - The installer does not prompt for or write environment values. If the API key is missing, tell the user to set it first.
 
 ## Routing Rules
 
-The script is deterministic. Most commands are read-only; `issues take` is the only controlled write command and moves a `todo` Issue to `in_progress` after confirmation or `--yes`. If the Issue has no assignee, `issues take` first assigns it to the authenticated API user. Do not rely on the script to decide user intent. Route the request before calling it.
+The script is deterministic. Read commands do not mutate platform state. Write commands create Issues, assign the authenticated user, update status, or add comments. `issues take` remains the confirmed shortcut that moves a `todo` Issue to `in_progress`; if the Issue has no assignee, it first assigns it to the authenticated API user. Do not rely on the script to decide user intent. Route the request before calling it, and verify writes with a read.
 
 Use the user prompt first, then `os-platform.json`, then ask the user for missing required parameters. Do not guess an org, issue number, project, or contributor when the prompt and config do not provide one.
 
@@ -40,13 +45,27 @@ Use the user prompt first, then `os-platform.json`, then ask the user for missin
 - Issue lists, filters, or work queues: use `issues list <org>` with the narrowest filters.
 - Issue searches by rough user phrasing: use `issues search <org> "<query>"` with narrow filters when useful.
 - A specific Issue/Bounty by number: use `issues show <org> <number>`.
+- Creating an Issue for new work: use `issues create <org> --title <title> --body <body>` with `--type` and `--priority` when known.
+- Assigning yourself after taking ownership: use `issues assign <org> <number>`; `--to me` is accepted but optional.
+- Keeping an owned Issue current: use `issues status <org> <number> <status>` with `todo`, `in_progress`, `in_review`, `completed`, or `cancelled`.
 - Taking a todo Issue: after the user confirms they want to work on it, use `issues take <org> <number>`; use `--yes` only when confirmation already happened in chat or another trusted workflow.
-- Issue submissions, activity, or comments: use the scoped command with `<org>` and `<issue-number>`.
+- Adding an Issue comment: use `comments add <org> <number> --body <body>`.
+- Reading Issue submissions, activity, or comments: use the scoped command with `<org>` and `<issue-number>`.
 - Contributors: use `contributors list <org>` or `contributors show <org> <user-handle>`.
 
 If the user asks for issues and omits org, read `os-platform.json`; if it has `org`, use it. If no org is available, ask the user which org to use before running the script.
 
 When the user asks for their own tasks or issues assigned to them, pass `--assignee me` (the script resolves `me`/`@me` to the authenticated API user via `GET /v1/users/me`, so no handle lookup is needed). When the user asks for issues to work on generally, prioritize todo issues assigned to the user or with no assignee before other todo issues. If the user identity is unclear, prefer unassigned todo issues.
+
+## Agent status lifecycle
+
+Use the platform as the source of truth for tracked work whenever it is available.
+
+- For a pre-existing Issue, read it before starting, assign yourself when you take ownership, and move it to `in_progress`.
+- For an ad hoc request with no Issue, create one first, then assign yourself and move it to `in_progress`.
+- Keep the Issue current while work advances: use `in_review` when the PR opens, `completed` after it merges, and `cancelled` when the work is deliberately abandoned or will not be done.
+- Add comments for durable progress or handoff context when useful. Do not replace or rewrite the Issue body to record progress.
+- Read the Issue after each write to verify the platform applied it. A write response alone is not durable evidence.
 
 ## Specific Issue Triage
 
@@ -60,7 +79,7 @@ When the user asks about a specific issue, fetch the live issue first, then insp
 
 ## Available Script
 
-`scripts/os_platform.py` is primarily a read-only API helper, with one controlled write command for taking an Issue. It uses only Python standard library modules.
+`scripts/os_platform.py` is an API helper for platform reads and controlled Issue workflow writes. It uses only Python standard library modules.
 
 Core commands:
 
@@ -72,10 +91,14 @@ python3 scripts/os_platform.py project get <org> <project>
 python3 scripts/os_platform.py issues list <org>
 python3 scripts/os_platform.py issues search <org> "<query>"
 python3 scripts/os_platform.py issues show <org> <number>
+python3 scripts/os_platform.py issues create <org> --title <title> --body <body>
+python3 scripts/os_platform.py issues assign <org> <number>
+python3 scripts/os_platform.py issues status <org> <number> <status>
 python3 scripts/os_platform.py issues take <org> <number>
 python3 scripts/os_platform.py submissions list <org> <issue-number>
 python3 scripts/os_platform.py activity list <org> <issue-number>
 python3 scripts/os_platform.py comments list issue <org> <issue-number>
+python3 scripts/os_platform.py comments add <org> <issue-number> --body <body>
 python3 scripts/os_platform.py contributors list <org>
 python3 scripts/os_platform.py contributors show <org> <user-handle>
 python3 scripts/os_platform.py raw GET /v1/...
@@ -85,7 +108,7 @@ Common flags:
 
 - `--limit N` caps list output.
 - `--json` prints the unwrapped `data` payload.
-- `--full` prints the full unwrapped data without compact summarization.
+- `--full` prints the full unwrapped data without compact summarization. `issues show` always does this, so its `--full` flag is a backward-compatible no-op.
 - `--base-url URL` overrides `OS_PLATFORM_API_BASE_URL` and the default base URL.
 
 `issues take`:
@@ -95,6 +118,13 @@ Common flags:
 - Assigns the Issue to the authenticated API user first when the Issue has no assignee.
 - Prompts before moving the Issue to `in_progress`, unless `--yes` is passed.
 
+Other writes:
+
+- `issues create` creates an Org-scoped Issue with a required title and body plus optional type and priority.
+- `issues assign` resolves the authenticated user through `GET /v1/users/me`, then assigns that user.
+- `issues status` accepts only `todo`, `in_progress`, `in_review`, `completed`, or `cancelled`.
+- `comments add` adds a Markdown comment to an Issue.
+
 `scripts/install.sh` installs this skill into a local agent skills directory. It defaults to `~/.codex/skills`, supports `--dest`, `--source`, `--repo`, `--ref`, `--path`, and `--force`, and never stores credentials.
 
 ## Workflow
@@ -102,7 +132,7 @@ Common flags:
 1. Decide whether the question is about current production state. If yes, use this skill.
 2. If the target route is unclear, read `references/api-map.md`.
 3. Run the narrowest script command that answers the question.
-4. Use default compact output for summaries. Use `--json` or `--full` only when exact fields matter.
+4. Use default compact output for summaries. `issues show` always returns the full Issue; use `--json` or `--full` on other reads when exact fields matter.
 5. Cite the live API result in your answer, and mention if a route appears fixture-backed or unreachable.
 
 ## Language Rules
@@ -114,7 +144,8 @@ Common flags:
 
 ## Safety
 
-- The bundled API script is read-only except for `issues take`. Do not add more mutation commands unless the user explicitly asks for a new version of the skill.
+- Run write commands only when the user or a trusted workflow has established the intended platform mutation. Verify each write with a read before any fan-out.
+- Issue body edits remain append-only: fetch the full current body first, append, and never overwrite existing content. The script does not expose body editing.
 - Do not print or persist `OS_PLATFORM_API_KEY`.
 - Do not infer private data from missing public data. A 404 on private/member-only resources can mean hidden, missing, or inaccessible.
 - Treat production data as current at request time, not as a durable local fact.

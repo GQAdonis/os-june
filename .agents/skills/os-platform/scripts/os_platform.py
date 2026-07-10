@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only os-platform production API helper for agents."""
+"""os-platform production API helper for agents."""
 
 from __future__ import annotations
 
@@ -23,8 +23,12 @@ DEFAULT_BASE_URL = "https://app.opensoftware.co/api"
 CONFIG_FILE_NAME = "os-platform.json"
 API_KEY_ENV = "OS_PLATFORM_API_KEY"
 BASE_URL_ENV = "OS_PLATFORM_API_BASE_URL"
+USER_AGENT = os.environ.get("OS_PLATFORM_USER_AGENT") or (
+    "os-platform-cli/2.0 (+https://opensoftware.co)"
+)
 WORD_RE = re.compile(r"[a-z0-9]+")
 ME_TOKENS = {"me", "@me"}
+ISSUE_STATUSES = ("todo", "in_progress", "in_review", "completed", "cancelled")
 
 COMPACT_KEYS = {
     "id",
@@ -237,7 +241,7 @@ def build_json_request(
 ) -> urllib.request.Request:
     headers = {
         "Accept": "application/json",
-        "User-Agent": "os-platform-agent-skill/1.0",
+        "User-Agent": USER_AGENT,
         "Authorization": f"Bearer {api_key}",
     }
     data = None
@@ -523,7 +527,10 @@ def take_issue(
 
 def print_payload(data: Any, args: argparse.Namespace) -> None:
     data = output_data_for_args(data, args)
-    if args.full or args.json:
+    issue_show = (
+        getattr(args, "resource", None) == "issues" and getattr(args, "action", None) == "show"
+    )
+    if args.full or args.json or issue_show:
         output = data
     else:
         output = compact_value(data, limit=args.limit)
@@ -601,6 +608,25 @@ def issue_get_request(org: str, number: str) -> tuple[str, str, dict[str, Any]]:
     return "GET", f"/v1/orgs/{org_ref}/bounties/{number_ref}", {}
 
 
+def issue_create_request(
+    org: str,
+    title: str,
+    body_markdown: str,
+    issue_type: str | None,
+    priority: str | None,
+) -> tuple[str, str, dict[str, Any], dict[str, str]]:
+    org_ref = urllib.parse.quote(require_text(org, "org"))
+    body = {
+        "title": require_text(title, "title"),
+        "body_markdown": require_text(body_markdown, "body"),
+    }
+    if issue_type is not None:
+        body["type"] = issue_type
+    if priority is not None:
+        body["priority"] = priority
+    return "POST", f"/v1/orgs/{org_ref}/bounties", {}, body
+
+
 def issue_status_request(org: str, number: str, status: str) -> tuple[str, str, dict[str, Any], dict[str, str]]:
     org_ref = urllib.parse.quote(require_text(org, "org"))
     number_ref = urllib.parse.quote(require_text(number, "issue number"))
@@ -615,6 +641,17 @@ def issue_update_request(
     org_ref = urllib.parse.quote(require_text(org, "org"))
     number_ref = urllib.parse.quote(require_text(number, "issue number"))
     return "PATCH", f"/v1/orgs/{org_ref}/bounties/{number_ref}", {}, dict(body)
+
+
+def comment_create_request(
+    org: str,
+    number: str,
+    body_markdown: str,
+) -> tuple[str, str, dict[str, Any], dict[str, str]]:
+    org_ref = urllib.parse.quote(require_text(org, "org"))
+    number_ref = urllib.parse.quote(require_text(number, "issue number"))
+    body = {"body_markdown": require_text(body_markdown, "body")}
+    return "POST", f"/v1/orgs/{org_ref}/bounties/{number_ref}/comments", {}, body
 
 
 def current_user_request() -> tuple[str, str, dict[str, Any]]:
@@ -669,6 +706,27 @@ def assign_issue_to_current_user(
         request=request,
     )
     method, path, query, body = issue_update_request(org, number, {"assignee_user_id": user_id})
+    payload = request(
+        method,
+        path,
+        base_url=base_url,
+        api_key=api_key,
+        query=query,
+        timeout=timeout,
+        body=body,
+    )
+    return unwrap_envelope(payload)
+
+
+def send_write_request(
+    request_spec: tuple[str, str, dict[str, Any], dict[str, Any]],
+    *,
+    base_url: str,
+    api_key: str,
+    timeout: int,
+    request: Any = request_json,
+) -> Any:
+    method, path, query, body = request_spec
     payload = request(
         method,
         path,
@@ -791,14 +849,15 @@ def command_to_request(args: argparse.Namespace) -> tuple[str, str, dict[str, An
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="os_platform.py",
-        description="Read-only helper for querying os-platform production API data.",
+        description="Helper for reading and updating os-platform production API data.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=textwrap.dedent(
             """\
             Examples:
               python3 scripts/os_platform.py status
               python3 scripts/os_platform.py issues list open-software --q wallet --limit 10
-              python3 scripts/os_platform.py issues show open-software 123 --full
+              python3 scripts/os_platform.py issues show open-software 123
+              python3 scripts/os_platform.py issues status open-software 123 in_review
               python3 scripts/os_platform.py raw GET /v1/_status
             """
         ),
@@ -827,7 +886,7 @@ def build_parser() -> argparse.ArgumentParser:
     project_get = leaf_parser(project_sub, "get", help="Get one Project.")
     project_get.add_argument("refs", nargs="*", metavar="ref")
 
-    issues = subparsers.add_parser("issues", help="Issue/Bounty reads.")
+    issues = subparsers.add_parser("issues", help="Issue/Bounty reads and writes.")
     issues_sub = issues.add_subparsers(dest="action", required=True)
     issues_list = leaf_parser(issues_sub, "list", help="List Issues for an Org.")
     issues_list.add_argument("org", nargs="?")
@@ -836,6 +895,18 @@ def build_parser() -> argparse.ArgumentParser:
     issues_search.add_argument("org", nargs="?")
     issues_search.add_argument("search_query")
     add_issue_filters(issues_search)
+    issues_create = leaf_parser(issues_sub, "create", help="Create an Issue in an Org.")
+    issues_create.add_argument("org", nargs="?")
+    issues_create.add_argument("--title", required=True)
+    issues_create.add_argument("--body", required=True)
+    issues_create.add_argument("--type", choices=["feature", "bug", "other"])
+    issues_create.add_argument("--priority", choices=["low", "med", "high"])
+    issues_assign = leaf_parser(issues_sub, "assign", help="Assign an Issue to the current user.")
+    issues_assign.add_argument("refs", nargs="*", metavar="ref")
+    issues_assign.add_argument("--to", choices=["me"], default="me")
+    issues_status = leaf_parser(issues_sub, "status", help="Set an Issue's status.")
+    issues_status.add_argument("refs", nargs="*", metavar="ref")
+    issues_status.add_argument("status", choices=ISSUE_STATUSES)
     issues_take = leaf_parser(issues_sub, "take", help="Move a todo Issue to in_progress after confirmation.")
     issues_take.add_argument("refs", nargs="*", metavar="ref")
     issues_take.add_argument("--yes", action="store_true", help="Skip confirmation prompt.")
@@ -854,7 +925,7 @@ def build_parser() -> argparse.ArgumentParser:
     activity_list.add_argument("--page", type=int)
     activity_list.add_argument("--per-page", type=int, dest="per_page")
 
-    comments = subparsers.add_parser("comments", help="Comment reads.")
+    comments = subparsers.add_parser("comments", help="Comment reads and writes.")
     comments_sub = comments.add_subparsers(dest="action", required=True)
     comments_list = comments_sub.add_parser("list", help="List comments.")
     comments_list_sub = comments_list.add_subparsers(dest="target", required=True)
@@ -862,6 +933,9 @@ def build_parser() -> argparse.ArgumentParser:
     issue_comments.add_argument("refs", nargs="*", metavar="ref")
     issue_comments.add_argument("--page", type=int)
     issue_comments.add_argument("--per-page", type=int, dest="per_page")
+    comments_add = leaf_parser(comments_sub, "add", help="Add a comment to an Issue.")
+    comments_add.add_argument("refs", nargs="*", metavar="ref")
+    comments_add.add_argument("--body", required=True)
 
     contributors = subparsers.add_parser("contributors", help="Contributor reads.")
     contributors_sub = contributors.add_subparsers(dest="action", required=True)
@@ -901,6 +975,47 @@ def main(argv: Sequence[str] | None = None) -> int:
                 api_key=api_key,
                 timeout=args.timeout,
                 assume_yes=args.yes,
+            )
+            print_payload(data, args)
+            return 0
+
+        if args.resource == "issues" and args.action == "create":
+            data = send_write_request(
+                issue_create_request(args.org, args.title, args.body, args.type, args.priority),
+                base_url=base_url,
+                api_key=api_key,
+                timeout=args.timeout,
+            )
+            print_payload(data, args)
+            return 0
+
+        if args.resource == "issues" and args.action == "assign":
+            data = assign_issue_to_current_user(
+                args.org,
+                args.number,
+                base_url=base_url,
+                api_key=api_key,
+                timeout=args.timeout,
+            )
+            print_payload(data, args)
+            return 0
+
+        if args.resource == "issues" and args.action == "status":
+            data = send_write_request(
+                issue_status_request(args.org, args.number, args.status),
+                base_url=base_url,
+                api_key=api_key,
+                timeout=args.timeout,
+            )
+            print_payload(data, args)
+            return 0
+
+        if args.resource == "comments" and args.action == "add":
+            data = send_write_request(
+                comment_create_request(args.org, args.number, args.body),
+                base_url=base_url,
+                api_key=api_key,
+                timeout=args.timeout,
             )
             print_payload(data, args)
             return 0
