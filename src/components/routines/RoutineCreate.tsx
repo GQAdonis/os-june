@@ -5,6 +5,7 @@ import {
   isConnectorNotConfiguredError,
   scopesCoverBundles,
   triggerRequiredBundles,
+  triggerProvider,
   triggerScopeWarning,
   type TriggerDraft,
 } from "../../lib/connectors";
@@ -68,6 +69,7 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
     const templateTrigger = template?.trigger;
     if (!templateTrigger) return { source: "schedule" };
     if (templateTrigger.kind === "email_received") return { source: "email_received" };
+    if (templateTrigger.kind === "linear_assignment") return { source: "linear_assignment" };
     return {
       source: "event_upcoming",
       leadMinutes: templateTrigger.leadMinutes ?? 30,
@@ -100,10 +102,16 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
   // the scope gate must check that exact account. Checking "any account" would
   // enable Create while the routine still polls/calls Google with an account
   // that lacks the scope, silently missing triggers or failing on scope errors.
-  const connectedAccount = (accounts ?? []).find((account) => account.status === "connected");
+  const googleAccount = (accounts ?? []).find(
+    (account) => account.provider === "google" && account.status === "connected",
+  );
+  const wantedTriggerProvider = triggerProvider(trigger);
+  const triggerAccount = (accounts ?? []).find(
+    (account) => account.provider === wantedTriggerProvider && account.status === "connected",
+  );
   const scopeGateSatisfied =
     !requiredScopes ||
-    (connectedAccount != null && scopesCoverBundles(connectedAccount.scopes, requiredScopes));
+    (googleAccount != null && scopesCoverBundles(googleAccount.scopes, requiredScopes));
   // A connector trigger must run on an account that holds the scope its daemon
   // polls (Gmail read for new mail, calendar read for upcoming events). Checking
   // "any account connected" is not enough: a calendar-only account can't back an
@@ -113,8 +121,9 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
   const triggerBundles = triggerRequiredBundles(trigger);
   const triggerScopeSatisfied =
     triggerBundles.length === 0 ||
-    (connectedAccount != null && scopesCoverBundles(connectedAccount.scopes, triggerBundles));
-  const blocked = !scopeGateSatisfied || !triggerScopeSatisfied;
+    (triggerAccount != null && scopesCoverBundles(triggerAccount.scopes, triggerBundles));
+  const triggerAccountSatisfied = wantedTriggerProvider == null || triggerAccount != null;
+  const blocked = !scopeGateSatisfied || !triggerScopeSatisfied || !triggerAccountSatisfied;
 
   async function connectForTemplate() {
     if (!requiredScopes || connectBusy) return;
@@ -145,7 +154,7 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
       trustMode,
       autonomousTools,
       trigger,
-      triggerAccountId: connectedAccount?.accountId,
+      triggerAccountId: triggerAccount?.accountId,
       connectorScopes: requiredScopes,
     });
   }
@@ -222,8 +231,8 @@ export function RoutineCreate({ template, creating, error, onBack, onCreate }: R
               <TriggerPicker
                 trigger={trigger}
                 scheduleDraft={draft}
-                hasAccount={Boolean(connectedAccount)}
-                scopeWarning={triggerScopeWarning(trigger, connectedAccount?.scopes ?? null)}
+                hasAccount={triggerAccountSatisfied}
+                scopeWarning={triggerScopeWarning(trigger, triggerAccount?.scopes ?? null)}
                 onTriggerChange={setTrigger}
                 onScheduleChange={setDraft}
               />

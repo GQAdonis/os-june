@@ -812,7 +812,9 @@ describe("RoutinesView detail", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(
-      await screen.findByText("Connect a Google account before using an event trigger."),
+      await screen.findByText(
+        "Connect a Google account before using an email or calendar trigger.",
+      ),
     ).toBeInTheDocument();
     // Validation aborted first: neither the trust downgrade nor the cron update
     // was attempted, so nothing needs rolling back.

@@ -24477,8 +24477,16 @@ input:focus-visible,
 
 .connectors-connect-row {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
   padding: var(--sp-3) var(--sp-4);
   border-top: 1px solid var(--border-subtle);
+}
+
+.connectors-connect-row .settings-row-description {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 .connectors-bundle-list {

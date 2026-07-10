@@ -1894,7 +1894,7 @@ export async function latestDictationEvent() {
 }
 
 // ---------------------------------------------------------------------------
-// Private Google connectors (local mode)
+// Private connectors (local mode)
 // ---------------------------------------------------------------------------
 
 /** Feature bundle wire names the connect flow requests. Mirrors the Rust
@@ -1908,14 +1908,16 @@ export type ConnectorScopeBundle =
   | "calendar_events";
 
 export type ConnectorAccountStatus = "connected" | "reconnect_required";
+export type ConnectorProvider = "google" | "notion" | "linear";
 
-/** One connected Google account, as the connectors module reports it. Carries
- * only metadata (email, granted scope URLs, health) — never a token. */
+/** One connected provider account/workspace. Carries only non-secret metadata
+ * and granted scope/capability identifiers, never a token. */
 export type ConnectorAccount = {
   accountId: string;
-  provider: "google";
-  email: string;
-  /** Granted Google scope URLs (not bundle names). */
+  provider: ConnectorProvider;
+  displayName: string;
+  email?: string;
+  /** Granted provider scope/capability identifiers. */
   scopes: string[];
   status: ConnectorAccountStatus;
 };
@@ -1937,7 +1939,7 @@ export type RoutineTrust = {
   autonomousServers?: string[];
 };
 
-export type ConnectorTriggerKind = "email_received" | "event_upcoming";
+export type ConnectorTriggerKind = "email_received" | "event_upcoming" | "linear_assignment";
 
 export type ConnectorTrigger = {
   id: string;
@@ -1978,11 +1980,18 @@ export async function connectorsList() {
  * until the browser flow completes (the Rust side enforces a 300s timeout).
  * `loginHint` pre-selects the Google account, for reconnects. */
 export async function connectorsConnect(input: {
-  scopes: ConnectorScopeBundle[];
+  provider?: ConnectorProvider;
+  scopes?: ConnectorScopeBundle[];
   loginHint?: string;
+  accountId?: string;
 }) {
   return invoke<ConnectorAccount>("connectors_connect", {
-    request: { scopes: input.scopes, loginHint: input.loginHint },
+    request: {
+      provider: input.provider ?? "google",
+      scopes: input.scopes ?? [],
+      loginHint: input.loginHint,
+      accountId: input.accountId,
+    },
   });
 }
 

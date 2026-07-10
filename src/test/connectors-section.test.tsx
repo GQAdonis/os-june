@@ -28,13 +28,15 @@ const GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly";
 const CALENDAR_EVENTS = "https://www.googleapis.com/auth/calendar.events";
 
 function account(overrides: Partial<ConnectorAccount> = {}): ConnectorAccount {
+  const email = overrides.email ?? "alex@example.com";
   return {
     accountId: "acc-1",
     provider: "google",
-    email: "alex@example.com",
+    email,
     scopes: [GMAIL_READONLY, CALENDAR_EVENTS],
     status: "connected",
     ...overrides,
+    displayName: overrides.displayName ?? email,
   };
 }
 
@@ -76,14 +78,14 @@ describe("ConnectorsSection", () => {
     // No "add another account" affordance while one is connected; the base
     // connector servers, triggers, and grants all bind to that single account.
     expect(screen.queryByRole("button", { name: "Connect Google account" })).toBeNull();
-    expect(screen.getByText(/Local mode uses one Google account at a time/i)).toBeInTheDocument();
+    expect(screen.getByText(/one account or workspace per provider/i)).toBeInTheDocument();
   });
 
   it("connects an account from the feature-bundle dialog and applies the runtime", async () => {
     render(<ConnectorsSection />);
-    await screen.findByText(/No Google account connected yet/);
+    await screen.findByText(/No accounts connected yet/);
 
-    await userEvent.click(screen.getByRole("button", { name: "Connect Google account" }));
+    await userEvent.click(screen.getByRole("button", { name: "Connect Google" }));
     const dialog = screen.getByRole("dialog", { name: "Connect Google account" });
     // Read mail and read calendar are preselected; add drafting.
     expect(within(dialog).getByRole("checkbox", { name: /read mail/i })).toBeChecked();
@@ -96,6 +98,7 @@ describe("ConnectorsSection", () => {
 
     await waitFor(() =>
       expect(mocks.connectorsConnect).toHaveBeenCalledWith({
+        provider: "google",
         scopes: ["gmail_read", "gmail_draft", "calendar_read"],
         loginHint: undefined,
       }),
@@ -104,15 +107,31 @@ describe("ConnectorsSection", () => {
     expect(await screen.findByText("alex@example.com")).toBeInTheDocument();
   });
 
+  it("connects Notion and Linear through their provider OAuth flows", async () => {
+    render(<ConnectorsSection />);
+    await screen.findByText(/No accounts connected yet/);
+
+    await userEvent.click(screen.getByRole("button", { name: "Connect Notion" }));
+    await waitFor(() =>
+      expect(mocks.connectorsConnect).toHaveBeenCalledWith({ provider: "notion" }),
+    );
+    await waitFor(() => expect(mocks.connectorsApplyRuntime).toHaveBeenCalled());
+
+    await userEvent.click(screen.getByRole("button", { name: "Connect Linear" }));
+    await waitFor(() =>
+      expect(mocks.connectorsConnect).toHaveBeenCalledWith({ provider: "linear" }),
+    );
+  });
+
   it("shows an inline notice when the connector is not configured in this build", async () => {
     mocks.connectorsConnect.mockRejectedValue({
       code: "connector_not_configured",
       message: "GOOGLE_OAUTH_CLIENT_ID missing",
     });
     render(<ConnectorsSection />);
-    await screen.findByText(/No Google account connected yet/);
+    await screen.findByText(/No accounts connected yet/);
 
-    await userEvent.click(screen.getByRole("button", { name: "Connect Google account" }));
+    await userEvent.click(screen.getByRole("button", { name: "Connect Google" }));
     await userEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", { name: "Connect" }),
     );
@@ -131,6 +150,7 @@ describe("ConnectorsSection", () => {
 
     await waitFor(() =>
       expect(mocks.connectorsConnect).toHaveBeenCalledWith({
+        provider: "google",
         scopes: ["gmail_read", "calendar_events"],
         loginHint: "alex@example.com",
       }),
@@ -157,7 +177,7 @@ describe("ConnectorsSection", () => {
         revoke: true,
       }),
     );
-    expect(await screen.findByText(/No Google account connected yet/)).toBeInTheDocument();
+    expect(await screen.findByText(/No accounts connected yet/)).toBeInTheDocument();
   });
 
   it("disconnects without revoking by default", async () => {

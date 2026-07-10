@@ -1,5 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { IconGoogle } from "central-icons/IconGoogle";
+import { IconLinear } from "central-icons/IconLinear";
+import { IconNotion } from "central-icons/IconNotion";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -18,6 +20,7 @@ import {
   connectorsDisconnect,
   connectorsList,
   type ConnectorAccount,
+  type ConnectorProvider,
   type ConnectorScopeBundle,
 } from "../../lib/tauri";
 import { Dialog } from "../ui/Dialog";
@@ -30,17 +33,37 @@ import { SettingsPageHeader } from "./AppSettings";
 // never grants mutation authority the user did not ask for.
 const DEFAULT_CONNECT_BUNDLES: readonly ConnectorScopeBundle[] = ["gmail_read", "calendar_read"];
 
+const PROVIDER_NAMES: Readonly<Record<ConnectorProvider, string>> = {
+  google: "Google",
+  notion: "Notion",
+  linear: "Linear",
+};
+
+function ProviderIcon({ provider }: { provider: ConnectorProvider }) {
+  if (provider === "notion") return <IconNotion size={14} aria-hidden />;
+  if (provider === "linear") return <IconLinear size={14} aria-hidden />;
+  return <IconGoogle size={14} aria-hidden />;
+}
+
+function featureSummary(account: ConnectorAccount): string {
+  if (account.provider === "google") {
+    const features = grantedFeatureLabels(account.scopes);
+    return features.length > 0 ? `Can ${features.join(", ").toLowerCase()}.` : "";
+  }
+  if (account.provider === "notion") return "Can search, read, and create pages.";
+  return "Can read issues, create issues and comments, and watch assignments.";
+}
+
 /**
- * The Connectors settings page: connected Google accounts (email, granted
- * features, health), the connect flow (feature-bundle picker), reconnect for
- * lapsed grants, and disconnect with optional Google-side revoke. Local mode
- * only: tokens live in the Mac's Keychain and every Google call goes straight
- * from this device.
+ * The Connectors settings page: connected provider accounts/workspaces,
+ * Google's feature-bundle picker, reconnect for lapsed grants, and disconnect
+ * with optional provider-side revoke. Local mode only: tokens live in the
+ * Mac's Keychain and provider calls originate on this device.
  */
 export function ConnectorsSection() {
   const [accounts, setAccounts] = useState<ConnectorAccount[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [notConfigured, setNotConfigured] = useState(false);
+  const [notConfigured, setNotConfigured] = useState<ConnectorProvider | null>(null);
   const [connectOpen, setConnectOpen] = useState(false);
   const [bundles, setBundles] = useState<ConnectorScopeBundle[]>([...DEFAULT_CONNECT_BUNDLES]);
   // Email of the account we are adding scope to (single-account incremental
@@ -48,6 +71,7 @@ export function ConnectorsSection() {
   // preselects that account and the backend's single-account guard passes.
   const [connectHint, setConnectHint] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectingProvider, setConnectingProvider] = useState<ConnectorProvider | null>(null);
   const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<ConnectorAccount | null>(null);
   const [revoke, setRevoke] = useState(false);
@@ -80,12 +104,32 @@ export function ConnectorsSection() {
     };
   }, [refresh]);
 
-  async function runConnect(scopes: ConnectorScopeBundle[], loginHint?: string) {
-    await connectorsConnect({ scopes, loginHint });
+  async function runConnect(input: {
+    provider: ConnectorProvider;
+    scopes?: ConnectorScopeBundle[];
+    loginHint?: string;
+    accountId?: string;
+  }) {
+    await connectorsConnect(input);
     // A fresh grant only takes effect once the rendered MCP config picks it
     // up; apply immediately so the user's next routine or chat sees it.
     await connectorsApplyRuntime();
     await refresh();
+  }
+
+  async function connectProvider(provider: Exclude<ConnectorProvider, "google">) {
+    if (connectingProvider) return;
+    setNotConfigured(null);
+    setConnectingProvider(provider);
+    try {
+      await runConnect({ provider });
+      toast.success(`${PROVIDER_NAMES[provider]} connected`);
+    } catch (err) {
+      if (isConnectorNotConfiguredError(err)) setNotConfigured(provider);
+      else toast.error(messageFromError(err));
+    } finally {
+      setConnectingProvider(null);
+    }
   }
 
   // Open the connect dialog for a brand-new account (only offered when none is
@@ -100,20 +144,25 @@ export function ConnectorsSection() {
     // Preselect what the account already holds so the dialog reads as "add to
     // these"; the checkboxes the user adds are the new scopes.
     setBundles(bundlesFromScopes(account.scopes));
-    setConnectHint(account.email);
+    setConnectHint(account.email ?? account.displayName);
     setConnectOpen(true);
   }
 
   async function submitConnect() {
     if (bundles.length === 0 || connecting) return;
+    setNotConfigured(null);
     setConnecting(true);
     try {
-      await runConnect(bundles, connectHint ?? undefined);
+      await runConnect({
+        provider: "google",
+        scopes: bundles,
+        loginHint: connectHint ?? undefined,
+      });
       setConnectOpen(false);
       toast.success(connectHint ? "Google access updated" : "Google account connected");
     } catch (err) {
       if (isConnectorNotConfiguredError(err)) {
-        setNotConfigured(true);
+        setNotConfigured("google");
         setConnectOpen(false);
       } else {
         toast.error(messageFromError(err));
@@ -124,12 +173,21 @@ export function ConnectorsSection() {
   }
 
   async function reconnect(account: ConnectorAccount) {
+    setNotConfigured(null);
     setReconnectingId(account.accountId);
     try {
-      await runConnect(bundlesFromScopes(account.scopes), account.email);
-      toast.success("Google account reconnected");
+      if (account.provider === "google") {
+        await runConnect({
+          provider: "google",
+          scopes: bundlesFromScopes(account.scopes),
+          loginHint: account.email,
+        });
+      } else {
+        await runConnect({ provider: account.provider, accountId: account.accountId });
+      }
+      toast.success(`${PROVIDER_NAMES[account.provider]} reconnected`);
     } catch (err) {
-      if (isConnectorNotConfiguredError(err)) setNotConfigured(true);
+      if (isConnectorNotConfiguredError(err)) setNotConfigured(account.provider);
       else toast.error(messageFromError(err));
     } finally {
       setReconnectingId(null);
@@ -145,7 +203,7 @@ export function ConnectorsSection() {
       await connectorsApplyRuntime();
       await refresh();
       setDisconnectTarget(null);
-      toast.success(`Disconnected ${account.email}`);
+      toast.success(`Disconnected ${account.displayName}`);
     } catch (err) {
       toast.error(messageFromError(err));
     } finally {
@@ -164,20 +222,22 @@ export function ConnectorsSection() {
 
   // The single healthy account, if any: the one incremental "Add access" acts
   // on and the one every connector surface binds to.
-  const connectedAccount = accounts?.find((account) => account.status === "connected") ?? null;
+  const googleAccount = accounts?.find((account) => account.provider === "google") ?? null;
+  const notionAccount = accounts?.find((account) => account.provider === "notion") ?? null;
+  const linearAccount = accounts?.find((account) => account.provider === "linear") ?? null;
 
   return (
     <section className="settings-group" aria-labelledby="connectors-heading">
       <SettingsPageHeader
         id="connectors-heading"
         title="Connectors"
-        blurb="Connect Google to June privately, in local mode: your tokens stay in your Mac's Keychain, every Google call goes straight from this device, and OpenSoftware's servers hold no key to your mail."
+        blurb="Connect Google, Notion, and Linear in local mode. Tokens stay in your Mac's Keychain, and provider calls go straight from this device."
       />
 
       {notConfigured ? (
         <InlineNotice
           tone="info"
-          body="Google connector isn't configured in this build."
+          body={`${PROVIDER_NAMES[notConfigured]} connector isn't configured in this build.`}
           aria-label="Connector not configured"
         />
       ) : null}
@@ -191,28 +251,26 @@ export function ConnectorsSection() {
         ) : accounts.length === 0 ? (
           <div className="connectors-empty">
             <p className="settings-row-description">
-              No Google account connected yet. Connect one to let routines read your mail and
-              calendar, draft replies for approval, and brief you before meetings.
+              No accounts connected yet. Connect a provider to give June access to the work you
+              choose, with mutations gated by routine trust.
             </p>
           </div>
         ) : (
           <ul className="settings-rows connectors-account-list" role="list">
             {accounts.map((account) => {
-              const status = accountStatusMeta(account.status);
-              const features = grantedFeatureLabels(account.scopes);
+              const status = accountStatusMeta(account.status, account.provider);
               return (
                 <li key={account.accountId} className="settings-row connectors-account-row">
                   <div className="settings-row-info">
                     <h3 className="settings-row-title connectors-account-email">
-                      <IconGoogle size={14} aria-hidden />
-                      {account.email}
+                      <ProviderIcon provider={account.provider} />
+                      {account.displayName}
                       <span className="connectors-account-status" data-tone={status.tone}>
                         {status.label}
                       </span>
                     </h3>
                     <p className="settings-row-description">
-                      {features.length > 0 ? `Can ${features.join(", ").toLowerCase()}.` : ""}{" "}
-                      {status.blurb}
+                      {featureSummary(account)} {status.blurb}
                     </p>
                   </div>
                   <div className="settings-row-control connectors-account-actions">
@@ -246,34 +304,55 @@ export function ConnectorsSection() {
           </ul>
         )}
         <div className="connectors-connect-row">
-          {accounts && accounts.length > 0 ? (
-            // Local mode v1 binds every connector server, trigger, and grant to
-            // one account, so June keeps it to a single account. Adding scope to
-            // that account is still allowed (incremental auth); switching to a
-            // different account means disconnecting first, which clears the
-            // current account's triggers and grants. Multi-account is a
-            // documented follow-up.
+          {accounts ? (
             <>
-              {connectedAccount ? (
+              {googleAccount ? (
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  onClick={() => openAddAccess(connectedAccount)}
+                  onClick={() => openAddAccess(googleAccount)}
                 >
                   <IconPlusMedium size={13} aria-hidden />
-                  Add access
+                  Add Google access
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="primary-action primary-solid"
+                  onClick={openConnectNew}
+                >
+                  <IconPlusMedium size={13} aria-hidden />
+                  Connect Google
+                </button>
+              )}
+              {!notionAccount ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={connectingProvider !== null}
+                  aria-busy={connectingProvider === "notion" || undefined}
+                  onClick={() => void connectProvider("notion")}
+                >
+                  <IconPlusMedium size={13} aria-hidden />
+                  {connectingProvider === "notion" ? "Waiting for browser…" : "Connect Notion"}
+                </button>
+              ) : null}
+              {!linearAccount ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  disabled={connectingProvider !== null}
+                  aria-busy={connectingProvider === "linear" || undefined}
+                  onClick={() => void connectProvider("linear")}
+                >
+                  <IconPlusMedium size={13} aria-hidden />
+                  {connectingProvider === "linear" ? "Waiting for browser…" : "Connect Linear"}
                 </button>
               ) : null}
               <p className="settings-row-description">
-                Local mode uses one Google account at a time. Disconnect the current one to switch
-                to a different account.
+                Local mode supports one account or workspace per provider.
               </p>
             </>
-          ) : accounts ? (
-            <button type="button" className="primary-action primary-solid" onClick={openConnectNew}>
-              <IconPlusMedium size={13} aria-hidden />
-              Connect Google account
-            </button>
           ) : null}
         </div>
       </div>
@@ -337,7 +416,7 @@ export function ConnectorsSection() {
         onClose={() => {
           if (!disconnecting) setDisconnectTarget(null);
         }}
-        title={`Disconnect ${disconnectTarget?.email ?? ""}?`}
+        title={`Disconnect ${disconnectTarget?.displayName ?? ""}?`}
         description="June stops using this account and removes its tokens from your Keychain. Routines that rely on it will fail until you reconnect."
         footer={
           <>
@@ -368,7 +447,8 @@ export function ConnectorsSection() {
             disabled={disconnecting}
             onChange={(event) => setRevoke(event.currentTarget.checked)}
           />
-          Also revoke June's access with Google
+          Also revoke June's access with{" "}
+          {disconnectTarget ? PROVIDER_NAMES[disconnectTarget.provider] : "the provider"}
         </label>
       </Dialog>
     </section>

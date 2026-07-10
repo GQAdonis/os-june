@@ -50,6 +50,29 @@ Provider keys and the OS Accounts App API key belong only in `june-api/.env`,
 never in the root desktop `.env`. Add `JUNE__UPSTREAMS__OPENAI__API_KEY` only
 if you want to use OpenAI transcription models.
 
+## Local connector OAuth
+
+Connector OAuth application identifiers belong in the root desktop `.env`.
+They identify the installed client but do not grant access to user data by
+themselves; user grants stay in Keychain.
+
+- Google: create a Desktop OAuth client and set `GOOGLE_OAUTH_CLIENT_ID` and
+  `GOOGLE_OAUTH_CLIENT_SECRET`.
+- Notion: create a public connection with read-content and insert-content
+  capabilities. Register
+  `http://127.0.0.1:43191/notion/callback`, then set
+  `NOTION_OAUTH_CLIENT_ID`, `NOTION_OAUTH_CLIENT_SECRET`, and
+  `NOTION_OAUTH_REDIRECT_URI` to that exact callback.
+- Linear: create an OAuth application and register
+  `http://127.0.0.1:43192/linear/callback`. Set `LINEAR_OAUTH_CLIENT_ID` and
+  `LINEAR_OAUTH_REDIRECT_URI`; `LINEAR_OAUTH_CLIENT_SECRET` is optional because
+  June uses PKCE. June requests only `read`, `issues:create`, and
+  `comments:create`.
+
+Restart `pnpm tauri:dev` after changing these values. Notion and Linear use
+fixed loopback ports because their registered redirect URIs must match exactly;
+stop the process already using a callback port before connecting.
+
 ## Local data
 
 The app data directory is resolved by Tauri at runtime. In development, inspect

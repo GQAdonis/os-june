@@ -252,15 +252,17 @@ describe("event triggers", () => {
 
   it("builds the trigger config payload per kind", () => {
     expect(triggerConfigFromDraft({ source: "email_received" })).toEqual({});
+    expect(triggerConfigFromDraft({ source: "linear_assignment" })).toEqual({});
     expect(
       triggerConfigFromDraft({ source: "event_upcoming", leadMinutes: 30, externalOnly: true }),
     ).toEqual({ leadMinutes: 30, externalOnly: true });
   });
 
-  it("has metadata for both kinds", () => {
+  it("has metadata for every kind", () => {
     expect(TRIGGER_META.email_received.label).toBe("When new email arrives");
     expect(TRIGGER_META.event_upcoming.label).toBe("Before an upcoming meeting");
     expect(TRIGGER_META.event_upcoming.configFields).toEqual(["leadMinutes", "externalOnly"]);
+    expect(TRIGGER_META.linear_assignment.label).toBe("When an issue is assigned to me");
   });
 
   it("maps each connector trigger to the scope its daemon polls", () => {
@@ -269,6 +271,7 @@ describe("event triggers", () => {
     expect(
       triggerRequiredBundles({ source: "event_upcoming", leadMinutes: 30, externalOnly: true }),
     ).toEqual(["calendar_read"]);
+    expect(triggerRequiredBundles({ source: "linear_assignment" })).toEqual([]);
   });
 
   it("warns only when a connected account lacks the trigger's scope", () => {
