@@ -64,6 +64,7 @@ Per-repo config the engineering skills read before acting (see the
 - [audio-pipeline.md](audio-pipeline.md) — capture → source separation → turns → transcription → note
 - [june-api-prd.md](june-api-prd.md) — June API: upstream proxy + OS Accounts authorize/charge (the canonical backend spec)
 - [personas-design.md](personas-design.md) — PRD: personas — tag a voice once, auto-recognize across meetings, dossiers, prep briefs (see ADR-0016)
+- [personas-implementation-plan.md](personas-implementation-plan.md) — production delivery plan, local schema and contracts, phase gates, and verification matrix for the Personas PRD
 - [telemetry.md](telemetry.md) — public overview of June telemetry, current behavior, and policies
 - [telemetry-p3a-prd.md](telemetry-p3a-prd.md) — June P3A: opt-in, privacy-preserving product telemetry
 - [telemetry-p3a-implementation-plan.md](telemetry-p3a-implementation-plan.md) — implementation plan for June P3A phases
