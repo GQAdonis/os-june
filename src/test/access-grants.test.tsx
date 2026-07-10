@@ -318,6 +318,7 @@ describe("access grants — rendered view", () => {
     const state = stubState({ patterns: ["Recursive deletion (rm -rf)"] });
     const onClearGrant = vi.fn();
     const onRevokeUnrestricted = vi.fn();
+    const onRevokeCliAccess = vi.fn();
     render(
       <AccessGrantsView
         state={state}
@@ -333,6 +334,9 @@ describe("access grants — rendered view", () => {
           grant({ requestId: "r1", choice: "once", command: "git push --force" }),
         ])}
         unrestrictedSessions={["sess-full-1"]}
+        cliAccess={true}
+        cliBusy={false}
+        onRevokeCliAccess={onRevokeCliAccess}
         onClearGrant={onClearGrant}
         onClearAllGrants={vi.fn()}
         onRevokeUnrestricted={onRevokeUnrestricted}
@@ -360,6 +364,31 @@ describe("access grants — rendered view", () => {
     const sessionRow = screen.getByText("Session sess-full-1").closest("li");
     fireEvent.click(within(sessionRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(onRevokeUnrestricted).toHaveBeenCalledWith("sess-full-1");
+
+    // Agent CLI access row: app-wide pill and a working revoke.
+    const cliRow = screen.getByText("Coding CLI state folders").closest("li");
+    expect(within(cliRow as HTMLElement).getByText("App-wide")).toBeTruthy();
+    fireEvent.click(within(cliRow as HTMLElement).getByRole("button", { name: "Revoke" }));
+    expect(onRevokeCliAccess).toHaveBeenCalled();
+  });
+
+  it("shows the CLI access group as not granted when the flag is off", () => {
+    render(
+      <AccessGrantsView
+        state={stubState()}
+        allowedRows={[]}
+        grantRows={[]}
+        unrestrictedSessions={[]}
+        cliAccess={false}
+        cliBusy={false}
+        onRevokeCliAccess={vi.fn()}
+        onClearGrant={vi.fn()}
+        onClearAllGrants={vi.fn()}
+        onRevokeUnrestricted={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Not granted.")).toBeTruthy();
+    expect(screen.queryByText("Coding CLI state folders")).toBeNull();
   });
 
   it("keeps the local groups when the runtime is unavailable", () => {
@@ -369,6 +398,9 @@ describe("access grants — rendered view", () => {
         allowedRows={[]}
         grantRows={buildSessionGrantRows([grant({ requestId: "r1", choice: "session" })])}
         unrestrictedSessions={[]}
+        cliAccess={false}
+        cliBusy={false}
+        onRevokeCliAccess={vi.fn()}
         onClearGrant={vi.fn()}
         onClearAllGrants={vi.fn()}
         onRevokeUnrestricted={vi.fn()}
@@ -389,6 +421,9 @@ describe("access grants — rendered view", () => {
         allowedRows={[]}
         grantRows={[]}
         unrestrictedSessions={[]}
+        cliAccess={false}
+        cliBusy={false}
+        onRevokeCliAccess={vi.fn()}
         onClearGrant={vi.fn()}
         onClearAllGrants={onClearAllGrants}
         onRevokeUnrestricted={vi.fn()}
@@ -402,6 +437,9 @@ describe("access grants — rendered view", () => {
         allowedRows={[]}
         grantRows={buildSessionGrantRows([grant({ requestId: "r1", choice: "once" })])}
         unrestrictedSessions={[]}
+        cliAccess={false}
+        cliBusy={false}
+        onRevokeCliAccess={vi.fn()}
         onClearGrant={vi.fn()}
         onClearAllGrants={onClearAllGrants}
         onRevokeUnrestricted={vi.fn()}

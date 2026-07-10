@@ -9,6 +9,7 @@ import {
   unrestrictedSessionIds,
 } from "../../lib/agent-session-modes";
 import { pendingActionStore, type PendingActionStore } from "../../lib/hermes-pending-actions";
+import { hermesAgentCliAccess, setHermesAgentCliAccess } from "../../lib/tauri";
 import {
   buildAllowedCommandRows,
   buildSessionGrantRows,
@@ -64,6 +65,37 @@ export function AccessGrantsSection({ mode = "sandboxed" }: AccessGrantsSectionP
     setUnrestricted(unrestrictedSessionIds());
   }, []);
 
+  // Agent CLI access: an app-wide, ongoing grant persisted as a flag file.
+  // Read here so the inventory really covers everything granted; the toggle in
+  // Agent settings remains the primary control.
+  const [cliAccess, setCliAccess] = useState<boolean | null>(null);
+  const [cliBusy, setCliBusy] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    hermesAgentCliAccess()
+      .then((status) => {
+        if (!cancelled) setCliAccess(status.enabled);
+      })
+      .catch(() => {
+        if (!cancelled) setCliAccess(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const revokeCliAccess = useCallback(async () => {
+    setCliBusy(true);
+    try {
+      const status = await setHermesAgentCliAccess(false);
+      setCliAccess(status.enabled);
+    } catch {
+      // Leave the shown state unchanged; the Agent settings toggle surfaces
+      // write failures with full error copy.
+    } finally {
+      setCliBusy(false);
+    }
+  }, []);
+
   const grantRows = buildSessionGrantRows(log.entries);
   // Clear only the records the list shows. "always" log entries are invisible
   // here (their live representation is the allowlist row) and clearing them
@@ -80,9 +112,12 @@ export function AccessGrantsSection({ mode = "sandboxed" }: AccessGrantsSectionP
       grantRows={grantRows}
       allowedRows={buildAllowedCommandRows(state.patterns, log.entries)}
       unrestrictedSessions={unrestricted}
+      cliAccess={cliAccess}
+      cliBusy={cliBusy}
       onClearGrant={log.remove}
       onClearAllGrants={clearAllGrants}
       onRevokeUnrestricted={revokeUnrestricted}
+      onRevokeCliAccess={() => void revokeCliAccess()}
     />
   );
 }
@@ -122,17 +157,24 @@ export function AccessGrantsView({
   allowedRows,
   grantRows,
   unrestrictedSessions,
+  cliAccess,
+  cliBusy,
   onClearGrant,
   onClearAllGrants,
   onRevokeUnrestricted,
+  onRevokeCliAccess,
 }: {
   state: AccessGrantsState;
   allowedRows: AllowedCommandRow[];
   grantRows: SessionGrantRow[];
   unrestrictedSessions: string[];
+  /** Whether Agent CLI access is granted; null when the status is unknown. */
+  cliAccess: boolean | null;
+  cliBusy: boolean;
   onClearGrant: (id: string) => void;
   onClearAllGrants: () => void;
   onRevokeUnrestricted: (sessionId: string) => void;
+  onRevokeCliAccess: () => void;
 }) {
   const [refreshSpins, setRefreshSpins] = useState(0);
   const isUnavailable = state.status === "unavailable";
@@ -280,6 +322,45 @@ export function AccessGrantsView({
                 </li>
               ))}
             </ul>
+          )}
+        </div>
+      </div>
+
+      {/* --- Agent CLI access (app-wide flag; the Agent settings toggle is the
+       * primary control, this row keeps the inventory complete) --- */}
+      <div className="access-grants-group">
+        <h3 className="settings-group-heading">Agent CLI access</h3>
+        <p className="settings-group-description">
+          Write access to the settings and session folders of coding CLIs you already use, like
+          Claude Code and Codex. Also managed under Agent settings. Revoking applies to new
+          sessions.
+        </p>
+        <div className="settings-card">
+          {cliAccess === null ? (
+            <GroupNote text="Could not read the current status. Manage this grant under Agent settings." />
+          ) : cliAccess ? (
+            <ul className="access-grants-list">
+              <li className="settings-row access-grant-row">
+                <div className="settings-row-info">
+                  <h4 className="settings-row-title">Coding CLI state folders</h4>
+                  <p className="settings-row-description">
+                    <GrantBadges scope="app-wide" duration="ongoing" />
+                  </p>
+                </div>
+                <div className="settings-row-control">
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    disabled={cliBusy}
+                    onClick={onRevokeCliAccess}
+                  >
+                    Revoke
+                  </button>
+                </div>
+              </li>
+            </ul>
+          ) : (
+            <GroupNote text="Not granted." />
           )}
         </div>
       </div>
