@@ -310,13 +310,49 @@ describe("TabBar", () => {
     }
   });
 
-  it("floats the close button over the label's faded tail", () => {
+  it("fades idle labels and reserves the close control for interaction", () => {
     const closeRule = cssRuleFor(".tab-close");
     const labelRule = cssRuleFor(".tab-label");
+    const interactiveLabelRule = cssRuleFor(".tab:hover .tab-label");
+    const interactiveCloseRule = cssRuleFor(".tab:hover .tab-close");
 
     expect(closeRule).toContain("position: absolute;");
     expect(labelRule).toContain("mask-image: linear-gradient(");
     expect(labelRule).not.toContain("text-overflow");
+    expect(labelRule).toContain("#000 calc(100% - 30px)");
+    expect(labelRule).toContain("transparent 100%");
+    expect(interactiveLabelRule).toContain("#000 calc(100% - 38px)");
+    expect(interactiveLabelRule).toContain("transparent calc(100% - 22px)");
+    expect(interactiveCloseRule).toContain("opacity: 1;");
+    expect(appCss).not.toContain(".tab:focus-within .tab-label");
+    expect(appCss).not.toContain(".tab:focus-within .tab-close");
+  });
+
+  it("offers a close control when only one tab is open", () => {
+    const onlyTab = { id: "tab-1", title: "New session", icon: <span aria-hidden /> };
+    const { props } = renderTabBar({ tabs: [onlyTab] });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close New session" }));
+
+    expect(props.onClose).toHaveBeenCalledWith("tab-1");
+  });
+
+  it("hides Close other tabs when only one tab is open", () => {
+    const onlyTab = { id: "tab-1", title: "New session", icon: <span aria-hidden /> };
+    renderTabBar({ tabs: [onlyTab] });
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "New session" }));
+
+    expect(screen.getByRole("menuitem", { name: "Close tab" })).toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "Close other tabs" })).not.toBeInTheDocument();
+  });
+
+  it("offers Close other tabs when multiple tabs are open", () => {
+    renderTabBar();
+
+    fireEvent.contextMenu(screen.getByRole("tab", { name: "New session" }));
+
+    expect(screen.getByRole("menuitem", { name: "Close other tabs" })).toBeInTheDocument();
   });
 
   it("freezes adaptive layout while the sidebar is being resized", () => {
