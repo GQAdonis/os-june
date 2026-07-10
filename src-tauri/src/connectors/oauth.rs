@@ -2,8 +2,11 @@
 //!
 //! PKCE (S256) + loopback redirect on an ephemeral 127.0.0.1 port, for BOTH
 //! debug and release builds: Google desktop-app clients use the loopback
-//! flow, not a custom URI scheme, and there is no client secret (public
-//! client). Mirrors the os_accounts.rs login flow mechanics.
+//! flow, not a custom URI scheme. Google requires the Desktop client's
+//! `client_secret` at its token endpoint even though an installed application
+//! cannot keep that credential confidential; PKCE remains the protection for
+//! an intercepted authorization code. Mirrors the os_accounts.rs login flow
+//! mechanics.
 //!
 //! NEVER log, print, or serialize tokens (or authorization codes) into
 //! errors. Error messages carry stable codes and short human text only.
@@ -111,6 +114,7 @@ pub enum RefreshOutcome {
 pub async fn authorize(
     flow: &ConnectFlow,
     client_id: &str,
+    client_secret: &str,
     scopes: &[&str],
     login_hint: Option<&str>,
 ) -> Result<AuthorizedGrant, AppError> {
@@ -162,7 +166,7 @@ pub async fn authorize(
     }
     let code = outcome?;
 
-    let tokens = exchange_code(client_id, &code, &verifier, &redirect_uri).await?;
+    let tokens = exchange_code(client_id, client_secret, &code, &verifier, &redirect_uri).await?;
     let email = resolve_email(&tokens).await?;
     Ok(AuthorizedGrant { tokens, email })
 }
@@ -334,23 +338,25 @@ fn validate_callback(path: &str, expected_state: &str) -> CallbackOutcome {
     code.map_or(CallbackOutcome::MissingCode, CallbackOutcome::Code)
 }
 
-/// Exchange the authorization code for tokens. Public client: no
-/// client_secret, PKCE verifier proves possession.
+/// Exchange the authorization code for tokens. Google requires the Desktop
+/// credential's `client_secret`; PKCE independently proves possession of the
+/// authorization request's verifier.
 async fn exchange_code(
     client_id: &str,
+    client_secret: &str,
     code: &str,
     verifier: &str,
     redirect_uri: &str,
 ) -> Result<GoogleTokenResponse, AppError> {
     let response = http_client()
         .post(TOKEN_ENDPOINT)
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("code", code),
-            ("code_verifier", verifier),
-            ("client_id", client_id),
-            ("redirect_uri", redirect_uri),
-        ])
+        .form(&authorization_code_form(
+            client_id,
+            client_secret,
+            code,
+            verifier,
+            redirect_uri,
+        ))
         .send()
         .await
         .map_err(|_| exchange_failed(None))?;
@@ -370,6 +376,23 @@ async fn exchange_code(
     Err(exchange_failed(error_code))
 }
 
+fn authorization_code_form<'a>(
+    client_id: &'a str,
+    client_secret: &'a str,
+    code: &'a str,
+    verifier: &'a str,
+    redirect_uri: &'a str,
+) -> [(&'static str, &'a str); 6] {
+    [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("code_verifier", verifier),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("redirect_uri", redirect_uri),
+    ]
+}
+
 fn exchange_failed(error_code: Option<String>) -> AppError {
     let message = match error_code {
         Some(code) => format!("Could not complete the Google connection ({code})."),
@@ -380,14 +403,10 @@ fn exchange_failed(error_code: Option<String>) -> AppError {
 
 /// One refresh attempt. Classifies invalid_grant (definitive, the account
 /// must be reconnected) apart from transient upstream wobble.
-pub async fn refresh(client_id: &str, refresh_token: &str) -> RefreshOutcome {
+pub async fn refresh(client_id: &str, client_secret: &str, refresh_token: &str) -> RefreshOutcome {
     let response = match http_client()
         .post(TOKEN_ENDPOINT)
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", client_id),
-        ])
+        .form(&refresh_form(client_id, client_secret, refresh_token))
         .send()
         .await
     {
@@ -409,6 +428,19 @@ pub async fn refresh(client_id: &str, refresh_token: &str) -> RefreshOutcome {
         .ok()
         .and_then(|body| body.error);
     classify_refresh_failure(status, error_code.as_deref())
+}
+
+fn refresh_form<'a>(
+    client_id: &'a str,
+    client_secret: &'a str,
+    refresh_token: &'a str,
+) -> [(&'static str, &'a str); 4] {
+    [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+    ]
 }
 
 /// `invalid_grant` is the definitive "grant revoked/expired" signal; 5xx and
@@ -620,6 +652,25 @@ mod tests {
             classify_refresh_failure(400, Some("invalid_client")),
             RefreshOutcome::Transient
         ));
+    }
+
+    #[test]
+    fn token_forms_include_the_google_desktop_client_credential() {
+        let exchange = authorization_code_form(
+            "desktop-id",
+            "desktop-secret",
+            "authorization-code",
+            "pkce-verifier",
+            "http://127.0.0.1:49152/callback",
+        );
+        assert!(exchange.contains(&("client_id", "desktop-id")));
+        assert!(exchange.contains(&("client_secret", "desktop-secret")));
+        assert!(exchange.contains(&("code_verifier", "pkce-verifier")));
+
+        let refresh = refresh_form("desktop-id", "desktop-secret", "refresh-token");
+        assert!(refresh.contains(&("client_id", "desktop-id")));
+        assert!(refresh.contains(&("client_secret", "desktop-secret")));
+        assert!(refresh.contains(&("refresh_token", "refresh-token")));
     }
 
     #[test]

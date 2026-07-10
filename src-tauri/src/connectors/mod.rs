@@ -35,6 +35,7 @@ pub use oauth::ConnectFlow;
 /// returned, so a caller never receives a token that dies mid-request.
 const ACCESS_TOKEN_EXPIRY_BUFFER_SECS: i64 = 60;
 const GOOGLE_OAUTH_CLIENT_ID_ENV: &str = "GOOGLE_OAUTH_CLIENT_ID";
+const GOOGLE_OAUTH_CLIENT_SECRET_ENV: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,25 +119,39 @@ pub(crate) fn random_b64url(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(&buf)
 }
 
-/// Google OAuth client id (public client, no secret). Runtime env overrides
-/// the value baked at build time.
-pub(crate) fn google_client_id() -> String {
-    crate::os_accounts::load_local_env();
-    env_or_build_trimmed(
-        GOOGLE_OAUTH_CLIENT_ID_ENV,
-        option_env!("GOOGLE_OAUTH_CLIENT_ID"),
-    )
+/// Google Desktop OAuth credential. Google calls the second field a client
+/// secret and requires it at the token endpoint, but an installed app cannot
+/// keep it confidential: both values are shipped in the binary and neither
+/// grants user-data access without the user's authorization code or refresh
+/// token. Runtime env values override the build-time values for local testing.
+struct GoogleOAuthClient {
+    client_id: String,
+    client_secret: String,
 }
 
-fn require_client_id() -> Result<String, AppError> {
-    let client_id = google_client_id();
-    if client_id.is_empty() {
+fn google_oauth_client() -> GoogleOAuthClient {
+    crate::os_accounts::load_local_env();
+    GoogleOAuthClient {
+        client_id: env_or_build_trimmed(
+            GOOGLE_OAUTH_CLIENT_ID_ENV,
+            option_env!("GOOGLE_OAUTH_CLIENT_ID"),
+        ),
+        client_secret: env_or_build_trimmed(
+            GOOGLE_OAUTH_CLIENT_SECRET_ENV,
+            option_env!("GOOGLE_OAUTH_CLIENT_SECRET"),
+        ),
+    }
+}
+
+fn require_oauth_client() -> Result<GoogleOAuthClient, AppError> {
+    let client = google_oauth_client();
+    if client.client_id.is_empty() || client.client_secret.is_empty() {
         return Err(AppError::new(
             "connector_not_configured",
             "Google connector is not configured in this build.",
         ));
     }
-    Ok(client_id)
+    Ok(client)
 }
 
 // --- Access tokens ----------------------------------------------------------------
@@ -223,7 +238,7 @@ async fn refresh_google_access_token_with_freshness_gate(
     account_id: &str,
     accept_fresh: bool,
 ) -> Result<String, AppError> {
-    let client_id = require_client_id()?;
+    let client = require_oauth_client()?;
     let lock = refresh_lock_for(account_id);
     let _guard = lock.lock().await;
     // Re-read inside the lock: another caller may have already refreshed
@@ -238,7 +253,13 @@ async fn refresh_google_access_token_with_freshness_gate(
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match oauth::refresh(&client_id, &stored.refresh_token).await {
+        match oauth::refresh(
+            &client.client_id,
+            &client.client_secret,
+            &stored.refresh_token,
+        )
+        .await
+        {
             oauth::RefreshOutcome::Refreshed(fresh) => {
                 stored.access_token = fresh.access_token.clone();
                 // Rotation: Google occasionally issues a new refresh token;
@@ -358,7 +379,7 @@ pub async fn begin_connect(
     bundles: &[scopes::ScopeBundle],
     login_hint: Option<&str>,
 ) -> Result<ConnectorAccount, AppError> {
-    let client_id = require_client_id()?;
+    let client = require_oauth_client()?;
     let repos = crate::commands::repositories(app).await?;
 
     // Escalation short-circuit: an existing, healthy account that already
@@ -380,7 +401,14 @@ pub async fn begin_connect(
     }
 
     let requested = scopes::requested_scopes(bundles);
-    let grant = oauth::authorize(flow, &client_id, &requested, login_hint).await?;
+    let grant = oauth::authorize(
+        flow,
+        &client.client_id,
+        &client.client_secret,
+        &requested,
+        login_hint,
+    )
+    .await?;
     let email = grant.email.clone();
 
     // A login hint means the user asked to (re)connect one specific account.
