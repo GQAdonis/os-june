@@ -1,13 +1,15 @@
 # Personas implementation plan
 
-Status: ready for implementation after the real-recording quality gate in
+Status: all three implementation phases are complete behind a
+development/release feature gate. Production enablement still requires the
+real-recording quality gate and metered-job recovery gate recorded in
 [ADR-0016](adr/0016-local-persona-recognition.md). This plan implements the
 accepted behavior in [personas-design.md](personas-design.md); it does not
 replace that PRD.
 
 ## Required gates
 
-Production recognition must not start until the existing spike passes on real
+Production release enablement must not start until the existing spike passes on real
 June `system.wav` recordings from different recording sessions. The operator
 must listen to every generated cluster, label the same person consistently
 across recordings, and mark mixed clusters. A passing report must show:
@@ -22,14 +24,25 @@ asset hashes and licenses, observed score ranges, initial suggest and auto
 thresholds, supported platforms, and packaging evidence. A failed gate means
 the recognition shape or runtime is reconsidered before production code.
 
-Two product decisions remain user-owned:
+Automatic dossier and detected-prep jobs are deliberately enabled only for the
+development loop until a durable cross-restart recovery contract exists for a
+metered model response. The current local job rows prevent duplicate local
+application and keep failures visible and retryable, but a fresh model retry is
+a fresh metered attempt. Production enablement must either persist the settled
+response through June API or define an equivalent shared replay contract before
+the release flag changes.
 
-1. Permission to analyze saved June recordings locally. The spike never
-   uploads audio or embeddings, but private recordings are not opened without
-   explicit permission.
-2. Whether automatic post-note dossier updates may spend credits on the
-   configured agent model. No implementation may introduce silent metered work
-   until that behavior is confirmed.
+The user confirmed both product decisions on 2026-07-10:
+
+1. Saved June recordings may be analyzed locally. Audio, Voiceprints, and
+   embeddings remain on-device.
+2. Automatic post-note dossier updates may use the configured metered agent
+   model. Failures stay visible and retryable without changing the ready note.
+
+Each automatic dossier update rewrites the bounded dossier as consolidated
+prose. That update-time cadence is the periodic consolidation pass; June does
+not add a separate surprise model call between notes. Open Commitments remain
+structured records and are never discarded by prose consolidation.
 
 ## Delivery order
 

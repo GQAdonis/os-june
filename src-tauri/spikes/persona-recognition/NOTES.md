@@ -27,3 +27,13 @@ meetings/devices and the operator must listen for mixed or fragmented clusters.
 Do not advance the production implementation from this placeholder. Phase 1
 stays gated until real recordings show a clean enough score separation and the
 diarized listening WAVs are not materially mixed or fragmented.
+
+Development implementation note (2026-07-10): after explicit user approval,
+the pinned runtime was absorbed behind a release-disabled feature gate so the
+quality loop can run inside June. A debug smoke over a real 7:18 System WAV
+completed in 137 seconds and returned ten raw clusters. The production module
+then consolidated non-overlapping clusters above the measured 0.85 boundary;
+a repeated smoke completed in 145 seconds and reduced the set to eight,
+matching the user-confirmed 00/02/03 fragment group. Human listening review of
+the remaining clusters and another recording session are still required before
+the gate verdict above changes.
