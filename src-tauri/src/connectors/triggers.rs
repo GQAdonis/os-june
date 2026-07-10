@@ -48,13 +48,20 @@ pub fn start(app: &AppHandle) {
 async fn run(app: AppHandle) {
     let mut next_gmail = Instant::now();
     let mut next_calendar = Instant::now();
+    // Last-known "is anything subscribed" per kind, refreshed each time that
+    // kind is polled. A kind not due this iteration keeps its prior value, so
+    // the idle backoff below reflects triggers across BOTH kinds, not just the
+    // one polled this loop. Without this, an install with only Gmail triggers
+    // would be forced onto the 5-minute idle cadence on every iteration where
+    // the empty calendar poll came due before the next mail poll.
+    let mut gmail_has_triggers = false;
+    let mut calendar_has_triggers = false;
     loop {
         let backoff = battery_low_and_discharging();
         let now = Instant::now();
 
-        let mut had_triggers = false;
         if now >= next_gmail {
-            had_triggers |= poll_kind(&app, EMAIL_KIND).await;
+            gmail_has_triggers = poll_kind(&app, EMAIL_KIND).await;
             let period = if backoff {
                 BACKOFF_PERIOD
             } else {
@@ -63,15 +70,17 @@ async fn run(app: AppHandle) {
             next_gmail = Instant::now() + period;
         }
         if now >= next_calendar {
-            had_triggers |= poll_kind(&app, EVENT_KIND).await;
+            calendar_has_triggers = poll_kind(&app, EVENT_KIND).await;
             next_calendar = Instant::now() + CALENDAR_PERIOD;
         }
 
-        // Idle backoff: with nothing subscribed, wait a full backoff period
-        // before looking again instead of spinning on the short mail cadence.
+        // Idle backoff: with nothing subscribed of either kind, wait a full
+        // backoff period before looking again instead of spinning on the short
+        // mail cadence. As long as some trigger exists, honor the normal
+        // per-kind cadence so due mail polls are not delayed to the idle rate.
         let soonest = next_gmail.min(next_calendar);
         let mut sleep = soonest.saturating_duration_since(Instant::now());
-        if !had_triggers {
+        if !gmail_has_triggers && !calendar_has_triggers {
             sleep = sleep.max(BACKOFF_PERIOD);
         }
         tokio::time::sleep(sleep.max(MIN_SLEEP)).await;

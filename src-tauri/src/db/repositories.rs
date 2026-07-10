@@ -546,6 +546,23 @@ impl Repositories {
         Ok(())
     }
 
+    /// Remove the polling cursor for one account+kind so the next daemon poll
+    /// re-establishes a baseline. Used when a new subscription must not fire for
+    /// items that arrived before it existed (a fresh Gmail subscription reusing
+    /// a stale per-account history cursor left by a deleted routine).
+    pub async fn clear_trigger_cursor(
+        &self,
+        account_id: &str,
+        kind: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        query("DELETE FROM trigger_cursors WHERE account_id = ? AND kind = ?")
+            .bind(account_id)
+            .bind(kind)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     // --- Earned-autonomy grants -------------------------------------------
     //
     // Grant tokens are bearer secrets consumed by the bridge (auto-server
@@ -3997,5 +4014,44 @@ mod tests {
                 .as_deref(),
             Some("sync-token-1")
         );
+    }
+
+    #[tokio::test]
+    async fn clear_trigger_cursor_removes_only_that_account_and_kind() {
+        let repos = test_repositories().await;
+        repos
+            .set_trigger_cursor("user@example.com", "email_received", "100")
+            .await
+            .expect("set email");
+        repos
+            .set_trigger_cursor("user@example.com", "event_upcoming", "sync-1")
+            .await
+            .expect("set event");
+
+        repos
+            .clear_trigger_cursor("user@example.com", "email_received")
+            .await
+            .expect("clear email");
+
+        // The mail cursor is gone, so the next poll reseeds a fresh baseline.
+        assert!(repos
+            .trigger_cursor("user@example.com", "email_received")
+            .await
+            .expect("get email")
+            .is_none());
+        // Other kinds are untouched.
+        assert_eq!(
+            repos
+                .trigger_cursor("user@example.com", "event_upcoming")
+                .await
+                .expect("get event")
+                .as_deref(),
+            Some("sync-1")
+        );
+        // Clearing an absent cursor is a no-op, not an error.
+        repos
+            .clear_trigger_cursor("user@example.com", "email_received")
+            .await
+            .expect("clear idempotent");
     }
 }

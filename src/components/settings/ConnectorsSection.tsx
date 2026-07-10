@@ -43,6 +43,10 @@ export function ConnectorsSection() {
   const [notConfigured, setNotConfigured] = useState(false);
   const [connectOpen, setConnectOpen] = useState(false);
   const [bundles, setBundles] = useState<ConnectorScopeBundle[]>([...DEFAULT_CONNECT_BUNDLES]);
+  // Email of the account we are adding scope to (single-account incremental
+  // auth), or null for a first-time connect. Sent as the login hint so Google
+  // preselects that account and the backend's single-account guard passes.
+  const [connectHint, setConnectHint] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<ConnectorAccount | null>(null);
@@ -84,13 +88,29 @@ export function ConnectorsSection() {
     await refresh();
   }
 
+  // Open the connect dialog for a brand-new account (only offered when none is
+  // connected), or to add scope to the one existing account.
+  function openConnectNew() {
+    setBundles([...DEFAULT_CONNECT_BUNDLES]);
+    setConnectHint(null);
+    setConnectOpen(true);
+  }
+
+  function openAddAccess(account: ConnectorAccount) {
+    // Preselect what the account already holds so the dialog reads as "add to
+    // these"; the checkboxes the user adds are the new scopes.
+    setBundles(bundlesFromScopes(account.scopes));
+    setConnectHint(account.email);
+    setConnectOpen(true);
+  }
+
   async function submitConnect() {
     if (bundles.length === 0 || connecting) return;
     setConnecting(true);
     try {
-      await runConnect(bundles);
+      await runConnect(bundles, connectHint ?? undefined);
       setConnectOpen(false);
-      toast.success("Google account connected");
+      toast.success(connectHint ? "Google access updated" : "Google account connected");
     } catch (err) {
       if (isConnectorNotConfiguredError(err)) {
         setNotConfigured(true);
@@ -141,6 +161,10 @@ export function ConnectorsSection() {
       return ALL_SCOPE_BUNDLES.filter((entry) => next.has(entry));
     });
   }
+
+  // The single healthy account, if any: the one incremental "Add access" acts
+  // on and the one every connector surface binds to.
+  const connectedAccount = accounts?.find((account) => account.status === "connected") ?? null;
 
   return (
     <section className="settings-group" aria-labelledby="connectors-heading">
@@ -224,22 +248,29 @@ export function ConnectorsSection() {
         <div className="connectors-connect-row">
           {accounts && accounts.length > 0 ? (
             // Local mode v1 binds every connector server, trigger, and grant to
-            // one account, so June keeps it to a single account. Switching means
-            // disconnecting first, which clears that account's triggers and
-            // grants. Multi-account is a documented follow-up.
-            <p className="settings-row-description">
-              Local mode uses one Google account at a time. Disconnect the current one to switch to
-              a different account.
-            </p>
+            // one account, so June keeps it to a single account. Adding scope to
+            // that account is still allowed (incremental auth); switching to a
+            // different account means disconnecting first, which clears the
+            // current account's triggers and grants. Multi-account is a
+            // documented follow-up.
+            <>
+              {connectedAccount ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => openAddAccess(connectedAccount)}
+                >
+                  <IconPlusMedium size={13} aria-hidden />
+                  Add access
+                </button>
+              ) : null}
+              <p className="settings-row-description">
+                Local mode uses one Google account at a time. Disconnect the current one to switch
+                to a different account.
+              </p>
+            </>
           ) : accounts ? (
-            <button
-              type="button"
-              className="primary-action primary-solid"
-              onClick={() => {
-                setBundles([...DEFAULT_CONNECT_BUNDLES]);
-                setConnectOpen(true);
-              }}
-            >
+            <button type="button" className="primary-action primary-solid" onClick={openConnectNew}>
               <IconPlusMedium size={13} aria-hidden />
               Connect Google account
             </button>
@@ -252,8 +283,12 @@ export function ConnectorsSection() {
         onClose={() => {
           if (!connecting) setConnectOpen(false);
         }}
-        title="Connect Google account"
-        description="Pick what June may do with this account. You approve everything in Google's own sign-in, and you can disconnect any time."
+        title={connectHint ? "Add Google access" : "Connect Google account"}
+        description={
+          connectHint
+            ? `Add to what June may do with ${connectHint}. You approve everything in Google's own sign-in, and you can disconnect any time.`
+            : "Pick what June may do with this account. You approve everything in Google's own sign-in, and you can disconnect any time."
+        }
         footer={
           <>
             <button

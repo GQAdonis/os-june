@@ -410,6 +410,23 @@ pub async fn connector_trigger_set(
         .unwrap_or(serde_json::Value::Object(Default::default()));
     let config_json = serde_json::to_string(&config)
         .map_err(|e| AppError::new("connector_trigger_invalid_config", e.to_string()))?;
+
+    // A fresh Gmail subscription must baseline from the current history id, not
+    // from a stale per-account cursor a previous (now deleted) email routine
+    // left behind. When this call establishes the account's first email trigger
+    // (checked before the insert, so an edit of an account that already has one
+    // does not count), clear the cursor: the daemon then reseeds like a
+    // first-time subscription and won't fire for mail that arrived before this
+    // routine existed. Checked before writing the trigger row below.
+    let reset_email_cursor = request.kind == "email_received"
+        && !repos
+            .list_connector_triggers(None)
+            .await?
+            .iter()
+            .any(|trigger| {
+                trigger.kind == "email_received" && trigger.account_id == request.account_id
+            });
+
     let record = repos
         .set_connector_trigger(
             &request.job_id,
@@ -418,6 +435,12 @@ pub async fn connector_trigger_set(
             &config_json,
         )
         .await?;
+
+    if reset_email_cursor {
+        repos
+            .clear_trigger_cursor(&request.account_id, "email_received")
+            .await?;
+    }
     Ok(ConnectorTriggerDto {
         config,
         id: record.id,
