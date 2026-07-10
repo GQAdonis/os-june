@@ -734,6 +734,58 @@ describe("RoutinesView detail", () => {
     );
   });
 
+  it("does not write the event trigger when the cron save fails", async () => {
+    // Switching a scheduled routine to an email trigger, but the cron update
+    // fails. The trigger row and pause must not be applied: they run only after
+    // onSave succeeds, so a failed save can never leave a trigger firing a
+    // routine whose far-future schedule never persisted.
+    tauriMocks.connectorsList.mockResolvedValue([googleAccount()]);
+    mocks.listRoutines.mockResolvedValue([job()]);
+    renderView();
+    await openDetail("Morning summary");
+
+    await userEvent.click(screen.getByRole("button", { name: "Trigger type" }));
+    await userEvent.click(screen.getByRole("option", { name: "When new email arrives" }));
+    mocks.updateRoutine.mockRejectedValueOnce(new Error("gateway down"));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("gateway down")).toBeInTheDocument();
+    // No trigger subscription written, and the routine was never paused: the
+    // save aborted before any trigger side effect.
+    expect(tauriMocks.connectorTriggerSet).not.toHaveBeenCalled();
+    expect(mocks.pauseRoutine).not.toHaveBeenCalled();
+  });
+
+  it("does not mint trust when an event trigger fails validation", async () => {
+    // An autonomous routine downgraded to read only while also switched to an
+    // email trigger, but no Google account is connected. The trigger validation
+    // aborts the save, and it must abort before the trust/grant write so a
+    // rejected save never leaves a half-applied trust change behind.
+    tauriMocks.routineTrustGet.mockResolvedValue({
+      trustMode: "autonomous",
+      approvalRunCount: 3,
+      autonomousTools: ["create_draft"],
+      autonomousServers: ["june_gmail_auto_x"],
+    });
+    tauriMocks.connectorsList.mockResolvedValue([]);
+    mocks.listRoutines.mockResolvedValue([job()]);
+    renderView();
+    await openDetail("Morning summary");
+
+    await userEvent.click(screen.getByRole("button", { name: /Read only/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Trigger type" }));
+    await userEvent.click(screen.getByRole("option", { name: "When new email arrives" }));
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(
+      await screen.findByText("Connect a Google account before using an event trigger."),
+    ).toBeInTheDocument();
+    // Validation aborted first: neither the trust downgrade nor the cron update
+    // was attempted, so nothing needs rolling back.
+    expect(tauriMocks.routineTrustSet).not.toHaveBeenCalled();
+    expect(mocks.updateRoutine).not.toHaveBeenCalled();
+  });
+
   it("restores a blank local name after saving unrelated changes", async () => {
     mocks.listRoutines.mockResolvedValueOnce([job()]).mockResolvedValueOnce([job()]);
     renderView();

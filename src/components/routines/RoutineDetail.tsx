@@ -234,6 +234,27 @@ export function RoutineDetail({
     if (scheduleChanged) updates.schedule = scheduleFromDraft(draft);
     if (promptChanged) updates.prompt = prompt;
 
+    // Validate a new event trigger up front, before any persistent write. An
+    // account/scope problem must abort the save before trust is minted or the
+    // cron job is touched, so a validation failure never leaves a half-applied
+    // trust/grant change to unwind.
+    let triggerAccount: ConnectorAccount | undefined;
+    const switchingToEvent = triggerChanged && trigger.source !== "schedule";
+    if (switchingToEvent) {
+      triggerAccount = accounts.find((entry) => entry.status === "connected");
+      if (!triggerAccount) {
+        toast.error("Connect a Google account before using an event trigger.");
+        return;
+      }
+      // The account must hold the scope this trigger's daemon polls, or the
+      // routine saves but never fires (the Gmail/calendar call fails).
+      const scopeIssue = triggerScopeWarning(trigger, triggerAccount.scopes);
+      if (scopeIssue) {
+        toast.error(scopeIssue);
+        return;
+      }
+    }
+
     // The trust record before this save, so a failed cron-job update can roll
     // the trust/grant change back and keep the two in sync.
     const previousTrust = storedTrust;
@@ -282,46 +303,19 @@ export function RoutineDetail({
       }
     }
 
-    if (triggerChanged) {
-      try {
-        if (trigger.source === "schedule") {
-          if (storedTrigger) await connectorTriggerDelete(storedTrigger.id);
-          setStoredTrigger(null);
-          // Back on a real schedule: replace the far-future placeholder and
-          // let the scheduler own the job again.
-          updates.schedule = scheduleFromDraft(draft);
-          await resumeRoutine(routine.job_id).catch(() => {});
-        } else {
-          const account = accounts.find((entry) => entry.status === "connected");
-          if (!account) {
-            toast.error("Connect a Google account before using an event trigger.");
-            return;
-          }
-          // The account must hold the scope this trigger's daemon polls, or the
-          // routine saves but never fires (the Gmail/calendar call fails).
-          const scopeIssue = triggerScopeWarning(trigger, account.scopes);
-          if (scopeIssue) {
-            toast.error(scopeIssue);
-            return;
-          }
-          const stored = await connectorTriggerSet({
-            jobId: routine.job_id,
-            kind: trigger.source,
-            accountId: account.accountId,
-            config: triggerConfigFromDraft(trigger),
-          });
-          setStoredTrigger(stored);
-          if (storedTriggerDraft.source === "schedule") {
-            // Newly event-driven: park the cron schedule far in the future
-            // and pause; the trigger daemon fires the job from now on.
-            updates.schedule = eventTriggerScheduleDraft().schedule;
-            await pauseRoutine(routine.job_id).catch(() => {});
-          }
-        }
-      } catch (err) {
-        toast.error(messageFromError(err));
-        return;
-      }
+    // Fold the trigger's schedule change into the cron update so it lands
+    // atomically with the rest. The trigger row write and pause/resume are
+    // deferred until after onSave succeeds (below).
+    const switchingToSchedule = triggerChanged && trigger.source === "schedule";
+    const switchingFromSchedule = switchingToEvent && storedTriggerDraft.source === "schedule";
+    if (switchingToSchedule) {
+      // Back on a real schedule: replace the far-future placeholder so the
+      // scheduler owns the job again once it is resumed below.
+      updates.schedule = scheduleFromDraft(draft);
+    } else if (switchingFromSchedule) {
+      // Newly event-driven: park the cron schedule far in the future; the
+      // trigger daemon fires the job once its trigger row is written below.
+      updates.schedule = eventTriggerScheduleDraft().schedule;
     }
 
     try {
@@ -333,7 +327,8 @@ export function RoutineDetail({
       // change back to keep them consistent: otherwise a downgrade to read only
       // would have deleted the grant while the job kept its autonomous toolsets,
       // and gate_action parks (not denies) an orphaned grant, so an approval
-      // could still let that run act on Google.
+      // could still let that run act on Google. No trigger row was written yet,
+      // so there is nothing else to unwind.
       if (trustChanged) {
         await routineTrustSet({
           jobId: routine.job_id,
@@ -345,6 +340,36 @@ export function RoutineDetail({
           .catch(() => {});
       }
       return;
+    }
+
+    // Trigger side effects run only after the cron save succeeded, so a failed
+    // onSave can never leave a trigger firing a routine whose schedule/toolsets
+    // never saved. If a side effect here fails the routine stays dormant (the
+    // far-future schedule and paused/unpaused state already persisted), which is
+    // safe: it under-fires rather than acting on stale config. Surface it so the
+    // user can retry.
+    if (triggerChanged) {
+      try {
+        if (trigger.source === "schedule") {
+          if (storedTrigger) await connectorTriggerDelete(storedTrigger.id);
+          setStoredTrigger(null);
+          await resumeRoutine(routine.job_id).catch(() => {});
+        } else if (triggerAccount) {
+          const stored = await connectorTriggerSet({
+            jobId: routine.job_id,
+            kind: trigger.source,
+            accountId: triggerAccount.accountId,
+            config: triggerConfigFromDraft(trigger),
+          });
+          setStoredTrigger(stored);
+          if (switchingFromSchedule) {
+            await pauseRoutine(routine.job_id).catch(() => {});
+          }
+        }
+      } catch (err) {
+        toast.error(messageFromError(err));
+        return;
+      }
     }
 
     // A new or removed per-job autonomy server only takes effect once the

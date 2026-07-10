@@ -111,6 +111,41 @@ pub fn missing_scopes(granted: &[String], wanted: &[ScopeBundle]) -> Vec<&'stati
     missing
 }
 
+/// The scopes to persist for a completed grant. With `include_granted_scopes`,
+/// Google's `grant_scope` normally carries the full union of everything the
+/// account has ever granted this app, so we take it verbatim. When Google omits
+/// the field (it may on an incremental add-access grant), fall back to the
+/// scopes we requested this round UNIONED with whatever the account already
+/// held, so add-access never makes the DB forget earlier grants the token still
+/// carries (which would make trigger scope gates and the reconnect UI wrongly
+/// think routines lost access).
+pub fn resolve_granted_scopes(
+    grant_scope: Option<&str>,
+    requested: &[&str],
+    existing: Option<&[String]>,
+) -> Vec<String> {
+    if let Some(scopes) = grant_scope
+        .map(|scope| {
+            scope
+                .split_whitespace()
+                .map(str::to_string)
+                .collect::<Vec<String>>()
+        })
+        .filter(|scopes| !scopes.is_empty())
+    {
+        return scopes;
+    }
+    let mut union: Vec<String> = requested.iter().map(|scope| scope.to_string()).collect();
+    if let Some(existing) = existing {
+        for scope in existing {
+            if !union.contains(scope) {
+                union.push(scope.clone());
+            }
+        }
+    }
+    union
+}
+
 /// True when a granted scope satisfies a needed scope, directly or because it
 /// is a broader scope that implies it: a write scope already grants the
 /// matching read/draft. Mirrors the frontend `SCOPE_IMPLICATIONS` so the
@@ -187,6 +222,43 @@ mod tests {
             missing_scopes(&granted, &[ScopeBundle::GmailModify]),
             vec![GMAIL_MODIFY]
         );
+    }
+
+    #[test]
+    fn resolve_granted_scopes_prefers_the_response_union() {
+        // Google returned the full union in the scope field: take it verbatim,
+        // ignoring the requested/existing fallbacks.
+        let requested = vec![GMAIL_READONLY];
+        let existing = owned(&[CALENDAR_EVENTS]);
+        let resolved = resolve_granted_scopes(
+            Some("openid email https://www.googleapis.com/auth/gmail.readonly"),
+            &requested,
+            Some(&existing),
+        );
+        assert_eq!(resolved, vec![OPENID, EMAIL, GMAIL_READONLY]);
+    }
+
+    #[test]
+    fn resolve_granted_scopes_unions_requested_with_existing_when_response_omits_scope() {
+        // Incremental add-access grant with no scope field: the persisted scopes
+        // must keep the account's earlier calendar grant, not shrink to only the
+        // gmail scope requested this round.
+        let requested = vec![OPENID, EMAIL, GMAIL_READONLY];
+        let existing = owned(&[OPENID, EMAIL, CALENDAR_EVENTS]);
+        let resolved = resolve_granted_scopes(None, &requested, Some(&existing));
+        assert_eq!(
+            resolved,
+            vec![OPENID, EMAIL, GMAIL_READONLY, CALENDAR_EVENTS]
+        );
+    }
+
+    #[test]
+    fn resolve_granted_scopes_falls_back_to_requested_for_a_first_connect() {
+        // No response scope and no existing account (first connect): just the
+        // requested scopes.
+        let requested = vec![OPENID, EMAIL, GMAIL_READONLY];
+        let resolved = resolve_granted_scopes(Some("   "), &requested, None);
+        assert_eq!(resolved, vec![OPENID, EMAIL, GMAIL_READONLY]);
     }
 
     #[test]

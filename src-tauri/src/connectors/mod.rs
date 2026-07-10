@@ -420,15 +420,16 @@ pub async fn begin_connect(
         ));
     }
 
-    // `include_granted_scopes=true` means the response scope field carries
-    // the union of everything this app was ever granted for the account.
-    let granted_scopes: Vec<String> = grant
-        .tokens
-        .scope
-        .as_deref()
-        .map(|scope| scope.split_whitespace().map(str::to_string).collect())
-        .filter(|scopes: &Vec<String>| !scopes.is_empty())
-        .unwrap_or_else(|| requested.iter().map(|scope| scope.to_string()).collect());
+    // Persist the account's scopes. When Google omits the response scope field
+    // on an incremental grant, this unions the requested scopes with the ones
+    // the account already held, so add-access never makes the DB forget earlier
+    // grants the token still carries.
+    let existing_scopes = existing_accounts
+        .iter()
+        .find(|record| record.email.eq_ignore_ascii_case(&email))
+        .map(|record| record.scopes.as_slice());
+    let granted_scopes =
+        scopes::resolve_granted_scopes(grant.tokens.scope.as_deref(), &requested, existing_scopes);
 
     // Scope escalation on an existing grant can omit the refresh token; keep
     // the one already in custody then.
