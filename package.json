@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@9.15.4",
+  "packageManager": "pnpm@11.11.0",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "tauri": "tauri",
@@ -71,11 +71,5 @@
     "typescript": "^5.6.3",
     "vite": "^6.0.3",
     "vitest": "^2.1.8"
-  },
-  "pnpm": {
-    "neverBuiltDependencies": [
-      "@central-icons-react/round-outlined-radius-3-stroke-2",
-      "@central-icons-react/round-filled-radius-3-stroke-2"
-    ]
   }
 }
