@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
 import { hasLiveSubscription, isOnMaxPlan } from "../../lib/account-gate";
-import { errorCode } from "../../lib/errors";
 import {
   MAX_UPGRADE_BUSY_LABEL,
   MAX_UPGRADE_CONFIRM_BODY,
   MAX_UPGRADE_CONFIRM_LABEL,
   MAX_UPGRADE_CONFIRM_TITLE,
-  pollForMaxGrant,
+  MAX_UPGRADE_READY_STATUS,
+  MAX_UPGRADE_WAITING_STATUS,
 } from "../../lib/max-upgrade";
-import { osAccountsChangePlan, osAccountsOpenPortal, osAccountsUpgrade } from "../../lib/tauri";
+import { osAccountsOpenPortal, osAccountsUpgrade } from "../../lib/tauri";
 import type { AccountStatus, SubscriptionPlan } from "../../lib/tauri";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { Spinner } from "../ui/Spinner";
@@ -26,23 +26,21 @@ type GateCopy = {
   title: string;
   subtitle: string;
   cta: string;
-  /** Copy for the waiting-on-the-browser panel. Absent on the in-place Pro
-   * upgrade path, which never opens the browser. */
+  /** Copy for the waiting-on-the-browser panel. */
   waiting?: string;
   reopen?: string;
 };
 
 export function FundingGate({ account, onRefresh, onSignOut }: Props) {
-  const [openedPortal, setOpenedPortal] = useState(false);
+  const [openedBillingPage, setOpenedBillingPage] = useState(false);
   const [checking, setChecking] = useState(false);
-  // Upgrade to Max charges the saved card the moment it runs, so it only
-  // fires from an explicit confirm dialog.
+  // Max checkout only opens from an explicit confirm dialog.
   const [confirmingUpgrade, setConfirmingUpgrade] = useState(false);
   const [confirmError, setConfirmError] = useState<string>();
-  // True after a successful plan change while the webhook credit grant is
-  // still on its way; the gate lifts (via App's refresh) once it lands.
-  const [awaitingGrant, setAwaitingGrant] = useState(false);
-  const [portalError, setPortalError] = useState<string>();
+  // Opening checkout is not proof of an upgrade. Stay neutral until a
+  // refreshed OS Accounts snapshot reports Max.
+  const [awaitingMaxConfirmation, setAwaitingMaxConfirmation] = useState(false);
+  const [billingStatus, setBillingStatus] = useState<string>();
   // Remembered so "Reopen checkout" lands on the same plan the user picked.
   const [chosenPlan, setChosenPlan] = useState<SubscriptionPlan>("pro");
   const handle = account.user?.handle;
@@ -53,56 +51,42 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
   const billingRecovery =
     subscribed && typeof status === "string" && status.length > 0 && !hasLiveSubscription(account);
   const topUpRequired = subscribed && !billingRecovery && negativeBalance;
-  // Only Max may buy credits. A depleted Pro subscriber's one path is an
-  // in-place upgrade to Max (credits granted immediately, no browser round
-  // trip); a depleted Max subscriber tops up through the portal as before.
+  // Only Max may buy credits. A depleted Pro subscriber's one path is hosted
+  // Max checkout; a depleted Max subscriber tops up through the portal.
   const proUpgradeRequired = topUpRequired && !isOnMaxPlan(account);
   const maxTopUpRequired = topUpRequired && isOnMaxPlan(account);
 
-  // The waiting state wins over branch derivation: right after the plan
-  // change PATCH the snapshot reads "depleted Max" (plan flipped, webhook
-  // grant still pending), which would otherwise re-derive as the top-up
-  // prompt mid-upgrade.
-  const copy: GateCopy = awaitingGrant
+  const copy: GateCopy = billingRecovery
     ? {
-        title: "Setting up Max",
-        subtitle: "Your upgrade went through. Your new credits are on the way.",
-        cta: "",
+        title: "Update billing",
+        subtitle: "Your payment needs attention. Update billing to keep using June.",
+        cta: "Manage billing",
+        waiting: "Waiting for your billing update",
+        reopen: "Reopen billing",
       }
-    : billingRecovery
+    : proUpgradeRequired
       ? {
-          title: "Update billing",
-          subtitle: "Your payment needs attention. Update billing to keep using June.",
-          cta: "Manage billing",
-          waiting: "Waiting for your billing update",
-          reopen: "Reopen billing",
+          title: "Upgrade to Max",
+          subtitle:
+            "You have used your Pro credits for this cycle. Upgrade to Max for 5x the monthly usage.",
+          cta: "Upgrade to Max",
         }
-      : proUpgradeRequired
+      : maxTopUpRequired
         ? {
-            // No waiting/reopen copy: the in-place upgrade never opens the
-            // browser (openedPortal stays false). Failures show inside the
-            // confirm dialog, which stays open as the retry affordance.
-            title: "Upgrade to Max",
-            subtitle:
-              "You have used your Pro credits for this cycle. Upgrade to Max for 5x the monthly usage.",
-            cta: "Upgrade to Max",
+            title: "Top up credits",
+            subtitle: "Your credit balance is below zero. Top up credits to keep using June.",
+            cta: "Top up credits",
+            waiting: "Waiting for your top-up",
+            reopen: "Reopen account portal",
           }
-        : maxTopUpRequired
-          ? {
-              title: "Top up credits",
-              subtitle: "Your credit balance is below zero. Top up credits to keep using June.",
-              cta: "Top up credits",
-              waiting: "Waiting for your top-up",
-              reopen: "Reopen account portal",
-            }
-          : {
-              title: "Upgrade to continue",
-              subtitle:
-                "Your starter credits are used up. Upgrade to a paid plan to keep using June.",
-              cta: "Upgrade to Pro",
-              waiting: "Waiting for your upgrade",
-              reopen: "Reopen checkout",
-            };
+        : {
+            title: "Upgrade to continue",
+            subtitle:
+              "Your starter credits are used up. Upgrade to a paid plan to keep using June.",
+            cta: "Upgrade to Pro",
+            waiting: "Waiting for your upgrade",
+            reopen: "Reopen checkout",
+          };
   // The Max upsell link only belongs on the Free/subscribe path; a depleted Pro
   // user already has exactly one path (upgrade to Max), and depleted Max users
   // top up. Neither shows a second affordance.
@@ -115,8 +99,16 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
     return () => window.clearInterval(interval);
   }, [onRefresh]);
 
-  async function handleOpenPortal(plan: SubscriptionPlan = chosenPlan) {
-    setPortalError(undefined);
+  useEffect(() => {
+    if (!awaitingMaxConfirmation || !isOnMaxPlan(account)) return;
+    // Match App's checkout confirmation mechanism: only the refreshed account
+    // snapshot may turn neutral waiting copy into success copy.
+    setAwaitingMaxConfirmation(false);
+    setBillingStatus(MAX_UPGRADE_READY_STATUS);
+  }, [account, awaitingMaxConfirmation]);
+
+  async function handleOpenBillingPage(plan: SubscriptionPlan = chosenPlan) {
+    setBillingStatus(undefined);
     try {
       if (billingRecovery || maxTopUpRequired) {
         await osAccountsOpenPortal();
@@ -124,42 +116,25 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
         setChosenPlan(plan);
         await osAccountsUpgrade(plan);
       }
-      setOpenedPortal(true);
+      setOpenedBillingPage(true);
     } catch (error) {
-      setPortalError(messageFromError(error));
+      setBillingStatus(messageFromError(error));
     }
   }
 
-  // In-place Pro -> Max upgrade, run from the confirm dialog only. The PATCH
-  // resolves before the webhook grants the new credits, so on success the
-  // gate flips to a waiting panel and polls until the balance reflects Max;
-  // App's refresh then lifts the gate. Real failures rethrow so the dialog
-  // stays open showing the error next to its retry affordance.
+  // Hosted Pro -> Max checkout, run from the confirm dialog only. Opening the
+  // browser enters a neutral waiting state; refreshed OS Accounts status is
+  // the only authority for announcing Max. Real failures rethrow so the
+  // dialog stays open showing the error next to its retry affordance.
   async function handleUpgradeToMax() {
-    const baselineCredits = account.balance?.credits ?? 0;
     try {
-      await osAccountsChangePlan("max");
+      await osAccountsUpgrade("max");
     } catch (error) {
-      const code = errorCode(error);
-      if (code === "already_on_plan" || code === "subscription_required") {
-        // Stale snapshot: the server disagrees about the current plan.
-        // Refresh and let the gate re-derive the right prompt (top up or
-        // subscribe) instead of surfacing an error.
-        await onRefresh();
-        return;
-      }
       setConfirmError(messageFromError(error));
       throw error;
     }
-    setAwaitingGrant(true);
-    // No separate refresh here: the poll's first tick refreshes immediately,
-    // and a parallel request could resolve out of order and overwrite the
-    // poll's fresher snapshot with a stale pre-grant one.
-    void pollForMaxGrant(onRefresh, baselineCredits).then(() => {
-      // Landed: the poll's refresh already lifted the gate. Timed out: drop
-      // back to the prompt state; the periodic refresh keeps reconciling.
-      setAwaitingGrant(false);
-    });
+    setChosenPlan("max");
+    setAwaitingMaxConfirmation(true);
   }
 
   async function handleCheckNow() {
@@ -181,21 +156,33 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
         <p className="welcome-subtitle">{copy.subtitle}</p>
 
         <div className="welcome-providers">
-          {awaitingGrant ? (
-            <div className="welcome-auth-progress" role="status" aria-live="polite">
-              <span className="welcome-progress-label">
-                <Spinner className="welcome-spinner" aria-hidden />
-                <span>Waiting for your new credits</span>
-              </span>
-              <button
-                type="button"
-                className="welcome-cancel-btn"
-                disabled={checking}
-                onClick={() => void handleCheckNow()}
-              >
-                {checking ? "Checking..." : "Check again"}
-              </button>
-            </div>
+          {awaitingMaxConfirmation ? (
+            <>
+              <div className="welcome-auth-progress" role="status" aria-live="polite">
+                <span className="welcome-progress-label">
+                  <Spinner className="welcome-spinner" aria-hidden />
+                  <span>{MAX_UPGRADE_WAITING_STATUS}</span>
+                </span>
+                <button
+                  type="button"
+                  className="welcome-cancel-btn"
+                  disabled={checking}
+                  onClick={() => void handleCheckNow()}
+                >
+                  {checking ? "Checking..." : "Check again"}
+                </button>
+              </div>
+              <p className="funding-hint">
+                Nothing happening?{" "}
+                <button
+                  type="button"
+                  className="funding-gate-link"
+                  onClick={() => void handleOpenBillingPage("max")}
+                >
+                  Reopen checkout
+                </button>
+              </p>
+            </>
           ) : proUpgradeRequired ? (
             <button
               type="button"
@@ -207,7 +194,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
             >
               {copy.cta}
             </button>
-          ) : openedPortal ? (
+          ) : openedBillingPage ? (
             <>
               <div className="welcome-auth-progress" role="status" aria-live="polite">
                 <span className="welcome-progress-label">
@@ -228,7 +215,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
                 <button
                   type="button"
                   className="funding-gate-link"
-                  onClick={() => void handleOpenPortal()}
+                  onClick={() => void handleOpenBillingPage()}
                 >
                   {copy.reopen}
                 </button>
@@ -239,7 +226,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
               <button
                 type="button"
                 className="primary-action"
-                onClick={() => void handleOpenPortal(offerMaxPlan ? "pro" : chosenPlan)}
+                onClick={() => void handleOpenBillingPage(offerMaxPlan ? "pro" : chosenPlan)}
               >
                 {copy.cta}
               </button>
@@ -249,7 +236,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
                   <button
                     type="button"
                     className="funding-gate-link"
-                    onClick={() => void handleOpenPortal("max")}
+                    onClick={() => void handleOpenBillingPage("max")}
                   >
                     Upgrade to Max
                   </button>
@@ -259,7 +246,7 @@ export function FundingGate({ account, onRefresh, onSignOut }: Props) {
           )}
         </div>
 
-        {portalError ? <p className="welcome-status">{portalError}</p> : null}
+        {billingStatus ? <p className="welcome-status">{billingStatus}</p> : null}
 
         <p className="welcome-terms">
           {handle ? <>Signed in as @{handle}. </> : null}

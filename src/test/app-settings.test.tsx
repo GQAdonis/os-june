@@ -945,13 +945,14 @@ describe("AppSettings", () => {
   function renderProBillingSettings(
     onAccountRefresh: () => Promise<AccountStatus | undefined> = vi.fn(async () => undefined),
   ) {
-    render(
+    const proAccount: AccountStatus = {
+      ...signedInAccount,
+      balance: { credits: 1200, usdMillis: 1200, usageRemainingPercent: 40 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    const settings = (account: AccountStatus) => (
       <AppSettings
-        account={{
-          ...signedInAccount,
-          balance: { credits: 1200, usdMillis: 1200, usageRemainingPercent: 40 },
-          subscription: { subscribed: true, status: "active", plan: "pro" },
-        }}
+        account={account}
         accountLoading={false}
         sourceMode="microphoneOnly"
         checkingSourceReadiness={false}
@@ -959,13 +960,16 @@ describe("AppSettings", () => {
         onAccountRefresh={onAccountRefresh}
         onSourceModeChange={vi.fn()}
         onEnableSystemAudio={vi.fn()}
-      />,
+      />
     );
-    return onAccountRefresh;
+    const view = render(settings(proAccount));
+    return {
+      rerenderAccount: (account: AccountStatus) => view.rerender(settings(account)),
+    };
   }
 
   const MAX_CONFIRM_BODY =
-    "Max is $100 per month, charged to your saved card now. Your billing cycle restarts today.";
+    "Max is $100 per month. Checkout opens in your browser so you can review and complete the upgrade.";
 
   it("never changes plans without an explicit confirm", async () => {
     const user = userEvent.setup();
@@ -974,75 +978,66 @@ describe("AppSettings", () => {
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
 
-    // The CTA opens the charge confirm; nothing has been billed yet.
+    // The CTA opens the checkout confirm; no checkout has opened yet.
     expect(await screen.findByText(MAX_CONFIRM_BODY)).toBeInTheDocument();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "Cancel" }));
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
     expect(screen.queryByText(MAX_CONFIRM_BODY)).toBeNull();
   });
 
-  it("lets a Pro subscriber upgrade in place to Max after confirming", async () => {
+  it("lets a Pro subscriber open hosted Max checkout after confirming", async () => {
     const user = userEvent.setup();
-    // The poll's first refresh already shows the granted Max balance.
-    const onAccountRefresh = renderProBillingSettings(
-      vi.fn(async () => ({
-        ...signedInAccount,
-        balance: { credits: 50_000, usdMillis: 50_000, usageRemainingPercent: 100 },
-        subscription: { subscribed: true, status: "active", plan: "max" },
-      })),
-    );
+    renderProBillingSettings();
 
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
-    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
+    await user.click(await screen.findByRole("button", { name: "Open checkout" }));
 
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledTimes(1);
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledWith("max");
-    // In-place change is not a browser checkout.
-    expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
-    // The PATCH lands before the webhook grant, so the poll refreshes until
-    // the balance reflects Max and the status flips to "ready".
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledTimes(1);
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
     expect(
-      await screen.findByText("You are on Max now. Your new credits are ready."),
+      await screen.findByText("Waiting for checkout to complete in your browser."),
     ).toBeInTheDocument();
-    // Single ordered refresh path: the poll's immediate tick is the only
-    // refresh, so a stale parallel response can never overwrite the granted
-    // Max snapshot.
-    await waitFor(() => expect(onAccountRefresh).toHaveBeenCalledTimes(1));
+    // Opening checkout is not proof that the plan changed.
+    expect(screen.queryByText("Max is active.")).toBeNull();
   });
 
-  it("shows a pending confirm state and blocks double-fires while the change is in flight", async () => {
+  it("shows a pending confirm state and blocks double-fires while checkout opens", async () => {
     const user = userEvent.setup();
-    let resolveChange: ((value: unknown) => void) | undefined;
-    mocks.osAccountsChangePlan.mockImplementation(
+    let resolveUpgrade: ((value: unknown) => void) | undefined;
+    mocks.osAccountsUpgrade.mockImplementation(
       () =>
         new Promise((resolve) => {
-          resolveChange = resolve;
+          resolveUpgrade = resolve;
         }),
     );
     renderProBillingSettings();
 
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
-    const confirm = await screen.findByRole("button", { name: "Upgrade now" });
+    const confirm = await screen.findByRole("button", { name: "Open checkout" });
     await user.click(confirm);
 
-    // Busy feedback while the PATCH is in flight, disabled against a second
-    // fire; a rapid second click must not charge twice.
-    const busy = await screen.findByRole("button", { name: "Upgrading..." });
+    // Busy feedback while the browser handoff is in flight, disabled against
+    // a second fire.
+    const busy = await screen.findByRole("button", { name: "Opening checkout..." });
     expect(busy).toBeDisabled();
     fireEvent.click(busy);
-    expect(mocks.osAccountsChangePlan).toHaveBeenCalledTimes(1);
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledTimes(1);
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
 
-    resolveChange?.({ subscribed: true, plan: "max", status: "active" });
+    resolveUpgrade?.(undefined);
     await waitFor(() => expect(screen.queryByText(MAX_CONFIRM_BODY)).toBeNull());
   });
 
-  it("keeps the confirm open showing the failure when the change errors", async () => {
+  it("keeps the confirm open showing the failure when checkout cannot open", async () => {
     const user = userEvent.setup();
-    mocks.osAccountsChangePlan.mockRejectedValueOnce({
+    mocks.osAccountsUpgrade.mockRejectedValueOnce({
       code: "network_error",
       message: "Could not reach OS Accounts.",
     });
@@ -1050,30 +1045,43 @@ describe("AppSettings", () => {
 
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
-    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
+    await user.click(await screen.findByRole("button", { name: "Open checkout" }));
 
     // The dialog stays up as the retry affordance, with the error inside it.
     expect(await screen.findByText("Could not reach OS Accounts.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Upgrade now" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Open checkout" })).toBeEnabled();
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 
-  it("treats already_on_plan as a benign refresh, not an error", async () => {
+  it("announces Max only after a refreshed account snapshot confirms it", async () => {
     const user = userEvent.setup();
-    const onAccountRefresh = vi.fn(async () => undefined);
-    mocks.osAccountsChangePlan.mockRejectedValueOnce({
-      code: "already_on_plan",
-      message: "You are already on this plan.",
+    const maxAccount: AccountStatus = {
+      ...signedInAccount,
+      balance: { credits: 50_000, usdMillis: 50_000, usageRemainingPercent: 100 },
+      subscription: { subscribed: true, status: "active", plan: "max" },
+    };
+    let rerenderAccount: ((account: AccountStatus) => void) | undefined;
+    const onAccountRefresh = vi.fn(async () => {
+      rerenderAccount?.(maxAccount);
+      return maxAccount;
     });
-    renderProBillingSettings(onAccountRefresh);
+    ({ rerenderAccount } = renderProBillingSettings(onAccountRefresh));
 
     await user.click(screen.getByRole("tab", { name: "Billing" }));
     await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
-    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
+    await user.click(await screen.findByRole("button", { name: "Open checkout" }));
 
-    // Benign copy plus a refresh so the card shows the server's current plan.
-    expect(await screen.findByText("You are already on Max.")).toBeInTheDocument();
-    await waitFor(() => expect(onAccountRefresh).toHaveBeenCalled());
-    expect(screen.queryByText("You are already on this plan.")).toBeNull();
+    expect(
+      await screen.findByText("Waiting for checkout to complete in your browser."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Max is active.")).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "Refresh usage" }));
+
+    expect(await screen.findByText("Max is active.")).toBeInTheDocument();
+    expect(onAccountRefresh).toHaveBeenCalledOnce();
+    expect(mocks.osAccountsUpgrade).toHaveBeenCalledWith("max");
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 
   it("shows Max subscribers only billing management, no upgrade path", async () => {
