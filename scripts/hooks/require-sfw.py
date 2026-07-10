@@ -17,7 +17,9 @@ PNPM_GUARDED = re.compile(r"^pnpm\s+(add|update|up|dlx)\b")
 # `pnpm install <pkg>` resolves a new package; a bare/flag-only install does not.
 PNPM_INSTALL_PKG = re.compile(r"^pnpm\s+(i|install)\s+[^-\s]")
 CARGO_GUARDED = re.compile(r"^cargo\s+(add|install|update)\b")
-WRONG_PM = re.compile(r"^(bun|yarn)\s+(add|install|remove|update|upgrade)\b")
+# npx / npm exec download and run registry code that never touches a lockfile.
+NPX_GUARDED = re.compile(r"^(npx|npm\s+exec)\b")
+WRONG_PM = re.compile(r"^(bun|bunx|yarn)\s+(add|install|remove|update|upgrade|\S+)\b")
 # npm project installs would create package-lock.json; global tool installs are fine.
 NPM_LOCAL_INSTALL = re.compile(r"^npm\s+(i|install|ci|add)\b(?!.*(\s-g\b|\s--global\b))")
 
@@ -32,7 +34,12 @@ def check(command):
                 "This repo is pnpm-only (no bun/npm/yarn lockfiles). Use "
                 "`sfw pnpm add <pkg>` instead; see spec/package-install-security.md."
             )
-        if PNPM_GUARDED.match(seg) or PNPM_INSTALL_PKG.match(seg) or CARGO_GUARDED.match(seg):
+        if (
+            PNPM_GUARDED.match(seg)
+            or PNPM_INSTALL_PKG.match(seg)
+            or CARGO_GUARDED.match(seg)
+            or NPX_GUARDED.match(seg)
+        ):
             return (
                 "New-package installs must go through Socket Firewall: rerun as "
                 f"`sfw {seg}` (one-time setup: `npm i -g sfw`). See "

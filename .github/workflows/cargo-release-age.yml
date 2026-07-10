@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - "**/Cargo.toml"
       - "src-tauri/Cargo.lock"
       - "june-api/Cargo.lock"
       - "scripts/check-cargo-release-age.py"
@@ -23,6 +24,13 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}
         run: git fetch --depth=1 origin "$BASE_REF"
+      # A manifest-only change with a stale (or deleted) Cargo.lock would let
+      # later builds resolve fresh crates that never saw the cooldown check,
+      # so lockfiles must exist and match their manifests.
+      - name: Verify lockfiles are in sync with manifests
+        run: |
+          cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
+          cargo metadata --locked --format-version 1 --manifest-path june-api/Cargo.toml > /dev/null
       - name: Check release age of new crate versions
         env:
           BASE_REF: ${{ github.base_ref || 'main' }}

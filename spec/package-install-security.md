@@ -2,8 +2,9 @@
 
 **Rule.** `pnpm` is the only JS/TS package manager in this repo — never
 introduce bun/npm/yarn lockfiles. Every command that brings new package code
-into the tree (`pnpm add`, `pnpm update`, `pnpm dlx`, `cargo add`,
-`cargo install`, `cargo update`) runs through Socket Firewall:
+into the tree or executes registry code (`pnpm add`, `pnpm update`,
+`pnpm dlx`, `npx` / `npm exec`, `cargo add`, `cargo install`,
+`cargo update`) runs through Socket Firewall:
 `sfw <command>`. Dependency versions younger than 7 days are refused by
 `minimumReleaseAge` in `pnpm-workspace.yaml`; cargo gets the same cooldown
 from `scripts/check-cargo-release-age.py` (cargo has no native equivalent —
@@ -25,7 +26,8 @@ harnesses follow this spec directly. For an urgent security patch inside the
 `scripts/cargo-release-age-exclude.txt`. Commit either change with the
 reason. New dependency
 build scripts are deny-by-default: read the script before approving it in
-`allowBuilds` in `pnpm-workspace.yaml`.
+`allowBuilds` in `pnpm-workspace.yaml`, and version-qualify allow entries
+(`name@<version>: true`) so a bumped version's script needs a fresh review.
 
 **Exceptions.** Lockfile-respecting restores (`pnpm install` with no package
 argument, `--frozen-lockfile` in CI, `cargo build`/`cargo fetch` against a

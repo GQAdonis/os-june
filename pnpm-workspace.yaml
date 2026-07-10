@@ -10,7 +10,9 @@ minimumReleaseAge: 10080
 allowBuilds:
   '@central-icons-react/round-outlined-radius-3-stroke-2': false
   '@central-icons-react/round-filled-radius-3-stroke-2': false
-  # validates/provisions the platform binary used by vite and vitest
-  esbuild: true
+  # validates/provisions the platform binary used by vite and vitest;
+  # version-qualified so a bumped esbuild fails install until its new
+  # version's script is reviewed and re-approved here
+  esbuild@0.21.5 || 0.25.12: true
   # postinstall only plays a cosmetic terminal animation
   unicode-animations: false

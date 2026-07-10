@@ -106,8 +106,10 @@ def main():
         try:
             current = parse_lock(open(path).read())
         except FileNotFoundError:
-            print(f"warning: {path} missing, skipped", file=sys.stderr)
-            continue
+            # Fail closed: a deleted lockfile would let later builds resolve
+            # fresh crates that never saw this check.
+            print(f"error: {path} missing", file=sys.stderr)
+            return 1
         new_packages |= current - parse_lock(base_lock(args.base, path))
 
     violations = []

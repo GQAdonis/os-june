@@ -12,6 +12,7 @@ on:
       - "biome.json"
       - "package.json"
       - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - "public/**"
       - "scripts/**"
       - "src/**"
@@ -28,6 +29,7 @@ on:
       - "biome.json"
       - "package.json"
       - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
       - "public/**"
       - "scripts/**"
       - "src/**"
@@ -139,7 +141,7 @@ jobs:
           changed_files="$(git diff --name-only "$BASE" HEAD)"
           # Frontend checks (biome, typecheck, vitest) read src/ and scripts/, never
           # src-tauri/, so a src-tauri-only diff skips them and vice versa.
-          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/desktop\.yml$|biome\.json$|hud\.html$|index\.html$|meeting-hud\.html$|package\.json$|pnpm-lock\.yaml$|public/|scripts/|src/|tsconfig\.json$|vite\.config\.ts$)'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/desktop\.yml$|biome\.json$|hud\.html$|index\.html$|meeting-hud\.html$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|public/|scripts/|src/|tsconfig\.json$|vite\.config\.ts$)'; then
             echo "frontend=true" >> "$GITHUB_OUTPUT"
           else
             echo "frontend=false" >> "$GITHUB_OUTPUT"
@@ -149,7 +151,7 @@ jobs:
           else
             echo "rust=false" >> "$GITHUB_OUTPUT"
           fi
-          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/desktop\.yml$|hud\.html$|index\.html$|meeting-hud\.html$|package\.json$|pnpm-lock\.yaml$|public/|scripts/|src/|src-tauri/|tsconfig\.json$|vite\.config\.ts$)'; then
+          if printf '%s\n' "$changed_files" | grep -Eq '^(\.github/workflows/desktop\.yml$|hud\.html$|index\.html$|meeting-hud\.html$|package\.json$|pnpm-lock\.yaml$|pnpm-workspace\.yaml$|public/|scripts/|src/|src-tauri/|tsconfig\.json$|vite\.config\.ts$)'; then
             echo "desktop_bundle=true" >> "$GITHUB_OUTPUT"
           else
             echo "desktop_bundle=false" >> "$GITHUB_OUTPUT"
