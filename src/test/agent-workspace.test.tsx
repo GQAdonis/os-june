@@ -3378,6 +3378,55 @@ describe("AgentWorkspace", () => {
     expect(await screen.findByText("Manual CI investigation")).toBeInTheDocument();
   });
 
+  it("uses the preview as the display title for a titleless existing-session follow-up", async () => {
+    const statusDetails: AgentSessionStatusDetail[] = [];
+    const handleStatus = (event: Event) => {
+      statusDetails.push((event as CustomEvent<AgentSessionStatusDetail>).detail);
+    };
+    window.addEventListener(AGENT_SESSION_STATUS_EVENT, handleStatus);
+    const preview = "Investigate the desktop release failure";
+    const titlelessSession = {
+      id: "session-preview-fallback",
+      title: "",
+      preview,
+      last_active: "2026-06-04T12:00:00Z",
+    };
+    mocks.listHermesSessions.mockResolvedValue([titlelessSession]);
+    const user = userEvent.setup();
+
+    try {
+      render(<AgentWorkspace initialSession={titlelessSession} />);
+
+      await user.type(
+        await screen.findByRole("textbox", { name: "Message June" }),
+        "Check the signing step too",
+      );
+      await user.click(screen.getByRole("button", { name: "Send message" }));
+
+      await waitFor(() =>
+        expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+          session_id: "runtime-session-1",
+          text: "Check the signing step too",
+        }),
+      );
+      expect(statusDetails).toContainEqual(
+        expect.objectContaining({
+          sessionId: "session-preview-fallback",
+          status: "running",
+          title: preview,
+        }),
+      );
+      expect(statusDetails).not.toContainEqual(
+        expect.objectContaining({
+          sessionId: "session-preview-fallback",
+          title: "Untitled session",
+        }),
+      );
+    } finally {
+      window.removeEventListener(AGENT_SESSION_STATUS_EVENT, handleStatus);
+    }
+  });
+
   it("skips the durable exchange marker when title persistence fails", async () => {
     const rawTitle = "I need you to inspect the flaky tests";
     mocks.listHermesSessions.mockResolvedValue([

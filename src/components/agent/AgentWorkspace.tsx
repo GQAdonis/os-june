@@ -5929,11 +5929,14 @@ export function AgentWorkspace({
         : attachmentOnlyTitle
           ? Promise.resolve(attachmentOnlyTitle)
           : agentSessionTitleForPrompt(titleContent).then((suggestion) => suggestion.title);
+    const listedTargetSession = targetSessionId
+      ? hermesSessionItemsRef.current.find((session) => session.id === targetSessionId)
+      : undefined;
     const fallbackSessionTitle = targetSessionId
       ? explicitSession?.title?.trim() ||
-        hermesSessionItemsRef.current
-          .find((session) => session.id === targetSessionId)
-          ?.title?.trim() ||
+        explicitSession?.preview?.trim() ||
+        listedTargetSession?.title?.trim() ||
+        listedTargetSession?.preview?.trim() ||
         "Untitled session"
       : options?.issueReport
         ? "Issue report"

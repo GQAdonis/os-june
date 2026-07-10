@@ -2213,10 +2213,7 @@ export function App() {
     // effort) so the session also shows in the agent history sidebar even if
     // the note chat's own registration hadn't landed yet — never blocks the
     // handoff, so a slow or failed registration can't stall or dead-end it.
-    void ensureHermesBridgeSession({
-      sessionId,
-      title: noteRef.title.trim() || "Note chat",
-    }).catch(() => undefined);
+    void ensureHermesBridgeSession({ sessionId }).catch(() => undefined);
     setActiveAgentSession({ id: sessionId, title: noteRef.title.trim() || undefined });
     setActiveView("agent");
   }

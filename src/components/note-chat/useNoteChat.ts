@@ -357,7 +357,6 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
           appliedModelIdRef.current = modelId;
           bridgeEnsuredRef.current = await ensureHermesBridgeSession({
             sessionId,
-            title: noteTitle.trim() || "Note chat",
             model: modelId,
           })
             .then(() => true)
@@ -369,7 +368,6 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         if (!bridgeEnsuredRef.current) {
           bridgeEnsuredRef.current = await ensureHermesBridgeSession({
             sessionId,
-            title: noteTitle.trim() || "Note chat",
             ...(appliedModelIdRef.current ? { model: appliedModelIdRef.current } : {}),
           })
             .then(() => true)
