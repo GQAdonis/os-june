@@ -44,23 +44,19 @@ export function makeTabId(): string {
 }
 
 // Apply a drag-reorder of the on-strip tabs. `orderedVisibleIds` is the strip's
-// visible tabs in their new left-to-right order; tabs folded into the overflow
-// popover keep their positions. The visible tabs' slots in the full array are
-// reassigned in the new order, so hidden tabs never move relative to the rest.
+// visible tabs in their new left-to-right order; they become the leading prefix
+// of the full array (so re-layout reproduces the strip exactly, even when the
+// active tab had been pinned onto the strip from overflow), and the remaining
+// tabs follow in their existing relative order.
 export function reorderTabs(tabs: Tab[], orderedVisibleIds: string[]): Tab[] {
   const byId = new Map(tabs.map((tab) => [tab.id, tab]));
-  const ordered = orderedVisibleIds.filter((id) => byId.has(id));
-  const slots: number[] = [];
+  const ordered = [...new Set(orderedVisibleIds)].filter((id) => byId.has(id));
   const orderedSet = new Set(ordered);
-  tabs.forEach((tab, index) => {
-    if (orderedSet.has(tab.id)) slots.push(index);
-  });
-  if (slots.length !== ordered.length) return tabs;
-  if (ordered.every((id, i) => tabs[slots[i]]!.id === id)) return tabs;
-  const next = [...tabs];
-  ordered.forEach((id, i) => {
-    next[slots[i]!] = byId.get(id)!;
-  });
+  const next = [
+    ...ordered.map((id) => byId.get(id)!),
+    ...tabs.filter((tab) => !orderedSet.has(tab.id)),
+  ];
+  if (next.every((tab, index) => tab === tabs[index])) return tabs;
   return next;
 }
 

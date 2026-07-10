@@ -182,6 +182,10 @@ export function TabBar({
 
   function abortDrag() {
     if (!dragRef.current) return;
+    if (settleTimerRef.current !== null) {
+      window.clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
     dragRef.current = null;
     clearDragTransforms();
     unlockSelection();
@@ -189,8 +193,10 @@ export function TabBar({
   }
 
   function setMeasuredAvailable(width: number) {
-    // A live drag can't survive its slot geometry changing under it.
-    if (dragRef.current?.started) abortDrag();
+    // A live drag can't survive its slot geometry changing under it — but a
+    // settling drag is already dropped and commits momentarily, so let it.
+    const drag = dragRef.current;
+    if (drag?.started && !drag.settling) abortDrag();
     if (layoutFrozenRef.current) {
       pendingAvailableRef.current = width;
       return;

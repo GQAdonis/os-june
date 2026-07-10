@@ -102,11 +102,20 @@ describe("reorderTabs", () => {
     expect(ids(reorderTabs(tabs, ["b", "c", "a"]))).toEqual(["b", "c", "a"]);
   });
 
-  it("keeps overflowed (non-visible) tabs in their slots", () => {
-    // a, b, d are on the strip; c and e sit in the overflow popover. Swapping
-    // a and d must leave c and e exactly where they were.
+  it("keeps overflowed (non-visible) tabs in their relative order after the strip", () => {
+    // a, b, d are on the strip; c and e sit in the overflow popover. The dropped
+    // strip order [d, b, a] leads, then c and e follow in their existing order.
     const tabs = [tab("a"), tab("b"), tab("c"), tab("d"), tab("e")];
-    expect(ids(reorderTabs(tabs, ["d", "b", "a"]))).toEqual(["d", "b", "c", "a", "e"]);
+    expect(ids(reorderTabs(tabs, ["d", "b", "a"]))).toEqual(["d", "b", "a", "c", "e"]);
+  });
+
+  it("preserves the dropped order when the active tab was pinned from overflow", () => {
+    // Full order a..e with active e pinned onto the strip by layout: strip shows
+    // [a, b, e]. Dragging e to the front must commit exactly that strip order —
+    // slot-index reassignment used to scatter it to [e, a, c, d, b], which
+    // re-layout then rendered as [e, a, c].
+    const tabs = [tab("a"), tab("b"), tab("c"), tab("d"), tab("e")];
+    expect(ids(reorderTabs(tabs, ["e", "a", "b"]))).toEqual(["e", "a", "b", "c", "d"]);
   });
 
   it("returns the same array when the order is unchanged", () => {
