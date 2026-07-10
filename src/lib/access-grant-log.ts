@@ -1,59 +1,42 @@
 /**
- * June's local record of the approval grants the user has answered — the data
- * source behind the "Access grants" settings page (JUN-206).
+ * June's local record of the "Always approve" answers the user has given — the
+ * enrichment source behind the "Access grants" settings page (JUN-206).
  *
- * When the user approves a dangerous-command request, the choice ("once" /
- * "session" / "always") goes to the Hermes runtime over `approval.respond`.
- * The runtime keeps "always" answers durably (its config `command_allowlist`)
- * and "session" answers in the session's memory, but June itself kept no
- * record — so there was nothing to show a user asking "what have I granted?".
- * This module is that record: every approved request is logged here with the
- * scope (this session vs app-wide) and duration (one time vs ongoing) implied
- * by the choice.
+ * When the user answers a dangerous-command approval with "Always approve",
+ * the runtime persists the pattern into its config `command_allowlist`, but
+ * that list carries no history: nothing says when the grant was made or which
+ * command triggered it. This log is that record. Only "always" answers are
+ * logged: they are the persistent, app-wide, ongoing grants the settings page
+ * manages. One-time and session approvals expire on their own (consumed by the
+ * request, or with the session) and are deliberately not tracked.
  *
  * Boundaries (what this log is NOT):
- * - It is NOT the source of truth for app-wide grants. That is the runtime's
- *   `command_allowlist`; the settings page reads and revokes it there. Log
- *   entries with choice "always" exist only to enrich those rows (when the
- *   grant was made, the command that triggered it).
- * - It cannot retract a session-scoped approval from a running session; the
- *   runtime holds that in memory with no revoke API. Session entries track
- *   what was granted; they expire with the session.
+ * - It is NOT the source of truth for the grants. That is the runtime's
+ *   `command_allowlist`; the settings page reads and revokes it there. Entries
+ *   here only enrich those rows (when the grant was made, the command that
+ *   triggered it).
  *
- * localStorage (not the backend) because the runtime's own session store is
+ * localStorage (not the backend) because the runtime's own config store is
  * machine-local too, and the log must be readable synchronously on render —
  * the same reasoning as `agent-session-modes.ts`. Framework-agnostic with a
  * `subscribe`/`getSnapshot` surface so React binds via `useSyncExternalStore`
  * and tests drive it directly.
  */
 
-import type { AgentApprovalChoice } from "./agent-chat-runtime";
-
 const STORAGE_KEY = "june.agent.accessGrants";
 
-/** Cap on stored entries. One-time history is the unbounded part; ongoing
- * grants are few by nature. Eviction drops the oldest entries first. */
+/** Cap on stored entries. Ongoing grants are few by nature, but the cap keeps
+ * a pathological history bounded. Eviction drops the oldest entries first. */
 export const ACCESS_GRANT_LOG_CAP = 200;
 
-/** Where a grant applies. Derived from the approval choice: "always" is
- * app-wide; "once" and "session" never outlive the session that asked. */
-export type AccessGrantScope = "session" | "app-wide";
-
-/** How long a grant lasts. "once" is consumed by the single command that asked;
- * "session" and "always" keep allowing matching requests. */
-export type AccessGrantDuration = "one-time" | "ongoing";
-
-/** An approval choice that granted something (i.e. not "deny"). */
-export type AccessGrantChoice = Exclude<AgentApprovalChoice, "deny">;
-
-/** One logged grant. Field contents come from the runtime's approval request
- * (already sanitized by the event classifier — no secrets cross into here). */
+/** One logged grant: an "Always approve" answer. Field contents come from the
+ * runtime's approval request (already sanitized by the event classifier — no
+ * secrets cross into here) and are redacted again before persisting. */
 export type AccessGrantRecord = {
   /** Stable identity: the session + request that granted it. */
   id: string;
   sessionId: string;
   requestId: string;
-  choice: AccessGrantChoice;
   /** The tool that asked, when the runtime named one (e.g. "shell"). */
   toolName?: string;
   /** The command that triggered the approval prompt. */
@@ -67,16 +50,6 @@ export type AccessGrantRecord = {
   /** Epoch ms when the user granted it. */
   grantedAt: number;
 };
-
-/** Scope implied by an approval choice. */
-export function grantScope(choice: AccessGrantChoice): AccessGrantScope {
-  return choice === "always" ? "app-wide" : "session";
-}
-
-/** Duration implied by an approval choice. */
-export function grantDuration(choice: AccessGrantChoice): AccessGrantDuration {
-  return choice === "once" ? "one-time" : "ongoing";
-}
 
 /** Extracts the runtime's pattern keys from a sanitized approval payload
  * (`pattern_keys` list, falling back to the single `pattern_key`). Total:
@@ -96,15 +69,29 @@ export function approvalPatternKeys(payload: unknown): string[] {
 
 const REDACTED = "[redacted]";
 
+/** Authorization schemes whose following token is a credential, so the scheme
+ * AND the credential are consumed together (`Authorization: Basic dXNl...`).
+ * An unknown single-token value is redacted whole. */
+const AUTH_SCHEMES = "basic|bearer|digest|token|dpop|oauth|negotiate|ntlm|apikey|aws4-hmac-sha256";
+
+/** `Authorization` header (or key) with any scheme: the ENTIRE value —
+ * scheme and credential — is replaced, not just the first token. Quoted
+ * values are consumed whole. */
+const AUTH_HEADER = new RegExp(
+  `\\bauthorization["']?(\\s*[:=]\\s*)("[^"]*"|'[^']*'|(?:${AUTH_SCHEMES})\\s+\\S+|\\S+)`,
+  "gi",
+);
+
 /**
  * Masks credential-shaped content in a grant's free text (the command or
  * description) BEFORE it is persisted: an approval prompt can be for a shell
- * command that embeds a secret (an `Authorization: Bearer ...` header, an
- * inline `API_KEY=...`), and this log writes to localStorage, so storing the
- * raw text would create a durable copy of that secret. Mirrors the admin
- * transport's redaction heuristics for free text: bearer tokens, `key=value`
- * pairs under credential-ish key names, and long separator-free alphanumeric
- * runs (paths/URLs exempt). Total: junk in, string out; never throws.
+ * command that embeds a secret (an `Authorization: ...` header, an inline
+ * `API_KEY=...`), and this log writes to localStorage, so storing the raw
+ * text would create a durable copy of that secret. Mirrors the admin
+ * transport's redaction heuristics for free text: whole Authorization header
+ * values (any scheme, not just Bearer), bare bearer tokens, `key=value` pairs
+ * under credential-ish key names, and long separator-free alphanumeric runs
+ * (paths/URLs exempt). Total: junk in, string out; never throws.
  */
 export function redactGrantText(text: string): string;
 export function redactGrantText(text: string | undefined): string | undefined;
@@ -113,6 +100,7 @@ export function redactGrantText(text: string | undefined): string | undefined {
   const keyish =
     /\b([A-Za-z0-9_-]*(?:token|api[_-]?key|secret|password|passphrase|credential|authorization)[A-Za-z0-9_-]*)(=|:\s*)("[^"]*"|'[^']*'|\S+)/gi;
   return text
+    .replace(AUTH_HEADER, (_match, sep: string) => `Authorization${sep}${REDACTED}`)
     .replace(/\bbearer\s+\S+/gi, `Bearer ${REDACTED}`)
     .replace(keyish, (_match, key: string, sep: string) => `${key}${sep}${REDACTED}`)
     .split(/(\s+)/)
@@ -130,13 +118,10 @@ function isCredentialShaped(value: string): boolean {
 }
 
 export type AccessGrantLog = {
-  /** Logs a grant. Total: never throws. A re-record of the same session +
-   * request (e.g. a retried respond) replaces the earlier entry. */
+  /** Logs an "Always approve" grant. Total: never throws. A re-record of the
+   * same session + request (e.g. a retried respond) replaces the earlier
+   * entry. */
   record(entry: Omit<AccessGrantRecord, "id" | "grantedAt"> & { grantedAt?: number }): void;
-  /** Removes one entry by id. No-op when unknown. */
-  remove(id: string): void;
-  /** Removes every logged entry. */
-  clear(): void;
   /** All entries, newest first. The array identity is stable between
    * mutations (a `useSyncExternalStore` snapshot). */
   list(): readonly AccessGrantRecord[];
@@ -151,7 +136,9 @@ function isRecordShape(value: unknown): value is AccessGrantRecord {
     typeof record.id === "string" &&
     typeof record.sessionId === "string" &&
     typeof record.requestId === "string" &&
-    (record.choice === "once" || record.choice === "session" || record.choice === "always") &&
+    // Entries written before the page narrowed to persistent grants carried a
+    // choice; only "always" ones are grants this log still describes.
+    (record.choice === undefined || record.choice === "always") &&
     typeof record.grantedAt === "number" &&
     Array.isArray(record.patternKeys)
   );
@@ -220,7 +207,6 @@ export function createAccessGrantLog(): AccessGrantLog {
         id,
         sessionId,
         requestId,
-        choice: entry.choice,
         toolName: entry.toolName,
         // Free text can embed a secret (a bearer header, an inline API key);
         // scrub it before it lands in durable storage.
@@ -230,15 +216,6 @@ export function createAccessGrantLog(): AccessGrantLog {
         grantedAt: entry.grantedAt ?? Date.now(),
       };
       replace([record, ...current().filter((existing) => existing.id !== id)]);
-    },
-    remove(id) {
-      const next = current().filter((entry) => entry.id !== id);
-      if (next.length === current().length) return;
-      replace([...next]);
-    },
-    clear() {
-      if (current().length === 0) return;
-      replace([]);
     },
     list() {
       return current();
@@ -252,7 +229,8 @@ export function createAccessGrantLog(): AccessGrantLog {
   };
 }
 
-/** The app-wide log. AgentWorkspace records into it when the user approves a
- * request; the Access grants settings page reads it. A singleton (not React
- * state) so the record survives navigation between the chat and settings. */
+/** The app-wide log. AgentWorkspace records into it when the user answers an
+ * approval with "Always approve"; the Access grants settings page reads it. A
+ * singleton (not React state) so the record survives navigation between the
+ * chat and settings. */
 export const accessGrantLog = createAccessGrantLog();

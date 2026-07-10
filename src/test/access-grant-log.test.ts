@@ -3,24 +3,11 @@ import {
   ACCESS_GRANT_LOG_CAP,
   approvalPatternKeys,
   createAccessGrantLog,
-  grantDuration,
-  grantScope,
   redactGrantText,
 } from "../lib/access-grant-log";
 
 beforeEach(() => {
   localStorage.clear();
-});
-
-describe("access grant log — scope/duration derivation", () => {
-  it("maps the approval choice to the JUN-206 scope and duration", () => {
-    expect(grantScope("once")).toBe("session");
-    expect(grantScope("session")).toBe("session");
-    expect(grantScope("always")).toBe("app-wide");
-    expect(grantDuration("once")).toBe("one-time");
-    expect(grantDuration("session")).toBe("ongoing");
-    expect(grantDuration("always")).toBe("ongoing");
-  });
 });
 
 describe("access grant log — pattern key extraction", () => {
@@ -48,6 +35,22 @@ describe("access grant log — free-text redaction", () => {
     expect(redactGrantText(`deploy --auth ${longSecret}`)).toBe("deploy --auth [redacted]");
   });
 
+  it("masks the whole Authorization value for any scheme, not just Bearer", () => {
+    // A short Basic credential misses the 32-char run heuristic; the header
+    // rule must catch the scheme AND the credential.
+    const basic = redactGrantText("curl -H 'Authorization: Basic dXNlcjpwYXNz' https://api.test");
+    expect(basic).not.toContain("dXNlcjpwYXNz");
+    expect(basic).toContain("https://api.test");
+    const token = redactGrantText('curl -H "Authorization: Token shorttok" -o out.json');
+    expect(token).not.toContain("shorttok");
+    expect(token).toContain("-o out.json");
+    // An unknown single-token value is redacted whole without eating the
+    // following argument.
+    const opaque = redactGrantText("curl -H 'Authorization: opaque123' -o out.json");
+    expect(opaque).not.toContain("opaque123");
+    expect(opaque).toContain("-o out.json");
+  });
+
   it("leaves ordinary commands and paths intact", () => {
     expect(redactGrantText("rm -rf build")).toBe("rm -rf build");
     expect(
@@ -61,7 +64,6 @@ describe("access grant log — free-text redaction", () => {
     log.record({
       sessionId: "s1",
       requestId: "r1",
-      choice: "once",
       command: "curl -H 'Authorization: Bearer sk-secret-token-value'",
       patternKeys: [],
     });
@@ -70,13 +72,14 @@ describe("access grant log — free-text redaction", () => {
   });
 });
 
-describe("access grant log — record/list/remove/clear", () => {
-  it("records a grant and lists it newest first", () => {
+describe("access grant log — record/list", () => {
+  it("records a grant, lists newest first, and notifies subscribers", () => {
     const log = createAccessGrantLog();
+    const listener = vi.fn();
+    log.subscribe(listener);
     log.record({
       sessionId: "s1",
       requestId: "r1",
-      choice: "session",
       command: "rm -rf build",
       description: "Recursive deletion (rm -rf)",
       patternKeys: ["Recursive deletion (rm -rf)"],
@@ -85,7 +88,6 @@ describe("access grant log — record/list/remove/clear", () => {
     log.record({
       sessionId: "s1",
       requestId: "r2",
-      choice: "once",
       command: "git push --force",
       patternKeys: [],
       grantedAt: 200,
@@ -94,6 +96,7 @@ describe("access grant log — record/list/remove/clear", () => {
     const entries = log.list();
     expect(entries.map((entry) => entry.requestId)).toEqual(["r2", "r1"]);
     expect(entries[1].command).toBe("rm -rf build");
+    expect(listener).toHaveBeenCalledTimes(2);
   });
 
   it("persists to localStorage and reloads in a fresh instance", () => {
@@ -101,55 +104,33 @@ describe("access grant log — record/list/remove/clear", () => {
     log.record({
       sessionId: "s1",
       requestId: "r1",
-      choice: "always",
       patternKeys: ["Curl piped to shell"],
       grantedAt: 100,
     });
 
     const fresh = createAccessGrantLog();
     expect(fresh.list()).toHaveLength(1);
-    expect(fresh.list()[0].choice).toBe("always");
+    expect(fresh.list()[0].patternKeys).toEqual(["Curl piped to shell"]);
   });
 
   it("replaces a re-record of the same session + request", () => {
     const log = createAccessGrantLog();
-    log.record({ sessionId: "s1", requestId: "r1", choice: "once", patternKeys: [] });
-    log.record({ sessionId: "s1", requestId: "r1", choice: "session", patternKeys: [] });
+    log.record({ sessionId: "s1", requestId: "r1", command: "sudo ls", patternKeys: [] });
+    log.record({ sessionId: "s1", requestId: "r1", command: "sudo id", patternKeys: [] });
     expect(log.list()).toHaveLength(1);
-    expect(log.list()[0].choice).toBe("session");
+    expect(log.list()[0].command).toBe("sudo id");
   });
 
   it("drops a grant without a session or request id", () => {
     const log = createAccessGrantLog();
-    log.record({ sessionId: "  ", requestId: "r1", choice: "once", patternKeys: [] });
-    log.record({ sessionId: "s1", requestId: "", choice: "once", patternKeys: [] });
+    log.record({ sessionId: "  ", requestId: "r1", patternKeys: [] });
+    log.record({ sessionId: "s1", requestId: "", patternKeys: [] });
     expect(log.list()).toHaveLength(0);
-  });
-
-  it("removes one entry and clears all, notifying subscribers", () => {
-    const log = createAccessGrantLog();
-    const listener = vi.fn();
-    log.subscribe(listener);
-    log.record({ sessionId: "s1", requestId: "r1", choice: "once", patternKeys: [] });
-    log.record({ sessionId: "s1", requestId: "r2", choice: "once", patternKeys: [] });
-    expect(listener).toHaveBeenCalledTimes(2);
-
-    log.remove("s1:r1");
-    expect(log.list().map((entry) => entry.id)).toEqual(["s1:r2"]);
-
-    // Removing an unknown id is a no-op (no extra notification).
-    const calls = listener.mock.calls.length;
-    log.remove("s1:missing");
-    expect(listener).toHaveBeenCalledTimes(calls);
-
-    log.clear();
-    expect(log.list()).toHaveLength(0);
-    expect(localStorage.getItem("june.agent.accessGrants")).toBeNull();
   });
 
   it("keeps the snapshot identity stable between mutations", () => {
     const log = createAccessGrantLog();
-    log.record({ sessionId: "s1", requestId: "r1", choice: "once", patternKeys: [] });
+    log.record({ sessionId: "s1", requestId: "r1", patternKeys: [] });
     expect(log.list()).toBe(log.list());
   });
 
@@ -159,7 +140,6 @@ describe("access grant log — record/list/remove/clear", () => {
       log.record({
         sessionId: "s1",
         requestId: `r${i}`,
-        choice: "once",
         patternKeys: [],
         grantedAt: i,
       });
@@ -169,6 +149,43 @@ describe("access grant log — record/list/remove/clear", () => {
     // Newest kept, oldest evicted.
     expect(entries[0].requestId).toBe(`r${ACCESS_GRANT_LOG_CAP + 4}`);
     expect(entries.some((entry) => entry.requestId === "r0")).toBe(false);
+  });
+
+  it("ignores legacy session-scoped entries left over from the older page", () => {
+    // Before the page narrowed to persistent grants, "once" and "session"
+    // approvals were logged too (with a `choice` field). They describe grants
+    // that expired on their own; only "always" entries still mean anything.
+    localStorage.setItem(
+      "june.agent.accessGrants",
+      JSON.stringify([
+        {
+          id: "s1:r1",
+          sessionId: "s1",
+          requestId: "r1",
+          choice: "once",
+          patternKeys: [],
+          grantedAt: 1,
+        },
+        {
+          id: "s1:r2",
+          sessionId: "s1",
+          requestId: "r2",
+          choice: "session",
+          patternKeys: [],
+          grantedAt: 2,
+        },
+        {
+          id: "s1:r3",
+          sessionId: "s1",
+          requestId: "r3",
+          choice: "always",
+          patternKeys: ["Sudo"],
+          grantedAt: 3,
+        },
+      ]),
+    );
+    const entries = createAccessGrantLog().list();
+    expect(entries.map((entry) => entry.requestId)).toEqual(["r3"]);
   });
 
   it("tolerates malformed stored JSON", () => {

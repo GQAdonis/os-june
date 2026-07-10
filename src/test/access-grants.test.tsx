@@ -1,37 +1,40 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import {
   AccessGrantsController,
   buildAllowedCommandRows,
-  buildSessionGrantRows,
-  grantDurationLabel,
-  grantScopeLabel,
   readCommandAllowlist,
   removeAllowedCommand,
-  shortSessionId,
+  useAccessGrants,
   type AccessGrantsEngine,
   type AccessGrantsState,
 } from "../lib/hermes-admin";
 import type { AccessGrantRecord } from "../lib/access-grant-log";
-import {
-  forgetSessionMode,
-  rememberSessionMode,
-  subscribeSessionModes,
-  unrestrictedSessionIds,
-} from "../lib/agent-session-modes";
-import {
-  AccessGrantsView,
-  revokeUnrestrictedSession,
-} from "../components/settings/AccessGrantsSection";
-import { createPendingActionStore } from "../lib/hermes-pending-actions";
+import { AccessGrantsView } from "../components/settings/AccessGrantsSection";
+import { hermesBridgeStatus } from "../lib/tauri";
 import { makeAdminHarness } from "./fixtures/hermes-admin-harness";
 
-/** A log record with sensible defaults a test can override. */
+vi.mock("../lib/tauri", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/tauri")>();
+  return { ...actual, hermesBridgeStatus: vi.fn() };
+});
+
+const mockBridgeStatus = vi.mocked(hermesBridgeStatus);
+
+/** A log record with sensible defaults a test can override. Every logged
+ * grant is an "Always approve" answer. */
 function grant(overrides: Partial<AccessGrantRecord> & { requestId: string }): AccessGrantRecord {
   return {
     id: `s1:${overrides.requestId}`,
     sessionId: "s1",
-    choice: "session",
     patternKeys: [],
     grantedAt: 1_000,
     ...overrides,
@@ -57,20 +60,18 @@ describe("access grants — config read", () => {
 });
 
 describe("access grants — allowed command rows", () => {
-  it("is app-wide + ongoing and enriched by the newest matching 'always' grant", () => {
+  it("is enriched by the newest matching grant record", () => {
     const rows = buildAllowedCommandRows(
       ["Recursive deletion (rm -rf)", "Sudo"],
       [
         grant({
           requestId: "new",
-          choice: "always",
           command: "rm -rf build",
           patternKeys: ["Recursive deletion (rm -rf)"],
           grantedAt: 2_000,
         }),
         grant({
           requestId: "old",
-          choice: "always",
           command: "rm -rf dist",
           patternKeys: ["Recursive deletion (rm -rf)"],
           grantedAt: 1_000,
@@ -79,8 +80,6 @@ describe("access grants — allowed command rows", () => {
     );
     expect(rows[0]).toMatchObject({
       pattern: "Recursive deletion (rm -rf)",
-      scope: "app-wide",
-      duration: "ongoing",
       grantedAt: 2_000,
       command: "rm -rf build",
     });
@@ -88,95 +87,21 @@ describe("access grants — allowed command rows", () => {
     expect(rows[1]).toMatchObject({ pattern: "Sudo", grantedAt: undefined });
   });
 
-  it("correlates by description when pattern keys are absent, and never by session grants", () => {
+  it("correlates by description when pattern keys are absent", () => {
     const rows = buildAllowedCommandRows(
       ["Sudo"],
-      [
-        grant({ requestId: "r1", choice: "session", description: "Sudo", command: "sudo ls" }),
-        grant({ requestId: "r2", choice: "always", description: "Sudo", command: "sudo id" }),
-      ],
+      [grant({ requestId: "r2", description: "Sudo", command: "sudo id" })],
     );
     expect(rows[0].command).toBe("sudo id");
   });
 });
 
-describe("access grants — session grant rows", () => {
-  it("maps once to one-time and session to ongoing, excluding always", () => {
-    const rows = buildSessionGrantRows([
-      grant({ requestId: "r1", choice: "once", command: "git push --force" }),
-      grant({ requestId: "r2", choice: "session", description: "Sudo" }),
-      grant({ requestId: "r3", choice: "always", description: "Curl piped to shell" }),
-    ]);
-    expect(rows).toHaveLength(2);
-    expect(rows[0]).toMatchObject({
-      title: "git push --force",
-      scope: "session",
-      duration: "one-time",
-    });
-    expect(rows[1]).toMatchObject({ title: "Sudo", duration: "ongoing" });
-  });
-});
-
-describe("access grants — labels and list math", () => {
-  it("labels scope and duration in user language", () => {
-    expect(grantScopeLabel("app-wide")).toBe("App-wide");
-    expect(grantScopeLabel("session")).toBe("This session");
-    expect(grantDurationLabel("one-time")).toBe("One time");
-    expect(grantDurationLabel("ongoing")).toBe("Ongoing");
-  });
-
+describe("access grants — list math", () => {
   it("removes a pattern without mutating and tolerates a double revoke", () => {
     const existing = ["a", "b"];
     expect(removeAllowedCommand(existing, "a")).toEqual(["b"]);
     expect(removeAllowedCommand(existing, "missing")).toEqual(["a", "b"]);
     expect(existing).toEqual(["a", "b"]);
-  });
-
-  it("shortens long session ids for display", () => {
-    expect(shortSessionId("short")).toBe("short");
-    expect(shortSessionId("0123456789abcdef")).toBe("0123456789ab...");
-  });
-});
-
-describe("access grants — session mode change notification", () => {
-  it("notifies subscribers when a session mode is remembered or forgotten", () => {
-    localStorage.clear();
-    const seen: string[][] = [];
-    const unsubscribe = subscribeSessionModes(() => {
-      seen.push(unrestrictedSessionIds());
-    });
-
-    rememberSessionMode("sess-1", true);
-    forgetSessionMode("sess-1");
-    unsubscribe();
-    rememberSessionMode("sess-2", true);
-
-    expect(seen).toEqual([["sess-1"], []]);
-    localStorage.clear();
-  });
-
-  it("revoking full access retires the session's pending actions", () => {
-    localStorage.clear();
-    rememberSessionMode("sess-full", true);
-    const store = createPendingActionStore();
-    store.record(
-      {
-        kind: "pending_action",
-        receivedAt: new Date().toISOString(),
-        sessionId: "sess-full",
-        action: { kind: "approval", requestId: "req-9", allowPermanent: true },
-      },
-      "unrestricted",
-    );
-    expect(store.openCount()).toBe(1);
-
-    revokeUnrestrictedSession("sess-full", store);
-
-    // The mode flag is gone AND the blocked request no longer offers a
-    // dead-end respond (it would route to the wrong gateway).
-    expect(unrestrictedSessionIds()).toEqual([]);
-    expect(store.openCount()).toBe(0);
-    localStorage.clear();
   });
 });
 
@@ -295,6 +220,31 @@ describe("access grants — controller", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Hook — the bridge-status load and its retry wiring.
+// ---------------------------------------------------------------------------
+
+describe("access grants — bridge status retry", () => {
+  it("refresh retries a failed bridge-status load", async () => {
+    mockBridgeStatus.mockRejectedValueOnce(new Error("bridge down"));
+    mockBridgeStatus.mockResolvedValue({ running: false });
+
+    const { result } = renderHook(() => useAccessGrants("sandboxed"));
+
+    // The failed load renders as a retryable error.
+    await waitFor(() => expect(result.current.status).toBe("error"));
+    expect(result.current.retryable).toBe(true);
+    expect(result.current.error).toContain("bridge down");
+
+    // The advertised retry actually re-runs the load (it is not the
+    // engine-less no-op): the second attempt reaches the bridge and lands on
+    // the honest "unavailable" state.
+    act(() => result.current.refresh());
+    await waitFor(() => expect(result.current.status).toBe("unavailable"));
+    expect(mockBridgeStatus).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Rendered view — labels and revoke wiring, driven with stubbed state.
 // ---------------------------------------------------------------------------
 
@@ -314,10 +264,8 @@ function stubState(overrides: Partial<AccessGrantsState> = {}): AccessGrantsStat
 }
 
 describe("access grants — rendered view", () => {
-  it("shows every group with scope and duration pills and wires revoke", () => {
+  it("shows only the persistent grant groups and wires revoke", () => {
     const state = stubState({ patterns: ["Recursive deletion (rm -rf)"] });
-    const onClearGrant = vi.fn();
-    const onRevokeUnrestricted = vi.fn();
     const onRevokeCliAccess = vi.fn();
     render(
       <AccessGrantsView
@@ -325,51 +273,34 @@ describe("access grants — rendered view", () => {
         allowedRows={buildAllowedCommandRows(state.patterns, [
           grant({
             requestId: "r0",
-            choice: "always",
             command: "rm -rf build",
             patternKeys: ["Recursive deletion (rm -rf)"],
           }),
         ])}
-        grantRows={buildSessionGrantRows([
-          grant({ requestId: "r1", choice: "once", command: "git push --force" }),
-        ])}
-        unrestrictedSessions={["sess-full-1"]}
         cliAccess={true}
         cliBusy={false}
         onRevokeCliAccess={onRevokeCliAccess}
-        onClearGrant={onClearGrant}
-        onClearAllGrants={vi.fn()}
-        onRevokeUnrestricted={onRevokeUnrestricted}
       />,
     );
 
     expect(screen.getByRole("heading", { name: "Access grants" })).toBeTruthy();
 
-    // Always allowed command row: pattern, App-wide + Ongoing pills, Revoke.
+    // Always allowed command row: pattern, triggering command, when, Revoke.
     const allowedRow = screen.getByText("Recursive deletion (rm -rf)").closest("li");
     expect(allowedRow).toBeTruthy();
-    expect(within(allowedRow as HTMLElement).getByText("App-wide")).toBeTruthy();
-    expect(within(allowedRow as HTMLElement).getByText("Ongoing")).toBeTruthy();
+    expect(within(allowedRow as HTMLElement).getByText("rm -rf build")).toBeTruthy();
+    expect(within(allowedRow as HTMLElement).getByText(/Granted /)).toBeTruthy();
     fireEvent.click(within(allowedRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(state.revoke).toHaveBeenCalledWith("Recursive deletion (rm -rf)");
 
-    // Session approval row: one-time pill and a Clear action.
-    const grantRow = screen.getByText("git push --force").closest("li");
-    expect(within(grantRow as HTMLElement).getByText("This session")).toBeTruthy();
-    expect(within(grantRow as HTMLElement).getByText("One time")).toBeTruthy();
-    fireEvent.click(within(grantRow as HTMLElement).getByRole("button", { name: "Clear" }));
-    expect(onClearGrant).toHaveBeenCalledWith("s1:r1");
-
-    // Full access session row revokes by session id.
-    const sessionRow = screen.getByText("Session sess-full-1").closest("li");
-    fireEvent.click(within(sessionRow as HTMLElement).getByRole("button", { name: "Revoke" }));
-    expect(onRevokeUnrestricted).toHaveBeenCalledWith("sess-full-1");
-
-    // Agent CLI access row: app-wide pill and a working revoke.
+    // Agent CLI access row: a working revoke.
     const cliRow = screen.getByText("Coding CLI state folders").closest("li");
-    expect(within(cliRow as HTMLElement).getByText("App-wide")).toBeTruthy();
     fireEvent.click(within(cliRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(onRevokeCliAccess).toHaveBeenCalled();
+
+    // Session-scoped surfaces are gone: the page shows persistent grants only.
+    expect(screen.queryByText("Session approvals")).toBeNull();
+    expect(screen.queryByText("Full access sessions")).toBeNull();
   });
 
   it("shows the CLI access group as not granted when the flag is off", () => {
@@ -377,75 +308,43 @@ describe("access grants — rendered view", () => {
       <AccessGrantsView
         state={stubState()}
         allowedRows={[]}
-        grantRows={[]}
-        unrestrictedSessions={[]}
         cliAccess={false}
         cliBusy={false}
         onRevokeCliAccess={vi.fn()}
-        onClearGrant={vi.fn()}
-        onClearAllGrants={vi.fn()}
-        onRevokeUnrestricted={vi.fn()}
       />,
     );
     expect(screen.getByText("Not granted.")).toBeTruthy();
     expect(screen.queryByText("Coding CLI state folders")).toBeNull();
   });
 
-  it("keeps the local groups when the runtime is unavailable", () => {
+  it("keeps the CLI group when the runtime is unavailable", () => {
     render(
       <AccessGrantsView
         state={stubState({ status: "unavailable" })}
         allowedRows={[]}
-        grantRows={buildSessionGrantRows([grant({ requestId: "r1", choice: "session" })])}
-        unrestrictedSessions={[]}
-        cliAccess={false}
+        cliAccess={true}
         cliBusy={false}
         onRevokeCliAccess={vi.fn()}
-        onClearGrant={vi.fn()}
-        onClearAllGrants={vi.fn()}
-        onRevokeUnrestricted={vi.fn()}
       />,
     );
 
     expect(screen.getByText(/runtime is not running/i)).toBeTruthy();
-    // The local record still renders without the runtime.
-    expect(screen.getByText("Approved request")).toBeTruthy();
-    expect(screen.getByText("No sessions have full access.")).toBeTruthy();
+    // The local flag still renders without the runtime.
+    expect(screen.getByText("Coding CLI state folders")).toBeTruthy();
   });
 
-  it("offers Clear all only when there are session approvals", () => {
-    const onClearAllGrants = vi.fn();
-    const { rerender } = render(
+  it("offers Try again for a retryable load error", () => {
+    const state = stubState({ status: "error", error: "boom", retryable: true });
+    render(
       <AccessGrantsView
-        state={stubState()}
+        state={state}
         allowedRows={[]}
-        grantRows={[]}
-        unrestrictedSessions={[]}
         cliAccess={false}
         cliBusy={false}
         onRevokeCliAccess={vi.fn()}
-        onClearGrant={vi.fn()}
-        onClearAllGrants={onClearAllGrants}
-        onRevokeUnrestricted={vi.fn()}
       />,
     );
-    expect(screen.queryByRole("button", { name: "Clear all" })).toBeNull();
-
-    rerender(
-      <AccessGrantsView
-        state={stubState()}
-        allowedRows={[]}
-        grantRows={buildSessionGrantRows([grant({ requestId: "r1", choice: "once" })])}
-        unrestrictedSessions={[]}
-        cliAccess={false}
-        cliBusy={false}
-        onRevokeCliAccess={vi.fn()}
-        onClearGrant={vi.fn()}
-        onClearAllGrants={onClearAllGrants}
-        onRevokeUnrestricted={vi.fn()}
-      />,
-    );
-    fireEvent.click(screen.getByRole("button", { name: "Clear all" }));
-    expect(onClearAllGrants).toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(state.refresh).toHaveBeenCalled();
   });
 });

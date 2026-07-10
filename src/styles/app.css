@@ -13230,11 +13230,10 @@ input:focus-visible,
   height: 14px;
 }
 
-/* Access grants (JUN-206): the settings page listing every grant the user has
- * made to the agent (always-allowed commands, session approvals, full access
- * sessions) with scope + duration pills and revoke actions. Reuses the settings
- * chrome (.settings-card / .settings-row) and the shared .status-pill; tokens
- * only. */
+/* Access grants (JUN-206): the settings page listing the persistent grants the
+ * user has made to the agent (always-allowed commands, Agent CLI access) with
+ * revoke actions. Reuses the settings chrome (.settings-card / .settings-row);
+ * tokens only. */
 .access-grants-group {
   margin-top: var(--sp-8);
 }
@@ -13269,14 +13268,7 @@ input:focus-visible,
   line-height: 1.5;
 }
 
-.access-grant-badges {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
 .access-grant-when {
-  margin-left: var(--sp-2);
   color: var(--muted-foreground);
   font-size: var(--fs-sm);
 }

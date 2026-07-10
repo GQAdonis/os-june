@@ -20,7 +20,7 @@
  * the runtime that target names.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { hermesBridgeStatus, type HermesBridgeStatus } from "../tauri";
 import { AdminStateCache, type AdminNotification } from "./cache";
 import { createHermesAdminClient, type HermesAdminClient } from "./client";
@@ -343,7 +343,7 @@ export function useAccessGrants(
 ): AccessGrantsState {
   const [bridge, setBridge] = useState<HermesBridgeStatus>();
   const [bridgeError, setBridgeError] = useState<string>();
-  const loaded = useRef(false);
+  const [bridgeAttempt, setBridgeAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -351,25 +351,38 @@ export function useAccessGrants(
       .then((status) => {
         if (!cancelled) {
           setBridge(status);
-          loaded.current = true;
+          setBridgeError(undefined);
         }
       })
       .catch((error: unknown) => {
         if (!cancelled) {
           setBridgeError(error instanceof Error ? error.message : String(error));
-          loaded.current = true;
         }
       });
     return () => {
       cancelled = true;
     };
+  }, [bridgeAttempt]);
+
+  // The error state below advertises `retryable`, so its refresh action must
+  // actually retry: re-run the bridge-status load (the thing that failed),
+  // not the engine-less UNAVAILABLE_STATE no-op.
+  const retryBridgeStatus = useCallback(() => {
+    setBridgeError(undefined);
+    setBridgeAttempt((attempt) => attempt + 1);
   }, []);
 
   const engine = useAccessGrantsEngine(bridge, mode, profile);
   const state = useAccessGrantsController(engine);
 
   if (engine === null && bridgeError) {
-    return { ...state, status: "error", error: bridgeError, retryable: true };
+    return {
+      ...state,
+      status: "error",
+      error: bridgeError,
+      retryable: true,
+      refresh: retryBridgeStatus,
+    };
   }
   return state;
 }

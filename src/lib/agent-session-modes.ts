@@ -53,27 +53,8 @@ export function rememberSessionMode(sessionId: string, unrestricted: boolean) {
     delete store[sessionId];
   }
   writeStore(store);
-  for (const listener of [...listeners]) listener();
 }
 
 export function forgetSessionMode(sessionId: string) {
   rememberSessionMode(sessionId, false);
-}
-
-/** Every session currently recorded as Unrestricted, for the Access grants
- * settings page. Insertion order (the order the grants were made). */
-export function unrestrictedSessionIds(): string[] {
-  return Object.keys(readStore());
-}
-
-const listeners = new Set<() => void>();
-
-/** Notifies when the recorded modes change in this window (e.g. an opt-in from
- * the session bar while the Access grants settings page is open). Returns an
- * unsubscribe. */
-export function subscribeSessionModes(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
 }

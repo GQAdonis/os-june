@@ -6618,10 +6618,12 @@ export function AgentWorkspace({
           payload: { request_id: requestId, choice },
         }),
       );
-      // JUN-206: the user just granted something — record what, with the
-      // scope/duration the choice implies, so the Access grants settings page
-      // can show it. Look the request's details up before resolving it away.
-      if (choice !== "deny") {
+      // JUN-206: the user just granted something persistent ("Always
+      // approve" is app-wide and ongoing) — record what, so the Access grants
+      // settings page can enrich the allowlist row it creates. One-time and
+      // session approvals expire on their own and are not tracked. Look the
+      // request's details up before resolving it away.
+      if (choice === "always") {
         const pending = pendingActionStore.getRecords().find(
           (record) =>
             // The store keys some streams by the live-event key (task id)
@@ -6635,7 +6637,6 @@ export function AgentWorkspace({
         accessGrantLog.record({
           sessionId,
           requestId,
-          choice,
           toolName: action?.toolName,
           command: action?.command,
           description: action?.description,
