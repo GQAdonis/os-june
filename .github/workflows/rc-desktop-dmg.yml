@@ -305,7 +305,7 @@ jobs:
           OS_ACCOUNTS_CLIENT_ID: ${{ secrets.PRODUCTION_OS_ACCOUNTS_CLIENT_ID }}
           JUNE_API_URL: ${{ secrets.PRODUCTION_JUNE_API_URL }}
         with:
-          args: --bundles app,dmg --target universal-apple-darwin
+          args: --bundles app,dmg --target universal-apple-darwin -- --locked
           # The DMG is notarized after the build, so don't let tauri-action
           # publish anything itself.
           includeUpdaterJson: false

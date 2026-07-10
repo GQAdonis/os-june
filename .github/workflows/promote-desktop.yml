@@ -246,7 +246,7 @@ jobs:
           OS_ACCOUNTS_CLIENT_ID: ${{ secrets.PRODUCTION_OS_ACCOUNTS_CLIENT_ID }}
           JUNE_API_URL: ${{ secrets.PRODUCTION_JUNE_API_URL }}
         with:
-          args: --bundles app,dmg --target universal-apple-darwin
+          args: --bundles app,dmg --target universal-apple-darwin -- --locked
           includeUpdaterJson: false
 
       - name: Notarize, verify, and publish stable release assets
