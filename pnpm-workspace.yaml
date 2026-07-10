@@ -6,6 +6,11 @@
 # adds the patched version to minimumReleaseAgeExclude.
 minimumReleaseAge: 10080
 
+# enableGlobalVirtualStore was tried and reverted: with the global virtual
+# store, tsc stops resolving @react-three/fiber's JSX type augmentation
+# (ExtendedColors errors in glass-mark-canvas), so typecheck fails.
+# Re-evaluate after the react-three stack is upgraded.
+
 # Dependency build scripts are ignored unless explicitly allowed here.
 allowBuilds:
   '@central-icons-react/round-outlined-radius-3-stroke-2': false
