@@ -2,10 +2,13 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { Agentation } from "agentation";
 import { App } from "./app/App";
+import { Toaster } from "./components/ui/Toaster";
 import { installNativeContextMenuGuard } from "./lib/native-context-menu";
 import { replayOnboarding } from "./lib/onboarding";
 import { initTheme } from "./lib/theme";
 import { initBrand } from "./lib/brand";
+import { initFontScale } from "./lib/font-scale";
+import { installExternalLinkOpener } from "./lib/external-links";
 import "./styles/app.css";
 
 declare global {
@@ -23,6 +26,8 @@ if (import.meta.env.DEV) {
 
 initTheme();
 initBrand();
+initFontScale();
+installExternalLinkOpener();
 installNativeContextMenuGuard();
 
 // Console driver for the agent HUD overlay window: __agentHud("demo") etc.
@@ -67,6 +72,12 @@ if (import.meta.env.DEV) {
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
     <App />
+    {/* Global toast host. Sonner mounts a real in-flow <section> (no portal),
+        so it must live outside App's .app-shell grid: an in-flow child there
+        auto-places into an implicit second grid row and steals height from
+        the main column once the sidebar collapses (JUN-237). The toast list
+        itself is position: fixed, so it renders identically from here. */}
+    <Toaster />
     {import.meta.env.DEV ? <Agentation /> : null}
   </React.StrictMode>,
 );

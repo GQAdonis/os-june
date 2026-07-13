@@ -13,6 +13,7 @@ import { IconBuildingBlocks } from "central-icons/IconBuildingBlocks";
 import { IconElements } from "central-icons/IconElements";
 import { IconModelcontextprotocol } from "central-icons/IconModelcontextprotocol";
 import { IconCircleInfo } from "central-icons/IconCircleInfo";
+import { IconColorPalette } from "central-icons/IconColorPalette";
 import { IconCreditCard1 } from "central-icons/IconCreditCard1";
 import { IconDotGrid1x3Vertical } from "central-icons/IconDotGrid1x3Vertical";
 import { IconFolderAddRight } from "central-icons/IconFolderAddRight";
@@ -75,6 +76,7 @@ import {
 import { errorCode, messageFromError } from "../../lib/errors";
 import { NOTE_DND_MIME } from "../../lib/dnd";
 import { useDismiss } from "../../lib/use-dismiss";
+import { attachScrollThumbFade } from "../../lib/scroll-thumb-fade";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import { useRecordingPresenceBounds } from "../../lib/recording-presence-bounds";
@@ -138,6 +140,11 @@ type SidebarProps = {
   /** stored session id (not the runtime session id). */
   onRenameAgentSession: (sessionId: string, title: string) => void;
   onSelectAgentSession: (session: HermesSessionInfo) => void;
+  /** Project membership per stored session id; drives the session menu's
+   * project items (optional so tests can skip the plumbing). */
+  sessionFolderIds?: Record<string, string[]>;
+  onOpenSessionMoveDialog?: (sessionId: string) => void;
+  onRemoveSessionFromFolder?: (sessionId: string, folderId: string) => void;
   recoverableNoteIds?: ReadonlySet<string>;
   recordingStatus?: RecordingStatusDto | null;
   recordingTitle?: string;
@@ -219,6 +226,11 @@ const SETTINGS_SIDEBAR_GROUPS: {
         id: "general",
         label: "General",
         icon: <IconSettingsGear4 size={16} />,
+      },
+      {
+        id: "appearance",
+        label: "Appearance",
+        icon: <IconColorPalette size={16} />,
       },
       {
         id: "billing",
@@ -366,6 +378,9 @@ export function Sidebar({
   onNewAgentSession,
   onRenameAgentSession,
   onSelectAgentSession,
+  sessionFolderIds,
+  onOpenSessionMoveDialog,
+  onRemoveSessionFromFolder,
   recoverableNoteIds,
   recordingStatus,
   recordingTitle = "New note",
@@ -637,8 +652,9 @@ export function Sidebar({
         action: () => onChangeView("settings"),
       },
       // Per-tab settings jumps surface only once a query is typed so ten
-      // rows don't flood the default Quick actions list. The general tab
-      // hosts Appearance, so its search text carries those terms too.
+      // rows don't flood the default Quick actions list. General and
+      // Appearance carry their row-level terms so "theme" or "account"
+      // still finds the right tab.
       ...(normalized
         ? SETTINGS_TABS.filter(
             (tab) =>
@@ -650,8 +666,10 @@ export function Sidebar({
               icon: <IconSettingsGear4 size={15} />,
               searchText: normalizeCommandQuery(
                 tab.id === "general"
-                  ? "settings general appearance theme accent account"
-                  : `settings ${tab.label}`,
+                  ? "settings general account permissions privacy"
+                  : tab.id === "appearance"
+                    ? "settings appearance theme accent text size dark light mode"
+                    : `settings ${tab.label}`,
               ),
               action: () => {
                 onSettingsTabChange?.(tab.id);
@@ -1338,8 +1356,17 @@ export function Sidebar({
           deleting={deletingAgentSessionIds.has(menuAgentSession.id)}
           right={menu.right}
           top={menu.top}
+          folderId={sessionFolderIds?.[menuAgentSession.id]?.[0]}
           onTogglePinned={() => togglePinnedAgentSession(menuAgentSession.id)}
           onRename={() => setRenamingAgentSessionId(menuAgentSession.id)}
+          onMoveToProject={
+            onOpenSessionMoveDialog ? () => onOpenSessionMoveDialog(menuAgentSession.id) : undefined
+          }
+          onRemoveFromProject={
+            onRemoveSessionFromFolder
+              ? (folderId) => onRemoveSessionFromFolder(menuAgentSession.id, folderId)
+              : undefined
+          }
           onDelete={() => {
             setAgentSessionDeleteError(null);
             setAgentSessionToDelete(menuAgentSession);
@@ -1653,6 +1680,14 @@ function CommandPrompt({
 }) {
   const resultsRef = useRef<HTMLDivElement>(null);
   const fade = useScrollFade(resultsRef);
+  // Native-overlay scrollbar feel, same as the main content areas: the custom
+  // webkit thumb fades in on scroll/hover and back out when idle (see
+  // scroll-thumb-fade.ts and the --thumb-alpha rules in app.css).
+  useEffect(() => {
+    const el = resultsRef.current;
+    if (!el) return;
+    return attachScrollThumbFade(el);
+  }, []);
   // Re-measure the edge fades when the query or result groups change.
   useEffect(() => {
     fade.update();
@@ -1722,7 +1757,6 @@ function CommandPrompt({
     >
       <div className="command-prompt" role="dialog" aria-modal="true" aria-label="Search">
         <label className="command-prompt-search">
-          <IconMagnifyingGlass size={16} />
           <input
             ref={inputRef}
             type="text"
@@ -2168,8 +2202,11 @@ function AgentSessionContextMenu({
   deleting,
   right,
   top,
+  folderId,
   onTogglePinned,
   onRename,
+  onMoveToProject,
+  onRemoveFromProject,
   onDelete,
   onClose,
 }: {
@@ -2177,8 +2214,11 @@ function AgentSessionContextMenu({
   deleting: boolean;
   right: number;
   top: number;
+  folderId?: string;
   onTogglePinned: () => void;
   onRename: () => void;
+  onMoveToProject?: () => void;
+  onRemoveFromProject?: (folderId: string) => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
@@ -2211,6 +2251,32 @@ function AgentSessionContextMenu({
         <IconPencil size={14} />
         Rename session
       </button>
+      {onMoveToProject ? (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onMoveToProject();
+            onClose();
+          }}
+        >
+          {folderId ? <IconMoveFolder size={14} /> : <IconFolderAddRight size={14} />}
+          {folderId ? "Change project" : "Add to project"}
+        </button>
+      ) : null}
+      {folderId && onRemoveFromProject ? (
+        <button
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onRemoveFromProject(folderId);
+            onClose();
+          }}
+        >
+          <IconFolderDelete size={14} />
+          Remove from project
+        </button>
+      ) : null}
       <div className="context-menu-separator" role="separator" />
       <button
         type="button"

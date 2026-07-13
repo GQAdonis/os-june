@@ -138,6 +138,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             theme_icon::set_dock_icon,
+            print_current_webview,
             commands::bootstrap_app,
             commands::create_note,
             commands::list_notes,
@@ -214,6 +215,8 @@ pub fn run() {
             hermes_bridge::update_hermes_bridge_messaging_platform,
             hermes_bridge::hermes_agent_cli_access,
             hermes_bridge::set_hermes_agent_cli_access,
+            hermes_bridge::june_character,
+            hermes_bridge::set_june_character,
             hermes_bridge::open_hermes_tui_debug,
             commands::get_microphone_permission_state,
             commands::check_recording_source_readiness,
@@ -221,6 +224,7 @@ pub fn run() {
             commands::reveal_path,
             commands::june_open_verify_page,
             commands::june_open_community_page,
+            commands::june_open_external_url,
             commands::start_recording,
             commands::pause_recording,
             commands::resume_recording,
@@ -548,6 +552,11 @@ fn main_window_focus_state(app: &tauri::AppHandle) -> Option<bool> {
 
 fn should_emit_close_tab_event(main_window_focused: Option<bool>) -> bool {
     main_window_focused == Some(true)
+}
+
+#[tauri::command]
+fn print_current_webview(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.print().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
