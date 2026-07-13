@@ -217,9 +217,8 @@ export function ConnectorApprovalsTray() {
             const provider = providerFromServer(item.server);
             const summary = item.summary || actionToolLabel(item.tool);
             return (
-              // The redacted args preview (redaction happens in Rust) rides in
-              // the row's tooltip: the summary carries the decision, and the
-              // preview stays one hover away instead of a paragraph per row.
+              // The redacted args preview (redaction happens in Rust) shows as
+              // one ellipsized line; the row tooltip carries the full text.
               <li
                 key={item.approvalId}
                 className="connector-approvals-item"
@@ -237,6 +236,9 @@ export function ConnectorApprovalsTray() {
                   <p className="connector-approvals-meta">
                     {actionToolLabel(item.tool)} · {item.accountEmail}
                   </p>
+                  {item.argsPreview ? (
+                    <p className="connector-approvals-preview">{item.argsPreview}</p>
+                  ) : null}
                 </div>
                 <div className="connector-approvals-actions">
                   <button

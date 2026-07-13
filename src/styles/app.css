@@ -25501,10 +25501,6 @@ input:focus-visible,
    card, hairline ring folded into the shadow), and collapses to its header
    line so an unanswered batch stops covering the composer corner. */
 .connector-approvals {
-  /* One leading rail shared by the header's logo stack and every row's
-     provider mark, so the title and the summaries land on a single left
-     edge (the steer queue's --follow-up-rail idea). */
-  --approvals-rail: 32px;
   position: fixed;
   right: var(--sp-6);
   bottom: var(--sp-6);
@@ -25574,14 +25570,14 @@ input:focus-visible,
 }
 
 /* The queue's providers as an overlapping logo stack (the avatar-group
- * treatment): small circular tiles, each ringed in the card color so the
- * overlap reads as separate marks. Fixed to the shared rail width so the
- * title text never shifts as providers come and go. */
+ * treatment). The separation between marks is a true transparent cutout, not
+ * a painted ring: each mark carves away where the next one overlaps (the
+ * tiles are translucent surface-subtle, so a painted ring would let the
+ * underlying logo show through, and a card-colored ring would halo on the
+ * trigger's gray hover wash — the cutout lets whatever is behind show). */
 .connector-approvals-stack {
   display: inline-flex;
   align-items: center;
-  width: var(--approvals-rail);
-  flex-shrink: 0;
 }
 
 .connector-approvals-stack-mark {
@@ -25591,12 +25587,19 @@ input:focus-visible,
   height: 16px;
   border-radius: var(--r-pill);
   background: var(--surface-subtle);
-  box-shadow: 0 0 0 2px var(--card);
   color: var(--foreground);
 }
 
 .connector-approvals-stack-mark + .connector-approvals-stack-mark {
   margin-left: -5px;
+}
+
+/* The next mark sits 3px right of this tile's right edge center (16px tile,
+ * -5px overlap → its center lands at x=19px); carving a 10px circle there
+ * leaves a 2px see-through gap around the overlapping mark. */
+.connector-approvals-stack-mark:not(:last-child) {
+  -webkit-mask: radial-gradient(circle 10px at 19px 50%, transparent 98%, #000 100%);
+  mask: radial-gradient(circle 10px at 19px 50%, transparent 98%, #000 100%);
 }
 
 .connector-approvals-header-actions {
@@ -25672,18 +25675,17 @@ input:focus-visible,
   overflow-y: auto;
 }
 
-/* One compact line per action (the Deel action-required mold): provider mark
- * on the rail, summary + meta in the middle, deny/approve icon buttons at the
- * end. Hairline dividers between rows, full tray width. */
+/* One compact row per action (the Deel action-required mold): provider mark,
+ * summary + meta + one preview line, deny/approve icon buttons at the end.
+ * Dividers run the full tray width in the detail-bar edge weight (the
+ * breadcrumb bar's lighter hairline, not the standard border-subtle). */
 .connector-approvals-item {
   display: grid;
-  grid-template-columns: var(--approvals-rail) minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   column-gap: var(--sp-2);
-  /* Inline inset = the tray frame + the trigger's padding, so the mark and
-   * summary line up under the header's stack and title. */
-  padding: var(--sp-2) var(--sp-4);
-  border-top: 1px solid var(--border-subtle);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--detail-bar-border);
 }
 
 .connector-approvals-item:first-child {
@@ -25722,10 +25724,29 @@ input:focus-visible,
   white-space: nowrap;
 }
 
+/* One line of the redacted args preview; the row tooltip holds the rest. */
+.connector-approvals-preview {
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--fs-xs);
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Verdicts reveal on row hover (or keyboard focus) rather than shouting from
+ * every row at once; opacity keeps their layout slot so nothing reflows. */
 .connector-approvals-actions {
   display: inline-flex;
   align-items: center;
   gap: var(--sp-1);
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease-out);
+}
+
+.connector-approvals-item:hover .connector-approvals-actions,
+.connector-approvals-item:focus-within .connector-approvals-actions {
+  opacity: 1;
 }
 
 /* Per-row verdicts as compact icon buttons (Deny ✕ quiet, Approve ✓ filled),
