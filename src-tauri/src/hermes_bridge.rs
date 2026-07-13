@@ -2491,9 +2491,9 @@ fn persist_browser_access(path: &Path, enabled: bool) -> Result<(), AppError> {
             std::fs::create_dir_all(parent)
                 .map_err(|error| AppError::new("browser_access_failed", error.to_string()))?;
         }
-        std::fs::write(&path, b"1")
+        std::fs::write(path, b"1")
             .map_err(|error| AppError::new("browser_access_failed", error.to_string()))?;
-    } else if let Err(error) = std::fs::remove_file(&path) {
+    } else if let Err(error) = std::fs::remove_file(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
             return Err(AppError::new("browser_access_failed", error.to_string()));
         }
