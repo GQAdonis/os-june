@@ -64,11 +64,19 @@ read_state() {
 }
 
 # Copy a key from june-api/.env verbatim. A missing or empty key is copied as
-# absent: june-api must see it as unset, never as a value we invented.
+# absent: june-api must see it as unset, never as a value we invented. The
+# sealed-env parser takes values raw, while dotenvy strips quotes and trailing
+# comments locally - a quoted value would work in `make dev` and silently
+# corrupt only on the CVM, so fail fast instead of guessing dotenv semantics.
 copy_env_line() {
   local key="$1" line
   line="$(grep -E "^${key}=." "$API_ENV_FILE" | tail -n 1 || true)"
-  if [[ -n "$line" ]]; then printf '%s\n' "$line"; fi
+  if [[ -z "$line" ]]; then return 0; fi
+  case "$line" in
+    *\"* | *\'* | *" #"*)
+      die "$API_ENV_FILE: $key is quoted or has a trailing comment; use a plain KEY=value line (sealed env takes values raw)." ;;
+  esac
+  printf '%s\n' "$line"
 }
 
 cmd_up() {
@@ -208,16 +216,29 @@ cmd_down() {
 
   echo "Deleting CVM $name ..."
   if ! phala cvms delete "$name" --force; then
-    # A failed delete may mean already-gone OR a transient auth/network/API
-    # failure. The state file is the only record of a billing CVM's name, so
-    # drop it only once the CVM is confirmed absent.
-    if phala cvms get "$name" --json 2>/dev/null \
-      | jq -e --arg n "$name" '.name == $n' >/dev/null 2>&1; then
-      echo "Could not delete $name and it still exists; keeping $STATE_FILE." >&2
+    # A failed delete may mean already-gone, never-created (deploy failed),
+    # OR a transient auth/network/API failure - and the same outage that
+    # broke delete usually breaks a probe too. The state file is the only
+    # record of a billing CVM's name, so drop it only on POSITIVE
+    # confirmation of absence: a successful /apps listing that does not
+    # contain this name (covers tombstoned and never-created alike; a
+    # `cvms get` probe cannot, it 404s on both). A failed or non-JSON
+    # listing is ambiguous and keeps the state.
+    local apps
+    if apps="$(phala api /apps --json -f page=1 -f page_size=100 -f "search=${name}" 2>/dev/null)" \
+      && printf '%s' "$apps" | jq -e . >/dev/null 2>&1; then
+      if printf '%s' "$apps" \
+        | jq -e --arg n "$name" 'any(.dstack_apps[]?; .current_cvm.name? == $n)' >/dev/null; then
+        echo "Could not delete $name and it still exists; keeping $STATE_FILE." >&2
+        echo "Retry with: make ephemeral-api-down" >&2
+        return 1
+      fi
+      echo "Delete reported failure but the API no longer lists $name; dropping the state file." >&2
+    else
+      echo "Could not delete $name and could not confirm it is gone; keeping $STATE_FILE." >&2
       echo "Retry with: make ephemeral-api-down" >&2
       return 1
     fi
-    echo "Delete reported failure but $name is no longer listed; dropping the state file." >&2
   fi
   rm -f "$STATE_FILE"
   echo "Ephemeral June API torn down."

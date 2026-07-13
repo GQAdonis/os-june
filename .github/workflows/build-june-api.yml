@@ -110,6 +110,11 @@ jobs:
           image-ref: ${{ env.IMAGE }}:${{ needs.build.outputs.sha_short }}
           api-key: ${{ secrets.PHALA_CLOUD_API_KEY }}
 
+      # Ordering mirrors promote-june-api.yml: verify before the digest
+      # record, so a broken ingress fails the run. A verify failure therefore
+      # skips the record for a deploy that DID happen; the record is
+      # create-once, so re-running this job after the ingress recovers fills
+      # it in safely.
       - name: Verify public endpoint after deploy
         if: steps.deploy.outputs.deployed == 'true'
         run: |
