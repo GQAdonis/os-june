@@ -3737,12 +3737,38 @@ export function AgentWorkspace({
     return true;
   }
 
+  // The Auto section's Preference drill-in writes the app-wide preference
+  // without changing the model; announce it so other surfaces (Settings, the
+  // note chat panel) refresh their designation.
+  async function handleCostQualityChange(value: number) {
+    const previous = generationCostQuality;
+    setGenerationCostQuality(value);
+    try {
+      const next = await setCostQuality(value);
+      setGenerationCostQuality(next.costQuality);
+      dispatchProviderModelSettingsChanged({
+        mode: "generation",
+        modelId: defaultGenerationModelIdRef.current,
+      });
+      setError(null);
+    } catch (err) {
+      setGenerationCostQuality(previous);
+      setError(messageFromError(err));
+    }
+  }
+
   // Switching the model from the composer is only allowed before a thread
   // exists. It writes the app-wide text-model default (Settings' model rows and
   // this pill refresh through the same changed event), and new sessions inherit
   // that choice at creation time.
-  async function handleSelectGenerationModel(modelId: string, costQuality?: number) {
-    setComposerModelOpen(false);
+  async function handleSelectGenerationModel(
+    modelId: string,
+    costQuality?: number,
+    options?: { keepOpen?: boolean },
+  ) {
+    // The Auto toggle switches models mid-flow, so it asks to keep the picker
+    // open; a row pick is a final choice and closes it.
+    if (!options?.keepOpen) setComposerModelOpen(false);
     if (composerModelSelectionLocked()) {
       showComposerModelLockedNotice();
       return false;
@@ -9535,9 +9561,10 @@ export function AgentWorkspace({
             searchRef={composerModelSearchRef}
             onFlyoutChange={setComposerModelFlyout}
             onSearchChange={setModelSearch}
-            onSelect={(modelId, costQuality) =>
-              void handleSelectGenerationModel(modelId, costQuality)
+            onSelect={(modelId, costQuality, options) =>
+              void handleSelectGenerationModel(modelId, costQuality, options)
             }
+            onCostQualityChange={(value) => void handleCostQualityChange(value)}
           />
         ) : null}
         {heroMode && sandboxMenuOpen ? (
