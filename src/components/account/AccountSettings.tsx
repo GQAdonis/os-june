@@ -224,6 +224,18 @@ export function BillingSettingsSection({
   // one more explicit confirm - hosted-copy consent never authorizes a
   // saved-card charge. Only the credit grant poll announces Max.
   async function handleChangePlan(plan: SubscriptionPlan) {
+    // A wait can begin on a coexisting surface while this confirm sits open
+    // (the funding notice, the sidebar chip). Never stack a second purchase
+    // on it; adopt the wait and show its status. A slow wait stays
+    // retryable - the dispatch below supersedes it.
+    const pendingWait = maxGrantWaitForAccount(account.user?.id);
+    if (pendingWait && pendingWait.phase !== "slow") {
+      setMaxGrantWait(pendingWait);
+      setBillingStatus(
+        pendingWait.phase === "browser" ? MAX_UPGRADE_BROWSER_STATUS : MAX_UPGRADE_WAITING_STATUS,
+      );
+      return;
+    }
     const baselineCredits = account.balance?.credits ?? 0;
     const chargeNow = chargeNowUpgrade;
     let alreadyOnPlan = false;
@@ -298,13 +310,32 @@ export function BillingSettingsSection({
   }
 
   useEffect(() => {
-    if (!maxGrantWait) return;
-    if (maxGrantWait.accountId !== account.user?.id) {
+    if (maxGrantWait && maxGrantWait.accountId !== account.user?.id) {
       clearMaxGrantWait(maxGrantWait);
       setMaxGrantWait(undefined);
       setBillingStatus(undefined);
       return;
     }
+    // Reconcile the cached wait against the shared record: an upgrade can
+    // start, supersede, or be cancelled on a coexisting surface (the funding
+    // notice, the sidebar chip), and this card must not keep offering - or
+    // suppressing - the purchase path from a stale copy. Runs on every
+    // account refresh tick.
+    const currentWait = maxGrantWaitForAccount(account.user?.id);
+    if (maxGrantWait !== currentWait) {
+      setMaxGrantWait(currentWait);
+      setBillingStatus(
+        currentWait === undefined
+          ? undefined
+          : currentWait.phase === "browser"
+            ? MAX_UPGRADE_BROWSER_STATUS
+            : currentWait.phase === "slow"
+              ? maxUpgradeSlowStatus(currentWait)
+              : MAX_UPGRADE_WAITING_STATUS,
+      );
+      return;
+    }
+    if (!maxGrantWait) return;
     if (maxGrantWait.phase === "browser" && account.subscription?.plan === "max") {
       markMaxGrantWaitWaiting(maxGrantWait);
       setBillingStatus(MAX_UPGRADE_WAITING_STATUS);

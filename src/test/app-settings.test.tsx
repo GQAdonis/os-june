@@ -1102,6 +1102,52 @@ describe("AppSettings", () => {
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 
+  it("adopts a wait begun after mount on the next account refresh", async () => {
+    const user = userEvent.setup();
+    const proAccount: AccountStatus = {
+      ...signedInAccount,
+      balance: { credits: 1200, usdMillis: 1200, usageRemainingPercent: 40 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    const { rerenderAccount } = renderProBillingSettings();
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+    expect(screen.getByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
+
+    // An upgrade begins on a coexisting surface (the funding notice or the
+    // sidebar chip) while this card is on screen. The next refresh tick must
+    // pull it in: no second purchase path, waiting status shown.
+    beginMaxGrantWait(1200, signedInAccount.user?.id, "browser");
+    rerenderAccount?.({ ...proAccount });
+
+    expect(
+      await screen.findByText("Waiting for you to confirm in the browser"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upgrade to Max" })).toBeNull();
+  });
+
+  it("drops a wait cancelled on another surface and restores the upgrade CTA", async () => {
+    const user = userEvent.setup();
+    const proAccount: AccountStatus = {
+      ...signedInAccount,
+      balance: { credits: 1200, usdMillis: 1200, usageRemainingPercent: 40 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    const grantWait = beginMaxGrantWait(1200, signedInAccount.user?.id, "browser");
+    const { rerenderAccount } = renderProBillingSettings();
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+    expect(screen.getByText("Waiting for you to confirm in the browser")).toBeInTheDocument();
+
+    // The user cancels from the funding notice ("I closed the Stripe page").
+    // The cached copy must not keep this card parked on the dead wait.
+    clearMaxGrantWait(grantWait);
+    rerenderAccount?.({ ...proAccount });
+
+    expect(await screen.findByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull();
+  });
+
   it("never changes plans without an explicit confirm", async () => {
     const user = userEvent.setup();
     renderProBillingSettings();

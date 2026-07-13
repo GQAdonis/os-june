@@ -1108,4 +1108,55 @@ describe("notes recording reliability", () => {
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
     expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
   });
+
+  it("drops the waiting banner when the wait is cancelled on another surface", async () => {
+    const failedNote = {
+      ...first,
+      processingStatus: "failed" as const,
+      lastError: "Your balance is too low. Upgrade to continue.",
+    };
+    const proAccount: AccountStatus = {
+      signedIn: true,
+      configured: true,
+      user: { id: "usr_123", handle: "alex" },
+      balance: { credits: 10, usdMillis: 10 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    mocks.osAccountsStatus.mockResolvedValue(proAccount);
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [failedNote, second],
+      activeRecoveries: [],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) =>
+      noteId === "note-2" ? second : failedNote,
+    );
+
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Upgrade now" }));
+    expect(
+      await screen.findByText("Waiting for you to confirm in the browser"),
+    ).toBeInTheDocument();
+
+    // The user cancels from the funding notice ("I closed the Stripe page").
+    // The banner's cached copy must not keep claiming a wait that no longer
+    // exists. A real refresh always yields a fresh snapshot object.
+    clearMaxGrantWait();
+    mocks.osAccountsStatus.mockResolvedValue({ ...proAccount });
+    const callsBeforeRefresh = mocks.osAccountsStatus.mock.calls.length;
+    window.dispatchEvent(new Event("focus"));
+    await waitFor(() =>
+      expect(mocks.osAccountsStatus.mock.calls.length).toBeGreaterThan(callsBeforeRefresh),
+    );
+    await waitFor(() =>
+      expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull(),
+    );
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+  });
 });

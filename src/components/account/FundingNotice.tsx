@@ -206,6 +206,16 @@ export function FundingNotice({ account, onRefresh, active = true }: Props) {
   // lifts entirely via App's refresh). Real failures rethrow so the dialog
   // stays open showing the error next to its retry affordance.
   async function handleUpgradeToMax() {
+    // A wait can begin on a coexisting surface while this confirm sits open
+    // (Billing settings, another notice placement). Never stack a second
+    // purchase on it; resolving without dispatch closes the dialog and the
+    // notice re-derives the waiting row from the shared record. A slow wait
+    // stays retryable - the dispatch below supersedes it.
+    const pendingWait = maxGrantWaitForAccount(account.user?.id);
+    if (pendingWait && pendingWait.phase !== "slow") {
+      setMaxGrantPhaseRevision((revision) => revision + 1);
+      return;
+    }
     const baselineCredits = account.balance?.credits ?? 0;
     const chargeNow = chargeNowUpgrade;
     let alreadyOnPlan = false;

@@ -740,6 +740,16 @@ export function App() {
       setBillingNotice(null);
       return;
     }
+    if (grantWait && !isMaxGrantWaitCurrent(grantWait)) {
+      // Cancelled or superseded on a coexisting surface (funding notice,
+      // sidebar chip, Billing settings). Drop the cached copy so the banner
+      // cannot claim a wait that no longer exists; the surface owning the
+      // live wait shows its status, and interaction guards re-adopt it here.
+      appMaxGrantWaitRef.current = undefined;
+      window.clearTimeout(billingNoticeTimerRef.current);
+      setBillingNotice(null);
+      return;
+    }
     if (grantWait?.phase === "browser" && account.subscription?.plan === "max") {
       markMaxGrantWaitWaiting(grantWait);
       showBillingNotice(MAX_UPGRADE_WAITING_STATUS);
@@ -3393,7 +3403,7 @@ export function App() {
                 {appMaxGrantWaitRef.current?.phase === "slow" ? (
                   <button
                     type="button"
-                    className="funding-gate-link"
+                    className="btn btn-ghost"
                     onClick={() => {
                       void osAccountsOpenPortal().catch((err) => setError(messageFromError(err)));
                     }}
