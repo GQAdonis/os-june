@@ -2538,6 +2538,11 @@ export function AgentWorkspace({
   // shows as a name-only stub so the pill never goes blank while configured.
   const [defaultGenerationModelId, setDefaultGenerationModelId] = useState("");
   const [generationCostQuality, setGenerationCostQuality] = useState<number | undefined>();
+  // Preference saves from the picker's drill-in: writes are chained so they
+  // persist in click order, and versioned so only the newest call's outcome
+  // touches the UI (mirrors Settings' saveCostQuality discipline).
+  const costQualitySaveChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const latestCostQualitySaveRef = useRef(0);
   const defaultGenerationModelIdRef = useRef("");
   const [generationModels, setGenerationModels] = useState<VeniceModelDto[]>([]);
   const generationModelsRef = useRef<VeniceModelDto[]>([]);
@@ -3740,21 +3745,35 @@ export function AgentWorkspace({
   // The Auto section's Preference drill-in writes the app-wide preference
   // without changing the model; announce it so other surfaces (Settings, the
   // note chat panel) refresh their designation.
-  async function handleCostQualityChange(value: number) {
-    const previous = generationCostQuality;
+  function handleCostQualityChange(value: number) {
+    // Rapid preset clicks overlap: the chain keeps the writes ordered so the
+    // last click is what persists, and the version gate makes sure only the
+    // newest call's outcome (success or rollback) touches the UI — the same
+    // discipline as Settings' saveCostQuality.
+    const version = ++latestCostQualitySaveRef.current;
+    const confirmed = generationCostQuality;
     setGenerationCostQuality(value);
-    try {
-      const next = await setCostQuality(value);
-      setGenerationCostQuality(next.costQuality);
-      dispatchProviderModelSettingsChanged({
-        mode: "generation",
-        modelId: defaultGenerationModelIdRef.current,
-      });
-      setError(null);
-    } catch (err) {
-      setGenerationCostQuality(previous);
-      setError(messageFromError(err));
-    }
+    const save = costQualitySaveChainRef.current.then(() => setCostQuality(value));
+    costQualitySaveChainRef.current = save.then(
+      () => undefined,
+      () => undefined,
+    );
+    void save.then(
+      (next) => {
+        if (version !== latestCostQualitySaveRef.current) return;
+        setGenerationCostQuality(next.costQuality);
+        dispatchProviderModelSettingsChanged({
+          mode: "generation",
+          modelId: defaultGenerationModelIdRef.current,
+        });
+        setError(null);
+      },
+      (err) => {
+        if (version !== latestCostQualitySaveRef.current) return;
+        setGenerationCostQuality(confirmed);
+        setError(messageFromError(err));
+      },
+    );
   }
 
   // Switching the model from the composer is only allowed before a thread
@@ -9564,7 +9583,7 @@ export function AgentWorkspace({
             onSelect={(modelId, costQuality, options) =>
               void handleSelectGenerationModel(modelId, costQuality, options)
             }
-            onCostQualityChange={(value) => void handleCostQualityChange(value)}
+            onCostQualityChange={handleCostQualityChange}
           />
         ) : null}
         {heroMode && sandboxMenuOpen ? (

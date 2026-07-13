@@ -12,7 +12,10 @@ import {
 import type { RefObject } from "react";
 import { createPortal } from "react-dom";
 import { modelAvailableForMode, modelIsPrivate, modelPrivacyBadge } from "../../lib/model-privacy";
-import { suggestedModelsForMode } from "../../lib/suggested-models";
+import {
+  DEFAULT_GENERATION_SUGGESTION_ID,
+  suggestedModelsForMode,
+} from "../../lib/suggested-models";
 import type { ProviderModelMode, VeniceModelDto } from "../../lib/tauri";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import { rectFromElement, type HoverBridgeRect } from "../ui/hoverBridge";
@@ -329,10 +332,13 @@ export function ModelPickerPopover({
         onSelect(AUTO_MODEL_ID, undefined, { keepOpen: true });
         return;
       }
+      // An empty or unloaded catalog must not trap the switch on: fall back
+      // to the curated default id, which is safe to select sight-unseen.
       const fallback =
         suggested.find((item) => item.model.id !== AUTO_MODEL_ID)?.model.id ??
-        selectable.find((option) => option.id !== AUTO_MODEL_ID)?.id;
-      if (fallback) onSelect(fallback, undefined, { keepOpen: true });
+        selectable.find((option) => option.id !== AUTO_MODEL_ID)?.id ??
+        DEFAULT_GENERATION_SUGGESTION_ID;
+      onSelect(fallback, undefined, { keepOpen: true });
     },
     [onFlyoutChange, onSelect, selectable, suggested],
   );
