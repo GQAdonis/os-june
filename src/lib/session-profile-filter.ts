@@ -16,16 +16,24 @@ function normalizedHermesProfileName(profile: string | undefined): string {
   return trimmed || "default";
 }
 
+/** A session with no mapping row belongs to `default` (pre-profiles data and
+ * sessions created outside June's create path — see ADR 0017). */
+export function sessionMatchesProfile(
+  session: HermesSessionInfo,
+  profiles: SessionProfileMap,
+  activeProfile: string,
+): boolean {
+  return (
+    normalizedHermesProfileName(profiles[session.id]) === normalizedHermesProfileName(activeProfile)
+  );
+}
+
 export function filterAgentSessionsForProfile(
   sessions: readonly HermesSessionInfo[],
   profiles: SessionProfileMap,
   activeProfile: string,
 ): HermesSessionInfo[] {
-  const targetProfile = normalizedHermesProfileName(activeProfile);
   return sessions
     .filter((session) => !isScheduledRunSession(session))
-    .filter((session) => {
-      const sessionProfile = normalizedHermesProfileName(profiles[session.id]);
-      return sessionProfile === targetProfile;
-    });
+    .filter((session) => sessionMatchesProfile(session, profiles, activeProfile));
 }

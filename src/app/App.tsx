@@ -67,6 +67,7 @@ import {
   getRecordingStatus,
   getNote,
   LIVE_TRANSCRIPT_EVENT,
+  listFolders,
   listNotes,
   listSessionFolders,
   listSessionProfiles,
@@ -1770,6 +1771,50 @@ export function App() {
       })
       .catch((err: unknown) => setError(messageFromError(err)));
   }, [appBlocked]);
+
+  // A profile switch swaps the visible data, not just the agent runtime
+  // (ADR 0017): re-read the profile-scoped notes and projects and reselect
+  // from the new profile's list, mirroring the delete flows. Chats refresh
+  // through the profile-aware session effects. If a recording is running its
+  // note keeps the selection (get_note is unscoped) so the recording view is
+  // never yanked mid-take.
+  const lastDataProfileRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (appBlocked || !bootstrapped) return;
+    const previous = lastDataProfileRef.current;
+    lastDataProfileRef.current = activeHermesProfileName;
+    if (previous === undefined || previous === activeHermesProfileName) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [notesResponse, folders] = await Promise.all([listNotes(), listFolders()]);
+        if (cancelled) return;
+        // The old profile's folder selection and origins point at rows the
+        // new profile can't see — clear them before the new lists land.
+        dispatch({ type: "folderSelected", folderId: undefined });
+        dispatch({ type: "foldersLoaded", folders });
+        dispatch({ type: "notesLoaded", notes: notesResponse.items });
+        setOriginFolderId(undefined);
+        setOriginAllNotes(false);
+        setFolderReturnTarget(undefined);
+        const nextNoteId = recordingNoteIdRef.current ?? notesResponse.items[0]?.id;
+        if (nextNoteId) {
+          const note = await getNote(nextNoteId);
+          if (!cancelled) dispatch({ type: "noteLoaded", note });
+        } else if (!cancelled) {
+          const currentView = activeViewRef.current;
+          if (currentView === "meetings" || currentView === "all-notes") {
+            setActiveView("notes");
+          }
+        }
+      } catch (err) {
+        if (!cancelled) setError(messageFromError(err));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeHermesProfileName, appBlocked, bootstrapped]);
 
   // Probe with "microphonePlusSystem" on mount so sourceReadiness always
   // has the system source. Onboarding's permissions screen normally fires

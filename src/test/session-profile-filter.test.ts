@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { normalizeHermesSessionsResponse } from "../lib/hermes-adapter";
-import { filterAgentSessionsForProfile, sessionProfileMap } from "../lib/session-profile-filter";
+import {
+  filterAgentSessionsForProfile,
+  sessionMatchesProfile,
+  sessionProfileMap,
+} from "../lib/session-profile-filter";
 
 vi.mock("../lib/tauri", () => ({
   deleteHermesBridgeSession: vi.fn(),
@@ -59,5 +63,23 @@ describe("session profile filtering", () => {
     expect(filterAgentSessionsForProfile(normalized, profiles, "default").map((s) => s.id)).toEqual(
       ["default-row-session", "legacy-session"],
     );
+  });
+
+  it("matches sessions per profile without dropping scheduled runs (sidebar predicate)", () => {
+    const profiles = sessionProfileMap([{ sessionId: "work-session", profile: "work" }]);
+    const workSession = { id: "work-session", title: "Work session" };
+    const legacySession = { id: "legacy-session", title: "Legacy session" };
+    const cronSession = { id: "cron_digest_20260709_070000", source: "cron", title: "Digest run" };
+
+    expect(sessionMatchesProfile(workSession, profiles, "work")).toBe(true);
+    expect(sessionMatchesProfile(workSession, profiles, "default")).toBe(false);
+    expect(sessionMatchesProfile(legacySession, profiles, "default")).toBe(true);
+    expect(sessionMatchesProfile(legacySession, profiles, "work")).toBe(false);
+    // Unmapped cron runs stay visible under default (unlike the main chat
+    // list, the sidebar keeps them) and hide under named profiles.
+    expect(sessionMatchesProfile(cronSession, profiles, "default")).toBe(true);
+    expect(sessionMatchesProfile(cronSession, profiles, "work")).toBe(false);
+    // Blank active profile normalizes to default.
+    expect(sessionMatchesProfile(legacySession, profiles, "  ")).toBe(true);
   });
 });

@@ -18,6 +18,7 @@ import {
   type HermesAttachmentState,
 } from "../../lib/hermes-image-attach";
 import {
+  assignSessionToProfile,
   ensureHermesBridgeSession,
   hermesBridgeImageDataUrl,
   hermesBridgeSessionMessages,
@@ -339,6 +340,11 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
           storedSessionIdRef.current = sessionId;
           setStoredSessionId(sessionId);
           rememberNoteChatSession(noteId, sessionId);
+          if (activeProfile !== "default") {
+            // The chat list scopes by the session→profile map (ADR 0017): an
+            // unstamped named-profile chat would surface under default.
+            await assignSessionToProfile(sessionId, activeProfile);
+          }
           // Registration in the bridge list happens at the single ensure point
           // below (which retries a swallowed attempt on later sends).
         }
