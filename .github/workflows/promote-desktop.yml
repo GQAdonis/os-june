@@ -257,6 +257,8 @@ jobs:
           GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.PRODUCTION_GOOGLE_OAUTH_CLIENT_ID }}
           GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.PRODUCTION_GOOGLE_OAUTH_CLIENT_SECRET }}
           JUNE_API_URL: ${{ secrets.PRODUCTION_JUNE_API_URL }}
+          # Preserve the RC's first-run Auto behavior when it is promoted.
+          OS_JUNE_AUTO_MODE_DEFAULT: "true"
         with:
           args: --bundles app,dmg --target universal-apple-darwin -- --locked
           includeUpdaterJson: false
