@@ -14,8 +14,10 @@
 #
 # The /verify page still renders the packaged config.toml attestation facts
 # (GHCR image repo, production Trust Center); those describe production, not
-# this throwaway build. Its source commit is stamped from the working tree
-# and suffixed "-dirty" when uncommitted changes were baked in.
+# this throwaway build. Source commit: a clean tree stamps the exact HEAD;
+# a dirty tree stamps "<sha>-dirty", which /verify deliberately renders as
+# "not stamped" (short_commit accepts only pure hex) - a dirty build claims
+# no commit rather than a wrong one.
 services:
   june-api:
     image: ${JUNE_IMAGE}
