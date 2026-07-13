@@ -1356,6 +1356,8 @@ fn drop_leading_orphan_tool_messages(messages: &mut Vec<serde_json::Value>) {
     }
 }
 
+const AGENT_SESSION_TITLE_SYSTEM_PROMPT: &str = "Name this agent session for the user's primary intent or topic. The user request is authoritative. Use an assistant reply excerpt only as secondary context to clarify concrete work, never as the title's point of view. Do not title an acknowledgement, conversational preamble, clarification question, or other wording from the assistant reply. If the user request is already clear, base the title on it even when the assistant asks a follow-up question. Example: for the request 'tell me about my calendar' and reply 'Sure! Which calendar service are you using?', return 'Calendar overview'. Return only a concrete 2 to 5 word title in sentence case: capitalize the first word and proper nouns only, never every word. Avoid first person, words like please/help/you, trailing ellipses, quotes, punctuation wrappers, markdown, or explanations.";
+
 pub async fn suggest_agent_session_title(
     prompt: &str,
     response: Option<&str>,
@@ -1372,7 +1374,7 @@ pub async fn suggest_agent_session_title(
         "messages": [
             {
                 "role": "system",
-                "content": "Name this agent session by the work being done, not by repeating the user's request. Return only a concrete 2 to 5 word title in sentence case: capitalize the first word and proper nouns only, never every word. Avoid first person, words like please/help/you, trailing ellipses, quotes, punctuation wrappers, markdown, or explanations. When an assistant reply excerpt is provided, name the session by the work described there."
+                "content": AGENT_SESSION_TITLE_SYSTEM_PROMPT
             },
             {
                 "role": "user",
@@ -1962,7 +1964,9 @@ fn agent_session_title_user_content(prompt: &str, response: Option<&str>) -> Str
     // crowds the shared max_tokens budget. The frontend caps to the same
     // length before invoking; this cap is the trust-boundary backstop.
     let response: String = response.chars().take(1200).collect();
-    format!("User request:\n{prompt}\n\nAssistant reply excerpt:\n{response}")
+    format!(
+        "Primary user intent (authoritative):\n{prompt}\n\nSecondary assistant context (clarification only):\n{response}"
+    )
 }
 
 fn clean_agent_session_title(value: &str) -> Option<String> {
@@ -3012,8 +3016,16 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"v
                 "  Refactor this parser  ",
                 Some("  I rewrote the tokenizer and added coverage.  "),
             ),
-            "User request:\nRefactor this parser\n\nAssistant reply excerpt:\nI rewrote the tokenizer and added coverage."
+            "Primary user intent (authoritative):\nRefactor this parser\n\nSecondary assistant context (clarification only):\nI rewrote the tokenizer and added coverage."
         );
+    }
+
+    #[test]
+    fn agent_session_title_prompt_prioritizes_clear_user_intent_over_reply() {
+        assert!(AGENT_SESSION_TITLE_SYSTEM_PROMPT.contains("user request is authoritative"));
+        assert!(AGENT_SESSION_TITLE_SYSTEM_PROMPT.contains("clarification question"));
+        assert!(AGENT_SESSION_TITLE_SYSTEM_PROMPT.contains("tell me about my calendar"));
+        assert!(AGENT_SESSION_TITLE_SYSTEM_PROMPT.contains("Calendar overview"));
     }
 
     #[test]
@@ -3021,7 +3033,9 @@ data: \"data\":{\"content\":\"Joined\",\"titleSuggestion\":null,\"provider\":\"v
         let response = "é".repeat(1201);
         let content = agent_session_title_user_content("Summarize the work", Some(&response));
         let excerpt = content
-            .strip_prefix("User request:\nSummarize the work\n\nAssistant reply excerpt:\n")
+            .strip_prefix(
+                "Primary user intent (authoritative):\nSummarize the work\n\nSecondary assistant context (clarification only):\n",
+            )
             .expect("formatted content should include assistant reply prefix");
         assert_eq!(excerpt.chars().count(), 1200);
         assert_eq!(excerpt, "é".repeat(1200));
