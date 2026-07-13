@@ -244,13 +244,39 @@ describe("FundingNotice", () => {
     expect(await screen.findByText(BROWSER_STATUS)).toBeInTheDocument();
 
     // Closing the Stripe page must not park the notice on a spinner for the
-    // whole poll window; nothing has been charged in the browser phase.
+    // whole poll window; the still-Pro refreshed snapshot proves nothing was
+    // charged, so the wait clears and the prompt returns.
     await user.click(screen.getByRole("button", { name: "I closed the Stripe page" }));
 
-    expect(screen.getByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Upgrade to Max" })).toBeInTheDocument();
     expect(currentMaxGrantWait()).toBeUndefined();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
     expect(mocks.osAccountsUpgrade).not.toHaveBeenCalled();
+  });
+
+  it("keeps waiting on cancel when the refreshed snapshot shows the payment went through", async () => {
+    const user = userEvent.setup();
+    // The user pays on the Stripe page, then clicks the cancel affordance
+    // anyway. The refreshed snapshot shows the plan flipped with the grant
+    // still pending - the wait is the only signal suppressing pre-grant Max
+    // claims, so it must survive the click as a waiting row.
+    const confirmedPreGrant: AccountStatus = {
+      ...baseAccount,
+      balance: { credits: -1, usdMillis: -1 },
+      subscription: { subscribed: true, status: "active", plan: "max" },
+    };
+    renderDepletedProNotice(vi.fn(async () => confirmedPreGrant));
+
+    await user.click(screen.getByRole("button", { name: "Upgrade to Max" }));
+    await user.click(await screen.findByRole("button", { name: "Upgrade now" }));
+    expect(await screen.findByText(BROWSER_STATUS)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "I closed the Stripe page" }));
+
+    expect(await screen.findByText(WAITING_STATUS)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Upgrade to Max" })).toBeNull();
+    expect(currentMaxGrantWait()).toMatchObject({ accountId: "usr_123", phase: "waiting" });
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 
   it("adopts an upgrade wait started on another surface instead of offering a second purchase", () => {

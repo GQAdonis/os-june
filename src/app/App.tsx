@@ -179,11 +179,13 @@ import {
   beginMaxGrantWait,
   clearMaxGrantWait,
   isMaxGrantWaitCurrent,
+  isMaxUpgradeWaitStatus,
   markMaxGrantWaitSlow,
   markMaxGrantWaitWaiting,
   maxGrantLanded,
   maxGrantWaitForAccount,
   maxUpgradeSlowStatus,
+  maxUpgradeWaitStatus,
   pollForMaxGrant,
 } from "../lib/max-upgrade";
 import { ConfirmDialog } from "../components/ui/ConfirmDialog";
@@ -749,6 +751,18 @@ export function App() {
       window.clearTimeout(billingNoticeTimerRef.current);
       setBillingNotice(null);
       return;
+    }
+    if (grantWait) {
+      // A coexisting surface's poll advances the shared wait's phase by
+      // in-place mutation, which the identity checks above cannot see. Swap
+      // a stale phase line for the live one - and only a phase line, never
+      // an error or the ready notice.
+      const phaseCopy = maxUpgradeWaitStatus(grantWait);
+      setBillingNotice((notice) =>
+        notice !== null && notice !== phaseCopy && isMaxUpgradeWaitStatus(notice)
+          ? phaseCopy
+          : notice,
+      );
     }
     if (grantWait?.phase === "browser" && account.subscription?.plan === "max") {
       markMaxGrantWaitWaiting(grantWait);

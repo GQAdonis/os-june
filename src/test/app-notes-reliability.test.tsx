@@ -3,7 +3,12 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { MEETING_START_TRANSCRIPTION_EVENT } from "../lib/events";
-import { beginMaxGrantWait, clearMaxGrantWait } from "../lib/max-upgrade";
+import {
+  beginMaxGrantWait,
+  clearMaxGrantWait,
+  currentMaxGrantWait,
+  markMaxGrantWaitSlow,
+} from "../lib/max-upgrade";
 import type {
   AccountStatus,
   BootstrapResponse,
@@ -1157,6 +1162,58 @@ describe("notes recording reliability", () => {
     await waitFor(() =>
       expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull(),
     );
+    expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
+  });
+
+  it("re-derives the banner when another surface's poll advances the wait phase", async () => {
+    const failedNote = {
+      ...first,
+      processingStatus: "failed" as const,
+      lastError: "Your balance is too low. Upgrade to continue.",
+    };
+    const proAccount: AccountStatus = {
+      signedIn: true,
+      configured: true,
+      user: { id: "usr_123", handle: "alex" },
+      balance: { credits: 10, usdMillis: 10 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    mocks.osAccountsStatus.mockResolvedValue(proAccount);
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [failedNote, second],
+      activeRecoveries: [],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) =>
+      noteId === "note-2" ? second : failedNote,
+    );
+
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    await userEvent.click(screen.getByRole("button", { name: /First note Preview/ }));
+
+    await userEvent.click(await screen.findByRole("button", { name: "Upgrade to Max" }));
+    await userEvent.click(await screen.findByRole("button", { name: "Upgrade now" }));
+    expect(
+      await screen.findByText("Waiting for you to confirm in the browser"),
+    ).toBeInTheDocument();
+
+    // Another surface's poll times out and mutates the shared wait in place.
+    // The banner snapshot must follow on the next refresh tick.
+    const grantWait = currentMaxGrantWait();
+    expect(grantWait).toBeDefined();
+    if (grantWait) markMaxGrantWaitSlow(grantWait);
+    mocks.osAccountsStatus.mockResolvedValue({ ...proAccount });
+    window.dispatchEvent(new Event("focus"));
+
+    expect(
+      await screen.findByText(
+        "Still waiting for payment confirmation. If you closed the Stripe page, you can try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull();
     expect(mocks.osAccountsChangePlan).not.toHaveBeenCalled();
   });
 });

@@ -1126,6 +1126,33 @@ describe("AppSettings", () => {
     expect(screen.queryByRole("button", { name: "Upgrade to Max" })).toBeNull();
   });
 
+  it("re-derives the status line when another surface's poll advances the wait phase", async () => {
+    const user = userEvent.setup();
+    const proAccount: AccountStatus = {
+      ...signedInAccount,
+      balance: { credits: 1200, usdMillis: 1200, usageRemainingPercent: 40 },
+      subscription: { subscribed: true, status: "active", plan: "pro" },
+    };
+    const grantWait = beginMaxGrantWait(1200, signedInAccount.user?.id, "browser");
+    const { rerenderAccount } = renderProBillingSettings();
+
+    await user.click(screen.getByRole("tab", { name: "Billing" }));
+    expect(screen.getByText("Waiting for you to confirm in the browser")).toBeInTheDocument();
+
+    // Another surface's poll times out and mutates the shared wait in place.
+    // Identity comparison cannot see it; the next refresh tick must still
+    // swap the stale phase line for the live one.
+    markMaxGrantWaitSlow(grantWait);
+    rerenderAccount?.({ ...proAccount });
+
+    expect(
+      await screen.findByText(
+        "Still waiting for payment confirmation. If you closed the Stripe page, you can try again.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Waiting for you to confirm in the browser")).toBeNull();
+  });
+
   it("drops a wait cancelled on another surface and restores the upgrade CTA", async () => {
     const user = userEvent.setup();
     const proAccount: AccountStatus = {

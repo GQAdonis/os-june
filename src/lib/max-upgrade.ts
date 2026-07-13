@@ -96,6 +96,29 @@ export function maxUpgradeSlowStatus(wait: MaxGrantWait): string {
   return wait.hosted ? MAX_UPGRADE_HOSTED_SLOW_STATUS : MAX_UPGRADE_SLOW_STATUS;
 }
 
+/** The status line for a wait's current phase. */
+export function maxUpgradeWaitStatus(wait: MaxGrantWait): string {
+  if (wait.phase === "browser") return MAX_UPGRADE_BROWSER_STATUS;
+  if (wait.phase === "slow") return maxUpgradeSlowStatus(wait);
+  return MAX_UPGRADE_WAITING_STATUS;
+}
+
+const MAX_UPGRADE_WAIT_STATUSES = new Set<string>([
+  MAX_UPGRADE_BROWSER_STATUS,
+  MAX_UPGRADE_WAITING_STATUS,
+  MAX_UPGRADE_SLOW_STATUS,
+  MAX_UPGRADE_HOSTED_SLOW_STATUS,
+]);
+
+/** Whether a status/notice string is one of the wait-phase lines. The wait's
+ * phase advances by in-place mutation, which identity-based reconciliation
+ * cannot see; surfaces that snapshot phase copy into state use this to swap
+ * a stale phase line for the live one without clobbering unrelated notices
+ * (error messages, the ready announcement). */
+export function isMaxUpgradeWaitStatus(status: string | null | undefined): boolean {
+  return status != null && MAX_UPGRADE_WAIT_STATUSES.has(status);
+}
+
 export function clearMaxGrantWait(wait?: MaxGrantWait): void {
   if (wait === undefined || activeMaxGrantWait === wait) activeMaxGrantWait = undefined;
 }

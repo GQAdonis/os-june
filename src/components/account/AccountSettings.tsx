@@ -20,10 +20,12 @@ import {
   isHostedMaxUpgradeFallbackError,
   isMaxGrantWaitCurrent,
   markMaxGrantWaitSlow,
+  isMaxUpgradeWaitStatus,
   markMaxGrantWaitWaiting,
   maxGrantLanded,
   maxGrantWaitForAccount,
   maxUpgradeSlowStatus,
+  maxUpgradeWaitStatus,
   pollForMaxGrant,
 } from "../../lib/max-upgrade";
 import {
@@ -336,6 +338,16 @@ export function BillingSettingsSection({
       return;
     }
     if (!maxGrantWait) return;
+    // A coexisting surface's poll advances the shared wait's phase by
+    // in-place mutation, which the identity check above cannot see. Swap a
+    // stale phase line for the live one - and only a phase line, never an
+    // error or the ready announcement.
+    const phaseCopy = maxUpgradeWaitStatus(maxGrantWait);
+    setBillingStatus((status) =>
+      status !== undefined && status !== phaseCopy && isMaxUpgradeWaitStatus(status)
+        ? phaseCopy
+        : status,
+    );
     if (maxGrantWait.phase === "browser" && account.subscription?.plan === "max") {
       markMaxGrantWaitWaiting(maxGrantWait);
       setBillingStatus(MAX_UPGRADE_WAITING_STATUS);

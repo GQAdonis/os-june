@@ -303,11 +303,32 @@ export function FundingNotice({ account, onRefresh, active = true }: Props) {
   }, [account, maxGrantWait]);
 
   // Closing the Stripe page must not park the notice on a spinner for the
-  // whole poll window: nothing has been charged in the browser phase, so
-  // cancelling just clears the wait and returns to the prompt. If the
-  // payment actually went through, the refresh observes the landed grant.
-  function handleCancelBrowserWait() {
-    if (maxGrantWait) clearMaxGrantWait(maxGrantWait);
+  // whole poll window. But the browser phase is exactly when a payment can
+  // complete out of band, and the wait is the only signal suppressing
+  // pre-grant "Max" claims - so cancel refreshes once and clears the wait
+  // only when the snapshot does not show a confirmed-but-ungranted upgrade.
+  async function handleCancelBrowserWait() {
+    const wait = maxGrantWait;
+    if (!wait) return;
+    let refreshed: AccountStatus | undefined;
+    try {
+      refreshed = await onRefresh();
+    } catch {
+      // A failed refresh cannot prove the payment went through; honor the
+      // cancel with the snapshot already on hand.
+    }
+    if (!isMaxGrantWaitCurrent(wait)) {
+      setMaxGrantPhaseRevision((revision) => revision + 1);
+      return;
+    }
+    const snapshot = refreshed ?? account;
+    if (snapshot.subscription?.plan === "max" && !maxGrantLanded(snapshot, wait.baselineCredits)) {
+      // Payment confirmed, grant still on its way: keep waiting instead of
+      // re-deriving a prompt that could sell a second billing action.
+      markMaxGrantWaitWaiting(wait);
+    } else {
+      clearMaxGrantWait(wait);
+    }
     setMaxGrantPhaseRevision((revision) => revision + 1);
   }
 
@@ -358,7 +379,7 @@ export function FundingNotice({ account, onRefresh, active = true }: Props) {
               <button
                 type="button"
                 className="btn btn-ghost"
-                onClick={() => handleCancelBrowserWait()}
+                onClick={() => void handleCancelBrowserWait()}
               >
                 I closed the Stripe page
               </button>
