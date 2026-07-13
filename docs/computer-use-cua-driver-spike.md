@@ -11,18 +11,24 @@ spawn topology. It is a findings note, not a build.
 
 ## Answer
 
-Run the driver outside the write jail. The private-interface lookups are not the
-blocker: under June's `(allow default)` profile the window-server and
-accessibility connection paths survive the jail unchanged (proven below). The
-blocker is the write jail plus TCC identity. As shipped, cua-driver is a
-single-instance daemon that must create a control socket and pid file under
-`~/Library/Caches/cua-driver/` and persist config under `~/.cua-driver/`, none
-of which are (or should be) June write roots, so a driver launched as a child of
-the in-jail runtime cannot start. Conveniently, cua-driver already solves the
-identity half of this for us: its `cua-driver mcp` process is a thin client that
-proxies to a `CuaDriver.app` daemon launched through LaunchServices "so TCC
-grants attach to the bundle". The recommended topology therefore matches the
-dictation-helper precedent almost exactly: the Rust broker owns a June-bundled,
+Run the driver outside the write jail - as the recommended topology, not
+because Seatbelt was shown to make in-jail operation impossible. What the
+experiments show: under June's `(allow default)` profile, a public-API probe
+confirms the window-server and accessibility connection mechanism the driver's
+private SPIs ride on is reachable in-jail, and the driver daemon itself starts
+in-jail once its socket and home are relocated into write roots, stopping only
+at its own TCC permissions gate. The private calls themselves
+(`SLEventPostToPid`, AX mutation, ScreenCaptureKit capture) were not exercised
+- they sit behind TCC grants only a human can set - so the full in-jail action
+path remains unverified pending that end-to-end run. On the default paths,
+without relocation, the daemon's state writes (`~/Library/Caches/cua-driver/`,
+`~/.cua-driver/`) are denied by the write jail. The recommendation therefore
+rests on identity and lifecycle, not on a hard denial: cua-driver's own design
+is that `cua-driver mcp` is a thin client proxying to a `CuaDriver.app` daemon
+launched through LaunchServices "so TCC grants attach to the bundle", and an
+in-jail daemon would run under an unresolved TCC identity while June tracks
+driver-internal paths across versions. The recommended topology matches the
+dictation-helper precedent: the Rust broker owns a June-bundled,
 separately-signed driver daemon that runs outside the jail with its own stable
 code identity, and the in-jail runtime's stdio client proxies to it over a
 June-controlled socket placed inside a write root. Version pinning is a bundled
@@ -144,15 +150,17 @@ profile from `build_sandbox_profile()` is `(allow default)` plus a
 `$TMPDIR`) plus a secret-read denylist. The profile does not deny mach lookups
 or any window-server or accessibility interface.
 
-### The private-interface lookups survive the jail
+### The connection mechanism is reachable in-jail (public-API probe)
 
 A small Swift probe was compiled and run bare, then under a faithful replica of
 the generated profile (same shape and write roots as `build_sandbox_profile()`,
-validated by the kernel via `sandbox-exec`). The probe calls `CGMainDisplayID`
-and `CGDisplayPixelsWide/High` (needs a window-server connection),
-`CGWindowListCopyWindowInfo` (needs a window-server connection), and the
-prompt-free TCC status calls `AXIsProcessTrusted` and
-`CGPreflightScreenCaptureAccess`.
+validated by the kernel via `sandbox-exec`). The probe calls only public APIs:
+`CGMainDisplayID` and `CGDisplayPixelsWide/High` (needs a window-server
+connection), `CGWindowListCopyWindowInfo` (needs a window-server connection),
+and the prompt-free TCC status calls `AXIsProcessTrusted` and
+`CGPreflightScreenCaptureAccess`. It does not resolve or invoke the private
+SPIs themselves (`SLEventPostToPid`, `_SLPSGetFrontProcess`), perform an AX
+mutation, capture via ScreenCaptureKit, or run the driver's action path.
 
 Bare and jailed produced identical output:
 
@@ -164,53 +172,95 @@ SCREEN_PREFLIGHT=false
 PROBE_DONE
 ```
 
-Two conclusions. First, the write jail does not block the window-server or
-accessibility connection mechanism the driver's private SPIs ride on; those
-paths work in-jail. Second, Seatbelt and TCC are orthogonal: the jail neither
-grants nor removes an Accessibility or screen-recording grant, and a fresh
-unbundled binary starts with neither (hence the `false` values), which is exactly
-why the driver needs a stable, separately-signed code identity plus a human
-grant.
+Two conclusions, stated at the strength the evidence supports. First, the write
+jail does not block the window-server or accessibility connection mechanism the
+driver's private SPIs ride on; the connection paths work in-jail. Whether the
+private calls themselves behave identically in-jail was not exercised and
+remains unverified until the TCC-blocked end-to-end run (see Blocked). Second,
+Seatbelt and TCC are orthogonal at the status level: the jail neither grants
+nor removes an Accessibility or screen-recording grant, and a fresh unbundled
+binary starts with neither (hence the `false` values), which is exactly why the
+driver needs a stable, separately-signed code identity plus a human grant.
 
-### The write jail blocks the driver's runtime state
+### The write jail blocks the driver's default-path state
 
-Under the same profile, writes inside a write root succeed and the driver's real
-runtime paths are denied:
+Under the same profile, writes inside a write root succeed and the driver's
+default runtime paths are denied:
 
 ```
 # inside HERMES_HOME (a write root)
 WROTE_HERMES_HOME_OK
 
-# ~/Library/Caches/cua-driver/ (the daemon's socket + pid dir)
+# ~/Library/Caches/cua-driver/ (the daemon's default socket + pid dir)
 mkdir: /Users/<user>/Library/Caches/cua-driver: Operation not permitted
 DENIED_CACHE
 
-# ~/.cua-driver/config.json (the driver's config)
+# ~/.cua-driver/config.json (the driver's default config home)
 mkdir: /Users/<user>/.cua-driver: Operation not permitted
 DENIED_DOTHOME
 ```
 
-Strings in the driver confirm these are load-bearing: the daemon binds a
-single-instance Unix-domain socket at `~/Library/Caches/cua-driver/cua-driver.sock`
-with a `cua-driver.pid` lock, and persists configuration to
-`~/.cua-driver/config.json` (plus `.telemetry_id`, `.installation_recorded`, and
-an update-check cache under `~/.cua-driver-rs/`). A driver launched as a child of
-the in-jail runtime cannot create any of these, so it cannot start. This is the
-concrete reason to run it outside the write jail, matching the PRD's hypothesis.
+Strings in the driver confirm these are load-bearing on the default paths: the
+daemon binds a single-instance Unix-domain socket at
+`~/Library/Caches/cua-driver/cua-driver.sock` with a `cua-driver.pid` lock, and
+persists configuration to `~/.cua-driver/config.json` (plus `.telemetry_id`,
+`.installation_recorded`, and an update-check cache under `~/.cua-driver-rs/`).
+So a driver launched as a child of the in-jail runtime with no relocation
+cannot create its state and will not come up. Both paths are relocatable
+(`--socket`, `CUA_DRIVER_RS_HOME`), which the next experiment exercises.
+
+### With full relocation the daemon starts in-jail, up to the TCC gate
+
+To test whether the denials above are actually unavoidable, the bundled binary
+was started under the same profile replica with everything relocated into write
+roots: `CUA_DRIVER_RS_HOME=<HERMES_HOME subdir>`,
+`serve --socket /private/tmp/june-cua-spike.sock` (a June write root),
+`CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`.
+
+Result: the daemon starts inside the jail. It bound the relocated socket
+(`Cua Driver daemon listening on /private/tmp/june-cua-spike.sock`), left the
+default `~/Library/Caches/cua-driver/` untouched, answered
+`status --socket` with "daemon is running", and produced zero Sandbox-log
+violations (`log show --predicate 'sender == "Sandbox"'`). It then blocked at
+its own startup permissions gate, waiting for Accessibility and Screen
+Recording grants ("cua-driver needs your permission before `serve` can start
+... still waiting on: Accessibility, Screen Recording"); the gate is skippable
+with `CUA_DRIVER_RS_PERMISSIONS_GATE=0`, but proceeding past it without grants
+was out of the spike's scope. No capture or action was attempted.
+
+Two practical constraints surfaced. The socket path must fit the Unix-domain
+`SUN_LEN` limit (about 104 bytes): a deep scratch path failed with
+`bind ...: path must be shorter than SUN_LEN`, so June must pick a short
+socket path. And an invocation without the relocation env writes
+`~/.cua-driver/.telemetry_id` on the spot (observed from an unjailed client
+run), so every June-owned invocation - client and daemon - needs the
+relocation and disable env applied consistently.
+
+Net: in-jail operation is not hard-blocked at the process-start level; it is
+possible with full relocation. The case for out-of-jail is made on other
+grounds in the topology section.
 
 ## Recommended spawn topology
 
 The broker spawns a June-bundled, separately-signed driver bundle directly,
 dictation-helper style, and keeps it out of the write jail; the in-jail runtime
-talks to it as a proxy client. Concretely:
+talks to it as a proxy client. This is a recommendation, not a necessity - the
+relocation experiment shows an in-jail daemon can start - and it is preferred
+because it matches the existing out-of-jail precedents (the dictation helper,
+the gateway daemon), gives the daemon a stable bundle identity for TCC
+attribution instead of an unresolved in-jail identity, puts daemon lifecycle in
+the broker's hands independent of per-session runtime spawns, and avoids June
+tracking driver-internal state paths across driver versions. Concretely:
 
 1. Bundle `CuaDriver.app` 0.5.0 as an app resource and re-sign it under June's
    Developer ID and a June bundle id (for example `co.opensoftware.june.cua-driver`),
    exactly as `build.rs` builds and `sign_helper_app()` signs the dictation
    helper (`co.opensoftware.june.dictation-helper`). This gives the daemon a
-   stable, auditable designated requirement so its Accessibility and screen
-   recording grants survive app updates and attribute to a June-controlled
-   identity, not to the runtime or a third-party signature.
+   stable, auditable designated requirement, expected to make its Accessibility
+   and screen recording grants survive app updates and attribute to a
+   June-controlled identity rather than the runtime or a third-party signature;
+   verifying that grants actually persist across two June-signed driver
+   versions is an open question below.
 2. The Rust broker (the unsandboxed host, the same layer that already spawns the
    dictation helper via `spawn_helper()` and the gateway daemon via
    `build_hermes_gateway_start_command`, both deliberately outside the Seatbelt
@@ -241,19 +291,24 @@ dictation helper and the gateway daemon.
 
 ### Alternative if the daemon is ever kept in-jail
 
-If a future design instead runs the daemon inside the jail (not recommended), the
-profile needs write grants for the daemon's state. From the evidence that is at
-least: the socket and pid dir `~/Library/Caches/cua-driver/` and the config home
-`~/.cua-driver/` (the latter partly relocatable with `CUA_DRIVER_RS_HOME`). The
-socket path is relocatable with `--socket`, so placing it under an existing write
-root avoids widening the profile for that piece. This path re-widens the jail
-toward `$HOME` and tracks driver-internal paths across versions, so the
-out-of-jail daemon is preferred.
+The relocation experiment shows this is viable at the start level with no
+profile widening at all: `--socket <short write-root path>` plus
+`CUA_DRIVER_RS_HOME=<write-root path>` (and the telemetry and update-check
+disables) let the daemon come up entirely inside the existing write roots -
+no new grants needed. What this path leaves unresolved: the TCC identity of a
+jailed daemon spawned under the runtime (a bare executable under
+`sandbox-exec`, no bundle of its own, so grants would attach to whatever
+responsible-process identity macOS assigns), whether the private SPI calls and
+capture behave in-jail past the permissions gate (unverified, TCC-blocked),
+the `SUN_LEN` limit on the socket path, and the burden of tracking every
+driver-internal write path across driver versions. Those are the reasons the
+out-of-jail daemon is preferred, not a Seatbelt denial.
 
 ## TCC (Accessibility and screen recording)
 
-TCC is orthogonal to Seatbelt (proven above) and is the real gate on computer
-use. The driver needs two grants: Accessibility (for AX posting and the private
+TCC, not Seatbelt, is the real gate on computer use: the probe shows the jail
+does not change TCC status, and the in-jail daemon stops at the driver's own
+permissions gate, not at a sandbox denial. The driver needs two grants: Accessibility (for AX posting and the private
 SkyLight event SPIs) and screen recording (for ScreenCaptureKit capture). These
 attach to the daemon's bundle identity, which is why the separately-signed
 bundle matters. Onboarding follows the dictation-helper pattern the PRD already
@@ -278,10 +333,12 @@ daemon) map directly onto that flow.
 
 ## Open questions for phase-2 planning
 
-- Socket reachability from inside the jail: confirm the jailed `cua-driver mcp`
-  client can `connect()` to a daemon socket placed under a write root, and settle
-  whether any residual client-side writes (config, telemetry id) need
-  `CUA_DRIVER_RS_HOME` pointed at a write root or can be fully suppressed.
+- Socket reachability from inside the jail: the daemon binds a write-root
+  socket in-jail (shown above), but the jailed `cua-driver mcp` client's
+  `connect()` to the broker-owned daemon was not exercised; confirm it, keep
+  the socket path under the `SUN_LEN` limit, and settle whether residual
+  client-side writes (the telemetry id was observed written on a plain
+  invocation) are fully covered by `CUA_DRIVER_RS_HOME` plus the disable env.
 - Daemon lifecycle and reuse: one daemon per machine (single-instance socket) or
   one per session, and how the broker supervises it (start, health, stop on
   revoke), including whether `serve` or a LaunchServices launch is the cleaner
