@@ -89,7 +89,7 @@ describe("ConnectorApprovalsTray", () => {
     tauriMocks.connectorApprovalsPending.mockResolvedValueOnce([approval()]).mockResolvedValue([]);
     render(<ConnectorApprovalsTray />);
     await screen.findByText("Send reply to Dana");
-    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    await userEvent.click(screen.getByRole("button", { name: "Approve Send reply to Dana" }));
     expect(tauriMocks.connectorApprovalRespond).toHaveBeenCalledWith({
       approvalId: "a1",
       approve: true,

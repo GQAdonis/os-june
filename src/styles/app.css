@@ -25495,15 +25495,19 @@ input:focus-visible,
 
 /* Connector approvals tray: a shell-level queue for parked action calls under
    the approval trust mode. Fixed bottom-right — the only fixed occupant of
-   that corner (toasts live top-right) — under the dialog layer (z 112) and the
-   panel resize handles. Wears the floating-surface recipe the steer queue and
-   funding notice share (solid card, hairline ring folded into the shadow),
-   and collapses to its header line so an unanswered batch stops covering the
-   composer corner. */
+   that corner, inset from it the way toasts are from the top-right (--sp-6) —
+   under the dialog layer (z 112) and the panel resize handles. Wears the
+   floating-surface recipe the steer queue and funding notice share (solid
+   card, hairline ring folded into the shadow), and collapses to its header
+   line so an unanswered batch stops covering the composer corner. */
 .connector-approvals {
+  /* One leading rail shared by the header's logo stack and every row's
+     provider mark, so the title and the summaries land on a single left
+     edge (the steer queue's --follow-up-rail idea). */
+  --approvals-rail: 32px;
   position: fixed;
-  right: var(--sp-4);
-  bottom: var(--sp-4);
+  right: var(--sp-6);
+  bottom: var(--sp-6);
   z-index: 60;
   width: min(360px, calc(100vw - var(--sp-8)));
   display: flex;
@@ -25552,14 +25556,14 @@ input:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
-  min-height: var(--control-sm);
+  min-height: var(--control-md);
   padding: var(--sp-1) var(--sp-2);
   border: 0;
   border-radius: var(--r-md);
   background: transparent;
   color: var(--foreground);
   font-weight: var(--fw-medium);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-md);
   text-align: left;
   cursor: pointer;
   transition: background-color var(--t-fast) var(--ease-out);
@@ -25567,6 +25571,32 @@ input:focus-visible,
 
 .connector-approvals-trigger:hover {
   background: var(--secondary);
+}
+
+/* The queue's providers as an overlapping logo stack (the avatar-group
+ * treatment): small circular tiles, each ringed in the card color so the
+ * overlap reads as separate marks. Fixed to the shared rail width so the
+ * title text never shifts as providers come and go. */
+.connector-approvals-stack {
+  display: inline-flex;
+  align-items: center;
+  width: var(--approvals-rail);
+  flex-shrink: 0;
+}
+
+.connector-approvals-stack-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-pill);
+  background: var(--surface-subtle);
+  box-shadow: 0 0 0 2px var(--card);
+  color: var(--foreground);
+}
+
+.connector-approvals-stack-mark + .connector-approvals-stack-mark {
+  margin-left: -5px;
 }
 
 .connector-approvals-header-actions {
@@ -25630,9 +25660,11 @@ input:focus-visible,
   background: var(--surface-subtle);
 }
 
+/* Bleeds to the tray edges so the row dividers run full width; the rows
+ * carry the matching inline inset themselves. */
 .connector-approvals-list {
   list-style: none;
-  margin: 0;
+  margin: 0 calc(-1 * var(--sp-2));
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -25640,16 +25672,17 @@ input:focus-visible,
   overflow-y: auto;
 }
 
-/* Rows separated by hairlines rather than nested cards: the tray is already
- * one popover surface, so a bordered card per item read as a card-in-card. */
+/* One compact line per action (the Deel action-required mold): provider mark
+ * on the rail, summary + meta in the middle, deny/approve icon buttons at the
+ * end. Hairline dividers between rows, full tray width. */
 .connector-approvals-item {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: var(--sp-2) var(--sp-3);
-  /* Inline inset matches the trigger's padding so the provider mark lands on
-   * the same left edge as the header's checklist icon. */
-  padding: var(--sp-3) var(--sp-2);
+  grid-template-columns: var(--approvals-rail) minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: var(--sp-2);
+  /* Inline inset = the tray frame + the trigger's padding, so the mark and
+   * summary line up under the header's stack and title. */
+  padding: var(--sp-2) var(--sp-4);
   border-top: 1px solid var(--border-subtle);
 }
 
@@ -25657,72 +25690,80 @@ input:focus-visible,
   border-top: 0;
 }
 
-/* The provider's monochrome mark, aligned with the summary's first line. */
+/* The provider's monochrome mark, left-aligned on the shared rail. */
 .connector-approvals-mark {
-  display: inline-grid;
-  place-items: center;
-  margin-top: 2px;
+  display: inline-flex;
+  align-items: center;
   color: var(--muted-foreground);
 }
 
 .connector-approvals-info {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-1);
+  gap: 1px;
+  min-width: 0;
 }
 
 .connector-approvals-summary {
   margin: 0;
-  font-size: var(--fs-sm);
+  overflow: hidden;
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connector-approvals-meta {
   margin: 0;
-  font-size: var(--fs-xs);
-  color: var(--muted-foreground);
-}
-
-/* The redacted args preview clamps: a long draft body must not blow the tray
- * up to its scroll cap on its own. */
-.connector-approvals-preview {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  margin: 0;
   overflow: hidden;
   font-size: var(--fs-xs);
   color: var(--muted-foreground);
-  white-space: pre-wrap;
-  word-break: break-word;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connector-approvals-actions {
-  grid-column: 2;
-  display: flex;
-  justify-content: flex-end;
-  gap: var(--sp-2);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
 }
 
-/* Approve reads as primary by being filled (the agent approval-card recipe):
- * solid subtle-gray at rest, firming to --muted on hover. No brand solid — a
- * batch of five approvals should not shout five times. */
-.connector-approvals-approve {
+/* Per-row verdicts as compact icon buttons (Deny ✕ quiet, Approve ✓ filled),
+ * following the agent approval-card weighting: approve reads as primary by
+ * being filled, deny stays muted, neither shouts. */
+.connector-approvals-item-deny,
+.connector-approvals-item-approve {
+  display: inline-grid;
+  place-items: center;
+  width: var(--control-sm);
   height: var(--control-sm);
-  padding: 0 var(--sp-3);
+  padding: 0;
   border: 0;
   border-radius: var(--r-sm);
-  background: var(--surface-subtle);
-  color: var(--secondary-foreground);
-  font-size: var(--fs-sm);
   cursor: pointer;
   transition: background-color var(--t-fast) var(--ease-out);
 }
 
-.connector-approvals-approve:hover:not(:disabled) {
+.connector-approvals-item-deny {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.connector-approvals-item-deny:hover:not(:disabled) {
+  background: var(--surface-subtle);
+}
+
+.connector-approvals-item-approve {
+  background: var(--surface-subtle);
+  color: var(--secondary-foreground);
+}
+
+.connector-approvals-item-approve:hover:not(:disabled) {
   background: var(--muted);
 }
 
-.connector-approvals-approve:disabled {
+.connector-approvals-item-deny:disabled,
+.connector-approvals-item-approve:disabled {
   opacity: 0.55;
   cursor: default;
 }

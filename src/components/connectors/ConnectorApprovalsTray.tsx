@@ -1,5 +1,7 @@
 import { IconChecklist } from "central-icons/IconChecklist";
+import { IconCheckmark2Small } from "central-icons/IconCheckmark2Small";
 import { IconChevronDownSmall } from "central-icons/IconChevronDownSmall";
+import { IconCrossSmall } from "central-icons/IconCrossSmall";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { actionToolLabel, providerFromServer } from "../../lib/connectors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
@@ -130,6 +132,17 @@ export function ConnectorApprovalsTray() {
 
   if (pending.length === 0) return null;
 
+  // The providers with work in the queue, deduped in arrival order — the
+  // header's overlapping logo stack (the avatar-group treatment) says at a
+  // glance whose actions are waiting, especially while collapsed.
+  const stackProviders = [
+    ...new Set(
+      pending
+        .map((item) => providerFromServer(item.server))
+        .filter((provider): provider is NonNullable<typeof provider> => provider !== null),
+    ),
+  ].slice(0, 3);
+
   return (
     <aside
       className="connector-approvals"
@@ -145,7 +158,19 @@ export function ConnectorApprovalsTray() {
           aria-expanded={!collapsed}
           onClick={() => setCollapsed((current) => !current)}
         >
-          <IconChecklist size={16} aria-hidden />
+          <span className="connector-approvals-stack" aria-hidden>
+            {stackProviders.length > 0 ? (
+              stackProviders.map((provider) => (
+                <span key={provider} className="connector-approvals-stack-mark">
+                  <ConnectorProviderIcon provider={provider} size={10} />
+                </span>
+              ))
+            ) : (
+              <span className="connector-approvals-stack-mark">
+                <IconChecklist size={10} aria-hidden />
+              </span>
+            )}
+          </span>
           Approvals needed
           {collapsed ? <span className="status-pill">{pending.length}</span> : null}
         </button>
@@ -190,8 +215,16 @@ export function ConnectorApprovalsTray() {
         <ul className="connector-approvals-list scroll-fade-mask" ref={listRef} {...fade.props}>
           {pending.map((item) => {
             const provider = providerFromServer(item.server);
+            const summary = item.summary || actionToolLabel(item.tool);
             return (
-              <li key={item.approvalId} className="connector-approvals-item">
+              // The redacted args preview (redaction happens in Rust) rides in
+              // the row's tooltip: the summary carries the decision, and the
+              // preview stays one hover away instead of a paragraph per row.
+              <li
+                key={item.approvalId}
+                className="connector-approvals-item"
+                title={item.argsPreview || undefined}
+              >
                 <span className="connector-approvals-mark" aria-hidden>
                   {provider ? (
                     <ConnectorProviderIcon provider={provider} size={14} />
@@ -200,32 +233,31 @@ export function ConnectorApprovalsTray() {
                   )}
                 </span>
                 <div className="connector-approvals-info">
-                  <p className="connector-approvals-summary">
-                    {item.summary || actionToolLabel(item.tool)}
-                  </p>
+                  <p className="connector-approvals-summary">{summary}</p>
                   <p className="connector-approvals-meta">
                     {actionToolLabel(item.tool)} · {item.accountEmail}
                   </p>
-                  {item.argsPreview ? (
-                    <p className="connector-approvals-preview">{item.argsPreview}</p>
-                  ) : null}
                 </div>
                 <div className="connector-approvals-actions">
                   <button
                     type="button"
-                    className="btn btn-ghost connector-approvals-deny"
+                    className="connector-approvals-item-deny"
+                    aria-label={`Deny ${summary}`}
+                    title="Deny"
                     disabled={busy}
                     onClick={() => void respondOne(item.approvalId, false)}
                   >
-                    Deny
+                    <IconCrossSmall size={14} aria-hidden />
                   </button>
                   <button
                     type="button"
-                    className="connector-approvals-approve"
+                    className="connector-approvals-item-approve"
+                    aria-label={`Approve ${summary}`}
+                    title="Approve"
                     disabled={busy}
                     onClick={() => void respondOne(item.approvalId, true)}
                   >
-                    Approve
+                    <IconCheckmark2Small size={14} aria-hidden />
                   </button>
                 </div>
               </li>
