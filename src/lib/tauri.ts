@@ -1646,9 +1646,11 @@ export async function osAccountsUpgradeSession(plan: SubscriptionPlan) {
 }
 
 /** Changes the plan on the caller's existing subscription in place (Pro to
- * Max). This is the compatibility fallback for deployments without hosted
- * upgrade sessions. Credits still arrive only through the invoice webhook, so
- * callers poll account status until the grant lands. */
+ * Max), charging the saved card immediately with no browser review. This is
+ * the compatibility fallback for deployments without hosted upgrade
+ * sessions, and callers must only dispatch it behind the charge-now consent
+ * copy. Credits still arrive only through the invoice webhook, so callers
+ * poll account status until the grant lands. */
 export async function osAccountsChangePlan(plan: SubscriptionPlan) {
   return invoke<AccountSubscription>("os_accounts_change_plan", { plan });
 }
