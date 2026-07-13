@@ -92,7 +92,7 @@ pub(crate) async fn generate(
     request.validate()?;
     let model_id = required(request.model, "model_required")?;
     validation::validate_text_len("model", &model_id, validation::MAX_MODEL_CHARS)?;
-    require_priced_model(&state, &model_id, ModelKind::Text)?;
+    let model_id = resolve_priced_text_model(&state, &model_id)?;
 
     let stream = request.stream;
     let params = NoteGenerateParams {
@@ -347,6 +347,33 @@ pub(crate) fn require_priced_model(
     require_priced_model_kind(state.pricing(), model_id, kind)
 }
 
+const AUTO_TEXT_MODEL: &str = "open-software/auto";
+
+/// Older June clients may retain a Venice model that disappeared when the
+/// production catalog moved behind os-api. Preserve those sessions by routing
+/// an unpriced text selection through Auto; wrong-kind models still fail.
+pub(crate) fn resolve_priced_text_model(
+    state: &ApiState,
+    requested_model_id: &str,
+) -> Result<String, ApiError> {
+    resolve_priced_text_model_kind(state.pricing(), requested_model_id)
+}
+
+fn resolve_priced_text_model_kind(
+    pricing: &PricingTable,
+    requested_model_id: &str,
+) -> Result<String, ApiError> {
+    match pricing.ensure_model_kind(requested_model_id, ModelKind::Text) {
+        Ok(()) => Ok(requested_model_id.to_string()),
+        Err(PricingError::NotPriced | PricingError::MissingRate) => {
+            require_priced_model_kind(pricing, AUTO_TEXT_MODEL, ModelKind::Text)?;
+            Ok(AUTO_TEXT_MODEL.to_string())
+        }
+        Err(PricingError::WrongUnit) => Err(ApiError::unprocessable("model_type_invalid")),
+        Err(PricingError::Overflow) => Err(ApiError::unprocessable("price_overflow")),
+    }
+}
+
 fn require_priced_model_kind(
     pricing: &PricingTable,
     model_id: &str,
@@ -368,7 +395,10 @@ fn parse_preview_flag(value: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_preview_flag, require_priced_model_kind};
+    use super::{
+        AUTO_TEXT_MODEL, parse_preview_flag, require_priced_model_kind,
+        resolve_priced_text_model_kind,
+    };
     use crate::ApiError;
     use june_config::{ModelPriceConfig, ModelProvider, ModelType, PriceUnit};
     use june_domain::ModelKind;
@@ -396,6 +426,24 @@ mod tests {
             },
         );
         models.insert(
+            AUTO_TEXT_MODEL.to_string(),
+            ModelPriceConfig {
+                unit: PriceUnit::Tokens,
+                credits_per_million_seconds: None,
+                input_credits_per_million_tokens: Some(1),
+                output_credits_per_million_tokens: Some(1),
+                provider: ModelProvider::Venice,
+                model_type: ModelType::Text,
+                display_name: "Auto".to_string(),
+                description: None,
+                privacy: None,
+                pricing: None,
+                context_tokens: None,
+                traits: Vec::new(),
+                capabilities: Vec::new(),
+            },
+        );
+        models.insert(
             "text-model".to_string(),
             ModelPriceConfig {
                 unit: PriceUnit::Tokens,
@@ -414,6 +462,20 @@ mod tests {
             },
         );
         PricingTable::new(models)
+    }
+
+    #[test]
+    fn stale_text_model_falls_back_to_auto() {
+        let resolved = resolve_priced_text_model_kind(&pricing_table(), "retired-venice-model")
+            .expect("stale model should remain usable through Auto");
+        assert_eq!(resolved, AUTO_TEXT_MODEL);
+    }
+
+    #[test]
+    fn priced_text_model_is_preserved() {
+        let resolved = resolve_priced_text_model_kind(&pricing_table(), "text-model")
+            .expect("priced text model should remain explicit");
+        assert_eq!(resolved, "text-model");
     }
 
     #[test]

@@ -313,6 +313,24 @@ async fn integration_agent_chat_stream_returns_upstream_sse_body() -> Result<(),
 }
 
 #[tokio::test]
+async fn integration_agent_chat_routes_stale_model_through_auto() -> Result<(), Box<dyn Error>> {
+    let response = send(json_request(
+        "/v1/chat/completions",
+        &serde_json::json!({
+            "model": "retired-venice-model",
+            "messages": [{ "role": "user", "content": "hello" }]
+        }),
+        Some(AUTHORIZATION),
+    )?)
+    .await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await?;
+    assert_eq!(body["id"], "chatcmpl_test");
+    Ok(())
+}
+
+#[tokio::test]
 async fn integration_note_generate_forwards_venice_api_key_header() -> Result<(), Box<dyn Error>> {
     let response = send(json_request_with_venice_api_key(
         "/v1/notes/generate",
@@ -1670,6 +1688,24 @@ fn models() -> BTreeMap<String, ModelPriceConfig> {
                 provider: ModelProvider::Openai,
                 model_type: ModelType::Text,
                 display_name: "Text Model".to_string(),
+                description: None,
+                privacy: None,
+                pricing: None,
+                context_tokens: None,
+                traits: Vec::new(),
+                capabilities: Vec::new(),
+            },
+        ),
+        (
+            "open-software/auto",
+            ModelPriceConfig {
+                unit: PriceUnit::Tokens,
+                credits_per_million_seconds: None,
+                input_credits_per_million_tokens: Some(500),
+                output_credits_per_million_tokens: Some(500),
+                provider: ModelProvider::Venice,
+                model_type: ModelType::Text,
+                display_name: "Auto".to_string(),
                 description: None,
                 privacy: None,
                 pricing: None,
