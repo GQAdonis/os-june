@@ -193,6 +193,14 @@ per-resume id. `session.create` returns both; conflating them attaches
 traces/artifacts to the wrong identity.
 _Avoid_: "the session id" (always say which).
 
+**Agent run**:
+The user-initiated Hermes execution that starts with `prompt.submit` and ends
+only when the session is truly idle, including its tool loop and automatic goal
+continuations. One agent run keeps one captured model. A later picker choice is
+applied at the next agent-run boundary, never inside the active run.
+_Avoid_: response (only the visible text), turn (ambiguous with transcript and
+conversation turns).
+
 **Composer**:
 The ProseMirror chat input with slash commands and attachment chips.
 _Avoid_: textbox.
@@ -256,6 +264,16 @@ group; an MCP server is an external tool provider (June ships `june_context`,
 `june_web`, `june_image`, `june_recorder`, `june_video`, and the connector
 servers `june_gmail`/`june_gcal` plus their `*_actions` counterparts).
 _Avoid_: using "tool" for all three.
+
+**Plugin**:
+A user-facing capability bundle in June's Plugins area. A plugin may combine
+Skills, Toolsets, app-owned MCP servers, routine templates, and optional
+Connectors around one job. Enabling or installing the bundle is distinct from
+connecting a third-party account and from choosing a routine's trust mode.
+The ranked portfolio and shared product contract live in
+[docs/plugins/portfolio.md](docs/plugins/portfolio.md).
+_Avoid_: connector (unless specifically naming its third-party account path),
+integration (too broad), plugin for a Tauri framework package.
 
 ### Connectors
 
