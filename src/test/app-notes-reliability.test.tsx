@@ -361,9 +361,7 @@ describe("notes recording reliability", () => {
       setActiveHermesProfileName("work");
     });
 
-    await waitFor(() =>
-      expect(mocks.listNotes.mock.calls.length).toBeGreaterThan(listCallsBefore),
-    );
+    await waitFor(() => expect(mocks.listNotes.mock.calls.length).toBeGreaterThan(listCallsBefore));
     await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
     expect(await screen.findByText("Work profile note")).toBeInTheDocument();
     expect(screen.queryByText("First note")).toBeNull();

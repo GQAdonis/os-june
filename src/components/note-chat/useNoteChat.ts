@@ -518,7 +518,11 @@ export function useNoteChat(note: NoteReferenceInput | null): NoteChat {
         // per-session override - that would silently bypass the profile's own
         // text model. An explicit note-chat pick still applies: the user chose
         // it for this chat.
-        if (!capturedModelSelection && defaultModelSelectionSnapshot && activeProfile === "default") {
+        if (
+          !capturedModelSelection &&
+          defaultModelSelectionSnapshot &&
+          activeProfile === "default"
+        ) {
           capturedModelSelection = await defaultModelSelectionSnapshot;
           capturedHermesModelId = hermesModelIdForSelection(capturedModelSelection);
         }
