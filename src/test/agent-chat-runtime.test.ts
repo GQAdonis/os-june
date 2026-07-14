@@ -1670,6 +1670,48 @@ describe("Agent chat runtime", () => {
     expect(tool?.type === "tool" ? tool.text : "").not.toContain("aGVsbG8=");
   });
 
+  it("renders a browser screenshot file reference from a tool result inline", () => {
+    const filename = "browser-screenshot-abc123.png";
+    const turns = buildHermesSessionChatTurns([
+      {
+        id: "assistant-1",
+        role: "assistant",
+        content: "",
+        timestamp: "2026-07-14T10:00:00.000Z",
+        tool_calls: JSON.stringify([
+          {
+            id: "call-1",
+            function: {
+              name: "screenshot",
+              arguments: { session_id: "session-1", tab_id: 7 },
+            },
+          },
+        ]),
+      },
+      {
+        id: "tool-1",
+        role: "tool",
+        tool_call_id: "call-1",
+        tool_name: "screenshot",
+        content: [
+          {
+            type: "text",
+            text: `${JSON.stringify({ fileReference: filename })}\nMEDIA:${filename}`,
+          },
+        ],
+        timestamp: "2026-07-14T10:00:01.000Z",
+      },
+    ]);
+
+    expect(turns[0]?.parts).toContainEqual({
+      type: "image",
+      status: "complete",
+      prompt: "Generated image",
+      path: filename,
+      name: filename,
+    });
+  });
+
   it("renders live june_image tool results inline from tool.complete content", () => {
     const turns = buildHermesSessionChatTurns(
       [],

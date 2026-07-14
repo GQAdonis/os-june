@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""MCP server exposing June browser use status.
+"""MCP server exposing June's transport-agnostic Browser use contract.
 
 The June app writes this script into the managed Hermes home and registers it as
-the built-in `june_browser` MCP server. This slice (JUN-286) exposes a single
-read-only `status` tool that calls the June app's local provider proxy (loopback
-only). The Rust browser broker answers with the Browser access grant state and
-the active session count, or refuses when the grant is off. It performs NO real
-browser actions; extension pairing, native messaging, and per-tab control are
-JUN-287's.
+the built-in `june_browser` MCP server. The Rust broker selects the transport,
+owns policy and task-tab isolation, and re-checks the Browser access grant on
+every request. The model cannot select a transport.
 
 It depends only on the Python standard library so it can run inside the Hermes
 runtime venv without extra packaging.
@@ -37,6 +34,113 @@ TOOLS: list[dict[str, Any]] = [
             "enabled or the June app is unavailable. Takes no arguments."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "start_session",
+        "description": "Start a Browser use session.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    *[
+        {
+            "name": name,
+            "description": description,
+            "inputSchema": {
+                "type": "object",
+                "properties": {"session_id": {"type": "string"}},
+                "required": ["session_id"],
+            },
+        }
+        for name, description in [
+            ("close_session", "Close a Browser use session and its task tabs."),
+            ("list_tabs", "List task tabs owned by a Browser use session."),
+            ("open_tab", "Open a new about:blank task tab."),
+        ]
+    ],
+    *[
+        {
+            "name": name,
+            "description": description,
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string"},
+                    "tab_id": {"type": "integer"},
+                },
+                "required": ["session_id", "tab_id"],
+            },
+        }
+        for name, description in [
+            ("snapshot", "Snapshot the accessibility tree of a task tab."),
+            ("screenshot", "Capture the visible viewport of a task tab."),
+            ("back", "Navigate a task tab back. Not implemented yet."),
+            ("switch_tab", "Make an owned task tab active."),
+            ("close_tab", "Close an owned task tab."),
+        ]
+    ],
+    {
+        "name": "navigate",
+        "description": "Navigate an owned task tab to a URL.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "tab_id": {"type": "integer"},
+                "url": {"type": "string"},
+            },
+            "required": ["session_id", "tab_id", "url"],
+        },
+    },
+    {
+        "name": "click",
+        "description": "Click a snapshot reference. Not implemented yet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "tab_id": {"type": "integer"},
+                "ref": {"type": "string"},
+            },
+            "required": ["session_id", "tab_id", "ref"],
+        },
+    },
+    {
+        "name": "press",
+        "description": "Press a key in a task tab. Not implemented yet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "tab_id": {"type": "integer"},
+                "key": {"type": "string"},
+            },
+            "required": ["session_id", "tab_id", "key"],
+        },
+    },
+    {
+        "name": "fill",
+        "description": "Fill a snapshot reference. Not implemented yet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "tab_id": {"type": "integer"},
+                "ref": {"type": "string"},
+                "text": {"type": "string"},
+            },
+            "required": ["session_id", "tab_id", "ref", "text"],
+        },
+    },
+    {
+        "name": "accept_shared_tab",
+        "description": "Accept a user-shared tab. Not implemented yet.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "share_id": {"type": "string"},
+            },
+            "required": ["session_id", "share_id"],
+        },
     },
 ]
 
@@ -131,8 +235,23 @@ def call_tool(
     name = params.get("name")
     try:
         if name == "status":
-            result = proxy_json(base_url, token, "GET", "/browser/status")
+            result = proxy_json(base_url, token, "GET", "/browser/status", None)
             return tool_text_result(request_id, render_status_result(result))
+        if any(tool["name"] == name for tool in TOOLS):
+            arguments = params.get("arguments") or {}
+            result = proxy_json(
+                base_url,
+                token,
+                "POST",
+                "/browser/execute",
+                {"tool": name, "arguments": arguments},
+            )
+            data = require_success(result)
+            text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            media = data.get("media")
+            if isinstance(media, str) and media.startswith("MEDIA:"):
+                text = f"{text}\n{media}"
+            return tool_text_result(request_id, text)
     except ToolError as exc:
         return tool_text_result(request_id, str(exc), is_error=True)
     except Exception as exc:
@@ -150,10 +269,15 @@ def proxy_json(
     token: str,
     method: str,
     path: str,
+    body: dict[str, Any] | None,
 ) -> dict[str, Any]:
     url = f"{base_url}{path}"
     headers = {"Authorization": f"Bearer {token}"}
-    request = urllib.request.Request(url, headers=headers, method=method)
+    encoded = None
+    if body is not None:
+        encoded = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, headers=headers, data=encoded, method=method)
     try:
         with urllib.request.urlopen(
             request, timeout=REQUEST_TIMEOUT_SECONDS
@@ -183,7 +307,8 @@ def require_success(result: dict[str, Any]) -> dict[str, Any]:
         data = result.get("data")
         return data if isinstance(data, dict) else {}
     message = result.get("message") or "June browser request failed."
-    raise ToolError(str(message))
+    code = result.get("errorCode") or "browser_request_failed"
+    raise ToolError(f"[{code}] {message}")
 
 
 def response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:

@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { helloMessage, parseHostMessage, pingMessage, PROTOCOL_VERSION } from "../protocol";
+import {
+  helloMessage,
+  parseBrowserRequest,
+  parseHostMessage,
+  pingMessage,
+  PROTOCOL_VERSION,
+} from "../protocol";
 
 describe("protocol messages", () => {
   it("stamps hello with the pinned protocol version and extension version", () => {
@@ -19,7 +25,10 @@ describe("protocol messages", () => {
 describe("parseHostMessage", () => {
   it("accepts every known host message type", () => {
     for (const type of ["hello_ok", "hello_incompatible", "pong", "error"]) {
-      expect(parseHostMessage({ v: 1, type })).toEqual({ v: 1, type });
+      expect(parseHostMessage({ v: PROTOCOL_VERSION, type })).toEqual({
+        v: PROTOCOL_VERSION,
+        type,
+      });
     }
   });
 
@@ -28,6 +37,30 @@ describe("parseHostMessage", () => {
     expect(parseHostMessage("hello_ok")).toBeNull();
     expect(parseHostMessage({ type: "hello_ok" })).toBeNull();
     expect(parseHostMessage({ v: "1", type: "hello_ok" })).toBeNull();
-    expect(parseHostMessage({ v: 1, type: "take_over_tab" })).toBeNull();
+    expect(parseHostMessage({ v: PROTOCOL_VERSION, type: "take_over_tab" })).toBeNull();
+  });
+
+  it("accepts only well-formed browser requests", () => {
+    expect(
+      parseBrowserRequest({
+        v: PROTOCOL_VERSION,
+        type: "request",
+        id: 3,
+        tool: "open_tab",
+        arguments: { session_id: "s" },
+      }),
+    ).toMatchObject({ id: 3, tool: "open_tab" });
+    expect(
+      parseBrowserRequest({
+        v: PROTOCOL_VERSION,
+        type: "request",
+        id: "3",
+        tool: "open_tab",
+        arguments: {},
+      }),
+    ).toBeNull();
+    expect(
+      parseBrowserRequest({ v: PROTOCOL_VERSION, type: "request", id: 3, tool: "open_tab" }),
+    ).toBeNull();
   });
 });
