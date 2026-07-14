@@ -160,7 +160,36 @@ pub(crate) async fn token_exchange(
         tracing::error!(%error, %status, "share viewer: token exchange non-JSON upstream body");
         ApiError::Metering
     })?;
-    Ok((status, Json(body)))
+    let relayed = viewer_token_body(status, body)?;
+    Ok((status, Json(relayed)))
+}
+
+/// Reduce a token-exchange upstream body to what the browser viewer needs. On a
+/// successful exchange the upstream returns both a short-lived `access_token`
+/// (the only field the viewer uses, as a bearer for `/view`) and a long-lived
+/// `refresh_token`; relaying the latter would hand a one-time share view a
+/// durable OS Accounts session in browser-reachable storage. Keep only the
+/// access token on success. Error envelopes carry no tokens and pass through
+/// unchanged so the page can still tell an expired code from a provider outage.
+fn viewer_token_body(
+    status: axum::http::StatusCode,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, ApiError> {
+    if !status.is_success() {
+        return Ok(body);
+    }
+    let access_token = body
+        .get("data")
+        .and_then(|data| data.get("access_token"))
+        .and_then(serde_json::Value::as_str);
+    let Some(access_token) = access_token else {
+        tracing::error!(%status, "share viewer: token exchange success without access_token");
+        return Err(ApiError::Metering);
+    };
+    Ok(serde_json::json!({
+        "success": true,
+        "data": { "access_token": access_token },
+    }))
 }
 
 fn client_address(headers: &HeaderMap) -> String {
@@ -171,4 +200,39 @@ fn client_address(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(',').next_back())
         .map_or_else(|| "unknown".to_string(), |value| value.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewer_token_body;
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    #[test]
+    fn success_body_keeps_only_the_access_token() {
+        let upstream = json!({
+            "success": true,
+            "data": { "access_token": "at-123", "refresh_token": "rt-secret", "expires_in": 3600 },
+        });
+        let relayed = viewer_token_body(StatusCode::OK, upstream).expect("success relays");
+        assert_eq!(relayed["data"]["access_token"], "at-123");
+        assert!(relayed["data"].get("refresh_token").is_none());
+        // Belt and suspenders: the refresh token must not survive anywhere in
+        // the relayed body.
+        assert!(!relayed.to_string().contains("rt-secret"));
+    }
+
+    #[test]
+    fn error_body_passes_through_untouched() {
+        let upstream = json!({ "success": false, "message": "invalid_grant", "error_code": 4001 });
+        let relayed =
+            viewer_token_body(StatusCode::BAD_REQUEST, upstream.clone()).expect("error relays");
+        assert_eq!(relayed, upstream);
+    }
+
+    #[test]
+    fn success_without_an_access_token_is_a_metering_error() {
+        let upstream = json!({ "success": true, "data": { "refresh_token": "rt" } });
+        assert!(viewer_token_body(StatusCode::OK, upstream).is_err());
+    }
 }
