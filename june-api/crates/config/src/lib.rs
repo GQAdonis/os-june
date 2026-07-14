@@ -136,6 +136,11 @@ pub struct AppConfig {
     pub attestation: AttestationConfig,
     #[serde(default)]
     pub issue_reports: IssueReportsConfig,
+    /// Private sharing (JUN-308). Sharing endpoints return 501
+    /// `sharing_unavailable` until `database_url` is configured, so the
+    /// feature cannot regress deployments that predate it.
+    #[serde(default)]
+    pub share: ShareConfig,
     pub pricing: BTreeMap<String, ModelPriceConfig>,
     /// Flat credits charged per generated image, keyed by image model id. Kept
     /// separate from `pricing` (the text/ASR catalog) so image models never leak
@@ -198,6 +203,7 @@ impl Debug for AppConfig {
             .field("upstreams", &self.upstreams)
             .field("attestation", &self.attestation)
             .field("issue_reports", &self.issue_reports)
+            .field("share", &RedactedShare(&self.share))
             .field("pricing", &self.pricing)
             .field("image_pricing", &self.image_pricing)
             .field("image_edit_pricing", &self.image_edit_pricing)
@@ -398,6 +404,52 @@ impl Debug for LocalDevConfig {
                 },
             )
             .field("user_id", &self.user_id)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShareConfig {
+    /// Postgres URL for the share store. Empty disables sharing.
+    #[serde(default)]
+    pub database_url: String,
+    /// OS Accounts site origin the viewer sends recipients to for sign-in
+    /// (e.g. `https://accounts.opensoftware.co`). Empty falls back to the
+    /// canonical issuer from `os_accounts.iss`.
+    #[serde(default)]
+    pub viewer_accounts_url: String,
+    /// Public OAuth client id registered for the browser viewer.
+    #[serde(default)]
+    pub viewer_client_id: String,
+    /// Max accepted ciphertext, in bytes.
+    #[serde(default = "default_share_max_ciphertext_bytes")]
+    pub max_ciphertext_bytes: usize,
+}
+
+fn default_share_max_ciphertext_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
+/// Debug view of `ShareConfig` that never prints the database URL (it embeds
+/// credentials); everything else in the section is public.
+struct RedactedShare<'a>(&'a ShareConfig);
+
+impl Debug for RedactedShare<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ShareConfig")
+            .field(
+                "database_url",
+                &if self.0.database_url.is_empty() {
+                    "<unset>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field("viewer_accounts_url", &self.0.viewer_accounts_url)
+            .field("viewer_client_id", &self.0.viewer_client_id)
+            .field("max_ciphertext_bytes", &self.0.max_ciphertext_bytes)
             .finish()
     }
 }
@@ -938,6 +990,7 @@ impl Default for AppConfig {
                         .to_string(),
             },
             issue_reports: IssueReportsConfig::default(),
+            share: ShareConfig::default(),
             pricing: default_pricing(),
             image_pricing: default_image_pricing(),
             image_edit_pricing: default_image_edit_pricing(),

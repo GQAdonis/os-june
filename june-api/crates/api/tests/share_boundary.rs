@@ -1,0 +1,570 @@
+//! HTTP boundary tests for private sharing (JUN-308).
+//!
+//! The load-bearing assertions: the server round-trips ciphertext untouched
+//! (no-plaintext guarantee at the boundary), and every unauthorized outcome
+//! — unknown share, someone else's share, uninvited caller, revoked invite —
+//! produces byte-identical `share_not_found` responses (non-enumeration).
+#![allow(clippy::expect_used, clippy::unwrap_used)]
+
+mod support;
+
+use axum::{
+    Router,
+    body::{Body, to_bytes},
+    http::{Request, StatusCode, header},
+};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use june_api::ShareViewerInfo;
+use june_domain::{
+    DomainError, NewShare, NewShareInvite, ShareInviteRecord, ShareKind, ShareRecord, ShareStore,
+    ShareStoreError, ShareViewRecord, ViewerIdentity,
+};
+use june_services::{ShareService, ShareServiceDeps};
+use pretty_assertions::assert_eq;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use tower::ServiceExt;
+
+// ── In-memory store mirroring the Postgres semantics ──────────────────────
+
+#[derive(Clone)]
+struct StoredInvite {
+    invite_id: String,
+    email: String,
+    envelope: Vec<u8>,
+    envelope_iv: Vec<u8>,
+    recipient_user_id: Option<String>,
+    accepted: bool,
+    revoked: bool,
+}
+
+#[derive(Clone)]
+struct StoredShare {
+    owner: String,
+    kind: ShareKind,
+    ciphertext: Vec<u8>,
+    iv: Vec<u8>,
+    invites: Vec<StoredInvite>,
+    deleted: bool,
+}
+
+#[derive(Default)]
+struct MemoryShareStore {
+    shares: Mutex<HashMap<String, StoredShare>>,
+}
+
+#[async_trait::async_trait]
+impl ShareStore for MemoryShareStore {
+    async fn create_share(&self, share: NewShare) -> Result<(), ShareStoreError> {
+        let mut shares = self.shares.lock().expect("lock");
+        shares.insert(
+            share.share_id,
+            StoredShare {
+                owner: share.owner_user_id.0,
+                kind: share.kind,
+                ciphertext: share.ciphertext,
+                iv: share.iv,
+                invites: share
+                    .invites
+                    .into_iter()
+                    .map(|(invite_id, invite)| StoredInvite {
+                        invite_id,
+                        email: invite.email,
+                        envelope: invite.envelope,
+                        envelope_iv: invite.envelope_iv,
+                        recipient_user_id: None,
+                        accepted: false,
+                        revoked: false,
+                    })
+                    .collect(),
+                deleted: false,
+            },
+        );
+        Ok(())
+    }
+
+    async fn list_shares(&self, owner: &str) -> Result<Vec<ShareRecord>, ShareStoreError> {
+        let shares = self.shares.lock().expect("lock");
+        Ok(shares
+            .iter()
+            .filter(|(_, share)| share.owner == owner && !share.deleted)
+            .map(|(share_id, share)| ShareRecord {
+                share_id: share_id.clone(),
+                owner_user_id: share.owner.clone(),
+                kind: share.kind,
+                created_at_unix: 0,
+            })
+            .collect())
+    }
+
+    async fn share_invites(
+        &self,
+        owner: &str,
+        share_id: &str,
+    ) -> Result<(ShareRecord, Vec<ShareInviteRecord>), ShareStoreError> {
+        let shares = self.shares.lock().expect("lock");
+        let share = shares
+            .get(share_id)
+            .filter(|share| share.owner == owner && !share.deleted)
+            .ok_or(ShareStoreError::NotFound)?;
+        Ok((
+            ShareRecord {
+                share_id: share_id.to_string(),
+                owner_user_id: share.owner.clone(),
+                kind: share.kind,
+                created_at_unix: 0,
+            },
+            share
+                .invites
+                .iter()
+                .map(|invite| ShareInviteRecord {
+                    invite_id: invite.invite_id.clone(),
+                    email: invite.email.clone(),
+                    recipient_user_id: invite.recipient_user_id.clone(),
+                    accepted_at_unix: invite.accepted.then_some(1),
+                    revoked_at_unix: invite.revoked.then_some(1),
+                    last_access_at_unix: invite.accepted.then_some(1),
+                })
+                .collect(),
+        ))
+    }
+
+    async fn add_invites(
+        &self,
+        owner: &str,
+        share_id: &str,
+        invites: Vec<(String, NewShareInvite)>,
+    ) -> Result<(), ShareStoreError> {
+        let mut shares = self.shares.lock().expect("lock");
+        let share = shares
+            .get_mut(share_id)
+            .filter(|share| share.owner == owner && !share.deleted)
+            .ok_or(ShareStoreError::NotFound)?;
+        for (invite_id, invite) in invites {
+            share.invites.push(StoredInvite {
+                invite_id,
+                email: invite.email,
+                envelope: invite.envelope,
+                envelope_iv: invite.envelope_iv,
+                recipient_user_id: None,
+                accepted: false,
+                revoked: false,
+            });
+        }
+        Ok(())
+    }
+
+    async fn revoke_invite(
+        &self,
+        owner: &str,
+        share_id: &str,
+        invite_id: &str,
+    ) -> Result<(), ShareStoreError> {
+        let mut shares = self.shares.lock().expect("lock");
+        let share = shares
+            .get_mut(share_id)
+            .filter(|share| share.owner == owner && !share.deleted)
+            .ok_or(ShareStoreError::NotFound)?;
+        let invite = share
+            .invites
+            .iter_mut()
+            .find(|invite| invite.invite_id == invite_id)
+            .ok_or(ShareStoreError::NotFound)?;
+        invite.revoked = true;
+        Ok(())
+    }
+
+    async fn delete_share(&self, owner: &str, share_id: &str) -> Result<(), ShareStoreError> {
+        let mut shares = self.shares.lock().expect("lock");
+        let share = shares
+            .get_mut(share_id)
+            .filter(|share| share.owner == owner)
+            .ok_or(ShareStoreError::NotFound)?;
+        share.deleted = true;
+        share.ciphertext.clear();
+        Ok(())
+    }
+
+    async fn fetch_view(
+        &self,
+        share_id: &str,
+        viewer_user_id: &str,
+        viewer_emails: &[String],
+    ) -> Result<ShareViewRecord, ShareStoreError> {
+        let mut shares = self.shares.lock().expect("lock");
+        let share = shares
+            .get_mut(share_id)
+            .filter(|share| !share.deleted)
+            .ok_or(ShareStoreError::NotFound)?;
+        if share.owner == viewer_user_id {
+            return Ok(ShareViewRecord {
+                kind: share.kind,
+                owner_user_id: share.owner.clone(),
+                ciphertext: share.ciphertext.clone(),
+                iv: share.iv.clone(),
+                envelope: None,
+            });
+        }
+        let kind = share.kind;
+        let owner = share.owner.clone();
+        let ciphertext = share.ciphertext.clone();
+        let iv = share.iv.clone();
+        let invite = share
+            .invites
+            .iter_mut()
+            .find(|invite| {
+                !invite.revoked
+                    && (invite.recipient_user_id.as_deref() == Some(viewer_user_id)
+                        || (invite.recipient_user_id.is_none()
+                            && viewer_emails.contains(&invite.email)))
+            })
+            .ok_or(ShareStoreError::NotFound)?;
+        invite.recipient_user_id = Some(viewer_user_id.to_string());
+        invite.accepted = true;
+        Ok(ShareViewRecord {
+            kind,
+            owner_user_id: owner,
+            ciphertext,
+            iv,
+            envelope: Some((invite.envelope.clone(), invite.envelope_iv.clone())),
+        })
+    }
+}
+
+/// Emails come from the fake bearer token itself: `user:usr_x|a@b.c,d@e.f`.
+struct TokenEmailsIdentity;
+
+#[async_trait::async_trait]
+impl ViewerIdentity for TokenEmailsIdentity {
+    async fn verified_emails(&self, access_token: &str) -> Result<Vec<String>, DomainError> {
+        Ok(access_token
+            .split('|')
+            .nth(1)
+            .unwrap_or("")
+            .split(',')
+            .filter(|email| !email.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+}
+
+fn share_router() -> Router {
+    let service = Arc::new(ShareService::new(ShareServiceDeps {
+        store: Arc::new(MemoryShareStore::default()),
+        identity: Arc::new(TokenEmailsIdentity),
+        max_ciphertext_bytes: 1024 * 1024,
+    }));
+    june_api::router(state_with_share(Some(service)))
+}
+
+fn state_with_share(share: Option<Arc<ShareService>>) -> june_api::ApiState {
+    support::test_state_with_share(
+        share,
+        ShareViewerInfo {
+            accounts_url: "https://accounts.example".to_string(),
+            accounts_api_url: "https://accounts-api.example".to_string(),
+            client_id: "client_viewer".to_string(),
+        },
+    )
+}
+
+async fn call(router: &Router, request: Request<Body>) -> (StatusCode, Value) {
+    let response = router
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("request completes");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, body)
+}
+
+fn authed(request: axum::http::request::Builder, token: &str) -> axum::http::request::Builder {
+    request.header(header::AUTHORIZATION, format!("Bearer {token}"))
+}
+
+fn create_request(token: &str, invites: &[Value]) -> Request<Body> {
+    let body = json!({
+        "kind": "note",
+        "ciphertext_b64": BASE64.encode(b"opaque-ciphertext"),
+        "iv_b64": BASE64.encode([7u8; 12]),
+        "invites": invites,
+    });
+    authed(Request::builder().method("POST").uri("/v1/shares"), token)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("request builds")
+}
+
+fn invite_wire(email: &str) -> Value {
+    json!({
+        "email": email,
+        "envelope_b64": BASE64.encode([1u8; 48]),
+        "envelope_iv_b64": BASE64.encode([2u8; 12]),
+    })
+}
+
+const OWNER: &str = "user:usr_owner|owner@example.com";
+const RECIPIENT: &str = "user:usr_friend|friend@example.com";
+const STRANGER: &str = "user:usr_stranger|stranger@example.com";
+
+#[tokio::test]
+async fn share_endpoints_answer_501_until_configured() {
+    let router = june_api::router(state_with_share(None));
+    let (status, body) = call(&router, create_request(OWNER, &[invite_wire("a@b.c")])).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body["message"], "sharing_unavailable");
+}
+
+#[tokio::test]
+async fn invited_recipient_views_exact_ciphertext_and_uninvited_cannot_be_told_from_missing() {
+    let router = share_router();
+    let (status, body) = call(
+        &router,
+        create_request(OWNER, &[invite_wire("Friend@Example.com")]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let share_id = body["data"]["share_id"]
+        .as_str()
+        .expect("share id")
+        .to_string();
+    assert_eq!(body["data"]["invites"][0]["email"], "friend@example.com");
+
+    // Invited recipient: gets envelope + the EXACT bytes the owner posted —
+    // the server neither reads nor rewrites content.
+    let (status, body) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/shares/{share_id}/view")),
+            RECIPIENT,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["data"]["ciphertext_b64"],
+        BASE64.encode(b"opaque-ciphertext")
+    );
+    assert_eq!(body["data"]["envelope_b64"], BASE64.encode([1u8; 48]));
+
+    // Uninvited authenticated user vs a share that does not exist: identical
+    // status AND identical body. Nothing distinguishes the two.
+    let (stranger_status, stranger_body) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/shares/{share_id}/view")),
+            STRANGER,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    let (missing_status, missing_body) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/shares/shr_does-not-exist/view"),
+            STRANGER,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(stranger_status, StatusCode::NOT_FOUND);
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+    assert_eq!(stranger_body, missing_body);
+}
+
+#[tokio::test]
+async fn owner_sees_invite_lifecycle_and_revocation_cuts_access() {
+    let router = share_router();
+    let (_, body) = call(
+        &router,
+        create_request(OWNER, &[invite_wire("friend@example.com")]),
+    )
+    .await;
+    let share_id = body["data"]["share_id"]
+        .as_str()
+        .expect("share id")
+        .to_string();
+    let invite_id = body["data"]["invites"][0]["invite_id"]
+        .as_str()
+        .expect("invite id")
+        .to_string();
+
+    // Pending before first access.
+    let (_, body) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/shares/{share_id}")),
+            OWNER,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(body["data"]["invites"][0]["status"], "pending");
+
+    // Recipient views once: accepted.
+    let (status, _) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/shares/{share_id}/view")),
+            RECIPIENT,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/shares/{share_id}")),
+            OWNER,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(body["data"]["invites"][0]["status"], "accepted");
+
+    // Revoke: recipient's next fetch is the standard 404.
+    let (status, _) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/shares/{share_id}/invites/{invite_id}")),
+            OWNER,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, body) = call(
+        &router,
+        authed(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/v1/shares/{share_id}/view")),
+            RECIPIENT,
+        )
+        .body(Body::empty())
+        .expect("request builds"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["message"], "share_not_found");
+}
+
+#[tokio::test]
+async fn non_owner_cannot_inspect_or_mutate_a_share() {
+    let router = share_router();
+    let (_, body) = call(
+        &router,
+        create_request(OWNER, &[invite_wire("friend@example.com")]),
+    )
+    .await;
+    let share_id = body["data"]["share_id"]
+        .as_str()
+        .expect("share id")
+        .to_string();
+
+    for (method, uri) in [
+        ("GET", format!("/v1/shares/{share_id}")),
+        ("DELETE", format!("/v1/shares/{share_id}")),
+        ("POST", format!("/v1/shares/{share_id}/invites")),
+    ] {
+        let request = authed(Request::builder().method(method).uri(uri), STRANGER)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({ "invites": [invite_wire("x@y.z")] }).to_string(),
+            ))
+            .expect("request builds");
+        let (status, body) = call(&router, request).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} must not leak");
+        assert_eq!(body["message"], "share_not_found");
+    }
+}
+
+#[tokio::test]
+async fn viewer_shell_is_static_noindex_and_identical_for_any_id() {
+    let router = share_router();
+    let mut pages = Vec::new();
+    for share_id in ["shr_real-looking-id", "shr_another-id"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/s/{share_id}"))
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(
+            headers.get("x-robots-tag").and_then(|v| v.to_str().ok()),
+            Some("noindex, nofollow, noarchive")
+        );
+        assert_eq!(
+            headers.get("referrer-policy").and_then(|v| v.to_str().ok()),
+            Some("no-referrer")
+        );
+        let csp = headers
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|v| v.to_str().ok())
+            .expect("csp present");
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("connect-src 'self'"));
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        pages.push(bytes);
+    }
+    // Same bytes for every id: the shell reveals nothing about existence.
+    assert_eq!(pages[0], pages[1]);
+}
+
+#[tokio::test]
+async fn robots_txt_disallows_share_paths() {
+    let router = share_router();
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/robots.txt")
+                .body(Body::empty())
+                .expect("request builds"),
+        )
+        .await
+        .expect("request completes");
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("body reads");
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    assert!(text.contains("Disallow: /s/"));
+}

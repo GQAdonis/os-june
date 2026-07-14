@@ -26,8 +26,8 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 pub use envelope::{
     ApiResponse, ERR_AUTHORIZATION_DENIED, ERR_BAD_REQUEST, ERR_INSUFFICIENT_CREDITS, ERR_INTERNAL,
-    ERR_METERING, ERR_NOT_FOUND, ERR_PAYLOAD_TOO_LARGE, ERR_TIMEOUT, ERR_UNAUTHORIZED,
-    ERR_UNPROCESSABLE, ERR_UPSTREAM,
+    ERR_METERING, ERR_NOT_FOUND, ERR_PAYLOAD_TOO_LARGE, ERR_SHARING_UNAVAILABLE, ERR_TIMEOUT,
+    ERR_UNAUTHORIZED, ERR_UNPROCESSABLE, ERR_UPSTREAM,
 };
 pub use error::ApiError;
 pub use handlers::dictate::{
@@ -43,13 +43,16 @@ pub use handlers::video::{
     VideoAnimateRequest, VideoGenerateRequest, VideoJobResponse, VideoStatusResponse,
 };
 pub use handlers::web::{WebFetchRequest, WebSearchRequest};
-pub use state::{ApiLimits, ApiState, ApiStateParams, AttestationInfo};
+pub use state::{ApiLimits, ApiState, ApiStateParams, AttestationInfo, ShareViewerInfo};
 
 /// Real shipped app version, sent by the desktop client on every request.
 /// Old stable builds keep calling production long after main moves on; this
 /// header is how logs and metrics tell them apart (ADR 0021).
 pub const JUNE_APP_VERSION_HEADER: &str = "x-june-app-version";
 
+// The route table: one line per endpoint, so it grows with each capability
+// (private sharing is the latest). Splitting it would scatter the surface.
+#[allow(clippy::too_many_lines)]
 pub fn router(state: ApiState) -> Router {
     let limits = state.limits();
     let timeout = ServiceBuilder::new()
@@ -62,6 +65,29 @@ pub fn router(state: ApiState) -> Router {
         .route("/readyz", get(handlers::health::readyz))
         .route("/healthz", get(handlers::health::healthz))
         .route("/verify", get(handlers::verify::verify))
+        .route("/robots.txt", get(handlers::share_viewer::robots))
+        .route("/s/{share_id}", get(handlers::share_viewer::shell))
+        .route(
+            "/v1/share-viewer/token",
+            post(handlers::share_viewer::token_exchange),
+        )
+        .route(
+            "/v1/shares",
+            post(handlers::share::create).get(handlers::share::list),
+        )
+        .route(
+            "/v1/shares/{share_id}",
+            get(handlers::share::detail).delete(handlers::share::delete),
+        )
+        .route(
+            "/v1/shares/{share_id}/invites",
+            post(handlers::share::add_invites),
+        )
+        .route(
+            "/v1/shares/{share_id}/invites/{invite_id}",
+            axum::routing::delete(handlers::share::revoke_invite),
+        )
+        .route("/v1/shares/{share_id}/view", get(handlers::share::view))
         .route("/v1/models", get(handlers::models::list_models))
         .route(
             "/v1/notes/transcribe",

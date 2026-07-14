@@ -16,7 +16,7 @@ pub(crate) async fn authenticated_user(
         .map_err(|error| crate::error::from_auth_error(&error))
 }
 
-fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
+pub(crate) fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
     let value = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())

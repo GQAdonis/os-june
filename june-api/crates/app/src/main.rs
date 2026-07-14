@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use june_api::{ApiLimits, ApiState, ApiStateParams, AttestationInfo};
+use june_api::{ApiLimits, ApiState, ApiStateParams, AttestationInfo, ShareViewerInfo};
 use june_config::{
     AppConfig, ModelPriceConfig, ModelProvider, OPENAI_API_KEY_PLACEHOLDER,
     VENICE_API_KEY_PLACEHOLDER, image_client_timeout_secs,
@@ -69,7 +69,29 @@ async fn serve() -> anyhow::Result<()> {
         metered_inference: &metered_inference_http,
         issue_reports: &issue_report_http,
     };
-    let app = build_router(&config, clients, pricing);
+    // Private sharing (JUN-308): optional — the API runs share-less until a
+    // database is configured, so this cannot regress existing deployments.
+    let share_store: Option<Arc<dyn june_domain::ShareStore>> =
+        match config.share.database_url.trim() {
+            "" => {
+                tracing::info!("share store not configured; sharing endpoints disabled");
+                None
+            }
+            database_url => match june_persistence::PgShareStore::connect(database_url).await {
+                Ok(store) => {
+                    tracing::info!("share store connected");
+                    Some(Arc::new(store))
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        "share store connection failed; sharing endpoints disabled"
+                    );
+                    None
+                }
+            },
+        };
+    let app = build_router(&config, clients, pricing, share_store);
     let listener = tokio::net::TcpListener::bind(address).await?;
     tracing::info!(%address, "june-api listening");
     axum::serve(listener, app).await?;
@@ -110,6 +132,7 @@ fn build_router(
     config: &AppConfig,
     clients: HttpClients<'_>,
     mut pricing_config: BTreeMap<String, ModelPriceConfig>,
+    share_store: Option<Arc<dyn june_domain::ShareStore>>,
 ) -> axum::Router {
     if config.local_dev.enabled {
         pricing_config = filter_unconfigured_provider_models(config, pricing_config);
@@ -272,6 +295,30 @@ fn build_router(
         flat_estimate_credits,
     }));
 
+    let share = share_store.map(|store| {
+        Arc::new(june_services::ShareService::new(
+            june_services::ShareServiceDeps {
+                store,
+                identity: Arc::new(
+                    june_providers::viewer_identity::OsAccountsViewerIdentity::new(
+                        clients.default.clone(),
+                        &config.os_accounts.api_url,
+                    ),
+                ),
+                max_ciphertext_bytes: config.share.max_ciphertext_bytes,
+            },
+        ))
+    });
+    let share_viewer = ShareViewerInfo {
+        accounts_url: if config.share.viewer_accounts_url.trim().is_empty() {
+            config.os_accounts.iss.clone()
+        } else {
+            config.share.viewer_accounts_url.clone()
+        },
+        accounts_api_url: config.os_accounts.api_url.clone(),
+        client_id: config.share.viewer_client_id.clone(),
+    };
+
     let state = ApiState::new(ApiStateParams {
         pricing,
         local_dev_enabled: config.local_dev.enabled,
@@ -285,6 +332,8 @@ fn build_router(
         video,
         issue_reports,
         p3a_reports,
+        share,
+        share_viewer,
         limits: ApiLimits {
             max_audio_bytes: config.server.max_audio_bytes,
             max_json_bytes: config.server.max_json_bytes,
