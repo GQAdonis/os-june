@@ -83,6 +83,9 @@ const JUNE_CONTEXT_MCP_SERVER_NAME: &str = "june_context";
 const JUNE_CONTEXT_MCP_DIR_NAME: &str = "hermes-mcp";
 const JUNE_CONTEXT_MCP_SCRIPT_NAME: &str = "june_context_mcp.py";
 const JUNE_CONTEXT_MCP_SCRIPT: &str = include_str!("hermes/june_context_mcp.py");
+/// Environment variable the `june_context` MCP reads its memory-write proxy
+/// token from. Kept out of argv so it does not appear in process listings.
+const JUNE_MEMORY_MCP_TOKEN_ENV: &str = "JUNE_MEMORY_PROXY_TOKEN";
 const JUNE_WEB_MCP_SERVER_NAME: &str = "june_web";
 const JUNE_WEB_MCP_SCRIPT_NAME: &str = "june_web_mcp.py";
 const JUNE_WEB_MCP_SCRIPT: &str = include_str!("hermes/june_web_mcp.py");
@@ -453,6 +456,7 @@ struct HermesProcess {
 struct SharedProviderProxy {
     port: u16,
     token: String,
+    memory_token: String,
     recorder_token: String,
     connector_token: String,
     shutdown: Option<oneshot::Sender<()>>,
@@ -461,6 +465,9 @@ struct SharedProviderProxy {
 #[derive(Clone)]
 struct ProviderProxyState {
     token: String,
+    /// Memory-write routes require this dedicated secret, handed only to the
+    /// `june_context` MCP. Its read tools do not need proxy access.
+    memory_token: String,
     /// Recorder routes require this dedicated secret, handed only to the
     /// `june_recorder` MCP: microphone control must not be reachable with the
     /// general provider token every model call carries.
@@ -483,6 +490,13 @@ struct ProviderProxyState {
     /// disappear until the app restarts.
     model_catalog_cache: Arc<Mutex<Vec<crate::june_api::ModelDto>>>,
     recorder_requests: Arc<Mutex<HashMap<String, oneshot::Sender<AgentRecorderResolution>>>>,
+    memory: Option<MemoryProxyContext>,
+}
+
+#[derive(Clone)]
+struct MemoryProxyContext {
+    repositories: crate::db::repositories::Repositories,
+    settings_path: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -1110,6 +1124,7 @@ async fn start_hermes_bridge_inner(
         &hermes_home,
         provider_proxy.port,
         &provider_proxy.token,
+        &provider_proxy.memory_token,
         &provider_proxy.recorder_token,
         &provider_proxy.connector_token,
         supports_vision,
@@ -1281,12 +1296,14 @@ async fn ensure_provider_proxy(
             return Ok(SharedProviderProxyInfo {
                 port: proxy.port,
                 token: proxy.token.clone(),
+                memory_token: proxy.memory_token.clone(),
                 recorder_token: proxy.recorder_token.clone(),
                 connector_token: proxy.connector_token.clone(),
             });
         }
     }
     let token = random_token();
+    let memory_token = random_token();
     let recorder_token = random_token();
     let connector_token = random_token();
     let app_data_dir = crate::app_paths::app_data_dir(app)
@@ -1298,6 +1315,7 @@ async fn ensure_provider_proxy(
     let videos_dir = hermes_home.join(JUNE_VIDEO_MCP_VIDEOS_DIR_NAME);
     let started = start_june_provider_proxy(
         token.clone(),
+        memory_token.clone(),
         recorder_token.clone(),
         connector_token.clone(),
         image_sources,
@@ -1316,6 +1334,7 @@ async fn ensure_provider_proxy(
     *guard = Some(SharedProviderProxy {
         port: started.port,
         token: token.clone(),
+        memory_token: memory_token.clone(),
         recorder_token: recorder_token.clone(),
         connector_token: connector_token.clone(),
         shutdown: Some(started.shutdown),
@@ -1323,6 +1342,7 @@ async fn ensure_provider_proxy(
     Ok(SharedProviderProxyInfo {
         port: started.port,
         token,
+        memory_token,
         recorder_token,
         connector_token,
     })
@@ -1331,6 +1351,7 @@ async fn ensure_provider_proxy(
 struct SharedProviderProxyInfo {
     port: u16,
     token: String,
+    memory_token: String,
     recorder_token: String,
     connector_token: String,
 }
@@ -7149,6 +7170,7 @@ fn sync_hermes_config(
     hermes_home: &std::path::Path,
     provider_proxy_port: u16,
     provider_proxy_token: &str,
+    memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     supports_vision: bool,
@@ -7163,6 +7185,7 @@ fn sync_hermes_config(
         hermes_home,
         provider_proxy_port,
         provider_proxy_token,
+        memory_proxy_token,
         recorder_proxy_token,
         connector_proxy_token,
         supports_vision,
@@ -7181,6 +7204,7 @@ fn sync_hermes_config_with_external_dirs(
     hermes_home: &std::path::Path,
     provider_proxy_port: u16,
     provider_proxy_token: &str,
+    memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     supports_vision: bool,
@@ -7218,6 +7242,7 @@ fn sync_hermes_config_with_external_dirs(
         supports_vision,
         &base_url,
         provider_proxy_token,
+        memory_proxy_token,
         recorder_proxy_token,
         connector_proxy_token,
         &cron_toolsets,
@@ -7532,6 +7557,7 @@ fn render_hermes_config(
     supports_vision: bool,
     base_url: &str,
     provider_proxy_token: &str,
+    memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     cron_toolsets: &str,
@@ -7551,6 +7577,7 @@ fn render_hermes_config(
         mcp_configs,
         base_url,
         provider_proxy_token,
+        memory_proxy_token,
         recorder_proxy_token,
         connector_proxy_token,
     );
@@ -7582,12 +7609,17 @@ fn render_mcp_servers_config(
     configs: BuiltinMcpConfigs<'_>,
     base_url: &str,
     proxy_token: &str,
+    memory_proxy_token: &str,
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
 ) -> String {
     let mut entries = String::new();
     if let Some(config) = configs.context {
-        entries.push_str(&render_context_mcp_entry(config));
+        entries.push_str(&render_context_mcp_entry(
+            config,
+            base_url,
+            memory_proxy_token,
+        ));
     }
     if let Some(config) = configs.web {
         entries.push_str(&render_web_mcp_entry(config, base_url, proxy_token));
@@ -7659,7 +7691,11 @@ fn render_mcp_servers_config(
     format!("mcp_servers:\n{entries}")
 }
 
-fn render_context_mcp_entry(config: &JuneContextMcpConfig) -> String {
+fn render_context_mcp_entry(
+    config: &JuneContextMcpConfig,
+    base_url: &str,
+    memory_proxy_token: &str,
+) -> String {
     format!(
         r#"  {server_name}:
     enabled: true
@@ -7668,8 +7704,10 @@ fn render_context_mcp_entry(config: &JuneContextMcpConfig) -> String {
       - {script_path}
       - {database_path}
       - {memory_settings_path}
+      - {base_url}
     env:
       PYTHONUNBUFFERED: "1"
+      {token_env}: {token}
     timeout: 30
     connect_timeout: 10
 "#,
@@ -7678,6 +7716,9 @@ fn render_context_mcp_entry(config: &JuneContextMcpConfig) -> String {
         script_path = yaml_string(&config.script_path.to_string_lossy()),
         database_path = yaml_string(&config.database_path.to_string_lossy()),
         memory_settings_path = yaml_string(&config.memory_settings_path.to_string_lossy()),
+        base_url = yaml_string(base_url),
+        token_env = JUNE_MEMORY_MCP_TOKEN_ENV,
+        token = yaml_string(memory_proxy_token),
     )
 }
 
@@ -8267,6 +8308,7 @@ fn yaml_string(value: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 async fn start_june_provider_proxy(
     token: String,
+    memory_token: String,
     recorder_token: String,
     connector_token: String,
     image_sources: ImageSourceCapabilities,
@@ -8275,6 +8317,13 @@ async fn start_june_provider_proxy(
     app: Option<AppHandle>,
     recorder_requests: Arc<Mutex<HashMap<String, oneshot::Sender<AgentRecorderResolution>>>>,
 ) -> Result<RunningJuneProviderProxy, AppError> {
+    let memory = match app.as_ref() {
+        Some(app) => Some(MemoryProxyContext {
+            repositories: crate::commands::repositories(app).await?,
+            settings_path: crate::commands::memory_settings_path(app)?,
+        }),
+        None => None,
+    };
     let listener = TcpListener::bind(("127.0.0.1", 0))
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
     listener
@@ -8291,6 +8340,7 @@ async fn start_june_provider_proxy(
         listener,
         Arc::new(ProviderProxyState {
             token,
+            memory_token,
             recorder_token,
             connector_token,
             image_sources,
@@ -8300,6 +8350,7 @@ async fn start_june_provider_proxy(
             image_safe_mode_pins: Arc::new(Mutex::new(VecDeque::new())),
             model_catalog_cache: Arc::new(Mutex::new(Vec::new())),
             recorder_requests,
+            memory,
         }),
         shutdown_rx,
     ));
@@ -8360,6 +8411,7 @@ async fn handle_june_provider_connection(
     let required_token = provider_proxy_required_token(
         &request.path,
         &state.token,
+        &state.memory_token,
         &state.recorder_token,
         &state.connector_token,
     );
@@ -8552,6 +8604,9 @@ async fn handle_june_provider_connection(
         ("GET", "/v1/recorder/status") => {
             write_json_response(&mut stream, 200, recorder_status_body()).await?;
         }
+        ("POST", path) if matches!(path, "/v1/memory/save" | "/v1/memory/forget") => {
+            handle_memory_route(&mut stream, &state, path, &request.body).await?;
+        }
         ("POST", path)
             if path.starts_with("/v1/gmail/")
                 || path.starts_with("/v1/gmail-actions/")
@@ -8574,6 +8629,107 @@ async fn write_not_found_response(stream: &mut tokio::net::TcpStream) -> io::Res
         serde_json::json!({ "error": { "message": "Not found" } }),
     )
     .await
+}
+
+async fn handle_memory_route(
+    stream: &mut tokio::net::TcpStream,
+    state: &ProviderProxyState,
+    path: &str,
+    request_body: &[u8],
+) -> io::Result<()> {
+    let (status, body) = dispatch_memory_route(state.memory.as_ref(), path, request_body).await;
+    write_json_response(stream, status, body).await
+}
+
+async fn dispatch_memory_route(
+    memory: Option<&MemoryProxyContext>,
+    path: &str,
+    request_body: &[u8],
+) -> (u16, serde_json::Value) {
+    let Some(memory) = memory else {
+        return (
+            503,
+            memory_error_body(&AppError::new(
+                "memory_store_unavailable",
+                "June's memory store is unavailable.",
+            )),
+        );
+    };
+    let body = serde_json::from_slice::<serde_json::Value>(request_body)
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let result = match path {
+        "/v1/memory/save" => {
+            let content = body
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let project_id = match body.get("project_id") {
+                None | Some(serde_json::Value::Null) => None,
+                Some(serde_json::Value::String(value)) => Some(value.as_str()),
+                Some(_) => {
+                    return (
+                        400,
+                        memory_error_body(&AppError::new(
+                            "folder_not_found",
+                            "Project was not found or has already been deleted.",
+                        )),
+                    );
+                }
+            };
+            crate::commands::create_memory_with_settings(
+                &memory.repositories,
+                &memory.settings_path,
+                project_id,
+                content,
+                "agent",
+            )
+            .await
+            .map(Some)
+        }
+        "/v1/memory/forget" => {
+            let id = body
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim();
+            if id.is_empty() {
+                Err(AppError::new(
+                    "memory_id_required",
+                    "Memory id is required.",
+                ))
+            } else {
+                memory.repositories.delete_memory(id).await.map(|()| None)
+            }
+        }
+        _ => unreachable!("memory route guard only passes known routes"),
+    };
+
+    match result {
+        Ok(Some(memory)) => (
+            200,
+            serde_json::json!({
+                "ok": true,
+                "message": "Memory saved.",
+                "memory": memory,
+            }),
+        ),
+        Ok(None) => (
+            200,
+            serde_json::json!({
+                "ok": true,
+                "message": "Memory forgotten.",
+            }),
+        ),
+        Err(error) => (400, memory_error_body(&error)),
+    }
+}
+
+fn memory_error_body(error: &AppError) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "error_code": error.code,
+        "message": error.message,
+    })
 }
 
 /// Dispatches a private-connector proxy route (`/v1/gmail*`, `/v1/gcal*`). The
@@ -9702,17 +9858,19 @@ fn model_catalog_with_fallback(
     }
 }
 
-/// Recorder mutations require the recorder-scoped secret; connector routes
-/// (mail/calendar) require the connector-scoped secret; every other route keeps
-/// the general provider token. Distinct secrets, so none authorizes another's
-/// surface.
+/// Memory writes, recorder mutations, and connector routes each require their
+/// own scoped secret; every other route keeps the general provider token.
+/// Distinct secrets, so none authorizes another's surface.
 fn provider_proxy_required_token<'a>(
     path: &str,
     provider_token: &'a str,
+    memory_token: &'a str,
     recorder_token: &'a str,
     connector_token: &'a str,
 ) -> &'a str {
-    if path.starts_with("/v1/recorder/") {
+    if path.starts_with("/v1/memory/") {
+        memory_token
+    } else if path.starts_with("/v1/recorder/") {
         recorder_token
     } else if path.starts_with("/v1/gmail/")
         || path.starts_with("/v1/gmail-actions/")
@@ -10994,6 +11152,7 @@ mod tests {
         let addr = listener.local_addr().expect("listener addr");
         let state = Arc::new(ProviderProxyState {
             token: "proxy-token".to_string(),
+            memory_token: "memory-token".to_string(),
             recorder_token: "recorder-token".to_string(),
             connector_token: "connector-token".to_string(),
             image_sources: ImageSourceCapabilities {
@@ -11006,6 +11165,7 @@ mod tests {
             image_safe_mode_pins: Arc::new(Mutex::new(VecDeque::new())),
             model_catalog_cache: Arc::new(Mutex::new(Vec::new())),
             recorder_requests: Arc::new(Mutex::new(HashMap::new())),
+            memory: None,
         });
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.expect("accept connection");
@@ -11032,6 +11192,38 @@ mod tests {
             .expect("read response");
         server.await.expect("server task");
         response
+    }
+
+    async fn test_memory_proxy_context(
+        enabled: bool,
+    ) -> (
+        MemoryProxyContext,
+        sqlx_sqlite::SqlitePool,
+        tempfile::TempDir,
+    ) {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory");
+        crate::db::migrations::run_migrations(&pool)
+            .await
+            .expect("migrations");
+        let settings_dir = tempfile::tempdir().expect("settings tempdir");
+        let settings_path = settings_dir.path().join("memory-settings.json");
+        std::fs::write(
+            &settings_path,
+            serde_json::json!({ "enabled": enabled }).to_string(),
+        )
+        .expect("write memory settings");
+        (
+            MemoryProxyContext {
+                repositories: crate::db::repositories::Repositories::new(pool.clone()),
+                settings_path,
+            },
+            pool,
+            settings_dir,
+        )
     }
 
     fn oauth_test_connection() -> HermesBridgeConnection {
@@ -11491,10 +11683,22 @@ mod tests {
     }
 
     #[test]
-    fn recorder_routes_require_the_recorder_scoped_token_and_vice_versa() {
+    fn sensitive_routes_require_their_scoped_token_and_vice_versa() {
         // The general provider token every model call carries must never
         // authorize microphone control, and the recorder secret must not
         // open the provider surface.
+        for path in ["/v1/memory/save", "/v1/memory/forget"] {
+            assert_eq!(
+                provider_proxy_required_token(
+                    path,
+                    "provider-tok",
+                    "memory-tok",
+                    "recorder-tok",
+                    "connector-tok"
+                ),
+                "memory-tok"
+            );
+        }
         for path in [
             "/v1/recorder/start",
             "/v1/recorder/stop",
@@ -11504,6 +11708,7 @@ mod tests {
                 provider_proxy_required_token(
                     path,
                     "provider-tok",
+                    "memory-tok",
                     "recorder-tok",
                     "connector-tok"
                 ),
@@ -11520,6 +11725,7 @@ mod tests {
                 provider_proxy_required_token(
                     path,
                     "provider-tok",
+                    "memory-tok",
                     "recorder-tok",
                     "connector-tok"
                 ),
@@ -11538,6 +11744,7 @@ mod tests {
                 provider_proxy_required_token(
                     path,
                     "provider-tok",
+                    "memory-tok",
                     "recorder-tok",
                     "connector-tok"
                 ),
@@ -11550,12 +11757,14 @@ mod tests {
         let recorder_required = provider_proxy_required_token(
             "/v1/recorder/start",
             "provider-tok",
+            "memory-tok",
             "recorder-tok",
             "connector-tok",
         );
         let provider_required = provider_proxy_required_token(
             "/v1/models",
             "provider-tok",
+            "memory-tok",
             "recorder-tok",
             "connector-tok",
         );
@@ -11591,6 +11800,132 @@ mod tests {
         assert!(!provider_proxy_authorized(&missing, "proxy-secret"));
         assert!(!provider_proxy_authorized(&basic, "proxy-secret"));
         assert!(!provider_proxy_authorized(&extra, "proxy-secret"));
+    }
+
+    #[test]
+    fn memory_proxy_routes_require_the_memory_scoped_token() {
+        let required = provider_proxy_required_token(
+            "/v1/memory/save",
+            "proxy-token",
+            "memory-token",
+            "recorder-token",
+            "connector-token",
+        );
+        assert!(!provider_proxy_authorized(
+            &request_with_authorization("Bearer proxy-token"),
+            required
+        ));
+        assert!(provider_proxy_authorized(
+            &request_with_authorization("Bearer memory-token"),
+            required
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_proxy_save_enforces_global_and_project_disable_rules() {
+        let (disabled_memory, _pool, _settings_dir) = test_memory_proxy_context(false).await;
+        let (_, global_response) = dispatch_memory_route(
+            Some(&disabled_memory),
+            "/v1/memory/save",
+            br#"{"content":"Remember this"}"#,
+        )
+        .await;
+        assert_eq!(global_response["error_code"], "memory_disabled");
+        std::fs::write(&disabled_memory.settings_path, "not json")
+            .expect("corrupt memory settings");
+        let (_, corrupt_response) = dispatch_memory_route(
+            Some(&disabled_memory),
+            "/v1/memory/save",
+            br#"{"content":"Remember this"}"#,
+        )
+        .await;
+        assert_eq!(corrupt_response["error_code"], "memory_disabled");
+
+        let (project_memory, _pool, _settings_dir) = test_memory_proxy_context(true).await;
+        let folder = project_memory
+            .repositories
+            .create_folder("Project", None)
+            .await
+            .expect("create folder");
+        project_memory
+            .repositories
+            .set_folder_memory_disabled(&folder.id, true)
+            .await
+            .expect("disable project memory");
+        let project_body = serde_json::json!({
+            "content": "Remember this",
+            "project_id": folder.id,
+        })
+        .to_string();
+        let (_, project_response) = dispatch_memory_route(
+            Some(&project_memory),
+            "/v1/memory/save",
+            project_body.as_bytes(),
+        )
+        .await;
+        assert_eq!(project_response["error_code"], "memory_disabled");
+    }
+
+    #[tokio::test]
+    async fn memory_proxy_save_validates_content_and_project_scope() {
+        let (memory, _pool, _settings_dir) = test_memory_proxy_context(true).await;
+        let too_long_body = serde_json::json!({ "content": "x".repeat(4_001) }).to_string();
+        let (_, too_long) =
+            dispatch_memory_route(Some(&memory), "/v1/memory/save", too_long_body.as_bytes()).await;
+        assert_eq!(too_long["error_code"], "memory_content_too_long");
+
+        let (_, missing_project) = dispatch_memory_route(
+            Some(&memory),
+            "/v1/memory/save",
+            br#"{"content":"Remember this","project_id":"missing"}"#,
+        )
+        .await;
+        assert_eq!(missing_project["error_code"], "folder_not_found");
+    }
+
+    #[tokio::test]
+    async fn memory_proxy_save_and_forget_use_agent_source_and_write_tombstone() {
+        let (memory, pool, _settings_dir) = test_memory_proxy_context(true).await;
+        let folder = memory
+            .repositories
+            .create_folder("Project", None)
+            .await
+            .expect("create folder");
+        let saved_body = serde_json::json!({
+            "content": "  Remember this  ",
+            "project_id": folder.id,
+        })
+        .to_string();
+        let (_, saved) =
+            dispatch_memory_route(Some(&memory), "/v1/memory/save", saved_body.as_bytes()).await;
+        assert_eq!(saved["ok"], true);
+        assert_eq!(saved["memory"]["content"], "Remember this");
+        assert_eq!(saved["memory"]["source"], "agent");
+        assert_eq!(saved["memory"]["folderId"], folder.id);
+        let memory_id = saved["memory"]["id"]
+            .as_str()
+            .expect("saved memory id")
+            .to_string();
+
+        let forget_body = serde_json::json!({ "id": memory_id }).to_string();
+        let (_, forgotten) =
+            dispatch_memory_route(Some(&memory), "/v1/memory/forget", forget_body.as_bytes()).await;
+        assert_eq!(forgotten["ok"], true);
+        use sqlx::row::Row;
+        let memories = sqlx::query::query("SELECT COUNT(*) AS count FROM memories")
+            .fetch_one(&pool)
+            .await
+            .expect("count memories")
+            .get::<i64, _>("count");
+        let tombstones =
+            sqlx::query::query("SELECT COUNT(*) AS count FROM memory_tombstones WHERE id = ?")
+                .bind(memory_id)
+                .fetch_one(&pool)
+                .await
+                .expect("count tombstones")
+                .get::<i64, _>("count");
+        assert_eq!(memories, 0);
+        assert_eq!(tombstones, 1);
     }
 
     #[test]
@@ -12364,6 +12699,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "new-token",
+            "memory-token",
             "recorder-token",
             "connector-token",
             "web",
@@ -12453,6 +12789,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "t",
+            "memory",
             "recorder",
             "connector",
             "web",
@@ -12670,6 +13007,7 @@ mcp_servers:
             home.path(),
             4242,
             "proxy-token",
+            "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
             false,
@@ -12721,6 +13059,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "tok",
+            "memory-tok",
             "recorder-tok",
             "connector-tok",
             "web, memory",
@@ -12763,6 +13102,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "tok",
+            "memory-tok",
             "recorder-tok",
             "connector-tok",
             "web",
@@ -12847,6 +13187,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "proxy-tok",
+            "memory-proxy-tok",
             "recorder-proxy-tok",
             "connector-proxy-tok",
             "web",
@@ -12873,6 +13214,25 @@ mcp_servers:
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_context_mcp.py\"\n"));
         assert!(config.contains("      - \"/tmp/june/notes.sqlite3\"\n"));
         assert!(config.contains("      - \"/tmp/june/config/memory-settings.json\"\n"));
+        // Context keeps its read-side database/settings argv and gains only
+        // the loopback URL plus the dedicated memory-write token.
+        assert!(config.contains("      JUNE_MEMORY_PROXY_TOKEN: \"memory-proxy-tok\"\n"));
+        assert!(!config.contains("      JUNE_MEMORY_PROXY_TOKEN: \"proxy-tok\"\n"));
+        let value: serde_yaml::Value = serde_yaml::from_str(&config).expect("config parses");
+        assert_eq!(
+            value["mcp_servers"]["june_context"]["args"],
+            serde_yaml::from_str::<serde_yaml::Value>(
+                r#"[
+  "/tmp/june/hermes-mcp/june_context_mcp.py",
+  "/tmp/june/notes.sqlite3",
+  "/tmp/june/config/memory-settings.json",
+  "http://127.0.0.1:9/v1"
+]"#,
+            )
+            .expect("expected args parse")
+        );
+        assert!(!JUNE_CONTEXT_MCP_SCRIPT.contains("INSERT INTO memories"));
+        assert!(!JUNE_CONTEXT_MCP_SCRIPT.contains("DELETE FROM memories"));
         // The web server gets the loopback proxy URL as an arg and the proxy
         // token via env, never as a direct credential the MCP must hold.
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_web_mcp.py\"\n"));
@@ -12948,6 +13308,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "proxy-tok",
+            "memory-proxy-tok",
             "recorder-proxy-tok",
             "connector-proxy-tok",
             "web",
@@ -12981,6 +13342,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "proxy-tok",
+            "memory-proxy-tok",
             "recorder-proxy-tok",
             "connector-proxy-tok",
             "web",
@@ -13014,6 +13376,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "tok",
+            "memory-tok",
             "recorder-tok",
             "connector-tok",
             "web",
@@ -13047,6 +13410,7 @@ mcp_servers:
             true,
             "http://127.0.0.1:9/v1",
             "proxy-token",
+            "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
             "web, memory",
@@ -13071,6 +13435,7 @@ mcp_servers:
             false,
             "http://127.0.0.1:9/v1",
             "proxy-token",
+            "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
             "web, memory",
@@ -13475,6 +13840,7 @@ mcp_servers:
             home.path(),
             4242,
             "proxy-token",
+            "memory-proxy-token",
             "recorder-proxy-token",
             "connector-proxy-token",
             false,
