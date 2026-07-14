@@ -159,6 +159,15 @@ async function detachTabs(tabIds: number[]): Promise<void> {
   await Promise.all(tabIds.map(detach));
 }
 
+async function clearTaskGroups(tabIds: number[]): Promise<void> {
+  if (tabIds.length === 0) return;
+  try {
+    await chrome.tabs.ungroup(tabIds);
+  } catch {
+    // Tabs or their groups can disappear while the native host disconnects.
+  }
+}
+
 async function waitUntilReady(tabId: number): Promise<void> {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -297,6 +306,7 @@ export class BrowserController {
     const tabIds = this.registry.cleanupPlan();
     this.registry.clear();
     await detachTabs(tabIds);
+    await clearTaskGroups(tabIds);
   }
 
   async execute(

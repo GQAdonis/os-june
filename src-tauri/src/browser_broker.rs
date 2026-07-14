@@ -203,7 +203,17 @@ impl BrowserBroker {
             }
         }
         self.lock().sessions.clear();
-        first_error.map_or(Ok(()), Err)
+        if let Some(error) = first_error {
+            tracing::warn!(
+                code = %error.code,
+                message = %error.message,
+                "browser session teardown failed during access revocation"
+            );
+        }
+        // Revocation must remain durable even if Chrome disappeared before it
+        // acknowledged detach. The broker gate is already closed and the
+        // caller must still remove the persisted grant and rotate credentials.
+        Ok(())
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -528,6 +538,25 @@ mod tests {
         }
     }
 
+    struct FailingCloseTransport;
+
+    impl BrowserTransport for FailingCloseTransport {
+        fn execute<'a>(&'a self, tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
+            Box::pin(async move {
+                if tool == "session_close" {
+                    return Err(AppError::new(
+                        "extension_disconnected",
+                        "The browser extension disconnected.",
+                    ));
+                }
+                Ok(TransportResponse {
+                    data: json!({}),
+                    artifact: None,
+                })
+            })
+        }
+    }
+
     #[test]
     fn artifact_names_are_broker_minted_and_path_safe() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -784,5 +813,32 @@ mod tests {
         revoke.await.expect("revoke task").expect("revoke result");
         assert_eq!(broker.active_session_count(), 0);
         assert!(!broker.is_enabled());
+    }
+
+    #[tokio::test]
+    async fn revocation_stays_closed_when_extension_teardown_cannot_acknowledge() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let broker = BrowserBroker::default();
+        broker.set_access_flag_path(flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(FailingCloseTransport),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+        broker
+            .execute(BrowserTransportKind::Attended, "session_start", json!({}))
+            .await
+            .expect("start");
+
+        broker
+            .set_enabled(false)
+            .await
+            .expect("revoke remains durable after disconnect");
+
+        assert!(!broker.is_enabled());
+        assert_eq!(broker.active_session_count(), 0);
     }
 }

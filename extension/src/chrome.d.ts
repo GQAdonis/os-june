@@ -73,6 +73,7 @@ declare namespace chrome {
     function update(tabId: number, details: { active?: boolean }): Promise<Tab>;
     function remove(tabIds: number | number[]): Promise<void>;
     function group(details: { tabIds: number[]; groupId?: number }): Promise<number>;
+    function ungroup(tabIds: number[]): Promise<void>;
     const onRemoved: { addListener(callback: (tabId: number) => void): void };
   }
 
