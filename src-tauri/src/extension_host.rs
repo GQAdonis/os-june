@@ -21,12 +21,14 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine as _;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::domain::types::AppError;
 
@@ -60,6 +62,8 @@ pub(crate) fn descriptor_path(data_dir: &std::path::Path) -> PathBuf {
 pub const MAX_FRAME_LEN: usize = 1024 * 1024;
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ARTIFACT_BYTES: usize = 32 * 1024 * 1024;
 
 pub const PAIRING_CHANGED_EVENT: &str = "june://extension-pairing-changed";
 
@@ -243,6 +247,21 @@ struct HostShared {
     paired_connection: Option<u64>,
     extension_version: Option<String>,
     protocol_version: Option<u32>,
+    next_request_id: u64,
+    paired_sender: Option<mpsc::UnboundedSender<Value>>,
+    pending: std::collections::HashMap<u64, PendingRequest>,
+}
+
+struct PendingRequest {
+    connection_id: u64,
+    sender: oneshot::Sender<Result<ExtensionResponse, AppError>>,
+    chunks: Vec<Vec<u8>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ExtensionResponse {
+    pub value: Value,
+    pub artifact_bytes: Option<Vec<u8>>,
 }
 
 #[derive(Default, Clone)]
@@ -274,11 +293,24 @@ impl ExtensionHost {
         shared.next_connection_id
     }
 
-    fn set_paired(&self, connection_id: u64, extension_version: Option<String>, protocol: u32) {
+    fn set_paired(
+        &self,
+        connection_id: u64,
+        extension_version: Option<String>,
+        protocol: u32,
+        sender: mpsc::UnboundedSender<Value>,
+    ) {
         let mut shared = self.shared.lock().expect("extension host state poisoned");
+        for (_, pending) in shared.pending.drain() {
+            let _ = pending.sender.send(Err(AppError::new(
+                "extension_connection_replaced",
+                "The browser extension connection was replaced.",
+            )));
+        }
         shared.paired_connection = Some(connection_id);
         shared.extension_version = extension_version;
         shared.protocol_version = Some(protocol);
+        shared.paired_sender = Some(sender);
     }
 
     fn end_connection(&self, connection_id: u64) -> bool {
@@ -287,9 +319,178 @@ impl ExtensionHost {
             shared.paired_connection = None;
             shared.extension_version = None;
             shared.protocol_version = None;
+            shared.paired_sender = None;
+            let pending_ids = shared
+                .pending
+                .iter()
+                .filter_map(|(id, pending)| (pending.connection_id == connection_id).then_some(*id))
+                .collect::<Vec<_>>();
+            for id in pending_ids {
+                if let Some(pending) = shared.pending.remove(&id) {
+                    let _ = pending.sender.send(Err(AppError::new(
+                        "extension_disconnected",
+                        "The browser extension disconnected.",
+                    )));
+                }
+            }
             true
         } else {
             false
+        }
+    }
+
+    pub(crate) async fn request(
+        &self,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<ExtensionResponse, AppError> {
+        let (receiver, id) = {
+            let mut shared = self.shared.lock().expect("extension host state poisoned");
+            let connection_id = shared.paired_connection.ok_or_else(|| {
+                AppError::new(
+                    "extension_not_paired",
+                    "The June browser extension is not paired.",
+                )
+            })?;
+            let sender = shared.paired_sender.clone().ok_or_else(|| {
+                AppError::new(
+                    "extension_not_paired",
+                    "The June browser extension is not paired.",
+                )
+            })?;
+            shared.next_request_id += 1;
+            let id = shared.next_request_id;
+            let (result_sender, receiver) = oneshot::channel();
+            shared.pending.insert(
+                id,
+                PendingRequest {
+                    connection_id,
+                    sender: result_sender,
+                    chunks: Vec::new(),
+                },
+            );
+            let message = json!({
+                "v": PROTOCOL_VERSION,
+                "type": "request",
+                "id": id,
+                "tool": tool,
+                "arguments": arguments,
+            });
+            if sender.send(message).is_err() {
+                shared.pending.remove(&id);
+                return Err(AppError::new(
+                    "extension_disconnected",
+                    "The browser extension disconnected.",
+                ));
+            }
+            (receiver, id)
+        };
+
+        match tokio::time::timeout(REQUEST_TIMEOUT, receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(AppError::new(
+                "extension_request_cancelled",
+                "The browser extension request was cancelled.",
+            )),
+            Err(_) => {
+                self.shared
+                    .lock()
+                    .expect("extension host state poisoned")
+                    .pending
+                    .remove(&id);
+                Err(AppError::new(
+                    "extension_request_timeout",
+                    "The browser extension did not respond in time.",
+                ))
+            }
+        }
+    }
+
+    fn handle_extension_frame(&self, connection_id: u64, frame: &Value) -> bool {
+        let Some(id) = frame.get("id").and_then(Value::as_u64) else {
+            return false;
+        };
+        let mut shared = self.shared.lock().expect("extension host state poisoned");
+        if shared.paired_connection != Some(connection_id) {
+            return true;
+        }
+        match message_type(frame) {
+            Some("chunk") => {
+                let Some(pending) = shared.pending.get_mut(&id) else {
+                    return true;
+                };
+                let index = frame.get("index").and_then(Value::as_u64);
+                if index != Some(pending.chunks.len() as u64) {
+                    if let Some(pending) = shared.pending.remove(&id) {
+                        let _ = pending.sender.send(Err(AppError::new(
+                            "extension_chunk_invalid",
+                            "The browser extension sent chunks out of order.",
+                        )));
+                    }
+                    return true;
+                }
+                let decoded = frame
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok());
+                match decoded {
+                    Some(bytes)
+                        if pending.chunks.iter().map(Vec::len).sum::<usize>() + bytes.len()
+                            <= MAX_ARTIFACT_BYTES =>
+                    {
+                        pending.chunks.push(bytes)
+                    }
+                    None => {
+                        if let Some(pending) = shared.pending.remove(&id) {
+                            let _ = pending.sender.send(Err(AppError::new(
+                                "extension_chunk_invalid",
+                                "The browser extension sent an invalid chunk.",
+                            )));
+                        }
+                    }
+                    Some(_) => {
+                        if let Some(pending) = shared.pending.remove(&id) {
+                            let _ = pending.sender.send(Err(AppError::new(
+                                "extension_artifact_too_large",
+                                "The browser extension artifact exceeds the allowed size.",
+                            )));
+                        }
+                    }
+                }
+                true
+            }
+            Some("response") => {
+                if let Some(pending) = shared.pending.remove(&id) {
+                    let metadata = frame.pointer("/data/artifact");
+                    let received_count = pending.chunks.len();
+                    let received_bytes = pending.chunks.iter().map(Vec::len).sum::<usize>();
+                    let valid = match metadata {
+                        Some(metadata) => {
+                            metadata.get("chunkCount").and_then(Value::as_u64)
+                                == Some(received_count as u64)
+                                && metadata.get("byteLength").and_then(Value::as_u64)
+                                    == Some(received_bytes as u64)
+                        }
+                        None => received_count == 0,
+                    };
+                    if !valid {
+                        let _ = pending.sender.send(Err(AppError::new(
+                            "extension_artifact_incomplete",
+                            "The browser extension artifact was incomplete.",
+                        )));
+                    } else {
+                        let artifact_bytes = metadata
+                            .is_some()
+                            .then(|| pending.chunks.into_iter().flatten().collect());
+                        let _ = pending.sender.send(Ok(ExtensionResponse {
+                            value: frame.clone(),
+                            artifact_bytes,
+                        }));
+                    }
+                }
+                true
+            }
+            _ => false,
         }
     }
 }
@@ -381,12 +582,25 @@ async fn handle_connection(
 
     let connection_id = host.begin_connection();
     let app_version = app.package_info().version.to_string();
+    let (outgoing_sender, mut outgoing_receiver) = mpsc::unbounded_channel();
 
     loop {
-        let frame = match read_frame_async(&mut reader).await {
-            Ok(Some(frame)) => frame,
-            Ok(None) | Err(_) => break,
+        let frame = tokio::select! {
+            incoming = read_frame_async(&mut reader) => match incoming {
+                Ok(Some(frame)) => frame,
+                Ok(None) | Err(_) => break,
+            },
+            outgoing = outgoing_receiver.recv() => match outgoing {
+                Some(frame) => {
+                    if write_frame_async(&mut writer, &frame).await.is_err() { break; }
+                    continue;
+                }
+                None => break,
+            }
         };
+        if host.handle_extension_frame(connection_id, &frame) {
+            continue;
+        }
         let reply = match message_type(&frame) {
             Some("hello") => {
                 let version = message_version(&frame);
@@ -400,6 +614,7 @@ async fn handle_connection(
                         connection_id,
                         extension_version,
                         version.unwrap_or(PROTOCOL_VERSION),
+                        outgoing_sender.clone(),
                     );
                     emit_pairing_changed(&app, &host);
                 }
@@ -792,7 +1007,8 @@ mod tests {
         let host = ExtensionHost::default();
         let first = host.begin_connection();
         let second = host.begin_connection();
-        host.set_paired(second, Some("0.1.0".into()), PROTOCOL_VERSION);
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        host.set_paired(second, Some("0.1.0".into()), PROTOCOL_VERSION, sender);
         assert!(host.status().paired);
 
         // A stale connection closing must not unpair the live one.
@@ -803,6 +1019,95 @@ mod tests {
         let status = host.status();
         assert!(!status.paired);
         assert_eq!(status.extension_version, None);
+    }
+
+    #[tokio::test]
+    async fn correlated_request_assembles_valid_artifact_chunks() {
+        let host = ExtensionHost::default();
+        let connection_id = host.begin_connection();
+        let (sender, mut outgoing) = mpsc::unbounded_channel();
+        host.set_paired(
+            connection_id,
+            Some("0.1.0".into()),
+            PROTOCOL_VERSION,
+            sender,
+        );
+
+        let request_host = host.clone();
+        let pending =
+            tokio::spawn(async move { request_host.request("screenshot", json!({})).await });
+        let request = outgoing.recv().await.expect("outgoing request");
+        let id = request["id"].as_u64().expect("request id");
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"png-bytes");
+
+        assert!(host.handle_extension_frame(
+            connection_id,
+            &json!({ "type": "chunk", "id": id, "index": 0, "data": encoded }),
+        ));
+        assert!(host.handle_extension_frame(
+            connection_id,
+            &json!({
+                "type": "response",
+                "id": id,
+                "success": true,
+                "data": {
+                    "artifact": {
+                        "kind": "screenshot",
+                        "mimeType": "image/png",
+                        "chunkCount": 1,
+                        "byteLength": 9,
+                    }
+                }
+            }),
+        ));
+
+        let response = pending.await.expect("request task").expect("response");
+        assert_eq!(
+            response.artifact_bytes.as_deref(),
+            Some(b"png-bytes".as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn correlated_request_rejects_truncated_artifact_transfers() {
+        let host = ExtensionHost::default();
+        let connection_id = host.begin_connection();
+        let (sender, mut outgoing) = mpsc::unbounded_channel();
+        host.set_paired(
+            connection_id,
+            Some("0.1.0".into()),
+            PROTOCOL_VERSION,
+            sender,
+        );
+
+        let request_host = host.clone();
+        let pending =
+            tokio::spawn(async move { request_host.request("screenshot", json!({})).await });
+        let request = outgoing.recv().await.expect("outgoing request");
+        let id = request["id"].as_u64().expect("request id");
+
+        assert!(host.handle_extension_frame(
+            connection_id,
+            &json!({
+                "type": "response",
+                "id": id,
+                "success": true,
+                "data": {
+                    "artifact": {
+                        "kind": "screenshot",
+                        "mimeType": "image/png",
+                        "chunkCount": 1,
+                        "byteLength": 9,
+                    }
+                }
+            }),
+        ));
+
+        let error = pending
+            .await
+            .expect("request task")
+            .expect_err("truncated transfer");
+        assert_eq!(error.code, "extension_artifact_incomplete");
     }
 
     #[test]

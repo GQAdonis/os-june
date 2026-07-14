@@ -1,6 +1,7 @@
 pub mod agent_hud;
 pub mod app_paths;
 pub mod audio;
+mod browser_broker;
 pub mod commands;
 pub mod connectors;
 pub mod db;

@@ -1,3 +1,4 @@
+use crate::browser_broker::{BrowserBroker, BrowserTransportKind, ExtensionBrowserTransport};
 use crate::domain::types::AppError;
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
@@ -467,82 +468,6 @@ struct HermesProcess {
     generation: u64,
     child: Child,
     connection: HermesBridgeConnection,
-}
-
-/// Minimal browser broker skeleton (JUN-286). Reads the Browser access grant
-/// from its persisted flag for every command and owns a registry of broker
-/// sessions, enough to refuse new commands and terminate every session on
-/// revoke. JUN-287 fleshes out extension pairing, the native-messaging shim,
-/// and per-tab debugger control; this slice adds no production session
-/// creation, only the grant gate and the terminable registry.
-#[derive(Default)]
-struct BrowserBroker {
-    state: Mutex<BrowserBrokerState>,
-}
-
-#[derive(Default)]
-struct BrowserBrokerState {
-    /// Persisted Browser access grant consulted for every broker command.
-    /// `None` fails closed until the app data path is configured.
-    access_flag_path: Option<PathBuf>,
-    /// Short-lived deny override used while a revoke removes the persisted
-    /// grant. This is transition ordering, not cached consent.
-    transition_blocked: bool,
-    /// Active broker sessions keyed by id. Only needs to be clearable on revoke
-    /// today; the value is a JUN-287 placeholder.
-    sessions: HashMap<String, BrowserSession>,
-}
-
-/// A tracked browser broker session. A placeholder in JUN-286 (JUN-287 fills it
-/// with the extension pairing and per-tab debugger handles); the registry only
-/// needs to be terminable on revoke today. Constructed only under test until
-/// JUN-287 lands real session creation.
-#[allow(dead_code)]
-#[derive(Default)]
-struct BrowserSession {}
-
-impl BrowserBroker {
-    fn lock(&self) -> std::sync::MutexGuard<'_, BrowserBrokerState> {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    fn set_access_flag_path(&self, path: PathBuf) {
-        self.lock().access_flag_path = Some(path);
-    }
-
-    /// Applies the in-memory half of a grant transition. This never stores an
-    /// enabled grant: authorization always comes from the flag file. Revoking
-    /// temporarily blocks commands before persistence and terminates every
-    /// session; enabling releases that transition block after persistence.
-    fn set_enabled(&self, enabled: bool) {
-        let mut state = self.lock();
-        state.transition_blocked = !enabled;
-        if !enabled {
-            state.sessions.clear();
-        }
-    }
-
-    fn is_enabled(&self) -> bool {
-        let state = self.lock();
-        !state.transition_blocked
-            && state
-                .access_flag_path
-                .as_ref()
-                .is_some_and(|path| path.exists())
-    }
-
-    fn active_session_count(&self) -> usize {
-        self.lock().sessions.len()
-    }
-
-    #[cfg(test)]
-    fn insert_test_session(&self, id: &str) {
-        self.lock()
-            .sessions
-            .insert(id.to_string(), BrowserSession::default());
-    }
 }
 
 struct SharedProviderProxy {
@@ -1416,6 +1341,16 @@ async fn ensure_provider_proxy(
     bridge
         .browser_broker
         .set_access_flag_path(app_data_dir.join(BROWSER_ACCESS_FLAG_FILE));
+    bridge.browser_broker.configure_transport(
+        BrowserTransportKind::Attended,
+        Arc::new(ExtensionBrowserTransport::new(
+            app.state::<crate::extension_host::ExtensionHost>()
+                .inner()
+                .clone(),
+        )),
+        hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
+        hermes_home.join("workspace").join("browser-artifacts"),
+    );
     {
         let guard = bridge.provider_proxy.lock().map_err(|_| {
             AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed.")
@@ -8935,6 +8870,9 @@ async fn handle_june_provider_connection(
         ("GET", "/v1/browser/status") => {
             handle_browser_status(&mut stream, &state).await?;
         }
+        ("POST", "/v1/browser/execute") => {
+            handle_browser_execute(&mut stream, &state, &request.body).await?;
+        }
         ("POST", path)
             if path.starts_with("/v1/gmail/")
                 || path.starts_with("/v1/gmail-actions/")
@@ -9834,6 +9772,96 @@ fn browser_status_body(state: &ProviderProxyState) -> serde_json::Value {
             "activeSessions": state.browser_broker.active_session_count(),
         }
     })
+}
+
+async fn handle_browser_execute(
+    stream: &mut tokio::net::TcpStream,
+    state: &ProviderProxyState,
+    body: &[u8],
+) -> io::Result<()> {
+    // The grant is deliberately re-read inside every broker execution. The
+    // browser-scoped loopback token prevents MCP cross-talk but is not an
+    // authorization boundary against the runtime itself (ADR 0017).
+    let request = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(request) => request,
+        Err(_) => {
+            return write_json_response(
+                stream,
+                400,
+                serde_json::json!({
+                    "success": false,
+                    "message": "Browser request body must be valid JSON.",
+                    "errorCode": "invalid_arguments",
+                }),
+            )
+            .await;
+        }
+    };
+    let Some(tool) = request.get("tool").and_then(serde_json::Value::as_str) else {
+        return write_json_response(
+            stream,
+            400,
+            serde_json::json!({
+                "success": false,
+                "message": "tool is required.",
+                "errorCode": "invalid_arguments",
+            }),
+        )
+        .await;
+    };
+    let arguments = match request.get("arguments") {
+        Some(arguments) if arguments.is_object() => arguments.clone(),
+        None => serde_json::json!({}),
+        Some(_) => {
+            return write_json_response(
+                stream,
+                400,
+                serde_json::json!({
+                    "success": false,
+                    "message": "arguments must be an object.",
+                    "errorCode": "invalid_arguments",
+                }),
+            )
+            .await;
+        }
+    };
+    match state
+        .browser_broker
+        .execute(BrowserTransportKind::Attended, tool, arguments)
+        .await
+    {
+        Ok(data) => {
+            write_json_response(
+                stream,
+                200,
+                serde_json::json!({ "success": true, "data": data }),
+            )
+            .await
+        }
+        Err(error) => {
+            let status = match error.code.as_str() {
+                "browser_access_disabled" => 403,
+                "browser_session_not_found" | "tab_not_owned" => 404,
+                "not_implemented" => 501,
+                "invalid_arguments"
+                | "unknown_browser_tool"
+                | "browser_url_invalid"
+                | "browser_url_not_allowed" => 400,
+                "extension_not_paired" | "browser_transport_unavailable" => 503,
+                _ => 502,
+            };
+            write_json_response(
+                stream,
+                status,
+                serde_json::json!({
+                    "success": false,
+                    "message": error.message,
+                    "errorCode": error.code,
+                }),
+            )
+            .await
+        }
+    }
 }
 
 struct HttpRequest {
@@ -12051,7 +12079,10 @@ mod tests {
         broker
     }
 
-    async fn browser_status_response_with_broker(broker: Arc<BrowserBroker>) -> String {
+    async fn browser_proxy_response_with_broker(
+        broker: Arc<BrowserBroker>,
+        request: &str,
+    ) -> String {
         let home = tempfile::tempdir().expect("tempdir");
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -12084,9 +12115,6 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("connect proxy");
-        // Always send the CORRECT browser token: the grant, not the token, is
-        // what the route gates on here.
-        let request = "GET /v1/browser/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Length: 0\r\n\r\n";
         stream
             .write_all(request.as_bytes())
             .await
@@ -12098,6 +12126,16 @@ mod tests {
             .expect("read response");
         server.await.expect("server task");
         response
+    }
+
+    async fn browser_status_response_with_broker(broker: Arc<BrowserBroker>) -> String {
+        // Always send the CORRECT browser token: the grant, not the token, is
+        // what the route gates on here.
+        browser_proxy_response_with_broker(
+            broker,
+            "GET /v1/browser/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Length: 0\r\n\r\n",
+        )
+        .await
     }
 
     async fn browser_status_response(grant_enabled: bool) -> String {
@@ -12143,6 +12181,27 @@ mod tests {
         assert!(
             response.starts_with("HTTP/1.1 403 Forbidden"),
             "the broker must read the persisted grant for every request: {response}"
+        );
+        assert!(response.contains("browser_access_disabled"));
+    }
+
+    #[tokio::test]
+    async fn browser_execute_route_refuses_the_correct_token_while_grant_is_off() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let body = r#"{"tool":"session_start","arguments":{}}"#;
+        let request = format!(
+            "POST /v1/browser/execute HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer browser-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+
+        let response =
+            browser_proxy_response_with_broker(broker_for_access_flag(&access_flag), &request)
+                .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "grant off must refuse action routes even with the correct token: {response}"
         );
         assert!(response.contains("browser_access_disabled"));
     }
@@ -12366,21 +12425,34 @@ mod tests {
     }
 
     #[test]
-    fn browser_mcp_script_advertises_only_the_status_tool() {
-        // The embedded script must expose exactly the zero-argument `status`
-        // tool and nothing that could act on a browser in this slice.
-        assert!(JUNE_BROWSER_MCP_SCRIPT.contains("\"name\": \"status\""));
-        for forbidden in [
-            "\"name\": \"open\"",
-            "\"name\": \"navigate\"",
-            "\"name\": \"click\"",
-            "start_recording",
+    fn browser_mcp_script_advertises_the_transport_agnostic_contract() {
+        for tool in [
+            "status",
+            "session_start",
+            "session_close",
+            "navigate",
+            "snapshot",
+            "click",
+            "fill",
+            "press",
+            "screenshot",
+            "back",
+            "tabs_list",
+            "tab_open",
+            "tab_switch",
+            "tab_close",
+            "tab_accept_shared",
         ] {
             assert!(
-                !JUNE_BROWSER_MCP_SCRIPT.contains(forbidden),
-                "browser MCP must not advertise {forbidden}"
+                JUNE_BROWSER_MCP_SCRIPT.contains(&format!("\"name\": \"{tool}\""))
+                    || JUNE_BROWSER_MCP_SCRIPT.contains(&format!("(\"{tool}\",")),
+                "browser MCP must advertise {tool}"
             );
         }
+        assert!(JUNE_BROWSER_MCP_SCRIPT.contains("[\"session_id\", \"tab_id\", \"ref\"]"));
+        assert!(JUNE_BROWSER_MCP_SCRIPT.contains("[\"session_id\", \"tab_id\", \"key\"]"));
+        assert!(!JUNE_BROWSER_MCP_SCRIPT.contains("\"name\": \"open\""));
+        assert!(!JUNE_BROWSER_MCP_SCRIPT.contains("start_recording"));
         // It reads its dedicated token env var, kept distinct from the others.
         assert!(JUNE_BROWSER_MCP_SCRIPT.contains(JUNE_BROWSER_MCP_TOKEN_ENV));
     }
