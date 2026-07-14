@@ -331,6 +331,206 @@ async fn integration_agent_chat_routes_stale_model_through_auto() -> Result<(), 
 }
 
 #[tokio::test]
+async fn integration_agent_chat_local_auto_fallback_strips_auto_policy()
+-> Result<(), Box<dyn Error>> {
+    let completer = Arc::new(RecordingChatCompleter::default());
+    let app = router(test_state_with_local_text_pricing(
+        Arc::new(FakeGenerator),
+        completer.clone(),
+    ));
+    let response = match app
+        .oneshot(json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "auto": { "cost_quality": 0.75 },
+                "messages": [{ "role": "user", "content": "hello" }]
+            }),
+            Some(AUTHORIZATION),
+        )?)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = completer
+        .requests
+        .lock()
+        .map_err(|_| "chat request mutex poisoned")?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model.0, "zai-org-glm-5-2");
+    assert!(requests[0].body.get("auto").is_none());
+    assert!(!requests[0].body.to_string().contains("cost_quality"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_agent_chat_non_local_missing_auto_fails_loudly() -> Result<(), Box<dyn Error>>
+{
+    let app = router(test_state_with_text_pricing_without_auto(
+        false,
+        Arc::new(FakeGenerator),
+        Arc::new(FakeChatCompleter),
+    ));
+    let response = match app
+        .oneshot(json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "messages": [{ "role": "user", "content": "hello" }]
+            }),
+            Some(AUTHORIZATION),
+        )?)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["message"], "model_not_priced");
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_agent_chat_local_auto_image_and_tools_falls_back_to_compatible_model()
+-> Result<(), Box<dyn Error>> {
+    let completer = Arc::new(RecordingChatCompleter::default());
+    let app = router(test_state_with_local_text_pricing(
+        Arc::new(FakeGenerator),
+        completer.clone(),
+    ));
+    let response = match app
+        .oneshot(json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "auto": { "cost_quality": 0.75 },
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": "describe this image" },
+                        {
+                            "type": "image_url",
+                            "image_url": { "url": "https://example.com/image.png" }
+                        }
+                    ]
+                }],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "save_description",
+                        "parameters": { "type": "object" }
+                    }
+                }]
+            }),
+            Some(AUTHORIZATION),
+        )?)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = completer
+        .requests
+        .lock()
+        .map_err(|_| "chat request mutex poisoned")?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model.0, "kimi-k2-6");
+    assert!(requests[0].body.get("auto").is_none());
+    assert!(requests[0].body.get("tools").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_agent_chat_local_auto_rejects_when_capabilities_are_unavailable()
+-> Result<(), Box<dyn Error>> {
+    let app = router(
+        test_state_with_text_pricing_without_auto_and_kimi_capabilities(
+            true,
+            Arc::new(FakeGenerator),
+            Arc::new(FakeChatCompleter),
+            vec!["supportsVision".to_string()],
+        ),
+    );
+    let response = match app
+        .oneshot(json_request(
+            "/v1/chat/completions",
+            &serde_json::json!({
+                "model": "open-software/auto",
+                "messages": [{
+                    "role": "user",
+                    "content": [{
+                        "type": "image_url",
+                        "image_url": { "url": "https://example.com/image.png" }
+                    }]
+                }],
+                "tools": [{
+                    "type": "function",
+                    "function": {
+                        "name": "save_description",
+                        "parameters": { "type": "object" }
+                    }
+                }]
+            }),
+            Some(AUTHORIZATION),
+        )?)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["message"], "model_capability_unavailable");
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_note_generate_local_auto_fallback_omits_cost_quality()
+-> Result<(), Box<dyn Error>> {
+    let generator = Arc::new(RecordingGenerator::default());
+    let app = router(test_state_with_local_text_pricing(
+        generator.clone(),
+        Arc::new(FakeChatCompleter),
+    ));
+    let response = match app
+        .oneshot(json_request(
+            "/v1/notes/generate",
+            &serde_json::json!({
+                "noteId": "note-local-auto",
+                "promptVersion": "prompt-v1",
+                "title": "Planning",
+                "transcript": "System: launch is Friday",
+                "model": "open-software/auto",
+                "costQuality": 0.75
+            }),
+            Some(AUTHORIZATION),
+        )?)
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = generator
+        .requests
+        .lock()
+        .map_err(|_| "generation request mutex poisoned")?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].model.0, "zai-org-glm-5-2");
+    assert_eq!(requests[0].cost_quality, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn integration_agent_chat_rejects_byok_when_stale_model_would_fallback()
 -> Result<(), Box<dyn Error>> {
     let response = send(json_request_with_venice_api_key(
@@ -1663,10 +1863,13 @@ fn test_state_with_issue_sink_and_timeout(
     request_timeout_secs: u64,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
+        pricing: models(),
+        local_dev_enabled: false,
         issue_reports: test_issue_report_service(issue_reports),
         attestation,
         transcriber: Arc::new(FakeTranscriber),
         generator: Arc::new(FakeGenerator),
+        chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs,
         p3a_sink: Arc::new(RecordingP3aSink::default()),
     })
@@ -1693,10 +1896,13 @@ fn test_state_with_sinks_and_transcriber(
     transcriber: Arc<dyn Transcriber>,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
+        pricing: models(),
+        local_dev_enabled: false,
         issue_reports,
         attestation,
         transcriber,
         generator: Arc::new(FakeGenerator),
+        chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs: 5,
         p3a_sink: Arc::new(RecordingP3aSink::default()),
     })
@@ -1707,10 +1913,13 @@ fn test_state_with_generator_and_timeout(
     request_timeout_secs: u64,
 ) -> ApiState {
     test_state_from_deps(TestStateDeps {
+        pricing: models(),
+        local_dev_enabled: false,
         issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
         attestation: test_attestation(),
         transcriber: Arc::new(FakeTranscriber),
         generator,
+        chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs,
         p3a_sink: Arc::new(RecordingP3aSink::default()),
     })
@@ -1718,30 +1927,115 @@ fn test_state_with_generator_and_timeout(
 
 fn test_state_with_p3a_sink(p3a_sink: Arc<dyn P3aSink>) -> ApiState {
     test_state_from_deps(TestStateDeps {
+        pricing: models(),
+        local_dev_enabled: false,
         issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
         attestation: test_attestation(),
         transcriber: Arc::new(FakeTranscriber),
         generator: Arc::new(FakeGenerator),
+        chat_completer: Arc::new(FakeChatCompleter),
         request_timeout_secs: 5,
         p3a_sink,
     })
 }
 
+fn test_state_with_local_text_pricing(
+    generator: Arc<dyn Generator>,
+    chat_completer: Arc<dyn AgentChatCompleter>,
+) -> ApiState {
+    test_state_with_text_pricing_without_auto(true, generator, chat_completer)
+}
+
+fn test_state_with_text_pricing_without_auto(
+    local_dev_enabled: bool,
+    generator: Arc<dyn Generator>,
+    chat_completer: Arc<dyn AgentChatCompleter>,
+) -> ApiState {
+    test_state_with_text_pricing_without_auto_and_kimi_capabilities(
+        local_dev_enabled,
+        generator,
+        chat_completer,
+        vec![
+            "supportsFunctionCalling".to_string(),
+            "supportsVision".to_string(),
+        ],
+    )
+}
+
+fn test_state_with_text_pricing_without_auto_and_kimi_capabilities(
+    local_dev_enabled: bool,
+    generator: Arc<dyn Generator>,
+    chat_completer: Arc<dyn AgentChatCompleter>,
+    kimi_capabilities: Vec<String>,
+) -> ApiState {
+    let mut pricing = models();
+    pricing.remove("open-software/auto");
+    pricing.insert(
+        "zai-org-glm-5-2".to_string(),
+        ModelPriceConfig {
+            unit: PriceUnit::Tokens,
+            credits_per_million_seconds: None,
+            input_credits_per_million_tokens: Some(500),
+            output_credits_per_million_tokens: Some(500),
+            provider: ModelProvider::Venice,
+            model_type: ModelType::Text,
+            display_name: "GLM 5.2".to_string(),
+            description: None,
+            privacy: None,
+            pricing: None,
+            context_tokens: None,
+            traits: Vec::new(),
+            capabilities: Vec::new(),
+        },
+    );
+    pricing.insert(
+        "kimi-k2-6".to_string(),
+        ModelPriceConfig {
+            unit: PriceUnit::Tokens,
+            credits_per_million_seconds: None,
+            input_credits_per_million_tokens: Some(500),
+            output_credits_per_million_tokens: Some(500),
+            provider: ModelProvider::Venice,
+            model_type: ModelType::Text,
+            display_name: "Kimi K2.6".to_string(),
+            description: None,
+            privacy: None,
+            pricing: None,
+            context_tokens: None,
+            traits: Vec::new(),
+            capabilities: kimi_capabilities,
+        },
+    );
+    test_state_from_deps(TestStateDeps {
+        pricing,
+        local_dev_enabled,
+        issue_reports: test_issue_report_service(Arc::new(RecordingIssueReportSink::default())),
+        attestation: test_attestation(),
+        transcriber: Arc::new(FakeTranscriber),
+        generator,
+        chat_completer,
+        request_timeout_secs: 5,
+        p3a_sink: Arc::new(RecordingP3aSink::default()),
+    })
+}
+
 struct TestStateDeps {
+    pricing: BTreeMap<String, ModelPriceConfig>,
+    local_dev_enabled: bool,
     issue_reports: Arc<IssueReportService>,
     attestation: AttestationInfo,
     transcriber: Arc<dyn Transcriber>,
     generator: Arc<dyn Generator>,
+    chat_completer: Arc<dyn AgentChatCompleter>,
     request_timeout_secs: u64,
     p3a_sink: Arc<dyn P3aSink>,
 }
 
 fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
-    let pricing = Arc::new(PricingTable::new(models()));
+    let pricing = Arc::new(PricingTable::new(deps.pricing));
     let os_accounts = Arc::new(FakeOsAccounts);
     let cleaner = Arc::new(FakeCleaner);
     let duration_probe = Arc::new(FakeDurationProbe);
-    let chat_completer = Arc::new(FakeChatCompleter);
     let image = Arc::new(ImageService::new(ImageServiceDeps {
         os_accounts: os_accounts.clone(),
         generator: Arc::new(FakeImageGenerator),
@@ -1772,6 +2066,7 @@ fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
 
     ApiState::new(ApiStateParams {
         pricing: pricing.clone(),
+        local_dev_enabled: deps.local_dev_enabled,
         token_verifier: Arc::new(FakeTokenVerifier),
         note_transcribe: Arc::new(NoteTranscribeService::new(NoteTranscribeServiceDeps {
             pricing: pricing.clone(),
@@ -1792,7 +2087,7 @@ fn test_state_from_deps(deps: TestStateDeps) -> ApiState {
         agent_chat: Arc::new(AgentChatService::new(AgentChatServiceDeps {
             pricing: pricing.clone(),
             os_accounts: os_accounts.clone(),
-            chat_completer,
+            chat_completer: deps.chat_completer,
             hold_ttl_seconds: 30,
             flat_estimate_credits: 1_000,
         })),
@@ -2410,6 +2705,22 @@ impl Generator for FakeGenerator {
     }
 }
 
+#[derive(Default)]
+struct RecordingGenerator {
+    requests: Mutex<Vec<GenerationRequest>>,
+}
+
+#[async_trait]
+impl Generator for RecordingGenerator {
+    async fn generate(&self, request: GenerationRequest) -> Result<GeneratedNote, DomainError> {
+        self.requests
+            .lock()
+            .map_err(|_| DomainError::UpstreamProvider)?
+            .push(request.clone());
+        FakeGenerator.generate(request).await
+    }
+}
+
 struct SlowGenerator;
 
 #[async_trait]
@@ -2479,6 +2790,36 @@ impl AgentChatCompleter for FakeChatCompleter {
             chunks: chunks_rx,
             outcome: outcome_rx,
         })
+    }
+}
+
+#[derive(Default)]
+struct RecordingChatCompleter {
+    requests: Mutex<Vec<AgentChatRequest>>,
+}
+
+#[async_trait]
+impl AgentChatCompleter for RecordingChatCompleter {
+    async fn complete(
+        &self,
+        request: AgentChatRequest,
+    ) -> Result<AgentChatCompletion, DomainError> {
+        self.requests
+            .lock()
+            .map_err(|_| DomainError::UpstreamProvider)?
+            .push(request.clone());
+        FakeChatCompleter.complete(request).await
+    }
+
+    async fn complete_stream(
+        &self,
+        request: AgentChatRequest,
+    ) -> Result<AgentChatStream, DomainError> {
+        self.requests
+            .lock()
+            .map_err(|_| DomainError::UpstreamProvider)?
+            .push(request.clone());
+        FakeChatCompleter.complete_stream(request).await
     }
 }
 
