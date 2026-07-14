@@ -343,6 +343,23 @@ async fn share_endpoints_answer_501_until_configured() {
 }
 
 #[tokio::test]
+async fn viewer_shell_fails_closed_when_sharing_disabled() {
+    // A misconfigured deployment (DATABASE_URL set, VIEWER_CLIENT_ID blank)
+    // disables the share service. The browser viewer shell must fail closed to
+    // 501 like the API paths, not render a viewer that bounces recipients to
+    // OS Accounts with an empty `client_id`.
+    let router = june_api::router(state_with_share(None));
+    let request = Request::builder()
+        .method("GET")
+        .uri("/s/shr_anything")
+        .body(Body::empty())
+        .expect("request builds");
+    let (status, body) = call(&router, request).await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body["message"], "sharing_unavailable");
+}
+
+#[tokio::test]
 async fn each_invite_link_resolves_to_its_own_envelope_by_invite_id() {
     // One recipient user holding two verified emails, each with its own invite.
     // The addresses differ, so both invites stay active (per-email uniqueness

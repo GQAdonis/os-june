@@ -75,6 +75,15 @@ fn shell_response(state: &ApiState) -> Response {
 /// `GET /s/{share_id}` and `GET /s/callback` — one static shell for both;
 /// the page script decides which mode it is in from the URL.
 pub(crate) async fn shell(State(state): State<ApiState>) -> Response {
+    // Fail closed when sharing is disabled (e.g. DATABASE_URL set but
+    // VIEWER_CLIENT_ID blank): the API/token paths already return 501, so the
+    // shell must too. Rendering it with an empty client id would hand
+    // recipients a viewer that bounces them to OS Accounts with `client_id=`
+    // instead of surfacing `sharing_unavailable`. This stays non-enumerating:
+    // the response is byte-identical for every share id in this state.
+    if state.share().is_none() {
+        return ApiError::SharingUnavailable.into_response();
+    }
     shell_response(&state)
 }
 
