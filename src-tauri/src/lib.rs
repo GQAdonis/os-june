@@ -2,6 +2,7 @@ pub mod agent_hud;
 pub mod app_paths;
 pub mod audio;
 pub mod commands;
+pub mod connectors;
 pub mod db;
 pub mod dictation;
 pub mod domain;
@@ -265,6 +266,7 @@ pub fn run() {
             providers::provider_model_settings,
             providers::list_venice_models,
             providers::set_venice_model,
+            providers::set_cost_quality,
             providers::set_venice_api_key,
             providers::clear_venice_api_key,
             providers::set_image_safe_mode,
@@ -288,11 +290,26 @@ pub fn run() {
             os_accounts::os_accounts_cancel_login,
             os_accounts::os_accounts_logout,
             os_accounts::os_accounts_upgrade,
+            os_accounts::os_accounts_upgrade_session,
             os_accounts::os_accounts_change_plan,
             os_accounts::os_accounts_open_portal,
             os_accounts::os_accounts_referral_summary,
             extension_host::extension_pairing_status,
             extension_host::register_browser_extension_host,
+            connectors::commands::connectors_list,
+            connectors::commands::connectors_connect,
+            connectors::commands::connectors_cancel_connect,
+            connectors::commands::connectors_disconnect,
+            connectors::commands::routine_trust_get,
+            connectors::commands::routine_trust_set,
+            connectors::commands::routine_trust_record_run,
+            connectors::commands::connector_triggers_list,
+            connectors::commands::connector_trigger_set,
+            connectors::commands::connector_trigger_delete,
+            connectors::approvals::connector_approvals_pending,
+            connectors::approvals::connector_approval_respond,
+            connectors::approvals::connector_approvals_respond_all,
+            hermes_bridge::connectors_apply_runtime,
             updates::get_release_channel,
             updates::set_release_channel,
             updates::fetch_update,
@@ -302,6 +319,7 @@ pub fn run() {
         .manage(hermes_bridge::HermesBridge::default())
         .manage(os_accounts::LoginFlow::default())
         .manage(extension_host::ExtensionHost::default())
+        .manage(connectors::ConnectFlow::default())
         .setup(|app| {
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
@@ -315,6 +333,10 @@ pub fn run() {
             repair_agent_task_statuses_on_app_start(app);
             hermes_bridge::start_on_app_start(app);
             extension_host::setup(app);
+            // Poll Google for the events routines subscribe to (email arrivals,
+            // upcoming meetings) and wake the matching routine. Runs after the
+            // bridge init so cron triggers have a runtime to fire into.
+            connectors::triggers::start(app.handle());
             meeting_hud::setup(app);
             os_accounts::setup_deep_link(app);
             #[cfg(target_os = "macos")]

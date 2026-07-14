@@ -28,6 +28,7 @@ import {
   setDictationMicrophone,
   setDictationShortcut,
   setImageSafeMode,
+  setCostQuality,
   setVeniceApiKey,
   setVeniceModel,
 } from "../../lib/tauri";
@@ -71,8 +72,8 @@ import { getStoredTheme, setStoredTheme, type ThemePreference } from "../../lib/
 import { BRAND_PRESETS, getStoredBrand, setStoredBrand, type BrandId } from "../../lib/brand";
 import {
   FONT_SCALE_PRESETS,
-  getStoredFontScale,
   setStoredFontScale,
+  useFontScaleId,
   type FontScaleId,
 } from "../../lib/font-scale";
 import {
@@ -81,7 +82,7 @@ import {
   setReleaseChannel,
   type ReleaseChannel,
 } from "../../lib/updater";
-import { isMacLikePlatform } from "../../lib/platform";
+import { isMacLikePlatform, isSystemAudioSupportedPlatform } from "../../lib/platform";
 import { systemAudioAvailability } from "../../lib/source-readiness";
 import { parseDictationHelperEvent } from "../../lib/dictation-events";
 import { dispatchProviderModelSettingsChanged } from "../../lib/model-privacy";
@@ -93,14 +94,18 @@ import {
 import { ProviderLogo } from "./ProviderLogo";
 import { modelOptions, selectedModel } from "./ModelPickerDialog";
 import {
+  AUTO_PREFERENCE_VALUES,
+  autoPreferenceFromCostQuality,
   ModelPickerCardContent,
   ModelPickerPopover,
+  type AutoPreference,
   type ModelPickerFlyout,
 } from "./ModelPickerPopover";
 import { DEFAULT_IMAGE_MODEL, IMAGE_MODELS } from "../../lib/image-models";
 import { IMAGE_GENERATION_ENABLED, VIDEO_GENERATION_ENABLED } from "../../lib/feature-flags";
 import { DEFAULT_VIDEO_MODEL, VIDEO_MODELS } from "../../lib/video-models";
 import { AgentSettingsSection } from "./AgentSettingsSection";
+import { ConnectorsSection } from "./ConnectorsSection";
 import { ExternalDirsSection } from "./ExternalDirsSection";
 import { InstalledSkillsSection } from "./InstalledSkillsSection";
 import { SkillDetailSection } from "./SkillDetailSection";
@@ -190,6 +195,15 @@ const RELEASE_CHANNEL_OPTIONS: readonly {
   { value: "rc", label: "Release candidate" },
 ];
 
+const AUTO_PREFERENCE_OPTIONS: readonly {
+  value: AutoPreference;
+  label: ReactNode;
+}[] = [
+  { value: "cost", label: "Lower cost" },
+  { value: "balanced", label: "Balanced" },
+  { value: "quality", label: "Higher quality" },
+];
+
 const EMPTY_MODIFIERS: DictationShortcutModifiers = {
   command: false,
   control: false,
@@ -238,6 +252,8 @@ const DEFAULT_PROVIDER_MODELS: ProviderModelSettingsDto = {
   // Mirrors DEFAULT_GENERATION_MODEL in the Rust providers module and the
   // leading Suggested pick in lib/suggested-models.ts.
   generationModel: "zai-org-glm-5-2",
+  // Mirrors DEFAULT_COST_QUALITY in the Rust providers module.
+  costQuality: 100,
   remoteGenerationModel: "zai-org-glm-5-2",
   // Mirrors DEFAULT_IMAGE_MODEL in the Rust providers module.
   imageModel: DEFAULT_IMAGE_MODEL,
@@ -265,6 +281,7 @@ export type SettingsTab =
   | "audio"
   | "models"
   | "agent"
+  | "connectors"
   | "skills"
   | "external-dirs"
   | "skill-review"
@@ -290,6 +307,7 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "audio", label: "Audio" },
   { id: "models", label: "Models" },
   { id: "agent", label: "Agent" },
+  { id: "connectors", label: "Connectors" },
   { id: "skills", label: "Installed skills" },
   { id: "external-dirs", label: "External skill directories" },
   { id: "skill-review", label: "Pending skill changes" },
@@ -439,7 +457,7 @@ export function AppSettings({
   const [micOpen, setMicOpen] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(() => getStoredTheme());
   const [brand, setBrand] = useState<BrandId>(() => getStoredBrand());
-  const [fontScale, setFontScale] = useState<FontScaleId>(() => getStoredFontScale());
+  const fontScale = useFontScaleId();
   const [dateFormat, setDateFormat] = useState<DateFormatPreference>(() => getStoredDateFormat());
   const [releaseChannel, setReleaseChannelValue] = useState<ReleaseChannel>("stable");
   // Set only when a leave-rc switch turns up an installable stable, so the
@@ -451,6 +469,9 @@ export function AppSettings({
   const modelPickerTriggerRef = useRef<HTMLButtonElement>(null);
   const modelPickerPopoverRef = useRef<HTMLDivElement>(null);
   const modelPickerSearchRef = useRef<HTMLInputElement>(null);
+  const costQualitySaveChainRef = useRef<Promise<void>>(Promise.resolve());
+  const latestCostQualitySaveRef = useRef(0);
+  const confirmedCostQualityRef = useRef(DEFAULT_PROVIDER_MODELS.costQuality);
   const [veniceApiKeyDraft, setVeniceApiKeyDraft] = useState("");
   const [showMoreModelOptions, setShowMoreModelOptions] = useState(false);
   const [showMoreImageOptions, setShowMoreImageOptions] = useState(false);
@@ -467,6 +488,7 @@ export function AppSettings({
   const [micTestStartedAt, setMicTestStartedAt] = useState<number>();
   const [micTestElapsedMs, setMicTestElapsedMs] = useState(0);
   const [micTestSampleSrc, setMicTestSampleSrc] = useState<string>();
+
   const [micTestError, setMicTestError] = useState<string>();
   const [micTestPlaying, setMicTestPlaying] = useState(false);
   const controlled = controlledTab !== undefined && onTabChange !== undefined;
@@ -494,6 +516,7 @@ export function AppSettings({
     ? SETTINGS_TABS.filter((tab) => tab.id !== "billing")
     : SETTINGS_TABS;
   const macLikePlatform = isMacLikePlatform();
+  const systemAudioSupportedPlatform = isSystemAudioSupportedPlatform();
   const setActiveTab = (tab: SettingsTab) => {
     if (controlled) {
       onTabChange?.(tab);
@@ -515,7 +538,7 @@ export function AppSettings({
   // be a dead end. The status label tells the two apart.
   const systemDenied = systemAvailability === "denied";
   const systemLocked = systemDenied || systemAvailability === "unavailable";
-  const systemUnavailable = !macLikePlatform || systemAvailability === "unsupported";
+  const systemUnavailable = !systemAudioSupportedPlatform || systemAvailability === "unsupported";
 
   useEffect(() => {
     capturingShortcutRef.current = capturingShortcut;
@@ -621,10 +644,12 @@ export function AppSettings({
         if (cancelled) return;
         // Merge over defaults so a settings payload that predates a field
         // (e.g. imageModel from an older backend) still has every model set.
-        setProviderSettings({
+        const nextProviderSettings = {
           ...DEFAULT_PROVIDER_MODELS,
           ...modelResponse.settings,
-        });
+        };
+        confirmedCostQualityRef.current = nextProviderSettings.costQuality;
+        setProviderSettings(nextProviderSettings);
         await requestMicrophones();
         await Promise.all([
           requestVeniceModels("transcription"),
@@ -955,20 +980,65 @@ export function AppSettings({
     }
   }
 
+  function saveCostQuality(value: number) {
+    const version = ++latestCostQualitySaveRef.current;
+    const save = costQualitySaveChainRef.current.then(() => setCostQuality(value));
+    costQualitySaveChainRef.current = save.then(
+      () => undefined,
+      () => undefined,
+    );
+    void save.then(
+      (next) => {
+        confirmedCostQualityRef.current = next.costQuality;
+        if (version !== latestCostQualitySaveRef.current) return;
+        setProviderSettings((current) => ({
+          ...current,
+          costQuality: next.costQuality,
+        }));
+        setStatus("Automatic model preference updated.");
+      },
+      (error) => {
+        if (version !== latestCostQualitySaveRef.current) return;
+        setProviderSettings((current) => ({
+          ...current,
+          costQuality: confirmedCostQualityRef.current,
+        }));
+        setStatus(messageFromError(error));
+      },
+    );
+  }
+
   function closeModelPicker() {
     setPickerMode(undefined);
     setModelPickerFlyout(null);
     setModelSearch("");
   }
 
-  function selectModelFromPicker(mode: ProviderModelMode, modelId: string) {
+  // Optimistic apply + persisted save, shared by the Models row's segmented
+  // control and the model picker popover's Auto section.
+  function applyCostQuality(costQuality: number) {
+    setProviderSettings((current) => ({ ...current, costQuality }));
+    saveCostQuality(costQuality);
+  }
+
+  function selectModelFromPicker(
+    mode: ProviderModelMode,
+    modelId: string,
+    costQuality?: number,
+    options?: { keepOpen?: boolean },
+  ) {
     const picked = modelOptionsForMode(mode).find((model) => model.id === modelId);
+    if (mode === "generation" && costQuality !== undefined) {
+      applyCostQuality(costQuality);
+    }
     if (mode === "generation" && picked?.provider === "local") {
       enableLocalGenerationFromPicker();
     } else {
       void selectVeniceModel(mode, modelId);
     }
-    closeModelPicker();
+    // The Auto toggle switches models mid-flow, so it asks to keep the picker
+    // open; a row pick is a final choice and closes it.
+    if (!options?.keepOpen) closeModelPicker();
   }
 
   // True when the draft matches what's persisted, so enabling can skip a
@@ -1449,10 +1519,7 @@ export function AppSettings({
                       aria-label="Text size"
                       value={fontScale}
                       options={FONT_SCALE_OPTIONS}
-                      onValueChange={(next) => {
-                        setFontScale(next);
-                        setStoredFontScale(next);
-                      }}
+                      onValueChange={setStoredFontScale}
                     />
                   </div>
                 </div>
@@ -1665,7 +1732,7 @@ export function AppSettings({
             <SettingsPageHeader
               id="audio-heading"
               title="Audio"
-              blurb="Control how June captures meeting and system audio on this Mac."
+              blurb="Control how June captures meeting and system audio."
             />
             <div className="settings-card">
               <div className="settings-rows">
@@ -1822,6 +1889,7 @@ export function AppSettings({
                     description="Used for generated notes and agent responses."
                     value={modelValueForMode("generation")}
                     options={generationOptions}
+                    costQuality={providerSettings.costQuality}
                     open={pickerMode === "generation"}
                     summarySuppressed={pickerMode !== undefined}
                     flyout={modelPickerFlyout}
@@ -1836,8 +1904,37 @@ export function AppSettings({
                     }
                     onFlyoutChange={setModelPickerFlyout}
                     onSearchChange={setModelSearch}
-                    onSelect={(modelId) => selectModelFromPicker("generation", modelId)}
+                    onSelect={(modelId, costQuality, options) =>
+                      selectModelFromPicker("generation", modelId, costQuality, options)
+                    }
+                    onCostQualityChange={applyCostQuality}
                   />
+                  {providerSettings.generationModel === "open-software/auto" ? (
+                    <div className="settings-row">
+                      <div className="settings-row-info">
+                        <span className="settings-row-title">Auto preference</span>
+                        <span className="settings-row-description">
+                          Choose how June balances model quality and usage cost.
+                        </span>
+                        {providerSettings.veniceApiKeyConfigured ? (
+                          <span className="settings-row-description settings-row-substatus">
+                            Auto does not use your Venice API key for notes or chat. Choose a Venice
+                            model above to use your key for notes and new chats.
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="settings-row-control">
+                        <SegmentedControl<AutoPreference>
+                          aria-label="Auto preference"
+                          value={autoPreferenceFromCostQuality(providerSettings.costQuality)}
+                          options={AUTO_PREFERENCE_OPTIONS}
+                          onValueChange={(preference) =>
+                            applyCostQuality(AUTO_PREFERENCE_VALUES[preference])
+                          }
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                   <div className="settings-row-divider" aria-hidden />
                   <button
                     type="button"
@@ -2126,6 +2223,8 @@ export function AppSettings({
           />
         ) : null}
 
+        {activeTab === "connectors" ? <ConnectorsSection /> : null}
+
         {activeTab === "skills" ? <InstalledSkillsSection onOpenSkill={setOpenSkill} /> : null}
         {activeTab === "external-dirs" ? <ExternalDirsSection /> : null}
         {activeTab === "skill-review" ? <SkillReviewSection /> : null}
@@ -2360,15 +2459,18 @@ function PermissionsSettingsSection({
   onEnableSystemAudio: () => void;
 }) {
   const macLikePlatform = isMacLikePlatform();
+  const systemAudioSupportedPlatform = isSystemAudioSupportedPlatform();
   return (
     <section className="settings-group" aria-labelledby="permissions-heading">
       <h2 id="permissions-heading" className="settings-group-heading">
-        System permissions
+        {macLikePlatform ? "System permissions" : "Audio access"}
       </h2>
       <p className="settings-group-description">
         {macLikePlatform
           ? "macOS access used for recording audio, pasting dictation, and capturing system sound."
-          : "Access used for recording audio."}
+          : systemAudioSupportedPlatform
+            ? "Audio sources available for recording microphone and app audio."
+            : "Audio sources available for recording microphone audio."}
       </p>
       <div className="settings-card">
         <div className="settings-rows">
@@ -2390,13 +2492,24 @@ function PermissionsSettingsSection({
                 onManage={onEnableAccessibility}
               />
 
-              <PermissionRow
-                title="System audio"
-                description="Record audio from other apps when system audio is enabled."
-                status={sourcePermissionStatus(systemReadiness)}
-                onManage={onEnableSystemAudio}
-              />
+              {systemAudioSupportedPlatform ? (
+                <PermissionRow
+                  title="System audio"
+                  description="Record audio from other apps when system audio is enabled."
+                  status={sourcePermissionStatus(systemReadiness, macLikePlatform)}
+                  onManage={onEnableSystemAudio}
+                />
+              ) : null}
             </>
+          ) : systemAudioSupportedPlatform ? (
+            <PermissionRow
+              title="System audio"
+              description="Record audio from other apps when system audio is enabled."
+              status={sourcePermissionStatus(systemReadiness, macLikePlatform)}
+              onManage={onEnableSystemAudio}
+              actionLabel="Open sound settings"
+              actionText="Open"
+            />
           ) : null}
         </div>
       </div>
@@ -2409,11 +2522,15 @@ function PermissionRow({
   description,
   status,
   onManage,
+  actionLabel,
+  actionText = "Manage",
 }: {
   title: string;
   description: string;
   status: PermissionStatusView;
   onManage?: () => void;
+  actionLabel?: string;
+  actionText?: string;
 }) {
   const actionDisabled = status.tone === "unsupported" || !onManage;
   return (
@@ -2436,10 +2553,10 @@ function PermissionRow({
           type="button"
           className="btn btn-secondary"
           disabled={actionDisabled}
-          aria-label={`Manage ${title} permission`}
+          aria-label={actionLabel ?? `Manage ${title} permission`}
           onClick={onManage}
         >
-          Manage
+          {actionText}
         </button>
       </div>
     </div>
@@ -2475,16 +2592,17 @@ function permissionStatus(state?: string): PermissionStatusView {
 }
 
 function sourcePermissionStatus(
-  source?: RecordingSourceReadinessDto["sources"][number],
+  source: RecordingSourceReadinessDto["sources"][number] | undefined,
+  macLikePlatform: boolean,
 ): PermissionStatusView {
   if (!source) return { label: "Checking", tone: "unknown" };
-  // The two halves are independent: permissionState is the grant, `ready` is
-  // whether this Mac can actually capture. A microphone-only check never asks
-  // for the grant, and a granted source can still be uncapturable (the helper
-  // reports `system_audio_capture_unavailable`, recoverable by restarting).
+  // The two halves are independent: permissionState is the platform grant or
+  // endpoint status, while `ready` says whether this device can actually
+  // capture. A microphone-only check never asks for the grant/status, and a
+  // granted source can still be uncapturable.
   if (source.permissionState === "granted") {
     return source.ready
-      ? { label: "Allowed", tone: "allowed" }
+      ? { label: macLikePlatform ? "Allowed" : "Available", tone: "allowed" }
       : { label: "Unavailable", tone: "attention" };
   }
   return permissionStatus(source.permissionState);
@@ -2511,6 +2629,7 @@ function ModelRow({
   description,
   value,
   options,
+  costQuality,
   open,
   flyout,
   search,
@@ -2521,6 +2640,7 @@ function ModelRow({
   onFlyoutChange,
   onSearchChange,
   onSelect,
+  onCostQualityChange,
   summarySuppressed,
 }: {
   mode: ProviderModelMode;
@@ -2528,6 +2648,7 @@ function ModelRow({
   description: string;
   value: string;
   options: VeniceModelDto[];
+  costQuality?: number;
   open: boolean;
   flyout: ModelPickerFlyout;
   search: string;
@@ -2537,7 +2658,8 @@ function ModelRow({
   onToggle: () => void;
   onFlyoutChange: (flyout: ModelPickerFlyout) => void;
   onSearchChange: (value: string) => void;
-  onSelect: (modelId: string) => void;
+  onSelect: (modelId: string, costQuality?: number, options?: { keepOpen?: boolean }) => void;
+  onCostQualityChange?: (value: number) => void;
   summarySuppressed?: boolean;
 }) {
   const model = selectedModel(options, value);
@@ -2579,6 +2701,7 @@ function ModelRow({
             flyout={flyout}
             model={model}
             options={options}
+            costQuality={costQuality}
             search={search}
             popoverRef={popoverRef}
             searchRef={searchRef}
@@ -2588,6 +2711,7 @@ function ModelRow({
             onFlyoutChange={onFlyoutChange}
             onSearchChange={onSearchChange}
             onSelect={onSelect}
+            onCostQualityChange={onCostQualityChange}
           />
         ) : null}
       </div>
@@ -2627,7 +2751,7 @@ function VeniceApiKeyRow({
         <h3 className="settings-row-title">Venice API key</h3>
         <p className="settings-row-description">
           Use your own key for Venice models so June credits are not used. Stored locally and sent
-          only for Venice requests.
+          only for Venice requests. For least privilege, use an inference-only key.
         </p>
         {configured ? (
           <p className="settings-row-description settings-row-substatus">Key saved.</p>
