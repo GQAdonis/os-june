@@ -380,12 +380,20 @@ pub async fn memory_settings(app: AppHandle) -> Result<MemorySettingsDto, AppErr
 #[tauri::command]
 pub async fn set_memory_enabled(
     app: AppHandle,
+    bridge: tauri::State<'_, crate::hermes_bridge::HermesBridge>,
     enabled: bool,
 ) -> Result<MemorySettingsDto, AppError> {
-    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
-    let settings = MemorySettingsDto { enabled };
-    let path = memory_settings_path(&app)?;
-    persist_memory_settings(&path, &settings)?;
+    let settings = {
+        let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+        let settings = MemorySettingsDto { enabled };
+        let path = memory_settings_path(&app)?;
+        persist_memory_settings(&path, &settings)?;
+        settings
+    };
+    // SOUL.md memory guidance is assembled at spawn; restart the runtime
+    // modes (the set_june_character pattern) so the running agent's guidance
+    // never disagrees with the tools' actual enabled state.
+    crate::hermes_bridge::restart_hermes_for_soul_change(&bridge)?;
     Ok(settings)
 }
 
