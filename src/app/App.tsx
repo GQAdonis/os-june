@@ -3803,6 +3803,18 @@ export function App() {
                   topUpLabel={topUpLabel}
                   onTopUp={handleTopUp}
                   sessionInProject={Boolean(activeAgentSessionFolder)}
+                  resolveSessionProjectContext={(sessionId) => {
+                    const folder = state.folders.find(
+                      (candidate) => candidate.id === sessionFolders[sessionId]?.[0],
+                    );
+                    return folder
+                      ? {
+                          id: folder.id,
+                          name: folder.name,
+                          instructions: folder.instructions,
+                        }
+                      : undefined;
+                  }}
                   projectContext={
                     agentProjectContextFolder
                       ? {
