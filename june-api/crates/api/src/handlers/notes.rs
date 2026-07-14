@@ -35,12 +35,12 @@ pub(crate) async fn transcribe(
     let mut form = MultipartFields::collect(multipart, limits.max_audio_bytes).await?;
     let audio = form.required_audio()?;
     validate_audio(&audio)?;
-    let model_id = form.required_text("model")?;
-    validation::validate_text_len("model", &model_id, validation::MAX_MODEL_CHARS)?;
-    require_priced_model(&state, &model_id, ModelKind::Asr)?;
+    let requested_model_id = form.required_text("model")?;
+    validation::validate_text_len("model", &requested_model_id, validation::MAX_MODEL_CHARS)?;
+    let model_id = resolve_priced_asr_model(&state, &requested_model_id)?;
     let provider_credentials = credentials_for_resolved_model(
         provider_credentials,
-        &model_id,
+        &requested_model_id,
         &model_id,
         state.pricing().is_venice_model(&model_id),
     )?;
@@ -349,14 +349,6 @@ pub(crate) fn required(value: Option<String>, message: &str) -> Result<String, A
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::bad_request(message))
-}
-
-pub(crate) fn require_priced_model(
-    state: &ApiState,
-    model_id: &str,
-    kind: ModelKind,
-) -> Result<(), ApiError> {
-    require_priced_model_kind(state.pricing(), model_id, kind)
 }
 
 const AUTO_TEXT_MODEL: &str = "open-software/auto";
