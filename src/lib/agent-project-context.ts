@@ -10,8 +10,40 @@ export type PreparedProjectPrompt = {
   contextSignature: string | null;
 };
 
+const CONTEXT_OPEN_MARKER = "[June project context]";
+const CONTEXT_CLOSE_MARKER = "[/June project context]";
+
+// The block is injected into user-role prompt text (Hermes has no separate
+// structured-context channel on prompt.submit), so the markers are forgeable
+// by construction. Two mitigations keep display honest: marker lines are
+// stripped out of the injected payload so instructions can never terminate
+// the envelope early, and stripping only removes a leading block that
+// byte-exactly matches the generated shape.
+function sanitizeContextPayload(value: string): string {
+  return value
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trim();
+      return trimmed !== CONTEXT_OPEN_MARKER && trimmed !== CONTEXT_CLOSE_MARKER;
+    })
+    .join("\n");
+}
+
 function projectContextSignature(project: AgentProjectContext): string {
   return JSON.stringify([project.id, project.name, project.instructions ?? ""]);
+}
+
+function renderProjectContext(project: AgentProjectContext): string {
+  const instructions = sanitizeContextPayload(project.instructions?.trim() ?? "") || "(none)";
+  const name = sanitizeContextPayload(project.name).replace(/\n/g, " ");
+  return [
+    CONTEXT_OPEN_MARKER,
+    `project_id: ${project.id}`,
+    `project: ${name}`,
+    "instructions:",
+    instructions,
+    CONTEXT_CLOSE_MARKER,
+  ].join("\n");
 }
 
 export function prepareProjectPrompt(
@@ -28,25 +60,23 @@ export function prepareProjectPrompt(
     return { text: prompt, injected: false, contextSignature };
   }
 
-  const instructions = project.instructions?.trim() || "(none)";
-  const context = [
-    "[June project context]",
-    `project_id: ${project.id}`,
-    `project: ${project.name}`,
-    "instructions:",
-    instructions,
-    "[/June project context]",
-  ].join("\n");
   return {
-    text: `${context}\n\n${prompt}`,
+    text: `${renderProjectContext(project)}\n\n${prompt}`,
     injected: true,
     contextSignature,
   };
 }
 
+// Matches only a block with the exact generated shape: the five fixed lines
+// with a single-line project_id and project name, a non-greedy instructions
+// body, and the closing marker followed by the blank separator. A user
+// message that merely starts with the open marker does not match and stays
+// visible. A hand-typed byte-exact well-formed block is hidden from display;
+// the model saw it either way.
+const GENERATED_CONTEXT_BLOCK =
+  /^\[June project context\]\nproject_id: [^\n]*\nproject: [^\n]*\ninstructions:\n[\s\S]*?\n\[\/June project context\]\n\n/;
+
 export function stripProjectContext(prompt: string): string {
-  if (!prompt.startsWith("[June project context]\n")) return prompt;
-  const endMarker = "\n[/June project context]\n\n";
-  const end = prompt.indexOf(endMarker);
-  return end < 0 ? prompt : prompt.slice(end + endMarker.length);
+  const match = GENERATED_CONTEXT_BLOCK.exec(prompt);
+  return match ? prompt.slice(match[0].length) : prompt;
 }

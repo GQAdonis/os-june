@@ -1780,6 +1780,11 @@ type AgentWorkspaceProps = {
   sessionInProject?: boolean;
   /** Current project metadata for hidden prompt context injection. */
   projectContext?: AgentProjectContext;
+  /** Resolves the project a specific stored session is filed in. Background
+   * deliveries (queued steers/attachments) target sessions other than the
+   * active one; injecting the ambient `projectContext` there would leak the
+   * open project's instructions into another session's run. */
+  resolveSessionProjectContext?: (storedSessionId: string) => AgentProjectContext | undefined;
   /** Opens the change-project dialog (which also owns removal) for the given
    * stored session id. */
   onMoveSessionToProject?: (sessionId: string) => void;
@@ -2325,6 +2330,7 @@ export function AgentWorkspace({
   topUpLabel = "Upgrade",
   sessionInProject = false,
   projectContext,
+  resolveSessionProjectContext,
   onMoveSessionToProject,
   creditActionsDisabledReason,
   fundingNotice,
@@ -6802,7 +6808,12 @@ export function AgentWorkspace({
       throw new Error(creditActionsDisabledReason);
     }
     const displayContent = options?.displayContent ?? content;
-    const submittedProjectContext = projectContext;
+    // Explicit-target submissions (background steer/attachment delivery, CLI
+    // notices) must use the TARGET session's project, never the ambient one —
+    // the user may have a different project session open by then. The ambient
+    // context still covers the new-session flow, where the filing is applied
+    // only after Hermes returns the session id.
+    const submittedProjectContext = explicitSession ? undefined : projectContext;
     const titleContent = options?.titleContent ?? displayContent;
     let attachmentOnlyTitle: string | undefined;
     if (!titleContent.trim() && options?.attachments?.length) {
@@ -7247,9 +7258,12 @@ export function AgentWorkspace({
         storedSessionId,
       });
       try {
+        const targetProjectContext = explicitSession
+          ? resolveSessionProjectContext?.(storedSessionId)
+          : submittedProjectContext;
         const preparedProjectPrompt = prepareProjectPrompt(
           promptSubmitContent,
-          submittedProjectContext,
+          targetProjectContext,
           projectContextSignaturesBySessionId.get(storedSessionId),
         );
         // Feature 15: record the outbound prompt.submit in the trace buffer. Its
@@ -7410,7 +7424,12 @@ export function AgentWorkspace({
       const raw = await createHermesMethods(gateway).compressSession({
         sessionId,
       });
-      return parseCompressSessionResult(sessionId, raw);
+      const result = parseCompressSessionResult(sessionId, raw);
+      // Compaction replaces the working context with a summary that may not
+      // preserve the injected project block; forget the signature so the next
+      // prompt reinjects it.
+      projectContextSignaturesBySessionId.delete(sessionId);
+      return result;
     },
     // Same stable-closure rationale as fetchSessionUsage above.
     // eslint-disable-next-line react-hooks/exhaustive-deps
