@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only MCP server exposing June notes and dictation context.
+"""MCP server exposing June notes, dictation context, and the June memory store.
 
 The June app writes this script into the managed Hermes home and registers it
-as the built-in `june_context` MCP server. It intentionally depends only on the
-Python standard library so it can run inside the Hermes runtime venv without
-extra packaging.
+as the built-in `june_context` MCP server. Notes and dictation stay read-only;
+writes are limited to the June memory store. The server intentionally depends
+only on the Python standard library so it can run inside the Hermes runtime
+venv without extra packaging.
 """
 
 from __future__ import annotations
@@ -12,17 +13,20 @@ from __future__ import annotations
 import json
 import sqlite3
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 
 PROTOCOL_VERSION = "2025-03-26"
-SERVER_INFO = {"name": "june-context", "version": "0.2.0"}
+SERVER_INFO = {"name": "june-context", "version": "0.3.0"}
 MAX_LIMIT = 20
 DEFAULT_LIMIT = 8
 SNIPPET_CHARS = 900
 FULL_TEXT_CHARS = 60_000
+MEMORY_CONTENT_MAX_CHARS = 4_000
+SQLITE_BUSY_TIMEOUT_MS = 5_000
 # Keep this in sync with DICTATION_HISTORY_RETENTION_DAYS in db/repositories.rs.
 DICTATION_HISTORY_RETENTION_DAYS = 7
 
@@ -204,19 +208,65 @@ TOOLS: list[dict[str, Any]] = [
             "required": ["note_id"],
         },
     },
+    {
+        "name": "save_memory",
+        "description": (
+            "Save a durable fact, preference, or decision in June's memory "
+            "store. Pass the project id from the June project context when "
+            "the memory belongs to that project; otherwise omit it."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string", "maxLength": MEMORY_CONTENT_MAX_CHARS},
+                "project_id": {"type": "string"},
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "list_memories",
+        "description": (
+            "Recall durable facts, preferences, and decisions from June's "
+            "memory store. Pass the current project id to include that "
+            "project's memories; global memories are included by default."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string"},
+                "include_global": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
+        "name": "forget_memory",
+        "description": (
+            "Permanently forget one memory by id. Use this when the user asks "
+            "June to forget something previously saved."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+        },
+    },
 ]
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        raise SystemExit("Usage: june_context_mcp.py <notes.sqlite3>")
+    if len(sys.argv) < 3:
+        raise SystemExit(
+            "Usage: june_context_mcp.py <notes.sqlite3> <memory-settings.json>"
+        )
 
     db_path = Path(sys.argv[1]).expanduser()
+    settings_path = Path(sys.argv[2]).expanduser()
     while True:
         message = read_message()
         if message is None:
             return
-        response = handle_message(db_path, message)
+        response = handle_message(db_path, settings_path, message)
         if response is not None:
             write_message(response)
 
@@ -257,7 +307,9 @@ def write_message(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
-def handle_message(db_path: Path, message: dict[str, Any]) -> dict[str, Any] | None:
+def handle_message(
+    db_path: Path, settings_path: Path, message: dict[str, Any]
+) -> dict[str, Any] | None:
     method = message.get("method")
     request_id = message.get("id")
 
@@ -277,14 +329,19 @@ def handle_message(db_path: Path, message: dict[str, Any]) -> dict[str, Any] | N
     if method == "tools/list":
         return response(request_id, {"tools": TOOLS})
     if method == "tools/call":
-        return call_tool(db_path, request_id, message.get("params") or {})
+        return call_tool(db_path, settings_path, request_id, message.get("params") or {})
 
     if request_id is None:
         return None
     return error_response(request_id, -32601, f"Unknown method: {method}")
 
 
-def call_tool(db_path: Path, request_id: Any, params: dict[str, Any]) -> dict[str, Any]:
+def call_tool(
+    db_path: Path,
+    settings_path: Path,
+    request_id: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
     name = params.get("name")
     arguments = params.get("arguments") or {}
     try:
@@ -294,6 +351,12 @@ def call_tool(db_path: Path, request_id: Any, params: dict[str, Any]) -> dict[st
             result = search_dictation_history(db_path, arguments)
         elif name == "get_meeting_note":
             result = get_meeting_note(db_path, arguments)
+        elif name == "save_memory":
+            result = save_memory(db_path, settings_path, arguments)
+        elif name == "list_memories":
+            result = list_memories(db_path, settings_path, arguments)
+        elif name == "forget_memory":
+            result = forget_memory(db_path, settings_path, arguments)
         else:
             return error_response(request_id, -32602, f"Unknown tool: {name}")
     except Exception as exc:
@@ -518,6 +581,214 @@ def search_dictation_history(db_path: Path, arguments: dict[str, Any]) -> dict[s
     return {"query": query, "count": len(items), "items": items}
 
 
+def save_memory(
+    db_path: Path, settings_path: Path, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    disabled = memory_disabled_result(settings_path)
+    if disabled:
+        return disabled
+
+    content = arguments.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return memory_error("memory_content_required", "Memory content is required.")
+    content = content.strip()
+    if len(content) > MEMORY_CONTENT_MAX_CHARS:
+        return memory_error(
+            "memory_content_too_long",
+            f"Memory content cannot exceed {MEMORY_CONTENT_MAX_CHARS} characters.",
+        )
+    project_id, project_error = memory_project_id(arguments)
+    if project_error:
+        return project_error
+    if not db_path.exists():
+        return memory_error(
+            "memory_store_unavailable", "June's memory store does not exist yet."
+        )
+
+    memory_id = str(uuid.uuid4())
+    now = timestamp()
+    with connect_database(db_path) as conn:
+        if project_id is None:
+            cursor = conn.execute(
+                """INSERT INTO memories
+                   (id, folder_id, content, source, created_at, updated_at)
+                   VALUES (?, NULL, ?, 'agent', ?, ?)""",
+                [memory_id, content, now, now],
+            )
+        else:
+            cursor = conn.execute(
+                """INSERT INTO memories
+                   (id, folder_id, content, source, created_at, updated_at)
+                   SELECT ?, ?, ?, 'agent', ?, ?
+                   WHERE EXISTS (
+                     SELECT 1 FROM folders
+                     WHERE id = ? AND deleted_at IS NULL AND memory_disabled = 0
+                   )""",
+                [memory_id, project_id, content, now, now, project_id],
+            )
+        if cursor.rowcount == 0:
+            return memory_scope_error(conn, project_id) or memory_error(
+                "memory_save_failed", "Memory could not be saved."
+            )
+
+    return {
+        "saved": True,
+        "memory": memory_item(memory_id, project_id, content, now),
+    }
+
+
+def list_memories(
+    db_path: Path, settings_path: Path, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    disabled = memory_disabled_result(settings_path)
+    if disabled:
+        return disabled
+
+    project_id, project_error = memory_project_id(arguments)
+    if project_error:
+        return project_error
+    include_global = arguments.get("include_global", True)
+    if not isinstance(include_global, bool):
+        return memory_error(
+            "memory_include_global_invalid", "include_global must be a boolean."
+        )
+    if not db_path.exists():
+        return {"count": 0, "items": []}
+
+    with connect_database(db_path, readonly=True) as conn:
+        conn.execute("BEGIN")
+        if project_id is not None:
+            scope_error = memory_scope_error(conn, project_id)
+            if scope_error:
+                conn.rollback()
+                return scope_error
+        if project_id is None:
+            rows = conn.execute(
+                """SELECT id, folder_id, content, created_at
+                   FROM memories
+                   WHERE folder_id IS NULL
+                   ORDER BY created_at DESC, rowid DESC"""
+            ).fetchall()
+        elif include_global:
+            rows = conn.execute(
+                """SELECT id, folder_id, content, created_at
+                   FROM memories
+                   WHERE folder_id = ? OR folder_id IS NULL
+                   ORDER BY created_at DESC, rowid DESC""",
+                [project_id],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, folder_id, content, created_at
+                   FROM memories
+                   WHERE folder_id = ?
+                   ORDER BY created_at DESC, rowid DESC""",
+                [project_id],
+            ).fetchall()
+        conn.commit()
+
+    items = [
+        memory_item(row["id"], row["folder_id"], row["content"], row["created_at"])
+        for row in rows
+    ]
+    return {"count": len(items), "items": items}
+
+
+def forget_memory(
+    db_path: Path, settings_path: Path, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    disabled = memory_disabled_result(settings_path)
+    if disabled:
+        return disabled
+
+    memory_id = arguments.get("id")
+    if not isinstance(memory_id, str) or not memory_id.strip():
+        return memory_error("memory_id_required", "Memory id is required.")
+    memory_id = memory_id.strip()
+    if not db_path.exists():
+        return memory_error("memory_not_found", "Memory was not found.")
+
+    with connect_database(db_path) as conn:
+        cursor = conn.execute("DELETE FROM memories WHERE id = ?", [memory_id])
+        if cursor.rowcount == 0:
+            return memory_error("memory_not_found", "Memory was not found.")
+        conn.execute(
+            "INSERT INTO memory_tombstones (id, deleted_at) VALUES (?, ?)",
+            [memory_id, timestamp()],
+        )
+    return {"forgotten": True, "id": memory_id}
+
+
+def memory_project_id(
+    arguments: dict[str, Any],
+) -> tuple[str | None, dict[str, Any] | None]:
+    project_id = arguments.get("project_id")
+    if project_id is None:
+        return None, None
+    if not isinstance(project_id, str) or not project_id.strip():
+        return None, memory_error(
+            "folder_not_found", "Project was not found or has already been deleted."
+        )
+    return project_id.strip(), None
+
+
+def memory_scope_error(
+    conn: sqlite3.Connection, project_id: str | None
+) -> dict[str, Any] | None:
+    if project_id is None:
+        return None
+    row = conn.execute(
+        "SELECT memory_disabled FROM folders WHERE id = ? AND deleted_at IS NULL",
+        [project_id],
+    ).fetchone()
+    if row is None:
+        return memory_error(
+            "folder_not_found", "Project was not found or has already been deleted."
+        )
+    if row["memory_disabled"]:
+        return memory_error("memory_disabled", "Memory is disabled for this scope.")
+    return None
+
+
+def memory_disabled_result(settings_path: Path) -> dict[str, Any] | None:
+    if memory_enabled(settings_path):
+        return None
+    return memory_error("memory_disabled", "Memory is disabled for this scope.")
+
+
+def memory_enabled(settings_path: Path) -> bool:
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    if not isinstance(settings, dict):
+        return False
+    enabled = settings.get("enabled", True)
+    return enabled if isinstance(enabled, bool) else False
+
+
+def memory_error(code: str, message: str) -> dict[str, Any]:
+    return {"error": code, "message": message}
+
+
+def memory_item(
+    memory_id: str, project_id: str | None, content: str, created_at: str
+) -> dict[str, Any]:
+    return {
+        "id": memory_id,
+        "content": content,
+        "created_at": created_at,
+        "scope": "project" if project_id is not None else "global",
+    }
+
+
+def timestamp() -> str:
+    now = datetime.now(timezone.utc)
+    return f"{now.strftime('%Y-%m-%dT%H:%M:%S')}.{now.microsecond // 1000:03d}Z"
+
+
 def dictation_history_cutoff_timestamp() -> str:
     """Return the retention cutoff as an RFC3339 string.
 
@@ -531,9 +802,15 @@ def dictation_history_cutoff_timestamp() -> str:
 
 
 def connect_readonly(db_path: Path) -> sqlite3.Connection:
-    uri = f"{db_path.resolve().as_uri()}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
+    return connect_database(db_path, readonly=True)
+
+
+def connect_database(db_path: Path, readonly: bool = False) -> sqlite3.Connection:
+    mode = "ro" if readonly else "rw"
+    uri = f"{db_path.resolve().as_uri()}?mode={mode}"
+    conn = sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {SQLITE_BUSY_TIMEOUT_MS}")
     return conn
 
 

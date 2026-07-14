@@ -359,6 +359,11 @@ import {
 } from "../../lib/agent-chat-runtime";
 import { toolActivitySentence } from "../../lib/agent-tool-labels";
 import {
+  prepareProjectPrompt,
+  stripProjectContext,
+  type AgentProjectContext,
+} from "../../lib/agent-project-context";
+import {
   buildAgentChatGallery,
   buildAgentErrorGallery,
   type AgentChatGallerySection,
@@ -371,6 +376,7 @@ const AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
 const AGENT_WORKSPACE_MAX_SESSION_RETRY_DELAY_MS =
   AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS[AGENT_WORKSPACE_SESSION_RETRY_DELAYS_MS.length - 1] ??
   2000;
+const projectContextSignaturesBySessionId = new Map<string, string | null>();
 const QUEUED_STEER_RETRY_DELAY_MS = 300;
 const RESTORED_QUEUED_STEER_RECONCILE_DELAY_MS = 1000;
 const RESTORED_QUEUED_STEER_BUSY_RECONCILE_DELAY_MS = 3000;
@@ -1772,6 +1778,8 @@ type AgentWorkspaceProps = {
   /** Whether the active session is filed in a project — drives the session
    * bar menu's project item label (App owns the folder state). */
   sessionInProject?: boolean;
+  /** Current project metadata for hidden prompt context injection. */
+  projectContext?: AgentProjectContext;
   /** Opens the change-project dialog (which also owns removal) for the given
    * stored session id. */
   onMoveSessionToProject?: (sessionId: string) => void;
@@ -2316,6 +2324,7 @@ export function AgentWorkspace({
   onTopUp,
   topUpLabel = "Upgrade",
   sessionInProject = false,
+  projectContext,
   onMoveSessionToProject,
   creditActionsDisabledReason,
   fundingNotice,
@@ -6793,6 +6802,7 @@ export function AgentWorkspace({
       throw new Error(creditActionsDisabledReason);
     }
     const displayContent = options?.displayContent ?? content;
+    const submittedProjectContext = projectContext;
     const titleContent = options?.titleContent ?? displayContent;
     let attachmentOnlyTitle: string | undefined;
     if (!titleContent.trim() && options?.attachments?.length) {
@@ -7237,6 +7247,11 @@ export function AgentWorkspace({
         storedSessionId,
       });
       try {
+        const preparedProjectPrompt = prepareProjectPrompt(
+          promptSubmitContent,
+          submittedProjectContext,
+          projectContextSignaturesBySessionId.get(storedSessionId),
+        );
         // Feature 15: record the outbound prompt.submit in the trace buffer. Its
         // params are sanitized before storage (the text is the user's own prompt,
         // kept; any secret-like value would be masked). This is the primary
@@ -7245,12 +7260,16 @@ export function AgentWorkspace({
         hermesTraceBuffer.recordOutbound({
           sessionId: storedSessionId,
           method: "prompt.submit",
-          params: { session_id: runtimeSessionId, text: promptSubmitContent },
+          params: { session_id: runtimeSessionId, text: preparedProjectPrompt.text },
         });
         await gateway.request("prompt.submit", {
           session_id: runtimeSessionId,
-          text: promptSubmitContent,
+          text: preparedProjectPrompt.text,
         });
+        projectContextSignaturesBySessionId.set(
+          storedSessionId,
+          preparedProjectPrompt.contextSignature,
+        );
         // JUN-171 (Phase A): the held fast-path images have now ridden along
         // with a successful follow-up prompt, either as structured image bytes or
         // in the non-vision path fallback. Clear only after prompt.submit accepts
@@ -16106,7 +16125,8 @@ function sameVisibleMessageText(left: string, right: string) {
 }
 
 function stripHermesVisibleContext(value: string) {
-  const withoutWarnings = value.replace(/\n*--- Context Warnings ---[\s\S]*$/m, "");
+  const withoutProjectContext = stripProjectContext(value);
+  const withoutWarnings = withoutProjectContext.replace(/\n*--- Context Warnings ---[\s\S]*$/m, "");
   const marker = withoutWarnings.search(/\n*--- Attached Context ---/m);
   const visible = marker >= 0 ? withoutWarnings.slice(0, marker) : withoutWarnings;
   // Drop the scheduled-run delivery preamble so a routine's title and dedup
