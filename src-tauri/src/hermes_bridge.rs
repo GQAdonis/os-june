@@ -1,4 +1,4 @@
-use crate::domain::types::AppError;
+use crate::domain::types::{AppError, MemorySettingsDto};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -214,6 +214,12 @@ const JUNE_CHARACTER_MAX_CHARS: usize = 4000;
 const JUNE_SOUL_CONTEXT_MD: &str = r#"
 June context tools: you have access to a local `june_context` MCP toolset for searching the user's June meeting notes, saved note transcripts, and dictation history. Use it when the user asks about prior meetings, calls, recordings, notes, decisions, follow-ups, or dictated text. Query it on demand instead of assuming you already know those entries, and summarize only what the retrieved results support.
 Messages may reference a specific note as `@note:<id>`, usually followed by the note title in quotes. When you see such a reference, call the `june_context` tool `get_meeting_note` with that id to load the note before answering, and rely on what it returns. Ask for the transcript with `include_transcript` only when the note content is not enough. If the tool reports the note was not found, say so instead of guessing.
+"#;
+
+/// Appended only while the June memory store is globally enabled. Scope is
+/// supplied by the project context injected into the first relevant prompt.
+const JUNE_SOUL_MEMORY_MD: &str = r#"
+June memory tools: proactively save durable user facts, preferences, and decisions with the `june_context` tool `save_memory`. When a `[June project context]` block is present, pass its `project_id` so the memory stays with that project; otherwise save it globally. Before relying on remembered information, call `list_memories` with the current project id when present instead of assuming. When the user asks you to forget something, call `forget_memory`. Never save secrets, credentials, access tokens, or other authentication material.
 "#;
 
 /// Appended to `SOUL.md` for every runtime. This calibrates June's first-turn
@@ -1139,6 +1145,7 @@ async fn start_hermes_bridge_inner(
         &hermes_home,
         sandbox_available,
         agent_cli_access,
+        june_memory_enabled(&june_context_mcp.memory_settings_path),
         video_generation_enabled,
         connectors_registered,
     )?;
@@ -1333,6 +1340,7 @@ struct JuneContextMcpConfig {
     command: String,
     script_path: PathBuf,
     database_path: PathBuf,
+    memory_settings_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -6864,12 +6872,32 @@ fn sync_june_context_mcp(
 
     let paths = crate::app_paths::AppPaths::from_data_dir(data_dir)
         .map_err(|error| AppError::new("june_context_mcp_failed", error.to_string()))?;
+    let memory_settings_path = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| AppError::new("june_context_mcp_failed", error.to_string()))?
+        .join("memory-settings.json");
 
     Ok(JuneContextMcpConfig {
         command: hermes_python_command(hermes_command),
         script_path,
         database_path: paths.database_path,
+        memory_settings_path,
     })
+}
+
+fn june_memory_enabled(path: &Path) -> bool {
+    match fs::read_to_string(path) {
+        Ok(settings) => {
+            serde_json::from_str::<MemorySettingsDto>(&settings)
+                .unwrap_or(MemorySettingsDto { enabled: false })
+                .enabled
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            MemorySettingsDto::default().enabled
+        }
+        Err(_) => false,
+    }
 }
 
 fn sync_june_web_mcp(app: &AppHandle, hermes_command: &str) -> Result<JuneWebMcpConfig, AppError> {
@@ -7639,6 +7667,7 @@ fn render_context_mcp_entry(config: &JuneContextMcpConfig) -> String {
     args:
       - {script_path}
       - {database_path}
+      - {memory_settings_path}
     env:
       PYTHONUNBUFFERED: "1"
     timeout: 30
@@ -7648,6 +7677,7 @@ fn render_context_mcp_entry(config: &JuneContextMcpConfig) -> String {
         command = yaml_string(&config.command),
         script_path = yaml_string(&config.script_path.to_string_lossy()),
         database_path = yaml_string(&config.database_path.to_string_lossy()),
+        memory_settings_path = yaml_string(&config.memory_settings_path.to_string_lossy()),
     )
 }
 
@@ -8022,6 +8052,7 @@ fn sync_june_soul(
     hermes_home: &std::path::Path,
     sandbox_available: bool,
     agent_cli_access: bool,
+    memory_enabled: bool,
     video_generation_enabled: bool,
     connectors_registered: bool,
 ) -> Result<(), AppError> {
@@ -8031,6 +8062,11 @@ fn sync_june_soul(
     let base = format!("{JUNE_SOUL_IDENTITY_MD}\n{character}\n");
     let video_section = if video_generation_enabled {
         JUNE_SOUL_VIDEO_MD
+    } else {
+        ""
+    };
+    let memory_section = if memory_enabled {
+        JUNE_SOUL_MEMORY_MD
     } else {
         ""
     };
@@ -8046,10 +8082,10 @@ fn sync_june_soul(
             JUNE_SOUL_CLI_BLOCKED_MD
         };
         format!(
-            "{base}{JUNE_SOUL_CONTEXT_MD}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}{JUNE_SOUL_SANDBOX_MD}{cli_section}"
+            "{base}{JUNE_SOUL_CONTEXT_MD}{memory_section}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}{JUNE_SOUL_SANDBOX_MD}{cli_section}"
         )
     } else {
-        format!("{base}{JUNE_SOUL_CONTEXT_MD}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}")
+        format!("{base}{JUNE_SOUL_CONTEXT_MD}{memory_section}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}")
     };
     std::fs::write(hermes_home.join("SOUL.md"), soul)
         .map_err(|error| AppError::new("hermes_bridge_soul_failed", error.to_string()))
@@ -11403,6 +11439,7 @@ mod tests {
             command: "/tmp/hermes/venv/bin/python".to_string(),
             script_path: PathBuf::from("/tmp/june/hermes-mcp/june_context_mcp.py"),
             database_path: PathBuf::from("/tmp/june/notes.sqlite3"),
+            memory_settings_path: PathBuf::from("/tmp/june/config/memory-settings.json"),
         }
     }
 
@@ -12835,6 +12872,7 @@ mcp_servers:
         assert!(config.contains("    command: \"/tmp/hermes/venv/bin/python\"\n"));
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_context_mcp.py\"\n"));
         assert!(config.contains("      - \"/tmp/june/notes.sqlite3\"\n"));
+        assert!(config.contains("      - \"/tmp/june/config/memory-settings.json\"\n"));
         // The web server gets the loopback proxy URL as an arg and the proxy
         // token via env, never as a direct credential the MCP must hold.
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_web_mcp.py\"\n"));
@@ -13499,7 +13537,7 @@ mcp_servers:
         )
         .expect("seed default soul");
 
-        sync_june_soul(home.path(), true, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are June"));
@@ -13519,10 +13557,40 @@ mcp_servers:
     }
 
     #[test]
+    fn june_soul_includes_memory_guidance_only_while_globally_enabled() {
+        let home = tempfile::tempdir().expect("tempdir");
+
+        sync_june_soul(home.path(), false, false, true, false, false).expect("enabled soul");
+        let enabled = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
+        assert!(enabled.contains("June memory tools"));
+        assert!(enabled.contains("save_memory"));
+        assert!(enabled.contains("list_memories"));
+        assert!(enabled.contains("forget_memory"));
+        assert!(enabled.contains("Never save secrets, credentials"));
+
+        sync_june_soul(home.path(), false, false, false, false, false).expect("disabled soul");
+        let disabled = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
+        assert!(!disabled.contains("June memory tools"));
+        assert!(!disabled.contains("save_memory"));
+    }
+
+    #[test]
+    fn june_memory_settings_match_the_command_loader_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory-settings.json");
+
+        assert!(june_memory_enabled(&path));
+        std::fs::write(&path, r#"{"enabled":false}"#).expect("disable memory");
+        assert!(!june_memory_enabled(&path));
+        std::fs::write(&path, "not json").expect("corrupt settings");
+        assert!(!june_memory_enabled(&path));
+    }
+
+    #[test]
     fn sandboxed_soul_describes_the_write_jail() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), true, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("Seatbelt"));
@@ -13547,7 +13615,7 @@ mcp_servers:
     fn june_soul_describes_local_context_tools() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_context"));
@@ -13563,7 +13631,7 @@ mcp_servers:
     fn june_soul_asks_for_clarification_before_costly_ambiguous_work() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("Clarifying questions"));
@@ -13577,7 +13645,7 @@ mcp_servers:
     fn june_soul_describes_web_tools() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_web"));
@@ -13590,14 +13658,14 @@ mcp_servers:
         let home = tempfile::tempdir().expect("tempdir");
 
         // Not registered: no connector stanza.
-        sync_june_soul(home.path(), false, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(!soul.contains("june_gmail"));
         assert!(!soul.contains("june_gcal"));
 
         // Registered: gmail/gcal toolsets, the untrusted-input warning, and the
         // approval note appear.
-        sync_june_soul(home.path(), false, false, true, true).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, true).expect("sync soul");
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_gmail"));
         assert!(soul.contains("june_gcal"));
@@ -13611,7 +13679,7 @@ mcp_servers:
     fn june_soul_uses_image_settings_instead_of_pre_refusing() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_image"));
@@ -13637,7 +13705,7 @@ mcp_servers:
     fn june_soul_describes_recorder_tools() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_recorder"));
@@ -13651,7 +13719,7 @@ mcp_servers:
     fn sandboxed_soul_with_cli_access_describes_the_grant() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), true, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, true, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("the user enabled Agent CLI access"));
@@ -13667,7 +13735,7 @@ mcp_servers:
     fn unsandboxed_soul_makes_no_sandbox_claims() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are June"));
@@ -13679,7 +13747,7 @@ mcp_servers:
     fn june_soul_omits_video_tools_when_disabled() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are June"));
@@ -13693,7 +13761,7 @@ mcp_servers:
     fn sync_june_soul_seeds_character_file_and_uses_default() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are helpful, knowledgeable, and direct"));
@@ -13712,7 +13780,7 @@ mcp_servers:
         )
         .expect("seed character");
 
-        sync_june_soul(home.path(), true, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("cheerful pirate"));
@@ -13734,7 +13802,7 @@ mcp_servers:
         let home = tempfile::tempdir().expect("tempdir");
         std::fs::write(home.path().join("CHARACTER.md"), "   \n\n").expect("seed blank");
 
-        sync_june_soul(home.path(), false, false, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are helpful, knowledgeable, and direct"));
@@ -13773,7 +13841,7 @@ mcp_servers:
     fn june_soul_includes_video_tools_when_enabled() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_video"));

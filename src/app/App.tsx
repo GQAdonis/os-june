@@ -1030,6 +1030,9 @@ export function App() {
   const activeAgentSessionFolder = activeAgentSessionId
     ? state.folders.find((folder) => folder.id === sessionFolders[activeAgentSessionId]?.[0])
     : undefined;
+  const agentProjectContextFolder =
+    activeAgentSessionFolder ??
+    (!activeAgentSessionId && agentOrigin?.kind === "project" ? agentOriginFolder : undefined);
   const recoveriesByNote = useMemo(() => {
     const map = new Map<string, (typeof state.activeRecoveries)[number]>();
     for (const recovery of state.activeRecoveries) {
@@ -3799,6 +3802,15 @@ export function App() {
                   topUpLabel={topUpLabel}
                   onTopUp={handleTopUp}
                   sessionInProject={Boolean(activeAgentSessionFolder)}
+                  projectContext={
+                    agentProjectContextFolder
+                      ? {
+                          id: agentProjectContextFolder.id,
+                          name: agentProjectContextFolder.name,
+                          instructions: agentProjectContextFolder.instructions,
+                        }
+                      : undefined
+                  }
                   onMoveSessionToProject={(sessionId) => setMoveDialogSessionIds([sessionId])}
                   origin={
                     agentOriginFolder
