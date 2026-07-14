@@ -94,10 +94,38 @@ export class TaskTabRegistry {
   }
 }
 
-type ToolFailure = Error & { code: string };
+type ToolFailure = Error & { code: string; browserSafeCode: true };
 
 function toolError(code: string, message: string): ToolFailure {
-  return Object.assign(new Error(message), { code });
+  return Object.assign(new Error(message), { code, browserSafeCode: true as const });
+}
+
+export function browserFailureResponse(
+  request: BrowserRequestMessage,
+  error: unknown,
+): BrowserResponseMessage {
+  const failure = error as Partial<ToolFailure>;
+  const errorCode =
+    failure.browserSafeCode === true && typeof failure.code === "string"
+      ? failure.code
+      : "extension_request_failed";
+  const sessionId =
+    typeof request.arguments.session_id === "string" ? request.arguments.session_id : undefined;
+  const tabId = Number.isInteger(request.arguments.tab_id) ? request.arguments.tab_id : undefined;
+  const location =
+    sessionId === undefined
+      ? ""
+      : tabId === undefined
+        ? ` for session ${sessionId}`
+        : ` for session ${sessionId} on tab ${String(tabId)}`;
+  return {
+    v: PROTOCOL_VERSION,
+    type: "response",
+    id: request.id,
+    success: false,
+    message: `Browser operation ${request.tool} failed${location}.`,
+    errorCode,
+  };
 }
 
 function stringArg(args: Record<string, unknown>, name: string): string {
@@ -341,17 +369,7 @@ export class BrowserController {
         response: { v: PROTOCOL_VERSION, type: "response", id: request.id, success: true, data },
       };
     } catch (error) {
-      const failure = error as Partial<ToolFailure>;
-      return {
-        response: {
-          v: PROTOCOL_VERSION,
-          type: "response",
-          id: request.id,
-          success: false,
-          message: failure.message ?? "Browser request failed.",
-          errorCode: failure.code ?? "extension_request_failed",
-        },
-      };
+      return { response: browserFailureResponse(request, error) };
     }
   }
 
@@ -464,7 +482,7 @@ export class BrowserController {
       const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
       return { artifact: artifactMessages(0, bytes, "screenshot", "image/png") };
     }
-    throw toolError("not_implemented", `${tool} is not implemented.`);
+    throw toolError("not_implemented", "The browser tool is not implemented.");
   }
 }
 

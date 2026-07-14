@@ -132,7 +132,7 @@ async fn start_managed_session_with_id(
     let created = cdp
         .call(None, "Target.createTarget", json!({ "url": "about:blank" }))
         .await
-        .map_err(tool_error)?;
+        .map_err(|error| tool_error("create target", &id, error))?;
     let target_id = created
         .get("targetId")
         .and_then(|value| value.as_str())
@@ -145,7 +145,7 @@ async fn start_managed_session_with_id(
             json!({ "targetId": target_id, "flatten": true }),
         )
         .await
-        .map_err(tool_error)?;
+        .map_err(|error| tool_error("attach target", &id, error))?;
     let cdp_session_id = attached
         .get("sessionId")
         .and_then(|value| value.as_str())
@@ -154,10 +154,10 @@ async fn start_managed_session_with_id(
 
     cdp.call(Some(&cdp_session_id), "Page.enable", json!({}))
         .await
-        .map_err(tool_error)?;
+        .map_err(|error| tool_error("enable page", &id, error))?;
     cdp.call(Some(&cdp_session_id), "Runtime.enable", json!({}))
         .await
-        .map_err(tool_error)?;
+        .map_err(|error| tool_error("enable runtime", &id, error))?;
 
     let session = Arc::new(ManagedBrowserSession {
         id,
@@ -387,7 +387,7 @@ impl ManagedBrowserSession {
                 json!({ "url": raw_url }),
             )
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| tool_error("navigate", &self.id, error))?;
 
         if let Some(error_text) = navigated.get("errorText").and_then(|value| value.as_str()) {
             if !error_text.is_empty() {
@@ -401,10 +401,7 @@ impl ManagedBrowserSession {
                          The managed browser reaches only the public web.",
                     ));
                 }
-                return Err(AppError::new(
-                    "browser_navigation_failed",
-                    format!("The page could not be loaded ({error_text})."),
-                ));
+                return Err(navigation_error(&self.id, error_text));
             }
         }
 
@@ -460,7 +457,7 @@ impl ManagedBrowserSession {
                 json!({}),
             )
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| tool_error("read navigation history", &self.id, error))?;
         let current_index = history
             .get("currentIndex")
             .and_then(|value| value.as_u64())
@@ -496,7 +493,7 @@ impl ManagedBrowserSession {
                 json!({ "entryId": entry_id }),
             )
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| tool_error("navigate back", &self.id, error))?;
         self.wait_for_load(&mut events, Duration::from_secs(10))
             .await;
 
@@ -525,7 +522,7 @@ impl ManagedBrowserSession {
                 json!({ "format": "png" }),
             )
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| tool_error("capture screenshot", &self.id, error))?;
         let data = captured
             .get("data")
             .and_then(|value| value.as_str())
@@ -542,7 +539,7 @@ impl ManagedBrowserSession {
                 json!({}),
             )
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| tool_error("read screenshot dimensions", &self.id, error))?;
         let viewport = metrics.get("cssVisualViewport");
         let width = viewport
             .and_then(|viewport| viewport.get("clientWidth"))
@@ -594,7 +591,7 @@ impl ManagedBrowserSession {
                 json!({ "expression": expression, "returnByValue": true }),
             )
             .await
-            .map_err(tool_error)?;
+            .map_err(|error| tool_error("read page state", &self.id, error))?;
         evaluated
             .get("result")
             .and_then(|result| result.get("value"))
@@ -924,8 +921,21 @@ fn session_closed(session_id: &str) -> AppError {
     )
 }
 
-fn tool_error(error: super::cdp::CdpError) -> AppError {
-    AppError::new("browser_command_failed", error.message)
+fn tool_error(operation: &str, session_id: &str, error: super::cdp::CdpError) -> AppError {
+    AppError::new(
+        "browser_command_failed",
+        format!(
+            "Browser operation {operation} failed for session {session_id} ({}).",
+            error.code
+        ),
+    )
+}
+
+fn navigation_error(session_id: &str, _browser_error_text: &str) -> AppError {
+    AppError::new(
+        "browser_navigation_failed",
+        format!("Browser navigation failed for session {session_id}."),
+    )
 }
 
 fn policy_error(violation: super::policy::PolicyViolation) -> AppError {
@@ -1104,3 +1114,41 @@ const SNAPSHOT_JS: &str = r#"(() => {
   lines.push(text.length > MAX_TEXT ? text.slice(0, MAX_TEXT) + "\n[truncated]" : text);
   return lines.join("\n");
 })()"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_command_error_omits_browser_provided_content() {
+        let error = tool_error(
+            "navigate",
+            "session-123",
+            super::super::cdp::CdpError {
+                code: "cdp_error",
+                message: "https://private.example/secret page text field-value-123".to_string(),
+            },
+        );
+
+        assert_eq!(error.code, "browser_command_failed");
+        assert!(error.message.contains("navigate"));
+        assert!(error.message.contains("session-123"));
+        assert!(!error.message.contains("private.example"));
+        assert!(!error.message.contains("page text"));
+        assert!(!error.message.contains("field-value-123"));
+    }
+
+    #[test]
+    fn navigation_failure_omits_browser_error_text() {
+        let error = navigation_error(
+            "session-456",
+            "net error at https://private.example/secret with field-value-456",
+        );
+
+        assert_eq!(error.code, "browser_navigation_failed");
+        assert!(error.message.contains("navigation"));
+        assert!(error.message.contains("session-456"));
+        assert!(!error.message.contains("private.example"));
+        assert!(!error.message.contains("field-value-456"));
+    }
+}

@@ -33,6 +33,18 @@ export type BrowserToolName =
   | "switch_tab"
   | "close_tab";
 
+const BROWSER_TOOL_NAMES = new Set<BrowserToolName>([
+  "start_session",
+  "close_session",
+  "navigate",
+  "snapshot",
+  "screenshot",
+  "list_tabs",
+  "open_tab",
+  "switch_tab",
+  "close_tab",
+]);
+
 export type BrowserRequestMessage = {
   v: number;
   type: "request";
@@ -101,7 +113,12 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
 export function parseBrowserRequest(raw: unknown): BrowserRequestMessage | null {
   const message = parseHostMessage(raw);
   if (message?.type !== "request") return null;
-  if (!Number.isInteger(message.id) || typeof message.tool !== "string") return null;
+  if (
+    !Number.isInteger(message.id) ||
+    typeof message.tool !== "string" ||
+    !BROWSER_TOOL_NAMES.has(message.tool as BrowserToolName)
+  )
+    return null;
   if (typeof message.arguments !== "object" || message.arguments === null) return null;
   return message;
 }

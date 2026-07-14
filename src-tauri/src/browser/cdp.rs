@@ -7,9 +7,8 @@
 //!
 //! Privacy (JUN-316): nothing here logs, prints, or traces CDP payloads, URLs,
 //! or page content. Parse failures are dropped silently; errors name a stable
-//! code and generic copy, never request params or page data. The one exception
-//! the contract allows is a CDP error's own `message`, returned verbatim to the
-//! caller so it can be surfaced, and even that is never written to a log.
+//! code and generic copy, never request params, browser-provided error text, or
+//! page data.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -197,17 +196,12 @@ impl CdpClient {
     }
 }
 
-/// Splits a CDP response into `Ok(result)` or `Err(cdp error message)`.
+/// Splits a CDP response into `Ok(result)` or a content-free protocol error.
 fn interpret_response(response: Value) -> Result<Value, CdpError> {
-    if let Some(error) = response.get("error") {
-        let message = error
-            .get("message")
-            .and_then(Value::as_str)
-            .unwrap_or("The browser reported a protocol error.")
-            .to_string();
+    if response.get("error").is_some() {
         return Err(CdpError {
             code: "cdp_error",
-            message,
+            message: "The browser reported a protocol error.".to_string(),
         });
     }
     Ok(response.get("result").cloned().unwrap_or(Value::Null))
@@ -364,14 +358,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn call_error_frame_becomes_err() {
+    async fn call_error_frame_is_redacted() {
         let (client, mut peer_read, mut peer_write) = client_with_peer();
         let peer = std::thread::spawn(move || {
             let frame = read_frame(&mut peer_read).unwrap();
             let id = frame["id"].as_u64().unwrap();
             write_frame(
                 &mut peer_write,
-                &json!({ "id": id, "error": { "code": -32000, "message": "Something failed" } }),
+                &json!({
+                    "id": id,
+                    "error": {
+                        "code": -32000,
+                        "message": "Navigation failed for https://private.example/secret with field value hunter2"
+                    }
+                }),
             );
             peer_write
         });
@@ -381,7 +381,9 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.code, "cdp_error");
-        assert_eq!(err.message, "Something failed");
+        assert_eq!(err.message, "The browser reported a protocol error.");
+        assert!(!err.message.contains("private.example"));
+        assert!(!err.message.contains("hunter2"));
         drop(peer.join().unwrap());
     }
 

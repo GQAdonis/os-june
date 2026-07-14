@@ -80,21 +80,13 @@ impl ExtensionBrowserTransport {
 impl BrowserTransport for ExtensionBrowserTransport {
     fn execute<'a>(&'a self, tool: &'a str, arguments: Value) -> TransportFuture<'a> {
         Box::pin(async move {
+            let failure_message = extension_failure_message(tool, &arguments);
             let ExtensionResponse {
                 value,
                 artifact_bytes,
             } = self.host.request(tool, arguments).await?;
             if value.get("success").and_then(Value::as_bool) != Some(true) {
-                return Err(AppError::new(
-                    value
-                        .get("errorCode")
-                        .and_then(Value::as_str)
-                        .unwrap_or("extension_request_failed"),
-                    value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .unwrap_or("The browser extension request failed."),
-                ));
+                return Err(extension_request_error(failure_message, &value));
             }
             let data = value.get("data").cloned().unwrap_or_else(|| json!({}));
             let artifact = match data.get("artifact") {
@@ -640,6 +632,42 @@ fn validate_attended_url(raw: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+fn extension_request_error(message: String, response: &Value) -> AppError {
+    let code = response
+        .get("errorCode")
+        .and_then(Value::as_str)
+        .filter(|code| {
+            matches!(
+                *code,
+                "session_exists"
+                    | "session_not_found"
+                    | "tab_not_owned"
+                    | "invalid_arguments"
+                    | "navigation_timeout"
+                    | "tab_open_failed"
+                    | "snapshot_invalidated"
+                    | "screenshot_failed"
+                    | "not_implemented"
+            )
+        })
+        .unwrap_or("extension_request_failed");
+    AppError::new(code, message)
+}
+
+fn extension_failure_message(tool: &str, arguments: &Value) -> String {
+    let session_id = arguments.get("session_id").and_then(Value::as_str);
+    let tab_id = arguments.get("tab_id").and_then(Value::as_i64);
+    match (session_id, tab_id) {
+        (Some(session_id), Some(tab_id)) => {
+            format!("Browser operation {tool} failed for session {session_id} on tab {tab_id}.")
+        }
+        (Some(session_id), None) => {
+            format!("Browser operation {tool} failed for session {session_id}.")
+        }
+        _ => format!("Browser operation {tool} failed."),
+    }
+}
+
 fn required_string<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, AppError> {
     arguments
         .get(name)
@@ -834,18 +862,43 @@ mod tests {
     fn attended_url_policy_accepts_web_urls_and_rejects_credentials_and_other_schemes() {
         assert!(validate_attended_url("https://example.com/path?q=1").is_ok());
         assert!(validate_attended_url("http://127.0.0.1/private").is_ok());
-        assert_eq!(
-            validate_attended_url("file:///tmp/private")
-                .expect_err("scheme")
-                .code,
-            "browser_url_not_allowed"
-        );
-        assert_eq!(
-            validate_attended_url("https://user:secret@example.com")
-                .expect_err("credentials")
-                .code,
-            "browser_url_not_allowed"
-        );
+        let scheme = validate_attended_url("file:///tmp/private-page-text")
+            .expect_err("scheme must be refused");
+        assert_eq!(scheme.code, "browser_url_not_allowed");
+        assert!(!scheme.message.contains("private-page-text"));
+
+        let credentials = validate_attended_url("https://user:secret@example.com/field-value")
+            .expect_err("credentials must be refused");
+        assert_eq!(credentials.code, "browser_url_not_allowed");
+        assert!(!credentials.message.contains("example.com"));
+        assert!(!credentials.message.contains("secret"));
+        assert!(!credentials.message.contains("field-value"));
+    }
+
+    #[test]
+    fn extension_failure_omits_message_and_argument_content() {
+        let arguments = json!({
+            "session_id": "session-123",
+            "tab_id": 42,
+            "url": "https://private.example/secret",
+            "text": "field-value-123",
+        });
+        let response = json!({
+            "success": false,
+            "errorCode": "navigation_timeout",
+            "message": "Page text from https://private.example/secret: field-value-123",
+        });
+
+        let error =
+            extension_request_error(extension_failure_message("navigate", &arguments), &response);
+
+        assert_eq!(error.code, "navigation_timeout");
+        assert!(error.message.contains("navigate"));
+        assert!(error.message.contains("session-123"));
+        assert!(error.message.contains("tab 42"));
+        assert!(!error.message.contains("private.example"));
+        assert!(!error.message.contains("Page text"));
+        assert!(!error.message.contains("field-value-123"));
     }
 
     #[tokio::test]

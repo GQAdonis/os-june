@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chunkBytes, TaskTabRegistry } from "../browser";
+import { browserFailureResponse, chunkBytes, TaskTabRegistry } from "../browser";
 
 describe("task tab registry", () => {
   it("refuses tabs outside the broker session", () => {
@@ -50,5 +50,40 @@ describe("native payload chunking", () => {
       ...Uint8Array.from(atob(chunk), (value) => value.charCodeAt(0)),
     ]);
     expect(Uint8Array.from(output)).toEqual(input);
+  });
+});
+
+describe("browser error redaction", () => {
+  it("omits browser content from protocol failures", () => {
+    const error = Object.assign(
+      new Error(
+        "Page text from https://private.example/secret with screenshot bytes and field-value-123",
+      ),
+      { code: "https://private.example/secret" },
+    );
+    const response = browserFailureResponse(
+      {
+        v: 2,
+        type: "request",
+        id: 9,
+        tool: "navigate",
+        arguments: {
+          session_id: "session-123",
+          tab_id: 42,
+          url: "https://private.example/secret",
+          text: "field-value-123",
+        },
+      },
+      error,
+    );
+
+    expect(response.errorCode).toBe("extension_request_failed");
+    expect(response.message).toContain("navigate");
+    expect(response.message).toContain("session-123");
+    expect(response.message).toContain("tab 42");
+    expect(response.message).not.toContain("private.example");
+    expect(response.message).not.toContain("Page text");
+    expect(response.message).not.toContain("screenshot bytes");
+    expect(response.message).not.toContain("field-value-123");
   });
 });

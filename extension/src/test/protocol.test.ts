@@ -62,5 +62,14 @@ describe("parseHostMessage", () => {
     expect(
       parseBrowserRequest({ v: PROTOCOL_VERSION, type: "request", id: 3, tool: "open_tab" }),
     ).toBeNull();
+    expect(
+      parseBrowserRequest({
+        v: PROTOCOL_VERSION,
+        type: "request",
+        id: 3,
+        tool: "https://private.example/field-value",
+        arguments: {},
+      }),
+    ).toBeNull();
   });
 });

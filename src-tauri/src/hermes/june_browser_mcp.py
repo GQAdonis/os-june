@@ -17,6 +17,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 
@@ -226,7 +227,7 @@ def handle_message(
 
     if request_id is None:
         return None
-    return error_response(request_id, -32601, f"Unknown method: {method}")
+    return error_response(request_id, -32601, "Unknown method.")
 
 
 def call_tool(
@@ -260,15 +261,19 @@ def call_tool(
                 text = f"{text}\n{media}"
             return tool_text_result(request_id, text)
     except ToolError as exc:
-        return tool_text_result(request_id, str(exc), is_error=True)
-    except Exception as exc:
         return tool_text_result(
             request_id,
-            f"June browser request failed: {exc}",
+            browser_failure_text(name, params, exc.code),
+            is_error=True,
+        )
+    except Exception:
+        return tool_text_result(
+            request_id,
+            browser_failure_text(name, params, "browser_request_failed"),
             is_error=True,
         )
 
-    return error_response(request_id, -32602, f"Unknown tool: {name}")
+    return error_response(request_id, -32602, "Unknown browser tool.")
 
 
 def browser_call_context() -> str:
@@ -318,14 +323,18 @@ def proxy_json(
         ) as response_value:
             return json.loads(response_value.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")
+        response_body = exc.read().decode("utf-8", "replace")
         try:
-            parsed = json.loads(body)
+            parsed = json.loads(response_body)
         except json.JSONDecodeError:
-            parsed = {"success": False, "message": body or exc.reason}
+            parsed = {
+                "success": False,
+                "errorCode": "browser_proxy_http_error",
+                "httpStatus": exc.code,
+            }
         return parsed
-    except urllib.error.URLError as exc:
-        raise ToolError(f"June browser proxy is unavailable: {exc}")
+    except urllib.error.URLError:
+        raise ToolError("browser_proxy_unavailable") from None
 
 
 def render_status_result(result: dict[str, Any]) -> str:
@@ -340,9 +349,46 @@ def require_success(result: dict[str, Any]) -> dict[str, Any]:
     if result.get("success") is True:
         data = result.get("data")
         return data if isinstance(data, dict) else {}
-    message = result.get("message") or "June browser request failed."
-    code = result.get("errorCode") or "browser_request_failed"
-    raise ToolError(f"[{code}] {message}")
+    code = result.get("errorCode")
+    if not isinstance(code, str) or not is_stable_error_code(code):
+        code = "browser_request_failed"
+    raise ToolError(code)
+
+
+def is_stable_error_code(code: str) -> bool:
+    return 0 < len(code) <= 64 and all(
+        character.isascii() and (character.islower() or character.isdigit() or character == "_")
+        for character in code
+    )
+
+
+def browser_failure_text(tool: Any, params: dict[str, Any], code: str) -> str:
+    operation = (
+        tool
+        if isinstance(tool, str) and any(item["name"] == tool for item in TOOLS)
+        else "request"
+    )
+    arguments = params.get("arguments")
+    arguments = arguments if isinstance(arguments, dict) else {}
+    identifiers: list[str] = []
+    session_id = arguments.get("session_id")
+    if isinstance(session_id, str) and is_uuid(session_id):
+        identifiers.append(f"session {session_id}")
+    tab_id = arguments.get("tab_id")
+    if isinstance(tab_id, int):
+        identifiers.append(f"tab {tab_id}")
+    action_id = arguments.get("action_id")
+    if isinstance(action_id, str) and is_uuid(action_id):
+        identifiers.append(f"action {action_id}")
+    location = f" for {', '.join(identifiers)}" if identifiers else ""
+    return f"[{code}] Browser operation {operation} failed{location}."
+
+
+def is_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
 
 
 def response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -369,8 +415,15 @@ def tool_text_result(
 
 
 class ToolError(Exception):
-    pass
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        raise SystemExit("June browser MCP failed.") from None
