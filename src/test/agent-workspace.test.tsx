@@ -10725,11 +10725,11 @@ describe("AgentWorkspace", () => {
     try {
       fireEvent.submit(document.querySelector(".agent-composer") as HTMLFormElement);
       await settleUnderFakeTimers(() =>
-        expect(screen.getByText("Generating video, this can take a minute")).toHaveClass(
-          "text-shimmer",
-          "shimmer",
-        ),
+        expect(screen.getByText("Generating video…")).toHaveClass("text-shimmer", "shimmer"),
       );
+      // The note under the frame carries either the fallback copy or, once the
+      // first status poll lands, the elapsed-time progress.
+      expect(document.querySelector(".agent-generated-media-note")).not.toBeNull();
       await act(async () => {
         await vi.advanceTimersByTimeAsync(900_000);
       });

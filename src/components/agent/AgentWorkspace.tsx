@@ -590,22 +590,26 @@ function buildSampleArtifactFiles(): { name: string; bytes: Uint8Array }[] {
 
 /** Paints a small gradient card on a canvas so the image preview path has a
  * real PNG to chew on, without bundling a fixture. */
-function sampleImageBytes(): Uint8Array {
+function sampleImageDataUrl(label = "june-sample.png", width = 480, height = 320): string {
   const canvas = document.createElement("canvas");
-  canvas.width = 480;
-  canvas.height = 320;
+  canvas.width = width;
+  canvas.height = height;
   const context = canvas.getContext("2d");
   if (context) {
-    const gradient = context.createLinearGradient(0, 0, 480, 320);
+    const gradient = context.createLinearGradient(0, 0, width, height);
     gradient.addColorStop(0, "#936862");
     gradient.addColorStop(1, "#f4e3d7");
     context.fillStyle = gradient;
-    context.fillRect(0, 0, 480, 320);
+    context.fillRect(0, 0, width, height);
     context.fillStyle = "rgba(255, 255, 255, 0.92)";
     context.font = "600 28px sans-serif";
-    context.fillText("june-sample.png", 24, 168);
+    context.fillText(label, 24, Math.round(height / 2) + 8);
   }
-  const base64 = canvas.toDataURL("image/png").split(",")[1] ?? "";
+  return canvas.toDataURL("image/png");
+}
+
+function sampleImageBytes(): Uint8Array {
+  const base64 = sampleImageDataUrl().split(",")[1] ?? "";
   return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
 }
 
@@ -9536,13 +9540,48 @@ export function AgentWorkspace({
     };
     // __imageGenDemo parks a generating-image turn (the dot-field placeholder)
     // in the selected session so the animation can be judged without paying for
-    // a real generation. Purely in-memory: never persisted, never retried.
-    w.__imageGenDemo = (show: boolean = true, prompt = "a calm mountain lake at dawn") => {
+    // a real generation; __imageGenDemo("complete") then flips the parked turn
+    // in place (same ids, so the mounted part sees running -> complete) to
+    // judge the develop-out-of-the-field reveal. Purely in-memory: never
+    // persisted, never retried.
+    w.__imageGenDemo = (
+      show: boolean | "complete" = true,
+      prompt = "a calm mountain lake at dawn",
+    ) => {
       if (!selectedHermesSessionId || selectedHermesSessionIsProvisional) {
         return "Open a real session first, then run __imageGenDemo().";
       }
       const turnId = `image-demo:${selectedHermesSessionId}`;
       const startedAt = Date.now();
+      if (show === "complete") {
+        const parked = (imageTurnsBySession[selectedHermesSessionId] ?? []).some(
+          (turn) => turn.id === `${turnId}:assistant`,
+        );
+        if (!parked) return "Park a turn first with __imageGenDemo(), then complete it.";
+        const dataUrl = sampleImageDataUrl("generated-image-demo.png", 480, 480);
+        setImageTurnsBySession((current) => ({
+          ...current,
+          [selectedHermesSessionId]: (current[selectedHermesSessionId] ?? []).map((turn) =>
+            turn.id === `${turnId}:assistant`
+              ? {
+                  ...turn,
+                  status: "complete" as const,
+                  parts: turn.parts.map((part) =>
+                    part.type === "image"
+                      ? {
+                          ...part,
+                          status: "complete" as const,
+                          dataUrl,
+                          name: "generated-image-demo.png",
+                        }
+                      : part,
+                  ),
+                }
+              : turn,
+          ),
+        }));
+        return "Completed the demo turn - watch the reveal. __imageGenDemo(false) clears it.";
+      }
       setImageTurnsBySession((current) => {
         const others = (current[selectedHermesSessionId] ?? []).filter(
           (turn) => !turn.id.startsWith(turnId),
@@ -9564,7 +9603,7 @@ export function AgentWorkspace({
         };
       });
       return show
-        ? "Parked a generating-image turn. Run __imageGenDemo(false) to clear it."
+        ? 'Parked a generating-image turn. __imageGenDemo("complete") plays the reveal; __imageGenDemo(false) clears.'
         : "Cleared the generating-image demo turn.";
     };
     return () => {
@@ -9572,7 +9611,7 @@ export function AgentWorkspace({
       delete w.__upNextDemo;
       delete w.__imageGenDemo;
     };
-  }, [selectedHermesSessionId, selectedHermesSessionIsProvisional]);
+  }, [selectedHermesSessionId, selectedHermesSessionIsProvisional, imageTurnsBySession]);
 
   // Hoisted so the trailing "Thinking…" indicator only shows in the gap after a
   // send (last turn is the user's) — once an assistant turn exists it carries
@@ -13258,38 +13297,41 @@ function SteeringPart({ part }: { part: Extract<AgentChatPart, { type: "steering
 // action; error -> the failure message. The bytes ride in `part.dataUrl` for an
 // instant thumbnail; open/download key off the imported workspace path.
 /* The June Agents mark sampled onto the generating dot lattice, one character
- * per 6px cell ("o" = dot). Derived from src/assets/june-agents-mark.svg by
- * rasterizing and thresholding per-cell coverage at 0.45 - whole dots keep
- * the glyph from fragmenting at its narrow diagonal step necks. */
+ * per 6px cell: "." = outside the glyph, digits 1-9 = the fraction of the
+ * cell the glyph covers. Derived from src/assets/june-agents-mark.svg by
+ * rasterizing with a slight blur (4px at 10px cells) and averaging per-cell
+ * alpha - the blur spreads each edge across two cells, so dots taper in size
+ * and tone toward the boundary and the glyph keeps its soft rounded edges
+ * instead of a hard binary cutout. */
 const GENERATED_MEDIA_MARK_CELLS = [
-  "...................ooooo",
-  "...................ooooo",
-  "...................ooooo",
-  "...................ooooo",
-  "..................oooooo",
-  ".....ooooooooooooooo....",
-  ".....oooooooooooooo.....",
-  ".....oooooooooooooo.....",
-  ".....oooooooooooooo.....",
-  "....ooooooooooooooo.....",
-  "oooooo..................",
-  "ooooo...................",
-  "ooooo...................",
-  "ooooo..............ooooo",
-  "ooooo..............ooooo",
-  "...................ooooo",
-  "...................ooooo",
-  "..................oooooo",
-  ".....ooooooooooooooo....",
-  ".....oooooooooooooo.....",
-  ".....oooooooooooooo.....",
-  ".....oooooooooooooo.....",
-  "....ooooooooooooooo.....",
-  "oooooo..................",
-  "ooooo...................",
-  "ooooo...................",
-  "ooooo...................",
-  "ooooo...................",
+  "..................157775",
+  "..................179997",
+  "..................289997",
+  "..................389997",
+  ".....1122222222223798875",
+  "....15777777777788973211",
+  "....1799999999999983....",
+  "....2899999999999982....",
+  "....3899999999999971....",
+  "11237988777777777751....",
+  "5788973222222222211.....",
+  "799983..................",
+  "799982.............11211",
+  "799971............157775",
+  "577751............179997",
+  "11211.............289997",
+  "..................389997",
+  ".....1122222222223798875",
+  "....15777777777788973211",
+  "....1799999999999983....",
+  "....2899999999999982....",
+  "....3899999999999971....",
+  "11237988777777777751....",
+  "5788973222222222211.....",
+  "799983..................",
+  "799982..................",
+  "799971..................",
+  "577751..................",
 ];
 
 /* One shared parameter set so the two wave kinds stay in the same physical
@@ -13298,21 +13340,38 @@ const GENERATED_MEDIA_MARK_CELLS = [
 const GENERATED_MEDIA_FIELD = {
   pitch: 6,
   dotRadius: 1,
-  markDotRadius: 1.5,
+  markDotRadius: 1.25,
   markGlowGain: 1.2,
   maxAlpha: 0.85,
   /* The ambient sheen: a plane wavefront crossing left to right, both ends
-   * fully off-canvas so the loop reset is invisible, then a rest beat. */
+   * fully off-canvas so the loop reset is invisible, then a rest beat. The
+   * band leans at the shared shimmer utility's 20deg so the canvas sweep and
+   * the label shimmer read as one system. */
   sweepCycleMs: 3600,
   sweepTravelMs: 2400,
   sweepSigma: 34,
   sweepPush: 2.2,
-  /* Pointer ripples: a radial wavefront expanding from the tap point. */
+  sweepAngleDeg: 20,
+  /* Pointer ripples: a radial wavefront expanding from the tap point. The
+   * band also paints the dots it crosses with the theme accent. */
   ripplePxPerMs: 0.24,
   rippleSigma: 24,
   rippleTauMs: 950,
   ripplePush: 5,
   rippleGlow: 0.4,
+  ripplePaintMix: 0.95,
+  /* Mark sparkle: each logo dot glints on its own deterministic cadence -
+   * a twinkle of color and brightness only, never size. The exponent keeps
+   * the glint to a short flash out of each slow cycle, so only a few dots
+   * shine at any moment. */
+  sparkMinRadPerSec: 0.5,
+  sparkSpanRadPerSec: 0.7,
+  sparkExponent: 10,
+  sparkMix: 0.95,
+  sparkAlphaBoost: 0.32,
+  /* The dot field thins out over this many px at the canvas bottom, into the
+   * card-surface gradient the CSS background lands on. */
+  bottomFadePx: 56,
 };
 
 type GeneratedMediaRipple = { x: number; y: number; startedAt: number };
@@ -13336,16 +13395,27 @@ function GeneratedMediaDotField() {
 
     let width = 0;
     let height = 0;
-    let dots: Array<{ x: number; y: number; mark: boolean }> = [];
+    // `mark` is the glyph-coverage weight of this lattice cell, 0..1; the
+    // spark fields give each logo dot its own deterministic glint cadence.
+    let dots: Array<{
+      x: number;
+      y: number;
+      mark: number;
+      sparkOmega: number;
+      sparkPhase: number;
+    }> = [];
     let raf = 0;
-    let idle = false;
 
-    /* The ink color and per-theme alphas live in CSS so the field follows the
-     * design tokens; the canvas reads their computed values. */
+    /* The ink colors and per-theme alphas live in CSS so the field follows
+     * the design tokens; the canvas reads their computed values. The theme
+     * accent rides in through `accent-color`, which computes to a concrete
+     * color without painting anything on a canvas element. */
     const readInk = () => {
       const style = getComputedStyle(canvas);
+      const accent = style.accentColor;
       return {
         color: style.color,
+        spark: accent && accent !== "auto" ? accent : style.color,
         dotAlpha: Number.parseFloat(style.getPropertyValue("--agent-generated-dot-alpha")) || 0.08,
         sheenGlow:
           Number.parseFloat(style.getPropertyValue("--agent-generated-sheen-glow")) || 0.24,
@@ -13373,18 +13443,33 @@ function GeneratedMediaDotField() {
       dots = [];
       for (let row = 0; row < rows; row++) {
         for (let col = 0; col < cols; col++) {
-          const mark =
+          const inMark =
             row >= markRow &&
             row < markRow + markRows &&
             col >= markCol &&
-            col < markCol + markCols &&
-            GENERATED_MEDIA_MARK_CELLS[row - markRow][col - markCol] === "o";
-          dots.push({ x: col * F.pitch + F.pitch / 2, y: row * F.pitch + F.pitch / 2, mark });
+            col < markCol + markCols;
+          const cell = inMark ? GENERATED_MEDIA_MARK_CELLS[row - markRow][col - markCol] : ".";
+          const mark = cell === "." ? 0 : Number.parseInt(cell, 10) / 9;
+          // Two lattice-position hashes decorrelate each dot's glint cycle.
+          const noise = Math.sin((row * 131 + col) * 12.9898) * 43758.5453;
+          const seed = noise - Math.floor(noise);
+          const noise2 = Math.sin((row * 131 + col) * 78.233) * 12543.8567;
+          const seed2 = noise2 - Math.floor(noise2);
+          dots.push({
+            x: col * F.pitch + F.pitch / 2,
+            y: row * F.pitch + F.pitch / 2,
+            mark,
+            sparkOmega: F.sparkMinRadPerSec + seed * F.sparkSpanRadPerSec,
+            sparkPhase: seed2 * Math.PI * 2,
+          });
         }
       }
     };
 
     const epoch = performance.now();
+    // The sweep axis: dots are banded by their projection onto this direction.
+    const sweepCos = Math.cos((F.sweepAngleDeg * Math.PI) / 180);
+    const sweepSin = Math.sin((F.sweepAngleDeg * Math.PI) / 180);
 
     const draw = (t: number, animated: boolean) => {
       const ripples = ripplesRef.current;
@@ -13394,25 +13479,30 @@ function GeneratedMediaDotField() {
       let front: number | null = null;
       if (animated) {
         const phase = ((t - epoch) % F.sweepCycleMs) / F.sweepTravelMs;
-        if (phase <= 1) front = -3 * F.sweepSigma + phase * (width + 6 * F.sweepSigma);
-      }
-      // Nothing in motion: keep the last static frame instead of repainting.
-      if (front === null && ripples.length === 0) {
-        if (idle) return;
-        idle = true;
-      } else {
-        idle = false;
+        const span = width * sweepCos + height * sweepSin;
+        if (phase <= 1) front = -3 * F.sweepSigma + phase * (span + 6 * F.sweepSigma);
       }
       context.clearRect(0, 0, width, height);
-      context.fillStyle = ink.color;
+      let fill = ink.color;
+      context.fillStyle = fill;
+      const setFill = (color: string) => {
+        if (color !== fill) {
+          fill = color;
+          context.fillStyle = color;
+        }
+      };
+      const seconds = t / 1000;
       for (const dot of dots) {
         let glow = 0;
+        let paint = 0;
         let dx = 0;
         let dy = 0;
         if (front !== null) {
-          const band = Math.exp(-((dot.x - front) ** 2) / (2 * F.sweepSigma ** 2));
+          const along = dot.x * sweepCos + dot.y * sweepSin;
+          const band = Math.exp(-((along - front) ** 2) / (2 * F.sweepSigma ** 2));
           glow += ink.sheenGlow * band;
-          dx += F.sweepPush * band;
+          dx += F.sweepPush * band * sweepCos;
+          dy += F.sweepPush * band * sweepSin;
         }
         for (const ripple of ripples) {
           const age = t - ripple.startedAt;
@@ -13424,19 +13514,43 @@ function GeneratedMediaDotField() {
             Math.exp(-((dist - F.ripplePxPerMs * age) ** 2) / (2 * F.rippleSigma ** 2)) *
             Math.exp(-age / F.rippleTauMs);
           glow += F.rippleGlow * band;
+          paint += band;
           dx += (rx / dist) * F.ripplePush * band;
           dy += (ry / dist) * F.ripplePush * band;
         }
-        const base = dot.mark ? ink.markAlpha : ink.dotAlpha;
-        context.globalAlpha = Math.min(F.maxAlpha, base + glow * (dot.mark ? F.markGlowGain : 1));
+        // The glint: a brief accent flash out of each logo dot's slow cycle.
+        let spark = 0;
+        if (animated && dot.mark > 0) {
+          const wave = 0.5 + 0.5 * Math.sin(seconds * dot.sparkOmega + dot.sparkPhase);
+          spark = wave ** F.sparkExponent * dot.mark;
+        }
+        // Partial glyph coverage blends the dot between field and mark, so
+        // the mark's rounded corners and bevels stay soft on the lattice.
+        const base = ink.dotAlpha + (ink.markAlpha - ink.dotAlpha) * dot.mark;
+        const gain = 1 + (F.markGlowGain - 1) * dot.mark;
+        // Thin the field out where the canvas background gradates into the
+        // card surface, so the grid gives way instead of hitting an edge.
+        const edge = Math.min(1, (height - dot.y) / F.bottomFadePx);
+        const bottomFade = edge * edge * (3 - 2 * edge);
+        const alpha =
+          Math.min(F.maxAlpha, base + glow * gain + spark * F.sparkAlphaBoost) * bottomFade;
+        const radius = F.dotRadius + (F.markDotRadius - F.dotRadius) * dot.mark;
+        // How much of the dot's paint comes from the theme accent: the glint
+        // plus the ripple's burst of color from a press.
+        const mix = Math.min(0.95, spark * F.sparkMix + paint * F.ripplePaintMix);
+        const x = dot.x + dx;
+        const y = dot.y + dy;
+        if (mix > 0.02) {
+          setFill(ink.spark);
+          context.globalAlpha = alpha * mix;
+          context.beginPath();
+          context.arc(x, y, radius, 0, Math.PI * 2);
+          context.fill();
+        }
+        setFill(ink.color);
+        context.globalAlpha = alpha * (1 - mix);
         context.beginPath();
-        context.arc(
-          dot.x + dx,
-          dot.y + dy,
-          dot.mark ? F.markDotRadius : F.dotRadius,
-          0,
-          Math.PI * 2,
-        );
+        context.arc(x, y, radius, 0, Math.PI * 2);
         context.fill();
       }
       context.globalAlpha = 1;
@@ -13457,10 +13571,8 @@ function GeneratedMediaDotField() {
       stop();
       if (reducedMotion.matches) {
         ripplesRef.current = [];
-        idle = false;
         draw(performance.now(), false);
       } else {
-        idle = false;
         raf = requestAnimationFrame(frame);
       }
     };
@@ -13473,7 +13585,6 @@ function GeneratedMediaDotField() {
 
     const resizeObserver = new ResizeObserver(() => {
       rebuild();
-      idle = false;
       if (reducedMotionRef.current) draw(performance.now(), false);
     });
     resizeObserver.observe(canvas);
@@ -13481,7 +13592,6 @@ function GeneratedMediaDotField() {
     // Theme flips swap the computed ink; repaint with the new values.
     const themeObserver = new MutationObserver(() => {
       ink = readInk();
-      idle = false;
       if (reducedMotionRef.current) draw(performance.now(), false);
     });
     themeObserver.observe(document.documentElement, {
@@ -13532,6 +13642,31 @@ function AgentGeneratedMediaPlaceholder({ kind }: { kind: "image" | "video" }) {
   );
 }
 
+/** Completion reveal for generated media: when a watched running turn
+ * completes and its bytes are ready, the media develops out of the generating
+ * field - the dot-field surface mounts over it (its entrance ripple doubling
+ * as the completion burst) and dissolves. Arming on the running -> complete
+ * flip keeps history loads and reduced motion on the instant swap. */
+function useGeneratedMediaReveal(status: "running" | "complete" | "error", ready: boolean) {
+  const [revealing, setRevealing] = useState(false);
+  const armedRef = useRef(false);
+  const prevStatusRef = useRef(status);
+  useEffect(() => {
+    if (prevStatusRef.current === "running" && status === "complete") {
+      armedRef.current = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    }
+    prevStatusRef.current = status;
+  }, [status]);
+  useEffect(() => {
+    if (!armedRef.current || status !== "complete" || !ready) return;
+    armedRef.current = false;
+    setRevealing(true);
+    const timer = setTimeout(() => setRevealing(false), 900);
+    return () => clearTimeout(timer);
+  }, [status, ready]);
+  return revealing;
+}
+
 function AgentGeneratedImage({
   part,
   onOpen,
@@ -13564,6 +13699,9 @@ function AgentGeneratedImage({
     };
   }, [part.status, part.dataUrl, part.path]);
 
+  const imageSrc = part.dataUrl ?? pathPreviewDataUrl;
+  const revealing = useGeneratedMediaReveal(part.status, Boolean(imageSrc));
+
   if (part.status === "running") {
     return (
       <div
@@ -13595,14 +13733,22 @@ function AgentGeneratedImage({
   // "Open" enlarges filesystem-backed images in the artifact viewer. MCP image
   // blocks have only inline bytes, so they render as a plain frame; Hermes
   // MEDIA references have a path and lazily fetch their preview data url above.
-  const imageSrc = part.dataUrl ?? pathPreviewDataUrl;
   const image = imageSrc ? (
     <img src={imageSrc} alt={part.prompt} draggable={false} />
   ) : part.path ? (
     <span className="agent-generated-image-loading text-shimmer shimmer">Loading image...</span>
   ) : null;
+  const reveal = revealing ? (
+    <span className="agent-generated-media-reveal" aria-hidden>
+      <GeneratedMediaDotField />
+    </span>
+  ) : null;
   return (
-    <figure className="agent-generated-image" data-status="complete">
+    <figure
+      className="agent-generated-image"
+      data-status="complete"
+      data-revealing={revealing ? "true" : undefined}
+    >
       {part.path ? (
         <button
           type="button"
@@ -13612,9 +13758,13 @@ function AgentGeneratedImage({
           title="Open image"
         >
           {image}
+          {reveal}
         </button>
       ) : (
-        <div className="agent-generated-image-frame">{image}</div>
+        <div className="agent-generated-image-frame">
+          {image}
+          {reveal}
+        </div>
       )}
       <figcaption className="agent-generated-image-bar">
         <span className="agent-generated-image-name" title={label}>
@@ -13628,7 +13778,7 @@ function AgentGeneratedImage({
             aria-label="Download image"
             title="Download image"
           >
-            <IconArrowInbox size={14} aria-hidden />
+            <IconArrowInbox size={15} aria-hidden />
             <span>Download</span>
           </button>
         ) : null}
@@ -13648,6 +13798,9 @@ function AgentGeneratedVideo({
   onRetry?: () => void;
   retryDisabledReason?: string;
 }) {
+  const src = part.status === "complete" && part.path ? localVideoFileSrc(part.path) : undefined;
+  const revealing = useGeneratedMediaReveal(part.status, Boolean(src));
+
   if (part.status === "running") {
     const progress = videoProgressLabel(part);
     return (
@@ -13688,9 +13841,12 @@ function AgentGeneratedVideo({
     );
   }
   const label = part.name?.trim() || "Generated video";
-  const src = part.path ? localVideoFileSrc(part.path) : undefined;
   return (
-    <figure className="agent-generated-video" data-status="complete">
+    <figure
+      className="agent-generated-video"
+      data-status="complete"
+      data-revealing={revealing ? "true" : undefined}
+    >
       <div className="agent-generated-video-frame">
         {src ? (
           <video controls src={src} poster={part.posterDataUrl} preload="metadata" />
@@ -13699,6 +13855,11 @@ function AgentGeneratedVideo({
             Loading video...
           </span>
         )}
+        {revealing ? (
+          <span className="agent-generated-media-reveal" aria-hidden>
+            <GeneratedMediaDotField />
+          </span>
+        ) : null}
       </div>
       <figcaption className="agent-generated-image-bar">
         <span className="agent-generated-image-name" title={label}>
@@ -13712,7 +13873,7 @@ function AgentGeneratedVideo({
             aria-label="Download video"
             title="Download video"
           >
-            <IconArrowInbox size={14} aria-hidden />
+            <IconArrowInbox size={15} aria-hidden />
             <span>Download</span>
           </button>
         ) : null}
