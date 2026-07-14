@@ -3043,25 +3043,147 @@ input:focus-visible,
   color: var(--foreground);
 }
 
-/* Generated image (the /image slash command) — rendered inline in the assistant
- * turn. Running shows a square shimmer placeholder; complete shows the image in
- * a quiet button that opens the file viewer (zoom-in cursor), with a download
- * action in the caption bar. Sized to sit in the chat column without dominating
- * it. */
+/* Generated image (the /image slash command and agent image tools) — rendered
+ * inline in the assistant turn. Running reserves the finished image's canvas;
+ * complete shows the image in a quiet button that opens the file viewer
+ * (zoom-in cursor), with a download action in the caption bar. Sized to sit in
+ * the chat column without dominating it. */
 .agent-generated-image {
   max-width: 320px;
-  margin-block: var(--sp-2);
+  /* Figures carry a UA margin-inline of 40px - without this reset the
+   * completed card lands indented relative to the generating placeholder. */
+  margin: var(--sp-2) 0;
 }
 
-.agent-generated-image-placeholder {
-  display: grid;
-  place-items: center;
-  aspect-ratio: 1 / 1;
-  border: 1px solid var(--border-subtle);
+/* Completed media is one card: the picture on top, the caption bar as the
+ * card's footer - the same chrome family as the generating card. The 4px
+ * padding insets the picture so it nests concentrically inside the card
+ * (inner radius = outer - inset), the same idiom as the artifact icon tile. */
+.agent-generated-image[data-status="complete"],
+.agent-generated-video[data-status="complete"] {
+  overflow: hidden;
   border-radius: var(--r-lg);
-  background: var(--muted);
+  padding: var(--sp-1);
+  background: var(--card);
+  box-shadow: var(--shadow-sm), var(--shadow-inset);
+}
+
+/* Generating state: a particle dot field inside a quiet card - the lattice,
+ * the June Agents mark, the traveling sheen, and the pointer ripples are all
+ * drawn by GeneratedMediaDotField on a canvas; these rules supply the surface
+ * and the per-theme ink the canvas reads (color + the alpha custom props).
+ * The status lives in its own footer, so the sheen never crosses the text. */
+.agent-generated-media-placeholder-card {
+  overflow: hidden;
+  border-radius: var(--r-lg);
+  padding: var(--sp-1);
+  background: var(--card);
+  box-shadow: var(--shadow-sm), var(--shadow-inset);
+}
+
+.agent-generated-image-placeholder,
+.agent-generated-video-placeholder,
+.agent-generated-media-reveal {
+  --agent-generated-dot-alpha: 0.08;
+  --agent-generated-sheen-glow: 0.24;
+  --agent-generated-mark-alpha: 0.32;
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  /* Concentric with the card: inner radius = outer - the card's 4px inset. */
+  border-radius: calc(var(--r-lg) - var(--sp-1));
+  /* The gray canvas itself gradates into the card surface at the bottom (and
+   * the dot field thins out over the same run), so the footer transition is
+   * owned by the background rather than an overlay fading in on top. */
+  background: linear-gradient(to bottom, var(--secondary) 62%, var(--card));
   color: var(--muted-foreground);
-  font-size: var(--fs-sm);
+}
+
+.agent-generated-video-placeholder {
+  aspect-ratio: 16 / 9;
+}
+
+[data-theme="dark"] .agent-generated-image-placeholder,
+[data-theme="dark"] .agent-generated-video-placeholder,
+[data-theme="dark"] .agent-generated-media-reveal {
+  --agent-generated-dot-alpha: 0.05;
+  --agent-generated-sheen-glow: 0.27;
+  --agent-generated-mark-alpha: 0.3;
+  color: var(--foreground);
+}
+
+/* Completion reveal: the finished image develops out of the generating field.
+ * The field surface (same ink and gradient as the placeholder above) mounts
+ * over the picture - its entrance ripple doubles as the completion burst -
+ * then dissolves. The frame border and caption bar hold back until the field
+ * has mostly cleared, so the chrome lands on a visible image. */
+.agent-generated-media-reveal {
+  position: absolute;
+  inset: 0;
+  display: block;
+  pointer-events: none;
+  animation: agent-generated-reveal-dissolve 650ms var(--ease-in-out) 150ms forwards;
+}
+
+@keyframes agent-generated-reveal-dissolve {
+  to {
+    opacity: 0;
+  }
+}
+
+.agent-generated-image[data-revealing="true"] .agent-generated-image-bar,
+.agent-generated-video[data-revealing="true"] .agent-generated-image-bar {
+  animation: agent-generated-reveal-chrome-in 300ms var(--ease-out) 500ms backwards;
+}
+
+@keyframes agent-generated-reveal-chrome-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-generated-media-reveal {
+    display: none;
+  }
+}
+
+.agent-generated-media-field {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* The theme accent for the mark's glints and the press ripple's wash; the
+   * canvas reads the computed value (accent-color paints nothing here). */
+  accent-color: var(--brand);
+}
+
+/* The label sits on the card surface the canvas gradient lands on - no
+ * overlay of its own, so there is no seam to hide. Padding is set against
+ * the card's 4px inset (matching the completed caption bar). */
+.agent-generated-media-status-bar {
+  display: flex;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+}
+
+/* The label rides the shared shimmer system's cadence and theme contrast;
+ * only the sweep spread widens to suit the short standalone phrase. */
+.agent-generated-media-label {
+  --shimmer-spread: calc(2ch + var(--sp-8));
+  max-width: 100%;
+  font-size: var(--fs-lg);
+}
+
+/* Caption under a generating frame (video's elapsed-time note). */
+.agent-generated-media-caption {
+  margin-top: var(--sp-2);
+}
+
+.agent-generated-media-note {
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
 }
 
 .agent-generated-image-error {
@@ -3090,26 +3212,24 @@ input:focus-visible,
   background: var(--muted);
 }
 
+/* The picture nests concentrically inside the card (inner radius = outer -
+ * the card's 4px inset); position anchors the completion-reveal overlay. */
 .agent-generated-image-frame {
+  position: relative;
   display: block;
   width: 100%;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-lg);
+  border: 0;
   padding: 0;
+  border-radius: calc(var(--r-lg) - var(--sp-1));
   background: var(--card);
   overflow: hidden;
   cursor: zoom-in;
-}
-
-.agent-generated-image-frame:hover {
-  border-color: var(--border);
 }
 
 .agent-generated-image-frame img {
   display: block;
   width: 100%;
   height: auto;
-  border-radius: inherit;
 }
 
 .agent-generated-image-loading {
@@ -3120,18 +3240,21 @@ input:focus-visible,
   font-size: var(--fs-sm);
 }
 
+/* The caption bar is the card's footer, sized like the rest of the app's
+ * chrome rather than a fine-print strip under the picture. Padding is set
+ * against the card's 4px inset so the label lands a comfortable step in. */
 .agent-generated-image-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
-  margin-top: var(--sp-1);
+  padding: var(--sp-2) var(--sp-2) var(--sp-1) var(--sp-3);
 }
 
 .agent-generated-image-name {
   overflow: hidden;
   color: var(--muted-foreground);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3143,10 +3266,10 @@ input:focus-visible,
   gap: var(--sp-1);
   border: 0;
   border-radius: var(--r-sm);
-  padding: calc(var(--sp-1) / 2) var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
   background: transparent;
   color: var(--muted-foreground);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-md);
   cursor: pointer;
 }
 
@@ -3158,34 +3281,19 @@ input:focus-visible,
 
 .agent-generated-video {
   max-width: min(100%, 520px);
-  margin-block: var(--sp-2);
+  /* Same UA figure margin-inline reset as .agent-generated-image. */
+  margin: var(--sp-2) 0;
 }
 
-.agent-generated-video-placeholder {
-  display: grid;
-  place-items: center;
-  gap: var(--sp-2);
-  aspect-ratio: 16 / 9;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-lg);
-  background: var(--muted);
-  color: var(--muted-foreground);
-  font-size: var(--fs-sm);
-  text-align: center;
-}
-
-.agent-generated-video-progress {
-  color: var(--muted-foreground);
-  font-size: var(--fs-xs);
-}
-
+/* Nests concentrically inside the card like the image frame; position
+ * anchors the completion-reveal overlay. */
 .agent-generated-video-frame {
+  position: relative;
   display: grid;
   place-items: center;
   width: 100%;
   aspect-ratio: 16 / 9;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--r-lg);
+  border-radius: calc(var(--r-lg) - var(--sp-1));
   background: var(--card);
   overflow: hidden;
 }
@@ -3694,41 +3802,28 @@ input:focus-visible,
   overflow-y: auto;
 }
 
-.agent-usage-body[aria-busy="true"] {
+/* A refresh dims the stale card so it reads as reloading while the prior data
+   stays visible. The first-load body is aria-busy too (its skeleton is genuinely
+   busy), but must NOT dim — the static --surface-subtle skeleton bars already
+   sit close to the popover background, so a 60% dim would render them nearly
+   invisible. [data-first-load] carries that exemption. */
+.agent-usage-body[aria-busy="true"]:not([data-first-load]) {
   opacity: 0.6;
 }
 
-/* First-load skeleton bars: block-shaped shimmer standing in for the model name
-   and the legend reading/percent while the real meter track renders empty
+/* First-load skeleton bars: quiet static placeholders standing in for the model
+   name and the legend reading/percent while the real meter track renders empty
    beneath. The body structure is shared with the loaded content, and the live
    track starts from a pixel-identical empty frame before lighting up, so the
-   swap has no visible jump. The bars run their own background-position sweep on
-   a wide muted gradient — a block sweep, not a text-clip, so it is independent
-   of the shared .shimmer text utility (which clips to glyphs). Muted base, pill
-   radius; sizes come from spacing tokens with a small local width var. */
+   swap has no visible jump. Same treatment as the other first-load skeletons
+   (settings sections, messaging detail): a flat --surface-subtle bar with the
+   small radius — no sweep. Bars stay 1em tall so they occupy exactly the line
+   the real text will. */
 .agent-usage-skeleton {
   display: inline-block;
   height: 1em;
-  border-radius: var(--r-pill);
-  background: linear-gradient(
-    90deg,
-    var(--muted) 0%,
-    var(--muted) 35%,
-    var(--muted-foreground) 50%,
-    var(--muted) 65%,
-    var(--muted) 100%
-  );
-  background-size: 200% 100%;
-  animation: usage-skeleton-sweep 1.6s linear infinite;
-}
-
-@keyframes usage-skeleton-sweep {
-  0% {
-    background-position: 150% 0;
-  }
-  100% {
-    background-position: -50% 0;
-  }
+  border-radius: var(--r-sm);
+  background: var(--surface-subtle);
 }
 
 .agent-usage-skeleton-model {
@@ -3986,12 +4081,6 @@ input:focus-visible,
   .agent-usage-panel,
   .agent-usage-model-row,
   .agent-usage-meter-legend {
-    animation: none;
-  }
-
-  /* Static shimmer bars: no sweep, a flat muted fill. */
-  .agent-usage-skeleton {
-    background: var(--muted);
     animation: none;
   }
 
@@ -4899,8 +4988,9 @@ input:focus-visible,
  * where the user just acted, and clears itself when the turn finishes. A
  * content-sized pill (not another full-width box, which read as a second
  * composer) with the rolling dot spinner tying it to the working state. Same
- * surface recipe as the recording-consent note and the "Generating notes…"
- * pill so the app's status messages read as one family. */
+ * surface recipe as the "Generating notes…" pill so the app's progress
+ * statuses read as one family. (The recording-consent note left this family
+ * for the funding-notice card chrome — it asks, it doesn't report progress.) */
 .agent-composer-notice {
   pointer-events: auto;
   display: inline-flex;
@@ -11170,42 +11260,48 @@ input:focus-visible,
 
 /* Scoped to .record-dock to outrank the later, equal-specificity base
  * .inline-notice rule, which would otherwise win on background/border/padding. */
-/* Matches the "Generating notes…" pill's padding/height/radius/surface so the
- * two status messages read as the same family. */
+/* Same surface recipe as the chat funding notice (.funding-notice): card,
+ * ring-in-shadow, --shadow-md, --r-xl — notices docked on the composer and on
+ * the recorder read as one family. Move them together. */
 .record-dock .record-consent-note-surface {
+  align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-2) var(--sp-4);
   border-color: transparent;
-  border-radius: var(--r-md);
-  background: color-mix(in oklch, var(--muted) 68%, var(--card));
-  color: var(--muted-foreground);
-  box-shadow: none;
+  border-radius: var(--r-xl);
+  background: var(--card);
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
+}
+
+/* The Dismiss button hugs the corner radius like the funding notice's CTA. */
+.record-dock .record-consent-note-surface:has(.inline-notice-actions) {
+  padding-right: var(--sp-2);
 }
 
 .record-dock .record-consent-note-surface .inline-notice-message {
   flex-wrap: nowrap;
   font-size: var(--fs-md);
-  font-weight: 400;
-  line-height: 1;
   white-space: nowrap;
 }
 
-/* Dismiss reads as a quiet text link, not a button — no underline, just a
- * medium-weight label in the app's link color (matching .agent-markdown a)
- * that deepens to foreground on hover. line-height matches the message so the
- * two text runs share a baseline. */
-.record-dock .record-consent-note-surface .inline-notice-actions .btn {
-  height: auto;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--primary);
-  font-weight: 400;
-  line-height: 1;
+/* The warning-only variant has no button to set the row's control height, so
+ * the text alone must reach it. */
+.record-dock .record-consent-note-surface .inline-notice-body {
+  min-height: var(--control-md);
+  display: inline-flex;
+  align-items: center;
+  color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
 }
 
-.record-dock .record-consent-note-surface .inline-notice-actions .btn:hover {
-  background: none;
+/* Quiet secondary action, recolored like the funding notice's ghost buttons
+ * ("Or go Max", reopen links). */
+.record-dock .record-consent-note-surface .inline-notice-actions .btn-ghost {
+  color: var(--muted-foreground);
+}
+
+.record-dock .record-consent-note-surface .inline-notice-actions .btn-ghost:hover {
   color: var(--foreground);
 }
 
@@ -11300,16 +11396,33 @@ input:focus-visible,
   background: color-mix(in oklch, var(--warm-strong) 12%, transparent);
 }
 
-/* Mic-blocked strip — persistent inline notice that sits above the
- * chevron popover when microphone access is denied. Mirrors the
- * .record-options-row shape so it feels like part of the same family
- * of inline status surfaces. */
+/* Mic-blocked and needs-credits notices — persistent inline notices that sit
+ * above the record pill. They occupy the same footer slot the FundingNotice
+ * renders into, so they wear the same chrome (card, ring-in-shadow,
+ * --shadow-md, --r-xl, content-max column) — see .funding-notice; move them
+ * together. Scoped to .editor-footer to outrank the later, equal-specificity
+ * base .inline-notice rule. */
 /* Inline notice layout slot for the editor footer — forces the notice
  * onto its own row so the recorder shell (if rendered) sits below. */
-.record-mic-blocked,
-.record-funding-blocked {
+.editor-footer .record-mic-blocked,
+.editor-footer .record-funding-blocked {
   flex: 0 0 100%;
   width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto;
+  align-items: center;
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-4);
+  border-color: transparent;
+  border-radius: var(--r-xl);
+  background: var(--card);
+  box-shadow:
+    var(--shadow-md),
+    0 0 0 1px color-mix(in oklch, var(--border-subtle) 60%, transparent);
+}
+
+.editor-footer .record-mic-blocked .inline-notice-body,
+.editor-footer .record-funding-blocked .inline-notice-body {
+  color: color-mix(in oklch, var(--foreground) 72%, var(--muted-foreground));
 }
 
 /* The out-of-credits notice in the editor footer sits on its own row above
@@ -12783,9 +12896,11 @@ input:focus-visible,
   color: var(--muted-foreground);
 }
 
+/* The granted pill follows the active theme accent rather than a generic
+ * green, so it sits in the earthy palette like the rest of the app. */
 .settings-permission-status[data-status="allowed"] {
-  background: color-mix(in oklch, var(--success) 14%, transparent);
-  color: color-mix(in oklch, var(--success) 72%, var(--foreground));
+  background: color-mix(in oklch, var(--brand) 14%, transparent);
+  color: color-mix(in oklch, var(--brand) 72%, var(--foreground));
 }
 
 .settings-permission-status[data-status="attention"] {
@@ -25979,15 +26094,15 @@ input:focus-visible,
 }
 
 .connector-approvals-stack-mark + .connector-approvals-stack-mark {
-  margin-left: -5px;
+  margin-left: -2px;
 }
 
-/* The next mark sits 3px right of this tile's right edge center (16px tile,
- * -5px overlap → its center lands at x=19px); carving a 10px circle there
+/* The next mark sits 6px right of this tile's right edge center (16px tile,
+ * -2px overlap → its center lands at x=22px); carving a 10px circle there
  * leaves a 2px see-through gap around the overlapping mark. */
 .connector-approvals-stack-mark:not(:last-child) {
-  -webkit-mask: radial-gradient(circle 10px at 19px 50%, transparent 98%, #000 100%);
-  mask: radial-gradient(circle 10px at 19px 50%, transparent 98%, #000 100%);
+  -webkit-mask: radial-gradient(circle 10px at 22px 50%, transparent 98%, #000 100%);
+  mask: radial-gradient(circle 10px at 22px 50%, transparent 98%, #000 100%);
 }
 
 .connector-approvals-header-actions {
