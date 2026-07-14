@@ -169,3 +169,16 @@ export function stripProjectContext(prompt: string): string {
   const match = GENERATED_CONTEXT_BLOCK.exec(prompt);
   return match ? prompt.slice(match[0].length) : prompt;
 }
+
+/** Session previews are TRUNCATED snippets of the raw prompt text, so a
+ * project-filed session's preview can open with the injected block cut off
+ * before its close marker — the strict full-block strip above can't match
+ * it. For previews: drop a complete leading block like the strict strip;
+ * when the block is truncated (no close marker), nothing of the user's own
+ * text is present, so blank the preview rather than expose instructions. */
+export function stripProjectContextFromPreview(preview: string | undefined): string | undefined {
+  if (!preview || !preview.startsWith(CONTEXT_OPEN_MARKER)) return preview;
+  const closeIndex = preview.indexOf(CONTEXT_CLOSE_MARKER);
+  if (closeIndex < 0) return undefined;
+  return preview.slice(closeIndex + CONTEXT_CLOSE_MARKER.length).trim() || undefined;
+}

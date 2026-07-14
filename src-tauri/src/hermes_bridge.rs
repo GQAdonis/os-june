@@ -2524,6 +2524,15 @@ pub fn set_june_character(
     Ok(june_character_status(&hermes_home))
 }
 
+/// Stops both runtime mode slots so the next spawn re-syncs SOUL.md. The
+/// CHARACTER.md pattern (`set_june_character`) for any setting that feeds
+/// `sync_june_soul`: the memory toggle uses it so guidance never disagrees
+/// with the tools' actual enabled state longer than the current process.
+pub fn restart_hermes_for_soul_change(bridge: &HermesBridge) -> Result<(), AppError> {
+    stop_hermes_mode(bridge, false)?;
+    stop_hermes_mode(bridge, true)
+}
+
 /// Stops the runtime in one mode slot, leaving the other mode running.
 fn stop_hermes_mode(bridge: &HermesBridge, full_mode: bool) -> Result<(), AppError> {
     let process = {

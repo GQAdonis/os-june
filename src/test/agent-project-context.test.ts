@@ -3,6 +3,7 @@ import {
   prepareProjectPrompt,
   ProjectContextSignatureStore,
   stripProjectContext,
+  stripProjectContextFromPreview,
   type AgentProjectContext,
 } from "../lib/agent-project-context";
 
@@ -161,6 +162,21 @@ describe("agent project context", () => {
       store.delete("session-1");
       expect(new ProjectContextSignatureStore(KEY).get("session-1")).toBeUndefined();
     });
+  });
+
+  it("never lets a session preview expose the injected block", () => {
+    const injected = prepareProjectPrompt("Plan the launch", project, undefined);
+
+    // Full block present: the user's own text survives.
+    expect(stripProjectContextFromPreview(injected.text)).toBe("Plan the launch");
+
+    // Preview truncated mid-block: nothing of the user's text is present, so
+    // the preview blanks instead of leaking instructions.
+    expect(stripProjectContextFromPreview(injected.text.slice(0, 60))).toBeUndefined();
+
+    // Ordinary previews pass through untouched.
+    expect(stripProjectContextFromPreview("Plain preview")).toBe("Plain preview");
+    expect(stripProjectContextFromPreview(undefined)).toBeUndefined();
   });
 
   it("keeps multi-line instructions intact through strip", () => {
