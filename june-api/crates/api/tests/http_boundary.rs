@@ -381,7 +381,7 @@ async fn integration_note_generate_forwards_venice_api_key_header() -> Result<()
             "promptVersion": "prompt-v1",
             "title": "Planning",
             "transcript": "System: launch is Friday",
-            "model": "text-model"
+            "model": "venice-text-model"
         }),
         "opaque_user_venice_key",
     )?)
@@ -395,6 +395,29 @@ async fn integration_note_generate_forwards_venice_api_key_header() -> Result<()
         "Generated note body with user Venice key"
     );
     assert!(!body.to_string().contains("opaque_user_venice_key"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn integration_note_generate_rejects_byok_for_current_non_venice_model()
+-> Result<(), Box<dyn Error>> {
+    let response = send(json_request_with_venice_api_key(
+        "/v1/notes/generate",
+        &serde_json::json!({
+            "noteId": "note-1",
+            "promptVersion": "prompt-v1",
+            "title": "Planning",
+            "transcript": "System: launch is Friday",
+            "model": "text-model"
+        }),
+        "opaque_user_venice_key",
+    )?)
+    .await;
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = response_json(response).await?;
+    assert_eq!(body["success"], false);
+    assert_eq!(body["message"], "venice_api_key_model_unavailable");
     Ok(())
 }
 
@@ -1791,6 +1814,24 @@ fn models() -> BTreeMap<String, ModelPriceConfig> {
                 provider: ModelProvider::Openai,
                 model_type: ModelType::Text,
                 display_name: "Text Model".to_string(),
+                description: None,
+                privacy: None,
+                pricing: None,
+                context_tokens: None,
+                traits: Vec::new(),
+                capabilities: Vec::new(),
+            },
+        ),
+        (
+            "venice-text-model",
+            ModelPriceConfig {
+                unit: PriceUnit::Tokens,
+                credits_per_million_seconds: None,
+                input_credits_per_million_tokens: Some(500),
+                output_credits_per_million_tokens: Some(500),
+                provider: ModelProvider::Venice,
+                model_type: ModelType::Text,
+                display_name: "Venice Text Model".to_string(),
                 description: None,
                 privacy: None,
                 pricing: None,

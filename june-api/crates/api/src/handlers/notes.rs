@@ -366,8 +366,10 @@ pub(crate) fn resolve_priced_text_model(
     resolve_priced_text_model_kind(state.pricing(), requested_model_id)
 }
 
-/// Auto is a June-managed route. Reject stale text BYOK selections instead of
-/// silently changing billing; callers may preserve the legacy ASR fallback.
+/// Auto is a June-managed route. Strip BYOK from an explicit Auto selection,
+/// and reject every other non-Venice resolution instead of forwarding the key
+/// across a provider boundary. Callers may preserve a legacy ASR fallback only
+/// when it resolves to another Venice model.
 pub(crate) fn credentials_for_resolved_model(
     mut credentials: ProviderCredentials,
     requested_model_id: &str,
@@ -375,8 +377,8 @@ pub(crate) fn credentials_for_resolved_model(
     resolved_supports_venice_byok: bool,
 ) -> Result<ProviderCredentials, ApiError> {
     if credentials.has_venice_api_key()
-        && requested_model_id != resolved_model_id
-        && (resolved_model_id == AUTO_TEXT_MODEL || !resolved_supports_venice_byok)
+        && ((resolved_model_id == AUTO_TEXT_MODEL && requested_model_id != AUTO_TEXT_MODEL)
+            || (resolved_model_id != AUTO_TEXT_MODEL && !resolved_supports_venice_byok))
     {
         return Err(ApiError::unprocessable("venice_api_key_model_unavailable"));
     }
@@ -543,6 +545,61 @@ mod tests {
         let error =
             credentials_for_resolved_model(credentials, "retired-venice-asr", "openai-asr", false)
                 .expect_err("provider-changing BYOK fallback should fail");
+
+        assert!(matches!(
+            error,
+            ApiError::Unprocessable { message, .. }
+                if message == "venice_api_key_model_unavailable"
+        ));
+    }
+
+    #[test]
+    fn byok_rejects_current_non_venice_model() {
+        let credentials = ProviderCredentials {
+            venice_api_key: Some("opaque-user-key".to_string()),
+        };
+
+        let error = credentials_for_resolved_model(
+            credentials,
+            "openai/current-model",
+            "openai/current-model",
+            false,
+        )
+        .expect_err("Venice BYOK must not cross into a non-Venice provider");
+
+        assert!(matches!(
+            error,
+            ApiError::Unprocessable { message, .. }
+                if message == "venice_api_key_model_unavailable"
+        ));
+    }
+
+    #[test]
+    fn explicit_auto_strips_byok() {
+        let credentials = ProviderCredentials {
+            venice_api_key: Some("opaque-user-key".to_string()),
+        };
+
+        let credentials =
+            credentials_for_resolved_model(credentials, AUTO_TEXT_MODEL, AUTO_TEXT_MODEL, false)
+                .expect("explicit Auto remains a June-managed request");
+
+        assert!(!credentials.has_venice_api_key());
+    }
+
+    #[test]
+    fn stale_text_byok_rejects_fallback_to_auto() {
+        let credentials = ProviderCredentials {
+            venice_api_key: Some("opaque-user-key".to_string()),
+        };
+
+        let error = credentials_for_resolved_model(
+            credentials,
+            "venice/retired-model",
+            AUTO_TEXT_MODEL,
+            true,
+        )
+        .expect_err("stale Venice BYOK must not silently switch to Auto billing");
 
         assert!(matches!(
             error,
