@@ -89,19 +89,11 @@ One durable fact June remembers, stored in June's own SQLite `memories`
 table — global or scoped to one project — written by the agent through
 `june_context` memory tools (or by the user in Settings), inspectable and
 editable in the "Memory" settings tab and the project detail view. Deletion
-is a hard DELETE plus a tombstone row (so sync can propagate it).
+is a hard DELETE plus a tombstone row (future-proofing for any later
+multi-device sync; nothing reads tombstones today).
 _Avoid_: the Hermes memory toolset's `memories/` files (the upstream
 mechanism June does not use for this), Biography (the connector-built user
 profile).
-
-**Memory sync** (zero-access):
-The opt-in encrypted sync of memory entries + project instructions across a
-user's devices via June API's `/v1/memory-sync/blob`. Client-encrypted under
-a Keychain-held key the server never sees; the key moves between devices only
-as a user-transferred **recovery phrase** (see
-[ADR-0020](docs/adr/0020-zero-access-encrypted-memory-sync.md)).
-_Avoid_: backup (it is multi-device sync), cloud memory (the server cannot
-read it).
 
 ### Audio & recording
 
