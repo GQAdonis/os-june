@@ -226,6 +226,7 @@ import { hermesTraceBuffer } from "../../lib/hermes-trace-buffer";
 import { UnsupportedEventNotice } from "./UnsupportedEventNotice";
 import { HermesTracePanel } from "./HermesTracePanel";
 import { MarkdownContent, highlightText } from "./MarkdownContent";
+import { SmoothedStreamingMarkdown } from "./SmoothedStreamingMarkdown";
 import {
   ComposerModelPicker,
   PrivacyModeBadge,
@@ -9820,6 +9821,14 @@ export function AgentWorkspace({
   const transcriptProgrammaticScrollTimeoutRef = useRef<number | undefined>();
   const transcriptLastScrollTopRef = useRef(0);
 
+  const pinTranscriptAfterVisibleReveal = useCallback(() => {
+    if (!transcriptShouldStickToBottomRef.current) return;
+    const scroller = agentScrollRef.current;
+    if (!scroller || typeof scroller.scrollTo !== "function") return;
+    scroller.scrollTo({ top: scroller.scrollHeight, behavior: "auto" });
+    transcriptLastScrollTopRef.current = scroller.scrollTop;
+  }, []);
+
   // History for the selected conversation has landed: a session gets an entry
   // in hermesSessionMessages (even an empty one) once its fetch resolves;
   // tasks either arrive with their turns inline or get recorded when the lazy
@@ -10797,6 +10806,7 @@ export function AgentWorkspace({
             )
           }
           branchingMessageId={branchingMessageId}
+          onVisibleMarkdownChange={pinTranscriptAfterVisibleReveal}
         />
       ))}
       <AgentThinking
@@ -10862,6 +10872,7 @@ export function AgentWorkspace({
             onTopUp={handleTopUp}
             topUpLabel={topUpLabel}
             fundingTier={fundingTier}
+            onVisibleMarkdownChange={pinTranscriptAfterVisibleReveal}
             onApproval={(part, choice) => {
               const sessionId = part.sessionId ?? selectedTask.hermesSessionId;
               if (!sessionId) return;
@@ -12655,6 +12666,7 @@ function AgentChatTurnRow({
   onTopUp,
   topUpLabel,
   fundingTier,
+  onVisibleMarkdownChange,
   onBranch,
   branchingMessageId,
   turn,
@@ -12690,6 +12702,7 @@ function AgentChatTurnRow({
   onTopUp?: () => void;
   topUpLabel?: string;
   fundingTier?: FundingTier;
+  onVisibleMarkdownChange?: (visibleMarkdown: string) => void;
   /** Fork the conversation from this turn into a new session (feature 07).
    * Optional: only Hermes-session rows pass it — task rows and the dev gallery
    * omit it, so the action is absent there. */
@@ -12951,9 +12964,11 @@ function AgentChatTurnRow({
                 {/* A part can retain raw MEDIA deltas while streaming or when
                     a terminal/error event arrives without message.complete.
                     Those transport references never belong in assistant prose. */}
-                <MarkdownContent
+                <SmoothedStreamingMarkdown
                   markdown={stripRenderedMediaReferences(part.text, part.status === "running")}
+                  running={part.status === "running"}
                   repairProse
+                  onVisibleMarkdownChange={onVisibleMarkdownChange}
                 />
               </div>
             )
