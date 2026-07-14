@@ -83,6 +83,7 @@ stalkerware, or other malicious code.";
 
 static HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static AGENT_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static LOCAL_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
 static VIDEO_JOB_MODELS: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -925,7 +926,7 @@ async fn generate_note_from_transcript_local(
         ]
     });
     let local_request = with_local_auth(
-        agent_http_client().post(local_chat_completions_url(&settings)?),
+        local_http_client().post(local_chat_completions_url(&settings)?),
         &settings,
     );
     let response = local_request
@@ -982,7 +983,7 @@ async fn proxy_local_agent_chat_completions(
         inject_local_safety_context(object);
     }
     let request = with_local_auth(
-        agent_http_client().post(local_chat_completions_url(&settings)?),
+        local_http_client().post(local_chat_completions_url(&settings)?),
         &settings,
     );
     let response = request.json(&body).send().await.map_err(network_error)?;
@@ -2714,6 +2715,23 @@ fn app_version_headers() -> reqwest::header::HeaderMap {
         headers.insert(JUNE_APP_VERSION_HEADER, value);
     }
     headers
+}
+
+/// For user-configured local/BYO inference endpoints. Same transport
+/// settings as the agent client, but without the June-only version header;
+/// that header is a June API contract, not something to send to whatever
+/// host the user pointed their local model at.
+fn local_http_client() -> &'static reqwest::Client {
+    LOCAL_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .timeout(AGENT_HTTP_TIMEOUT)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .user_agent(concat!("os-june-agent/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
 }
 
 // June API requires a non-empty `title` on transcribe and generate calls

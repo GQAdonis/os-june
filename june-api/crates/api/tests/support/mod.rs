@@ -759,8 +759,16 @@ impl VideoProvider for FakeVideoProvider {
         if request.prompt.contains("boom") {
             return Err(DomainError::UpstreamProvider);
         }
+        // A prompt mentioning "instantly" yields a job whose first poll is
+        // already complete (VPS-backed URL), so tests can pin the completed
+        // status shape; every other job stays processing forever.
+        let venice_queue_id = if request.prompt.contains("instantly") {
+            "vq_completed".to_string()
+        } else {
+            "vq_boundary".to_string()
+        };
         Ok(VideoQueued {
-            venice_queue_id: "vq_boundary".to_string(),
+            venice_queue_id,
             download_url: None,
         })
     }
@@ -775,7 +783,12 @@ impl VideoProvider for FakeVideoProvider {
         })
     }
 
-    async fn retrieve(&self, _model: &str, _queue_id: &str) -> Result<VideoRetrieved, DomainError> {
+    async fn retrieve(&self, _model: &str, queue_id: &str) -> Result<VideoRetrieved, DomainError> {
+        if queue_id == "vq_completed" {
+            return Ok(VideoRetrieved::CompletedUrl {
+                download_url: "https://videos.example.com/generated.mp4".to_string(),
+            });
+        }
         Ok(VideoRetrieved::Processing {
             average_execution_ms: 145_000,
             execution_ms: 30_000,
