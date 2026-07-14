@@ -389,7 +389,7 @@ pub async fn set_memory_enabled(
     Ok(settings)
 }
 
-async fn create_memory_with_settings(
+pub(crate) async fn create_memory_with_settings(
     repos: &Repositories,
     settings_path: &Path,
     folder_id: Option<&str>,
@@ -475,7 +475,7 @@ fn validated_folder_instructions(instructions: Option<&str>) -> Result<Option<&s
     Ok(instructions)
 }
 
-fn memory_settings_path(app: &AppHandle) -> Result<PathBuf, AppError> {
+pub(crate) fn memory_settings_path(app: &AppHandle) -> Result<PathBuf, AppError> {
     app.path()
         .app_config_dir()
         .map(|directory| directory.join("memory-settings.json"))
