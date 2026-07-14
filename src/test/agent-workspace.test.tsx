@@ -85,6 +85,8 @@ const mocks = vi.hoisted(() => ({
   listHermesSessionMessages: vi.fn(),
   hermesAgentCliAccess: vi.fn(),
   setHermesAgentCliAccess: vi.fn(),
+  hermesBrowserAccess: vi.fn(),
+  setHermesBrowserAccess: vi.fn(),
   listHermesSessions: vi.fn(),
   gatewayRequest: vi.fn(),
   gatewayEventHandlers: new Set<(event: Record<string, unknown>) => void>(),
@@ -119,6 +121,7 @@ vi.mock("../lib/tauri", () => ({
   hermesBridgeFileText: mocks.hermesBridgeFileText,
   hermesBridgeMessagingPlatforms: mocks.hermesBridgeMessagingPlatforms,
   hermesAgentCliAccess: mocks.hermesAgentCliAccess,
+  hermesBrowserAccess: mocks.hermesBrowserAccess,
   hermesBridgeSkills: mocks.hermesBridgeSkills,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
   hermesBridgeToolsets: mocks.hermesBridgeToolsets,
@@ -134,6 +137,7 @@ vi.mock("../lib/tauri", () => ({
   videoStatus: mocks.videoStatus,
   retryAgentTask: mocks.retryAgentTask,
   setHermesAgentCliAccess: mocks.setHermesAgentCliAccess,
+  setHermesBrowserAccess: mocks.setHermesBrowserAccess,
   setImageSafeMode: mocks.setImageSafeMode,
   setImageSafeModePromptDismissed: mocks.setImageSafeModePromptDismissed,
   setLocalGenerationEnabled: mocks.setLocalGenerationEnabled,
@@ -477,6 +481,7 @@ describe("AgentWorkspace", () => {
     mocks.listHermesSessions.mockResolvedValue([existingSession]);
     mocks.listHermesSessionMessages.mockResolvedValue([]);
     mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: false });
     mocks.hermesBridgeSkills.mockResolvedValue([]);
     mocks.getHermesBridgeSkill.mockImplementation(async (name: string) => ({
       name,
@@ -5093,6 +5098,118 @@ describe("AgentWorkspace", () => {
     // The card resolves quietly; nothing is sent into the session.
     expect(await screen.findByText("Not now")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Enable Agent CLI access" })).toBeNull();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+  });
+
+  it("renders June's browser use request as a card and enables the grant", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "check my dashboard and summarize it",
+        timestamp: "2026-07-14T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "That page needs a live browser session.\n\n[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+    mocks.setHermesBrowserAccess.mockResolvedValue({ enabled: true });
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(await screen.findByText("Browser use requested")).toBeInTheDocument();
+    // The token renders as the card, never as literal text.
+    expect(screen.queryByText(/REQUEST:BROWSER_ACCESS/)).toBeNull();
+    expect(screen.getByText(/needs a live browser session/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Enable Browser use" }));
+
+    // Approving persists the same stored grant as the Settings toggle (the
+    // setter also restarts both runtime modes)...
+    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(true));
+    // ...and June is told the grant is live, so it retries the turn that
+    // asked on the restarted runtime.
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("I enabled Browser use"),
+      }),
+    );
+    expect(await screen.findByText("Browser use enabled")).toBeInTheDocument();
+  });
+
+  it("blocks the browser-use follow-up at the shared paid dispatch boundary", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+    mocks.setHermesBrowserAccess.mockResolvedValue({ enabled: true });
+    const user = userEvent.setup();
+
+    render(
+      <AgentWorkspace
+        initialSession={existingSession}
+        creditActionsDisabledReason="Add credits to send messages or generate images and videos."
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Enable Browser use" }));
+
+    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(true));
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+    expect(
+      screen.getAllByText("Add credits to send messages or generate images and videos.").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("shows the browser use request as already granted when the grant is on", async () => {
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: true });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    // Already granted resolves to the quiet collapsed receipt row — the full
+    // "requested" prompt title is not shown, only the enabled outcome.
+    expect(await screen.findByText("Browser use enabled")).toBeInTheDocument();
+    expect(screen.queryByText("Browser use requested")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Enable Browser use" })).toBeNull();
+  });
+
+  it("dismisses the browser use request without changing the grant", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "The page needs a browser.\n\n[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    await user.click(await screen.findByRole("button", { name: "Not now" }));
+
+    // Declining leaves the grant off and the session usable: nothing is sent
+    // into the session and the card resolves quietly.
+    expect(mocks.setHermesBrowserAccess).not.toHaveBeenCalled();
+    expect(await screen.findByText("Not now")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Enable Browser use" })).toBeNull();
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
   });
 
