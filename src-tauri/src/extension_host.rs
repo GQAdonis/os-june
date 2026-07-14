@@ -942,7 +942,7 @@ mod tests {
 
     #[test]
     fn hello_at_other_versions_is_rejected_with_expected_version() {
-        for version in [None, Some(0), Some(2), Some(999)] {
+        for version in [None, Some(0), Some(PROTOCOL_VERSION + 1), Some(999)] {
             let reply = hello_response(version, "0.0.32");
             assert_eq!(reply["type"], "hello_incompatible", "version {version:?}");
             assert_eq!(reply["expected"], PROTOCOL_VERSION);
