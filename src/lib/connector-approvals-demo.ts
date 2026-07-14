@@ -130,6 +130,9 @@ export function registerConnectorApprovalsDemo({
       case "clear":
       case "stop":
         setPending([]);
+        // Drop the preview override so a stale count can't leak into a later
+        // real approvals refresh in the same dev session.
+        delete win.__connectorApprovalsStack;
         return "Approvals tray dismissed.";
       default:
         return HELP;
@@ -139,7 +142,8 @@ export function registerConnectorApprovalsDemo({
   (window as unknown as Record<string, unknown>).__connectorApprovals = hook;
 
   function dispose() {
-    delete (window as unknown as Record<string, unknown>).__connectorApprovals;
+    delete win.__connectorApprovals;
+    delete win.__connectorApprovalsStack;
   }
 
   return { dispose };
