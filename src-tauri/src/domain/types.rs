@@ -61,6 +61,7 @@ pub struct FolderDto {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryDto {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     pub content: String,
     pub source: String,
@@ -975,4 +976,30 @@ pub enum SourceState {
     Invalid,
     Recoverable,
     Failed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MemoryDto;
+
+    fn memory(folder_id: Option<&str>) -> MemoryDto {
+        MemoryDto {
+            id: "memory-1".to_string(),
+            folder_id: folder_id.map(str::to_string),
+            content: "Remember this".to_string(),
+            source: "user".to_string(),
+            created_at: "2026-07-14T00:00:00Z".to_string(),
+            updated_at: "2026-07-14T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn memory_folder_id_is_omitted_for_global_memory_and_present_for_scoped_memory() {
+        let global = serde_json::to_value(memory(None)).expect("serialize global memory");
+        assert!(global.get("folderId").is_none());
+
+        let scoped =
+            serde_json::to_value(memory(Some("folder-1"))).expect("serialize folder-scoped memory");
+        assert_eq!(scoped["folderId"], "folder-1");
+    }
 }

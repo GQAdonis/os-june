@@ -59,7 +59,8 @@ use tauri::{AppHandle, Manager};
 use tokio::{sync::OnceCell, time::sleep};
 
 const MEMORY_CONTENT_MAX_CHARS: usize = 4_000;
-static MEMORY_SETTINGS_LOCK: Mutex<()> = Mutex::new(());
+const FOLDER_INSTRUCTIONS_MAX_CHARS: usize = 4_000;
+static MEMORY_SETTINGS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tauri::command]
 pub async fn bootstrap_app(app: AppHandle) -> Result<BootstrapResponse, AppError> {
@@ -314,26 +315,17 @@ pub async fn create_memory(
     content: String,
     source: String,
 ) -> Result<MemoryDto, AppError> {
-    let content = validated_memory_content(&content)?;
-    let source = source.trim();
-    if !matches!(source, "agent" | "user") {
-        return Err(AppError::new(
-            "memory_source_invalid",
-            "Memory source must be agent or user.",
-        ));
-    }
     let repos = repositories(&app).await?;
-    if let Some(folder_id) = folder_id.as_deref() {
-        if !repos.folder_exists(folder_id).await? {
-            return Err(AppError::new(
-                "folder_not_found",
-                "Folder was not found or has already been deleted.",
-            ));
-        }
-    }
-    repos
-        .create_memory(folder_id.as_deref(), content, source)
-        .await
+    let settings_path = memory_settings_path(&app)?;
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+    create_memory_with_settings(
+        &repos,
+        &settings_path,
+        folder_id.as_deref(),
+        &content,
+        &source,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -342,8 +334,10 @@ pub async fn update_memory(
     id: String,
     content: String,
 ) -> Result<MemoryDto, AppError> {
-    let content = validated_memory_content(&content)?;
-    repositories(&app).await?.update_memory(&id, content).await
+    let repos = repositories(&app).await?;
+    let settings_path = memory_settings_path(&app)?;
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+    update_memory_with_settings(&repos, &settings_path, &id, &content).await
 }
 
 #[tauri::command]
@@ -357,9 +351,10 @@ pub async fn set_folder_instructions(
     folder_id: String,
     instructions: Option<String>,
 ) -> Result<crate::domain::types::FolderDto, AppError> {
+    let instructions = validated_folder_instructions(instructions.as_deref())?;
     repositories(&app)
         .await?
-        .set_folder_instructions(&folder_id, instructions.as_deref())
+        .set_folder_instructions(&folder_id, instructions)
         .await
 }
 
@@ -376,35 +371,76 @@ pub async fn set_folder_memory_disabled(
 }
 
 #[tauri::command]
-pub fn memory_settings(app: AppHandle) -> Result<MemorySettingsDto, AppError> {
-    let _guard = MEMORY_SETTINGS_LOCK.lock().map_err(|_| {
-        AppError::new(
-            "memory_settings_unavailable",
-            "Memory settings lock failed.",
-        )
-    })?;
-    Ok(load_memory_settings(&app))
+pub async fn memory_settings(app: AppHandle) -> Result<MemorySettingsDto, AppError> {
+    let path = memory_settings_path(&app)?;
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
+    Ok(load_memory_settings(&path))
 }
 
 #[tauri::command]
-pub fn set_memory_enabled(app: AppHandle, enabled: bool) -> Result<MemorySettingsDto, AppError> {
-    let _guard = MEMORY_SETTINGS_LOCK.lock().map_err(|_| {
-        AppError::new(
-            "memory_settings_unavailable",
-            "Memory settings lock failed.",
-        )
-    })?;
+pub async fn set_memory_enabled(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<MemorySettingsDto, AppError> {
+    let _guard = MEMORY_SETTINGS_LOCK.lock().await;
     let settings = MemorySettingsDto { enabled };
     let path = memory_settings_path(&app)?;
+    persist_memory_settings(&path, &settings)?;
+    Ok(settings)
+}
+
+async fn create_memory_with_settings(
+    repos: &Repositories,
+    settings_path: &Path,
+    folder_id: Option<&str>,
+    content: &str,
+    source: &str,
+) -> Result<MemoryDto, AppError> {
+    ensure_memory_enabled(settings_path)?;
+    let content = validated_memory_content(content)?;
+    let source = source.trim();
+    if !matches!(source, "agent" | "user") {
+        return Err(AppError::new(
+            "memory_source_invalid",
+            "Memory source must be agent or user.",
+        ));
+    }
+    repos.create_memory(folder_id, content, source).await
+}
+
+async fn update_memory_with_settings(
+    repos: &Repositories,
+    settings_path: &Path,
+    id: &str,
+    content: &str,
+) -> Result<MemoryDto, AppError> {
+    ensure_memory_enabled(settings_path)?;
+    let content = validated_memory_content(content)?;
+    repos.update_memory(id, content).await
+}
+
+fn ensure_memory_enabled(settings_path: &Path) -> Result<(), AppError> {
+    if load_memory_settings(settings_path).enabled {
+        Ok(())
+    } else {
+        Err(memory_disabled_error())
+    }
+}
+
+fn persist_memory_settings(path: &Path, settings: &MemorySettingsDto) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| AppError::new("memory_settings_save_failed", error.to_string()))?;
     }
     let serialized = serde_json::to_string_pretty(&settings)
         .map_err(|error| AppError::new("memory_settings_save_failed", error.to_string()))?;
-    fs::write(path, serialized)
+    let temporary_path = path.with_extension("json.tmp");
+    fs::write(&temporary_path, serialized)
         .map_err(|error| AppError::new("memory_settings_save_failed", error.to_string()))?;
-    Ok(settings)
+    fs::rename(&temporary_path, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary_path);
+        AppError::new("memory_settings_save_failed", error.to_string())
+    })
 }
 
 fn validated_memory_content(content: &str) -> Result<&str, AppError> {
@@ -424,6 +460,21 @@ fn validated_memory_content(content: &str) -> Result<&str, AppError> {
     Ok(content)
 }
 
+fn validated_folder_instructions(instructions: Option<&str>) -> Result<Option<&str>, AppError> {
+    let instructions = instructions
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if instructions.is_some_and(|value| value.chars().count() > FOLDER_INSTRUCTIONS_MAX_CHARS) {
+        return Err(AppError::new(
+            "folder_instructions_too_long",
+            format!(
+                "Folder instructions cannot exceed {FOLDER_INSTRUCTIONS_MAX_CHARS} characters."
+            ),
+        ));
+    }
+    Ok(instructions)
+}
+
 fn memory_settings_path(app: &AppHandle) -> Result<PathBuf, AppError> {
     app.path()
         .app_config_dir()
@@ -431,12 +482,18 @@ fn memory_settings_path(app: &AppHandle) -> Result<PathBuf, AppError> {
         .map_err(|error| AppError::new("memory_settings_unavailable", error.to_string()))
 }
 
-fn load_memory_settings(app: &AppHandle) -> MemorySettingsDto {
-    memory_settings_path(app)
-        .ok()
-        .and_then(|path| fs::read_to_string(path).ok())
-        .and_then(|settings| serde_json::from_str(&settings).ok())
-        .unwrap_or_default()
+fn load_memory_settings(path: &Path) -> MemorySettingsDto {
+    match fs::read_to_string(path) {
+        Ok(settings) => {
+            serde_json::from_str(&settings).unwrap_or(MemorySettingsDto { enabled: false })
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => MemorySettingsDto::default(),
+        Err(_) => MemorySettingsDto { enabled: false },
+    }
+}
+
+fn memory_disabled_error() -> AppError {
+    AppError::new("memory_disabled", "Memory is disabled for this scope.")
 }
 
 #[tauri::command]
@@ -2582,14 +2639,17 @@ fn app_paths(app: &AppHandle) -> Result<AppPaths, AppError> {
 mod tests {
     use super::{
         apply_system_audio_permission_probe_result, assemble_recording_source_readiness,
-        capture_start_timeout_error, recovery_validation_expected_duration_ms,
+        capture_start_timeout_error, create_memory_with_settings, load_memory_settings,
+        persist_memory_settings, recovery_validation_expected_duration_ms,
         should_probe_system_audio_permission, start_capture_with_timeout_and_cleanup,
+        update_memory_with_settings, validated_folder_instructions,
     };
     use crate::{
         audio::capture::{is_capture_active, CaptureStartState, StartedRecording, StartedSource},
+        db::repositories::Repositories,
         domain::types::{
-            AppError, AudioLevelDto, RecordingSource, RecordingSourceMode, RecordingState,
-            RecordingStatusDto, SourceReadinessDto,
+            AppError, AudioLevelDto, MemorySettingsDto, RecordingSource, RecordingSourceMode,
+            RecordingState, RecordingStatusDto, SourceReadinessDto,
         },
     };
     use std::{
@@ -2600,6 +2660,169 @@ mod tests {
         },
         time::Duration,
     };
+
+    async fn test_repositories() -> Repositories {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory");
+        crate::db::migrations::run_migrations(&pool)
+            .await
+            .expect("migrations");
+        Repositories::new(pool)
+    }
+
+    #[test]
+    fn memory_settings_loader_defaults_enabled_only_when_file_is_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory-settings.json");
+
+        assert!(load_memory_settings(&path).enabled);
+
+        std::fs::write(&path, r#"{"enabled":false}"#).expect("write valid settings");
+        assert!(!load_memory_settings(&path).enabled);
+
+        std::fs::write(&path, b"not json").expect("write corrupt settings");
+        assert!(!load_memory_settings(&path).enabled);
+    }
+
+    #[test]
+    fn memory_settings_persistence_replaces_atomically_and_preserves_previous_file_on_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("memory-settings.json");
+        let temporary_path = path.with_extension("json.tmp");
+
+        persist_memory_settings(&path, &MemorySettingsDto { enabled: false })
+            .expect("persist settings");
+        assert!(!load_memory_settings(&path).enabled);
+        assert!(!temporary_path.exists());
+
+        std::fs::write(&path, r#"{"enabled":true}"#).expect("restore previous settings");
+        std::fs::create_dir(&temporary_path).expect("block temporary file creation");
+        let error = persist_memory_settings(&path, &MemorySettingsDto { enabled: false })
+            .expect_err("temporary write must fail");
+
+        assert_eq!(error.code, "memory_settings_save_failed");
+        assert!(load_memory_settings(&path).enabled);
+    }
+
+    #[tokio::test]
+    async fn create_memory_enforces_global_and_folder_disable_matrix() {
+        for global_enabled in [false, true] {
+            for folder_disabled in [false, true] {
+                for folder_scoped in [false, true] {
+                    let repos = test_repositories().await;
+                    let folder = repos
+                        .create_folder("Project", None)
+                        .await
+                        .expect("create folder");
+                    repos
+                        .set_folder_memory_disabled(&folder.id, folder_disabled)
+                        .await
+                        .expect("set folder memory state");
+                    let dir = tempfile::tempdir().expect("tempdir");
+                    let settings_path = dir.path().join("memory-settings.json");
+                    std::fs::write(
+                        &settings_path,
+                        serde_json::json!({ "enabled": global_enabled }).to_string(),
+                    )
+                    .expect("write settings");
+
+                    let result = create_memory_with_settings(
+                        &repos,
+                        &settings_path,
+                        folder_scoped.then_some(folder.id.as_str()),
+                        "Remember this",
+                        "user",
+                    )
+                    .await;
+                    let should_reject = !global_enabled || (folder_scoped && folder_disabled);
+
+                    if should_reject {
+                        assert_eq!(
+                            result.expect_err("create must be rejected").code,
+                            "memory_disabled"
+                        );
+                    } else {
+                        let created = result.expect("create must succeed");
+                        assert_eq!(
+                            created.folder_id.as_deref(),
+                            folder_scoped.then_some(folder.id.as_str())
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn update_memory_rejects_content_in_a_disabled_folder() {
+        let repos = test_repositories().await;
+        let folder = repos
+            .create_folder("Project", None)
+            .await
+            .expect("create folder");
+        let memory = repos
+            .create_memory(Some(&folder.id), "Original", "user")
+            .await
+            .expect("create memory");
+        repos
+            .set_folder_memory_disabled(&folder.id, true)
+            .await
+            .expect("disable folder memory");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("memory-settings.json");
+
+        let error = update_memory_with_settings(&repos, &settings_path, &memory.id, "Replacement")
+            .await
+            .expect_err("update must be rejected");
+
+        assert_eq!(error.code, "memory_disabled");
+        let unchanged = repos
+            .list_memories(Some(&folder.id), false)
+            .await
+            .expect("list memory");
+        assert_eq!(unchanged[0].content, "Original");
+    }
+
+    #[tokio::test]
+    async fn update_memory_rejects_all_content_when_memory_is_globally_disabled() {
+        let repos = test_repositories().await;
+        let memory = repos
+            .create_memory(None, "Original", "user")
+            .await
+            .expect("create memory");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings_path = dir.path().join("memory-settings.json");
+        std::fs::write(&settings_path, r#"{"enabled":false}"#).expect("disable memory");
+
+        let error = update_memory_with_settings(&repos, &settings_path, &memory.id, "Replacement")
+            .await
+            .expect_err("update must be rejected");
+
+        assert_eq!(error.code, "memory_disabled");
+        let unchanged = repos
+            .list_memories(None, false)
+            .await
+            .expect("list global memory");
+        assert_eq!(unchanged[0].content, "Original");
+    }
+
+    #[test]
+    fn folder_instructions_enforce_character_limit_after_trimming() {
+        let boundary = format!("  {}  ", "x".repeat(4_000));
+        assert_eq!(
+            validated_folder_instructions(Some(&boundary))
+                .expect("4,000 characters must be accepted")
+                .expect("instructions"),
+            "x".repeat(4_000)
+        );
+
+        let error = validated_folder_instructions(Some(&"x".repeat(4_001)))
+            .expect_err("4,001 characters must be rejected");
+        assert_eq!(error.code, "folder_instructions_too_long");
+    }
 
     #[test]
     fn skips_system_audio_permission_probe_while_capture_is_active() {

@@ -932,14 +932,6 @@ impl Repositories {
         content: &str,
         source: &str,
     ) -> Result<MemoryDto, AppError> {
-        if let Some(folder_id) = folder_id {
-            if !self.folder_exists(folder_id).await? {
-                return Err(AppError::new(
-                    "folder_not_found",
-                    "Folder was not found or has already been deleted.",
-                ));
-            }
-        }
         let now = timestamp();
         let memory = MemoryDto {
             id: Uuid::new_v4().to_string(),
@@ -949,29 +941,76 @@ impl Repositories {
             created_at: now.clone(),
             updated_at: now,
         };
-        query(
-            "INSERT INTO memories (id, folder_id, content, source, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&memory.id)
-        .bind(&memory.folder_id)
-        .bind(&memory.content)
-        .bind(&memory.source)
-        .bind(&memory.created_at)
-        .bind(&memory.updated_at)
-        .execute(&self.pool)
-        .await?;
+        let result = if let Some(folder_id) = folder_id {
+            query(
+                "INSERT INTO memories (id, folder_id, content, source, created_at, updated_at)
+                 SELECT ?, ?, ?, ?, ?, ?
+                 WHERE EXISTS (
+                   SELECT 1 FROM folders
+                   WHERE id = ? AND deleted_at IS NULL AND memory_disabled = 0
+                 )",
+            )
+            .bind(&memory.id)
+            .bind(&memory.folder_id)
+            .bind(&memory.content)
+            .bind(&memory.source)
+            .bind(&memory.created_at)
+            .bind(&memory.updated_at)
+            .bind(folder_id)
+            .execute(&self.pool)
+            .await?
+        } else {
+            query(
+                "INSERT INTO memories (id, folder_id, content, source, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&memory.id)
+            .bind(&memory.folder_id)
+            .bind(&memory.content)
+            .bind(&memory.source)
+            .bind(&memory.created_at)
+            .bind(&memory.updated_at)
+            .execute(&self.pool)
+            .await?
+        };
+        if result.rows_affected() == 0 {
+            return Err(self
+                .memory_scope_write_error(folder_id.expect("scoped insert"))
+                .await?);
+        }
         Ok(memory)
     }
 
     pub async fn update_memory(&self, id: &str, content: &str) -> Result<MemoryDto, AppError> {
-        let result = query("UPDATE memories SET content = ?, updated_at = ? WHERE id = ?")
-            .bind(content.trim())
-            .bind(timestamp())
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = query(
+            "UPDATE memories
+             SET content = ?, updated_at = ?
+             WHERE id = ?
+               AND (
+                 folder_id IS NULL
+                 OR EXISTS (
+                   SELECT 1 FROM folders
+                   WHERE folders.id = memories.folder_id
+                     AND folders.deleted_at IS NULL
+                     AND folders.memory_disabled = 0
+                 )
+               )",
+        )
+        .bind(content.trim())
+        .bind(timestamp())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         if result.rows_affected() == 0 {
+            let folder_id = query("SELECT folder_id FROM memories WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?
+                .ok_or_else(|| AppError::new("memory_not_found", "Memory was not found."))?
+                .get::<Option<String>, _>("folder_id");
+            if let Some(folder_id) = folder_id {
+                return Err(self.memory_scope_write_error(&folder_id).await?);
+            }
             return Err(AppError::new("memory_not_found", "Memory was not found."));
         }
         let row = query(
@@ -983,6 +1022,26 @@ impl Repositories {
         .fetch_one(&self.pool)
         .await?;
         Ok(memory_from_row(row))
+    }
+
+    async fn memory_scope_write_error(
+        &self,
+        folder_id: &str,
+    ) -> Result<AppError, sqlx::error::Error> {
+        let memory_disabled =
+            query("SELECT memory_disabled FROM folders WHERE id = ? AND deleted_at IS NULL")
+                .bind(folder_id)
+                .fetch_optional(&self.pool)
+                .await?
+                .map(|row| row.get::<i64, _>("memory_disabled") != 0);
+        Ok(if memory_disabled == Some(true) {
+            AppError::new("memory_disabled", "Memory is disabled for this scope.")
+        } else {
+            AppError::new(
+                "folder_not_found",
+                "Folder was not found or has already been deleted.",
+            )
+        })
     }
 
     pub async fn delete_memory(&self, id: &str) -> Result<(), AppError> {
@@ -1907,6 +1966,18 @@ impl Repositories {
             .execute(&mut *tx)
             .await?;
         query("DELETE FROM session_folders WHERE folder_id = ?")
+            .bind(folder_id)
+            .execute(&mut *tx)
+            .await?;
+        query(
+            "INSERT INTO memory_tombstones (id, deleted_at)
+             SELECT id, ? FROM memories WHERE folder_id = ?",
+        )
+        .bind(&now)
+        .bind(folder_id)
+        .execute(&mut *tx)
+        .await?;
+        query("DELETE FROM memories WHERE folder_id = ?")
             .bind(folder_id)
             .execute(&mut *tx)
             .await?;
@@ -3892,33 +3963,74 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn soft_deleted_folder_keeps_memory_but_hides_it_from_folder_filter() {
+    async fn create_memory_rejects_a_deleted_folder() {
         let repos = test_repositories().await;
         let folder = repos
             .create_folder("Archived project", None)
             .await
             .expect("create folder");
-        let memory = repos
-            .create_memory(Some(&folder.id), "Keep this for later sync", "user")
-            .await
-            .expect("create memory");
-
         repos
             .delete_folder(&folder.id, false)
             .await
             .expect("soft delete folder");
 
-        assert!(repos
-            .list_memories(Some(&folder.id), false)
+        let error = repos
+            .create_memory(Some(&folder.id), "Do not persist", "user")
             .await
-            .expect("list deleted folder")
-            .is_empty());
-        let all = repos
+            .expect_err("deleted folder must reject memory");
+        assert_eq!(error.code, "folder_not_found");
+    }
+
+    #[tokio::test]
+    async fn deleting_folder_removes_scoped_memories_and_writes_tombstones() {
+        let repos = test_repositories().await;
+        let folder = repos
+            .create_folder("Archived project", None)
+            .await
+            .expect("create folder");
+        let other_folder = repos
+            .create_folder("Active project", None)
+            .await
+            .expect("create other folder");
+        let global = repos
+            .create_memory(None, "Global memory", "user")
+            .await
+            .expect("create global memory");
+        let first_deleted = repos
+            .create_memory(Some(&folder.id), "First project memory", "user")
+            .await
+            .expect("create first scoped memory");
+        let second_deleted = repos
+            .create_memory(Some(&folder.id), "Second project memory", "agent")
+            .await
+            .expect("create second scoped memory");
+        let retained = repos
+            .create_memory(Some(&other_folder.id), "Other project memory", "user")
+            .await
+            .expect("create other scoped memory");
+
+        repos
+            .delete_folder(&folder.id, false)
+            .await
+            .expect("delete folder");
+
+        let remaining = repos
             .list_memories(None, true)
             .await
-            .expect("list all memories");
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].id, memory.id);
+            .expect("list remaining memories");
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().any(|memory| memory.id == global.id));
+        assert!(remaining.iter().any(|memory| memory.id == retained.id));
+        let tombstones = query("SELECT id FROM memory_tombstones ORDER BY id")
+            .fetch_all(&repos.pool)
+            .await
+            .expect("list tombstones")
+            .into_iter()
+            .map(|row| row.get::<String, _>("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(tombstones.len(), 2);
+        assert!(tombstones.contains(&first_deleted.id));
+        assert!(tombstones.contains(&second_deleted.id));
     }
 
     #[tokio::test]
