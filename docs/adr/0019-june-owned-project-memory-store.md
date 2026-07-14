@@ -27,8 +27,9 @@ session.
 
 Memory is a June-owned store in June's SQLite database (`memories` table),
 scoped by an optional `folder_id` (NULL = global), with a
-`memory_tombstones` table written transactionally on every hard delete so a
-future sync can propagate deletions.
+`memory_tombstones` table written transactionally on every hard delete —
+future-proofing so any later multi-device sync could propagate deletions
+(no sync feature exists; nothing reads tombstones today).
 
 The agent reads and writes it through the `june_context` MCP server:
 
@@ -72,7 +73,8 @@ SOUL stanza directs June to the june_context tools.
 ## Consequences
 
 - "What June remembers" is a plain database view; delete is a hard DELETE the
-  UI can verify, and every delete leaves a tombstone for sync.
+  UI can verify, and every delete leaves a tombstone (unread today; kept so a
+  later multi-device sync could honor deletions).
 - Memory entries and project instructions are inert data at rest; they enter
   model context only via the injected block and tool results.
 - The project-context block spends prompt tokens on the first submit of each

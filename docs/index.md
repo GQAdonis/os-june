@@ -29,7 +29,6 @@ decision. See "When to add an ADR" in [AGENTS.md](../AGENTS.md).
 - [adr/0017](adr/0017-browser-use-via-june-extension.md) — browser use in the user's own browser via the June extension, two tracks behind one broker; computer use productizes the pinned toolset
 - [adr/0018](adr/0018-session-model-changes-apply-at-agent-run-boundaries.md) — session model changes are staged at Send and applied only at the next idle agent-run boundary
 - [adr/0019](adr/0019-june-owned-project-memory-store.md) — memory entries live in June's SQLite (not the Hermes memory toolset), scoped by project, agent writes via the loopback proxy, project context by prompt injection
-- [adr/0020](adr/0020-zero-access-encrypted-memory-sync.md) — opt-in memory/instructions sync as one client-encrypted blob; Keychain key + recovery phrase, version-CAS, tombstones beat content
 
 ## Enforceable rules (spec/)
 
