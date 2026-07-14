@@ -3718,6 +3718,7 @@ export function App() {
             <div className="workspace">
               {activeView === "settings" ? (
                 <AppSettings
+                  folders={state.folders}
                   account={account}
                   accountLoading={accountLoading}
                   sourceMode={sourceMode}
@@ -3943,6 +3944,7 @@ export function App() {
                   onRenameFolder={(folderId, name, description) =>
                     void handleRenameFolder(folderId, name, description)
                   }
+                  onFolderUpdated={(folder) => dispatch({ type: "folderUpdated", folder })}
                   onDeleteFolder={(folderId) => handleDeleteFolder(folderId)}
                   onCreateNote={(folderId) => void handleCreateNote(folderId)}
                   onSelectNote={(noteId) => {

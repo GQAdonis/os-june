@@ -955,6 +955,30 @@ describe("AgentWorkspace", () => {
     }
   });
 
+  it("shows project instructions only for a project-filed session", async () => {
+    const user = userEvent.setup();
+    const view = render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Project instructions" })).toBeNull();
+
+    view.rerender(
+      <AgentWorkspace
+        initialSession={existingSession}
+        sessionInProject
+        projectContext={{
+          id: "project-1",
+          name: "Launch",
+          instructions: "Keep launch risks visible.",
+        }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Project instructions" }));
+    const dialog = screen.getByRole("dialog", { name: "Launch instructions" });
+    expect(within(dialog).getByText("Keep launch risks visible.")).toBeInTheDocument();
+  });
+
   it("opens the issue report dialog without submitting", async () => {
     window.sessionStorage.setItem(
       AGENT_NEW_SESSION_PENDING_KEY,
