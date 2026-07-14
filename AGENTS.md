@@ -184,7 +184,10 @@ build scripts in `pnpm-workspace.yaml` — live in
   The runner can exit non-zero from `hud-meeting.test.ts` teardown noise despite
   0 real failures — judge by the failure count. Composer/ProseMirror tests can
   flake with a `localsInner` crash under machine load (a `@tiptap/pm` duplicate,
-  not a regression).
+  not a regression). On **Node 26** the `font-scale` and `referral-nudge`
+  storage tests fail locally (experimental web storage shadows jsdom's
+  `localStorage`); run `NODE_OPTIONS=--no-experimental-webstorage pnpm test`
+  and do not "fix" the tests.
 - **Rust tests:** `pnpm test:rust` (src-tauri) and `pnpm test:june-api` (the
   backend workspace).
 - **Hermes pin gate:** `pnpm test:hermes-smoke` + `pnpm hermes:upgrade-check`
@@ -199,7 +202,14 @@ build scripts in `pnpm-workspace.yaml` — live in
   the warnings incrementally. Never leave checks broken.
 - **CI parity:** `make verify` runs the full gate locally (Biome, typecheck,
   vitest, and `cargo fmt`/`clippy`/`test` for both Rust crates); `make help`
-  lists every target. A green `make verify` should mean green CI.
+  lists every target. A green `make verify` should mean green CI. It adds
+  `cargo clippy --all-targets`, which the narrower targets skip — "green" from
+  `cargo test` + `pnpm test` alone is **not** CI-green.
+- **A red gate that is not your bug:** see [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+  before chasing one — Node 26 storage tests, vitest teardown exit codes,
+  ProseMirror flake, `cargo test --lib` missing the integration suites, pnpm's
+  non-TTY purge prompt (`CI=true`), and 1Password-locked signing/push failures
+  are all documented false alarms.
 
 ## Boundaries
 
