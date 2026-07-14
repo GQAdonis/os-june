@@ -16,7 +16,18 @@ import { IconPageSearch } from "central-icons/IconPageSearch";
 import { IconPlusMedium } from "central-icons/IconPlusMedium";
 import { IconSortArrowUpDown } from "central-icons/IconSortArrowUpDown";
 import { IconTrashCan } from "central-icons/IconTrashCan";
-import type { FolderDto, HermesSessionInfo, NoteListItemDto } from "../../lib/tauri";
+import {
+  deleteMemory,
+  listMemories,
+  memorySettings,
+  setFolderInstructions,
+  setFolderMemoryDisabled,
+  updateMemory,
+  type FolderDto,
+  type HermesSessionInfo,
+  type MemoryDto,
+  type NoteListItemDto,
+} from "../../lib/tauri";
 import { sessionTimestamp } from "../../lib/hermes-adapter";
 import {
   type DragEvent,
@@ -33,6 +44,8 @@ import { useForcedEmptyStates } from "../../lib/empty-states-demo";
 import { BreadcrumbBar } from "../ui/BreadcrumbBar";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { EmptyState } from "../ui/EmptyState";
+import { Switch } from "../ui/Switch";
+import { MemoryRows } from "../settings/MemorySettingsSection";
 import { AddNotesToFolderDialog } from "./AddNotesToFolderDialog";
 import { AddSessionsToProjectDialog } from "./AddSessionsToProjectDialog";
 import { CreateFolderDialog } from "./CreateFolderDialog";
@@ -55,6 +68,7 @@ type FoldersWorkspaceProps = {
   onSelectFolder: (folderId?: string) => void;
   onCreateFolder: (name: string, description?: string) => Promise<FolderDto | undefined> | void;
   onRenameFolder: (folderId: string, name: string, description?: string) => void;
+  onFolderUpdated: (folder: FolderDto) => void;
   onDeleteFolder: (folderId: string, deleteNotes: boolean) => Promise<unknown> | void;
   onCreateNote: (folderId?: string) => void;
   /** Start a fresh agent session that gets filed into this project. */
@@ -559,6 +573,7 @@ function FolderDetail({
   sessionFolderIds,
   onSelectFolder,
   onRenameFolder,
+  onFolderUpdated,
   onDeleteFolder,
   onCreateNote,
   onCreateSession,
@@ -579,6 +594,11 @@ function FolderDetail({
   const [addSessionsOpen, setAddSessionsOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [instructionsDraft, setInstructionsDraft] = useState(folder.instructions ?? "");
+  const [instructionsError, setInstructionsError] = useState<string>();
+  const [memories, setMemories] = useState<MemoryDto[]>([]);
+  const [memoryEnabled, setMemoryEnabledState] = useState(false);
+  const [memoryError, setMemoryError] = useState<string>();
   const titleRef = useRef<HTMLInputElement | null>(null);
 
   useLayoutEffect(() => {
@@ -591,6 +611,30 @@ function FolderDetail({
   useEffect(() => {
     if (!editingTitle) setTitleDraft(folder.name);
   }, [folder.name, editingTitle]);
+
+  useEffect(() => {
+    setInstructionsDraft(folder.instructions ?? "");
+    setInstructionsError(undefined);
+  }, [folder.id, folder.instructions]);
+
+  useEffect(() => {
+    let active = true;
+    setMemories([]);
+    setMemoryError(undefined);
+    void Promise.all([listMemories(folder.id, false), memorySettings()])
+      .then(([nextMemories, settings]) => {
+        if (!active) return;
+        setMemories(sortMemoriesNewestFirst(nextMemories));
+        setMemoryEnabledState(settings.enabled);
+        setMemoryError(undefined);
+      })
+      .catch((caught) => {
+        if (active) setMemoryError(messageFromCaught(caught));
+      });
+    return () => {
+      active = false;
+    };
+  }, [folder.id]);
 
   useEffect(() => {
     if (!menu) return;
@@ -654,6 +698,49 @@ function FolderDetail({
       right: window.innerWidth - rect.right,
       top: rect.bottom + 4,
     });
+  }
+
+  async function saveInstructions() {
+    const next = instructionsDraft.trim();
+    if (next === (folder.instructions ?? "")) return;
+    try {
+      const updated = await setFolderInstructions(folder.id, next || undefined);
+      onFolderUpdated(updated);
+      setInstructionsDraft(updated.instructions ?? "");
+      setInstructionsError(undefined);
+    } catch (caught) {
+      setInstructionsError(messageFromCaught(caught));
+    }
+  }
+
+  async function toggleProjectMemory(remember: boolean) {
+    try {
+      const updated = await setFolderMemoryDisabled(folder.id, !remember);
+      onFolderUpdated(updated);
+      setMemoryError(undefined);
+    } catch (caught) {
+      setMemoryError(messageFromCaught(caught));
+    }
+  }
+
+  async function editProjectMemory(id: string, content: string) {
+    const updated = await updateMemory(id, content);
+    setMemories((current) =>
+      sortMemoriesNewestFirst(
+        current.map((memory) => (memory.id === updated.id ? updated : memory)),
+      ),
+    );
+  }
+
+  async function removeProjectMemory(id: string) {
+    try {
+      await deleteMemory(id);
+      setMemories((current) => current.filter((memory) => memory.id !== id));
+      setMemoryError(undefined);
+    } catch (caught) {
+      setMemoryError(messageFromCaught(caught));
+      throw caught;
+    }
   }
 
   return (
@@ -756,6 +843,80 @@ function FolderDetail({
             Updated {formatDate(lastUpdated)}
           </p>
         </header>
+
+        <section className="folder-context-section" aria-labelledby="folder-instructions-heading">
+          <h2 id="folder-instructions-heading" className="folder-notes-title">
+            Instructions
+          </h2>
+          <div className="settings-card folder-context-card">
+            <textarea
+              className="folder-instructions-textarea"
+              value={instructionsDraft}
+              placeholder="Add instructions June should follow in this project's sessions."
+              aria-label="Project instructions"
+              aria-invalid={instructionsError ? true : undefined}
+              onChange={(event) => {
+                setInstructionsDraft(event.currentTarget.value);
+                setInstructionsError(undefined);
+              }}
+              onBlur={() => void saveInstructions()}
+            />
+            {instructionsDraft.length >= 3_600 ? (
+              <p
+                className="folder-instructions-count"
+                data-over-limit={instructionsDraft.length > 4_000 || undefined}
+              >
+                {instructionsDraft.length} / 4000 characters
+              </p>
+            ) : null}
+            {instructionsError ? (
+              <p className="settings-row-error" role="alert">
+                {instructionsError}
+              </p>
+            ) : null}
+          </div>
+        </section>
+
+        <section className="folder-context-section" aria-labelledby="folder-memory-heading">
+          <h2 id="folder-memory-heading" className="folder-notes-title">
+            Memory
+          </h2>
+          <div className="settings-card folder-context-card">
+            <div className="settings-row folder-memory-toggle-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">Remember things in this project</h3>
+                <p className="settings-row-description">
+                  {memoryEnabled
+                    ? "June can save and use memories for this project."
+                    : "Memory is turned off in Settings > Memory."}
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <Switch
+                  checked={!folder.memoryDisabled}
+                  disabled={!memoryEnabled}
+                  aria-label="Remember things in this project"
+                  onCheckedChange={(remember) => void toggleProjectMemory(remember)}
+                />
+              </div>
+            </div>
+            {memories.length > 0 ? (
+              <MemoryRows
+                memories={memories}
+                editable={memoryEnabled && !folder.memoryDisabled}
+                onUpdate={editProjectMemory}
+                onDelete={removeProjectMemory}
+              />
+            ) : (
+              <p className="folder-memory-empty">No memories for this project yet.</p>
+            )}
+            {memoryError ? (
+              <p className="settings-row-error" role="alert">
+                {memoryError}
+              </p>
+            ) : null}
+          </div>
+        </section>
 
         {folderNotes.length > 0 || folderSessions.length > 0 ? (
           <>
@@ -1385,6 +1546,17 @@ function formatDate(iso: string): string {
     day: "numeric",
     year: sameYear ? undefined : "numeric",
   });
+}
+
+function sortMemoriesNewestFirst(memories: MemoryDto[]) {
+  return [...memories].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+function messageFromCaught(caught: unknown) {
+  if (caught && typeof caught === "object" && "message" in caught) {
+    return String((caught as { message: unknown }).message);
+  }
+  return String(caught);
 }
 
 /** Right-aligned timestamp inside a folder's note row. Same-day shows

@@ -10954,6 +10954,7 @@ export function AgentWorkspace({
               : undefined
           }
           inProject={sessionInProject}
+          projectContext={sessionInProject ? projectContext : undefined}
           onMoveToProject={
             onMoveSessionToProject &&
             !newSessionMode &&
@@ -11211,6 +11212,7 @@ function AgentSessionBar({
   artifactCount = 0,
   artifactsOpen = false,
   inProject = false,
+  projectContext,
   onToggleArtifacts,
   onRename,
   onMoveToProject,
@@ -11226,6 +11228,7 @@ function AgentSessionBar({
   artifactCount?: number;
   artifactsOpen?: boolean;
   inProject?: boolean;
+  projectContext?: AgentProjectContext;
   onToggleArtifacts?: () => void;
   onRename?: (title: string) => void;
   /** Opens the change-project dialog (which also owns removal). */
@@ -11240,6 +11243,7 @@ function AgentSessionBar({
   const [renaming, setRenaming] = useState(false);
   const [draft, setDraft] = useState(title ?? "");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [instructionsOpen, setInstructionsOpen] = useState(false);
   const menuWrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -11336,6 +11340,15 @@ function AgentSessionBar({
         </ol>
       </nav>
       <div className="detail-bar-actions">
+        {projectContext ? (
+          <button
+            type="button"
+            className="agent-project-instructions"
+            onClick={() => setInstructionsOpen(true)}
+          >
+            Project instructions
+          </button>
+        ) : null}
         {fullMode ? <UnrestrictedBadge /> : null}
         {onToggleArtifacts && artifactCount > 0 ? (
           <button
@@ -11462,6 +11475,24 @@ function AgentSessionBar({
           </div>
         ) : null}
       </div>
+      <Dialog
+        open={instructionsOpen}
+        onClose={() => setInstructionsOpen(false)}
+        title={`${projectContext?.name ?? "Project"} instructions`}
+        footer={
+          <button
+            type="button"
+            className="primary-action"
+            onClick={() => setInstructionsOpen(false)}
+          >
+            Close
+          </button>
+        }
+      >
+        <div className="agent-project-instructions-content">
+          {projectContext?.instructions?.trim() || "No project instructions have been added."}
+        </div>
+      </Dialog>
     </div>
   );
 }

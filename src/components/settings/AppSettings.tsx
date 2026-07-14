@@ -42,6 +42,7 @@ import type {
   DictationSettingsDto,
   DictationShortcutModifiers,
   DictationShortcutSetting,
+  FolderDto,
   LocalGenerationSettingsDto,
   ProviderModelMode,
   ProviderModelSettingsDto,
@@ -125,6 +126,7 @@ import { SkillsHubSection } from "./SkillsHubSection";
 import { TeamTapsSection } from "./TeamTapsSection";
 import { ToolsetsSection } from "./ToolsetsSection";
 import { DictionarySettingsSection } from "./DictionarySettingsSection";
+import { MemorySettingsSection } from "./MemorySettingsSection";
 import { MicTestControl, type MicTestState } from "./MicTestControl";
 import { StyleSettingsSection } from "./StyleSettingsSection";
 import { PrivacySettingsSection } from "./PrivacySettingsSection";
@@ -281,6 +283,7 @@ export type SettingsTab =
   | "audio"
   | "models"
   | "agent"
+  | "memory"
   | "connectors"
   | "skills"
   | "external-dirs"
@@ -307,6 +310,7 @@ export const SETTINGS_TABS: { id: SettingsTab; label: string }[] = [
   { id: "audio", label: "Audio" },
   { id: "models", label: "Models" },
   { id: "agent", label: "Agent" },
+  { id: "memory", label: "Memory" },
   { id: "connectors", label: "Connectors" },
   { id: "skills", label: "Installed skills" },
   { id: "external-dirs", label: "External skill directories" },
@@ -353,6 +357,7 @@ export function SettingsPageHeader({
 }
 
 type AppSettingsProps = {
+  folders?: FolderDto[];
   account: AccountStatus;
   accountLoading: boolean;
   sourceMode: RecordingSourceMode;
@@ -395,6 +400,7 @@ type AppSettingsProps = {
 };
 
 export function AppSettings({
+  folders = [],
   account,
   accountLoading,
   sourceMode,
@@ -2222,6 +2228,8 @@ export function AppSettings({
             onBackFromPlatform={() => setAgentPlatformId(undefined)}
           />
         ) : null}
+
+        {activeTab === "memory" ? <MemorySettingsSection folders={folders} /> : null}
 
         {activeTab === "connectors" ? <ConnectorsSection /> : null}
 

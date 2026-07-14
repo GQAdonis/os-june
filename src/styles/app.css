@@ -16982,6 +16982,86 @@ input:focus-visible,
   max-width: 60%;
 }
 
+/* Memory settings and the project detail memory list share one quiet row
+ * treatment so inspect, edit, and delete behave identically in both homes. */
+.memory-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--sp-4);
+}
+
+.memory-settings-hint,
+.memory-project-off,
+.folder-memory-empty,
+.folder-instructions-count {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.memory-settings-hint {
+  padding: 0 var(--sp-3);
+}
+
+.memory-group {
+  display: grid;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-6);
+}
+
+.memory-group-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding-right: var(--sp-3);
+}
+
+.memory-project-off {
+  font-size: var(--fs-xs);
+}
+
+.memory-empty {
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.memory-empty p {
+  margin: 0;
+}
+
+.memory-row .settings-row-info {
+  min-width: 0;
+}
+
+.memory-content {
+  display: -webkit-box;
+  width: 100%;
+  overflow: hidden;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  line-height: 1.45;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.memory-content[data-expanded="true"] {
+  display: block;
+  overflow: visible;
+}
+
+.memory-source {
+  margin-top: var(--sp-1);
+  font-size: var(--fs-xs);
+}
+
 .sign-in-prompt-status {
   margin: var(--sp-4) 0 0;
   color: var(--muted-foreground);
@@ -17991,6 +18071,33 @@ input:focus-visible,
   display: inline-flex;
   align-items: center;
   gap: var(--sp-2);
+}
+
+.agent-project-instructions {
+  height: var(--control-xs);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-pill);
+  padding: 0 var(--sp-3);
+  background: var(--surface-subtle);
+  color: var(--muted-foreground);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.agent-project-instructions:hover {
+  border-color: var(--border);
+  color: var(--foreground);
+}
+
+.agent-project-instructions-content {
+  max-height: calc(var(--control-xl) * 8);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--foreground);
+  font-size: var(--fs-md);
+  line-height: 1.5;
 }
 
 /* Agent session bar — inline rename + overflow menu layered on the shared
@@ -19997,6 +20104,55 @@ input:focus-visible,
 
 .folder-detail-meta-dot {
   opacity: 0.5;
+}
+
+.folder-context-section {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.folder-context-card {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.folder-instructions-textarea {
+  width: 100%;
+  min-height: calc(var(--control-xl) * 3);
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: var(--sp-3);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-size: var(--fs-md);
+  line-height: 1.5;
+  transition:
+    border-color var(--t-fast) var(--ease-out),
+    box-shadow var(--t-fast) var(--ease-out);
+}
+
+.folder-instructions-textarea:focus {
+  border-color: var(--ring);
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 22%, transparent);
+}
+
+.folder-instructions-count {
+  justify-self: end;
+}
+
+.folder-instructions-count[data-over-limit="true"] {
+  color: var(--destructive);
+}
+
+.folder-memory-toggle-row {
+  padding-top: 0;
+}
+
+.folder-context-card > .memory-rows {
+  border-top: 1px solid var(--border-subtle);
 }
 
 /* Notes list — rows ride on white by default, hover lifts a quiet

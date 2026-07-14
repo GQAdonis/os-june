@@ -8,6 +8,12 @@ import type { AccountStatus, FolderDto, NoteListItemDto } from "../lib/tauri";
 
 const mocks = vi.hoisted(() => ({
   osAccountsReferralSummary: vi.fn(),
+  listMemories: vi.fn(),
+  memorySettings: vi.fn(),
+  setFolderInstructions: vi.fn(),
+  setFolderMemoryDisabled: vi.fn(),
+  updateMemory: vi.fn(),
+  deleteMemory: vi.fn(),
 }));
 
 vi.mock("../lib/tauri", async (importOriginal) => {
@@ -16,6 +22,12 @@ vi.mock("../lib/tauri", async (importOriginal) => {
   return {
     ...actual,
     osAccountsReferralSummary: mocks.osAccountsReferralSummary,
+    listMemories: mocks.listMemories,
+    memorySettings: mocks.memorySettings,
+    setFolderInstructions: mocks.setFolderInstructions,
+    setFolderMemoryDisabled: mocks.setFolderMemoryDisabled,
+    updateMemory: mocks.updateMemory,
+    deleteMemory: mocks.deleteMemory,
   };
 });
 
@@ -89,6 +101,7 @@ function baseProps() {
     onSelectFolder: vi.fn(),
     onCreateFolder: vi.fn(),
     onRenameFolder: vi.fn(),
+    onFolderUpdated: vi.fn(),
     onDeleteFolder: vi.fn(),
     onCreateNote: vi.fn(),
     onCreateSession: vi.fn(),
@@ -116,6 +129,29 @@ beforeEach(() => {
     appliedMonths: 1,
     availableMonths: 1,
   });
+  mocks.listMemories.mockResolvedValue([]);
+  mocks.memorySettings.mockResolvedValue({ enabled: true });
+  mocks.setFolderInstructions.mockImplementation(
+    async (folderId: string, instructions?: string) => {
+      const folder = folders.find((candidate) => candidate.id === folderId);
+      if (!folder) throw new Error("Missing test folder");
+      return { ...folder, instructions };
+    },
+  );
+  mocks.setFolderMemoryDisabled.mockImplementation(async (folderId: string, disabled: boolean) => {
+    const folder = folders.find((candidate) => candidate.id === folderId);
+    if (!folder) throw new Error("Missing test folder");
+    return { ...folder, memoryDisabled: disabled };
+  });
+  mocks.updateMemory.mockImplementation(async (id: string, content: string) => ({
+    id,
+    content,
+    folderId: "folder-2",
+    source: "user",
+    createdAt: now,
+    updatedAt: now,
+  }));
+  mocks.deleteMemory.mockResolvedValue(undefined);
 });
 
 describe("Sidebar primary navigation", () => {
@@ -800,5 +836,66 @@ describe("FoldersWorkspace — detail view", () => {
     await user.click(screen.getByRole("button", { name: /Actions for Roadmap/ }));
     await user.click(screen.getByRole("menuitem", { name: /Remove from project/ }));
     expect(props.onRemoveNoteFromFolder).toHaveBeenCalledWith("note-1", "folder-2");
+  });
+
+  it("autosaves project instructions on blur and surfaces the 4000 character limit", async () => {
+    const user = userEvent.setup();
+    const props = baseProps();
+    render(<FoldersWorkspace {...props} selectedFolderId="folder-2" />);
+
+    const textarea = screen.getByRole("textbox", { name: "Project instructions" });
+    await user.type(textarea, "Keep answers concise");
+    fireEvent.blur(textarea);
+
+    await waitFor(() =>
+      expect(mocks.setFolderInstructions).toHaveBeenCalledWith("folder-2", "Keep answers concise"),
+    );
+    expect(props.onFolderUpdated).toHaveBeenCalledWith(
+      expect.objectContaining({ instructions: "Keep answers concise" }),
+    );
+
+    fireEvent.change(textarea, { target: { value: "x".repeat(4_001) } });
+    expect(screen.getByText("4001 / 4000 characters")).toBeInTheDocument();
+    mocks.setFolderInstructions.mockRejectedValueOnce(
+      new Error("Project instructions cannot exceed 4000 characters."),
+    );
+    fireEvent.blur(textarea);
+    expect(
+      await screen.findByText("Project instructions cannot exceed 4000 characters."),
+    ).toBeInTheDocument();
+  });
+
+  it("loads project memories and wires the project memory toggle", async () => {
+    mocks.listMemories.mockResolvedValueOnce([
+      {
+        id: "memory-1",
+        folderId: "folder-2",
+        content: "The launch is Friday",
+        source: "agent",
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]);
+    const user = userEvent.setup();
+    const props = baseProps();
+    render(<FoldersWorkspace {...props} selectedFolderId="folder-2" />);
+
+    expect(await screen.findByText("The launch is Friday")).toBeInTheDocument();
+    expect(screen.getByText("Added by June")).toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "Remember things in this project" }));
+    expect(mocks.setFolderMemoryDisabled).toHaveBeenCalledWith("folder-2", true);
+    expect(props.onFolderUpdated).toHaveBeenCalledWith(
+      expect.objectContaining({ memoryDisabled: true }),
+    );
+  });
+
+  it("shows global memory off and disables the project toggle", async () => {
+    mocks.memorySettings.mockResolvedValueOnce({ enabled: false });
+    render(<FoldersWorkspace {...baseProps()} selectedFolderId="folder-2" />);
+
+    expect(
+      await screen.findByText("Memory is turned off in Settings > Memory."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "Remember things in this project" })).toBeDisabled();
   });
 });

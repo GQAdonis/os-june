@@ -332,7 +332,22 @@ describe("notesReducer", () => {
     });
     expect(renamed.folders.map((folder) => folder.name)).toEqual(["Archive", "Triage"]);
 
-    const deleted = notesReducer(renamed, {
+    const updated = notesReducer(renamed, {
+      type: "folderUpdated",
+      folder: {
+        id: "folder-1",
+        name: "Triage",
+        instructions: "Keep answers concise",
+        memoryDisabled: true,
+        createdAt: now,
+        updatedAt: now,
+      },
+    });
+    expect(updated.folders.find((folder) => folder.id === "folder-1")).toEqual(
+      expect.objectContaining({ instructions: "Keep answers concise", memoryDisabled: true }),
+    );
+
+    const deleted = notesReducer(updated, {
       type: "folderDeleted",
       folderId: "folder-1",
     });
