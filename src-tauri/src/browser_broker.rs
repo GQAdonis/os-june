@@ -13,6 +13,19 @@ use crate::{
     extension_host::{ExtensionHost, ExtensionResponse},
 };
 
+fn constant_time_eq(left: &str, right: &str) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.as_bytes()
+        .iter()
+        .zip(right.as_bytes())
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
+}
+
 pub(crate) type TransportFuture<'a> =
     Pin<Box<dyn Future<Output = Result<TransportResponse, AppError>> + Send + 'a>>;
 
@@ -38,6 +51,29 @@ pub(crate) enum BrowserTransportKind {
     /// Reserved for the JUN-289 transport behind this same broker dispatch.
     #[allow(dead_code)]
     Managed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum BrowserBrokerContext {
+    Attended,
+    Routine(String),
+}
+
+impl BrowserBrokerContext {
+    fn transport_kind(&self) -> BrowserTransportKind {
+        match self {
+            Self::Attended => BrowserTransportKind::Attended,
+            Self::Routine(_) => BrowserTransportKind::Managed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoutineBrowserGrant {
+    pub(crate) job_id: String,
+    pub(crate) server_name: String,
+    pub(crate) token: String,
+    pub(crate) enabled: bool,
 }
 
 pub(crate) struct TransportResponse {
@@ -155,10 +191,12 @@ struct BrowserBrokerState {
     transports: HashMap<BrowserTransportKind, Arc<dyn BrowserTransport>>,
     screenshot_root: Option<PathBuf>,
     artifact_root: Option<PathBuf>,
+    routine_grants: Vec<RoutineBrowserGrant>,
 }
 
 struct BrowserSession {
     transport_kind: BrowserTransportKind,
+    routine_id: Option<String>,
     tabs: HashSet<i64>,
 }
 
@@ -166,6 +204,7 @@ impl Default for BrowserSession {
     fn default() -> Self {
         Self {
             transport_kind: BrowserTransportKind::Attended,
+            routine_id: None,
             tabs: HashSet::new(),
         }
     }
@@ -193,6 +232,53 @@ impl BrowserBroker {
 
     pub(crate) fn set_access_flag_path(&self, path: PathBuf) {
         self.lock().access_flag_path = Some(path);
+    }
+
+    pub(crate) fn replace_routine_grants(&self, grants: Vec<RoutineBrowserGrant>) {
+        self.lock().routine_grants = grants;
+    }
+
+    pub(crate) fn set_routine_grant(&self, grant: RoutineBrowserGrant) {
+        let mut state = self.lock();
+        state
+            .routine_grants
+            .retain(|existing| existing.job_id != grant.job_id);
+        state.routine_grants.push(grant);
+    }
+
+    pub(crate) fn remove_routine_grant(&self, job_id: &str) -> Option<RoutineBrowserGrant> {
+        let mut state = self.lock();
+        let index = state
+            .routine_grants
+            .iter()
+            .position(|grant| grant.job_id == job_id)?;
+        Some(state.routine_grants.remove(index))
+    }
+
+    pub(crate) fn routine_grant_for_token(&self, token: &str) -> Option<RoutineBrowserGrant> {
+        self.lock()
+            .routine_grants
+            .iter()
+            .find(|grant| constant_time_eq(&grant.token, token))
+            .cloned()
+    }
+
+    fn require_routine_opt_in(&self, job_id: &str, tool: &str) -> Result<(), AppError> {
+        if self
+            .lock()
+            .routine_grants
+            .iter()
+            .any(|grant| grant.job_id == job_id && grant.enabled)
+        {
+            Ok(())
+        } else {
+            Err(AppError::new(
+                "browser_routine_not_opted_in",
+                format!(
+                    "The {tool} browser operation was refused because this routine has not been granted browsing."
+                ),
+            ))
+        }
     }
 
     pub(crate) async fn lock_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
@@ -307,9 +393,38 @@ impl BrowserBroker {
         })
     }
 
+    pub(crate) async fn execute_for(
+        &self,
+        context: BrowserBrokerContext,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, AppError> {
+        self.require_enabled()?;
+        let kind = context.transport_kind();
+        let routine_id = match &context {
+            BrowserBrokerContext::Attended => None,
+            BrowserBrokerContext::Routine(job_id) => {
+                self.require_routine_opt_in(job_id, tool)?;
+                Some(job_id.as_str())
+            }
+        };
+        self.execute_inner(kind, routine_id, tool, arguments).await
+    }
+
+    #[cfg(test)]
     pub(crate) async fn execute(
         &self,
         kind: BrowserTransportKind,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<Value, AppError> {
+        self.execute_inner(kind, None, tool, arguments).await
+    }
+
+    async fn execute_inner(
+        &self,
+        kind: BrowserTransportKind,
+        routine_id: Option<&str>,
         tool: &str,
         mut arguments: Value,
     ) -> Result<Value, AppError> {
@@ -384,6 +499,7 @@ impl BrowserBroker {
                         session_id.clone(),
                         BrowserSession {
                             transport_kind: kind,
+                            routine_id: routine_id.map(str::to_string),
                             tabs: HashSet::new(),
                         },
                     );
@@ -409,10 +525,10 @@ impl BrowserBroker {
             let still_owned = {
                 let state = self.lock();
                 !state.transition_blocked
-                    && state
-                        .sessions
-                        .get(&session_id)
-                        .is_some_and(|session| session.transport_kind == kind)
+                    && state.sessions.get(&session_id).is_some_and(|session| {
+                        session.transport_kind == kind
+                            && session.routine_id.as_deref() == routine_id
+                    })
             };
             if !still_owned {
                 transport.terminate_session(&session_id);
@@ -430,11 +546,9 @@ impl BrowserBroker {
         let session_id = required_string(&arguments, "session_id")?.to_string();
         {
             let state = self.lock();
-            if !state
-                .sessions
-                .get(&session_id)
-                .is_some_and(|session| session.transport_kind == kind)
-            {
+            if !state.sessions.get(&session_id).is_some_and(|session| {
+                session.transport_kind == kind && session.routine_id.as_deref() == routine_id
+            }) {
                 return Err(AppError::new(
                     "browser_session_not_found",
                     "Browser session was not found.",
