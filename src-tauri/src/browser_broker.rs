@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 
 use crate::{
     browser::policy::{classify_managed_action, ActionClass, InteractiveElement, ManagedAction},
+    db::repositories::Repositories,
     domain::types::AppError,
     extension_host::{ExtensionHost, ExtensionResponse},
 };
@@ -57,6 +58,48 @@ pub(crate) enum BrowserTransportKind {
     /// Reserved for the JUN-289 transport behind this same broker dispatch.
     #[allow(dead_code)]
     Managed,
+}
+
+impl BrowserTransportKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Attended => "attended",
+            Self::Managed => "managed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowserOutcomeClass {
+    TargetState,
+    Artifact,
+    ActionReceipt,
+}
+
+impl BrowserOutcomeClass {
+    fn for_tool(tool: &str) -> Option<Self> {
+        match tool {
+            "navigate" | "back" => Some(Self::TargetState),
+            "snapshot" | "screenshot" => Some(Self::Artifact),
+            "click" | "fill" | "press" => Some(Self::ActionReceipt),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TargetState => "target_state",
+            Self::Artifact => "artifact",
+            Self::ActionReceipt => "action_receipt",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct BrowserOutcomeDeclaration {
+    id: String,
+    session_id: String,
+    outcome_class: Option<BrowserOutcomeClass>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +247,7 @@ struct BrowserBrokerState {
     resolved_actions: HashMap<BrowserActionKey, BrowserActionOutcome>,
     approvals_changed: Option<Arc<dyn Fn() + Send + Sync>>,
     routine_grants: Vec<RoutineBrowserGrant>,
+    outcome_repository: Option<Repositories>,
 }
 
 struct BrowserSession {
@@ -240,6 +284,7 @@ struct PendingBrowserAction {
     origin: String,
     element: InteractiveElement,
     requested_at_ms: u64,
+    ledger_action_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -285,6 +330,10 @@ impl BrowserBroker {
         state.transports.entry(kind).or_insert(transport);
         state.screenshot_root = Some(screenshot_root);
         state.artifact_root = Some(artifact_root);
+    }
+
+    pub(crate) fn configure_outcome_repository(&self, repositories: Repositories) {
+        self.lock().outcome_repository = Some(repositories);
     }
 
     pub(crate) fn set_access_flag_path(&self, path: PathBuf) {
@@ -355,14 +404,17 @@ impl BrowserBroker {
 
     pub(crate) async fn set_enabled(&self, enabled: bool) -> Result<(), AppError> {
         let _action = self.action_lock.lock().await;
-        let (transports, sessions, approvals_changed) = {
+        let (transports, sessions, cancelled) = {
             let mut state = self.lock();
             state.transition_blocked = !enabled;
             if enabled {
                 return Ok(());
             }
-            let approvals_changed = !state.pending_approvals.is_empty();
-            state.pending_approvals.clear();
+            let cancelled = state
+                .pending_approvals
+                .drain()
+                .map(|(_, pending)| pending)
+                .collect::<Vec<_>>();
             state.pending_by_action.clear();
             state.resolved_actions.clear();
             let transports = state.transports.clone();
@@ -371,9 +423,18 @@ impl BrowserBroker {
                 .drain()
                 .map(|(id, session)| (id.clone(), session.transport_kind))
                 .collect::<Vec<_>>();
-            (transports, sessions, approvals_changed)
+            (transports, sessions, cancelled)
         };
-        if approvals_changed {
+        for pending in &cancelled {
+            self.finish_approval(
+                pending,
+                "cancelled_by_task_end",
+                "browser_action_cancelled_by_task_end",
+            )
+            .await?;
+            tracing::info!(action_id = %pending.approval_id, outcome = "cancelled_by_task_end", "browser approval state changed");
+        }
+        if !cancelled.is_empty() {
             self.notify_approvals_changed();
         }
         // Kill managed Chromium processes before awaiting any graceful close.
@@ -448,8 +509,9 @@ impl BrowserBroker {
         self.lock().sessions.len()
     }
 
-    pub(crate) fn release_tab(&self, tab_id: i64) -> bool {
-        let (released, approvals_changed) = {
+    pub(crate) async fn release_tab(&self, tab_id: i64) -> Result<bool, AppError> {
+        let _action = self.action_lock.lock().await;
+        let (released, cancelled) = {
             let mut state = self.lock();
             let mut released = false;
             let session_ids = state
@@ -462,19 +524,29 @@ impl BrowserBroker {
                     })
                 })
                 .collect::<HashSet<_>>();
-            let approvals_changed = remove_actions_matching(&mut state, |key| {
+            let cancelled = remove_actions_matching(&mut state, |key| {
                 key.tab_id == tab_id && session_ids.contains(&key.session_id)
             });
-            (released, approvals_changed)
+            (released, cancelled)
         };
-        if approvals_changed {
+        for pending in &cancelled {
+            self.finish_approval(
+                pending,
+                "cancelled_by_task_end",
+                "browser_action_cancelled_by_task_end",
+            )
+            .await?;
+            tracing::info!(action_id = %pending.approval_id, outcome = "cancelled_by_task_end", "browser approval state changed");
+        }
+        if !cancelled.is_empty() {
             self.notify_approvals_changed();
         }
-        released
+        Ok(released)
     }
 
-    pub(crate) fn pending_approvals(&self) -> Vec<PendingBrowserApproval> {
-        self.prune_expired_approvals();
+    pub(crate) async fn pending_approvals(&self) -> Result<Vec<PendingBrowserApproval>, AppError> {
+        let _action = self.action_lock.lock().await;
+        self.prune_expired_approvals().await?;
         let mut pending = self
             .lock()
             .pending_approvals
@@ -492,34 +564,40 @@ impl BrowserBroker {
             })
             .collect::<Vec<_>>();
         pending.sort_by_key(|entry| entry.requested_at_ms);
-        pending
+        Ok(pending)
     }
 
-    fn prune_expired_approvals(&self) {
-        let changed = {
-            let mut state = self.lock();
+    async fn prune_expired_approvals(&self) -> Result<(), AppError> {
+        let expired = {
+            let state = self.lock();
             let now = now_ms();
-            let expired = state
+            state
                 .pending_approvals
                 .iter()
                 .filter(|(_, pending)| {
                     now.saturating_sub(pending.requested_at_ms) >= BROWSER_APPROVAL_TIMEOUT_MS
                 })
-                .map(|(id, _)| id.clone())
-                .collect::<Vec<_>>();
-            for id in &expired {
-                if let Some(pending) = state.pending_approvals.remove(id) {
-                    state.pending_by_action.remove(&pending.key);
-                    state
-                        .resolved_actions
-                        .insert(pending.key, BrowserActionOutcome::NotExecuted);
-                }
-            }
-            !expired.is_empty()
+                .map(|(_, pending)| pending.clone())
+                .collect::<Vec<_>>()
         };
-        if changed {
+        for pending in &expired {
+            self.finish_approval(pending, "expired", "browser_approval_expired")
+                .await?;
+        }
+        if !expired.is_empty() {
+            let mut state = self.lock();
+            for pending in &expired {
+                state.pending_approvals.remove(&pending.approval_id);
+                state.pending_by_action.remove(&pending.key);
+                state
+                    .resolved_actions
+                    .insert(pending.key.clone(), BrowserActionOutcome::NotExecuted);
+                tracing::info!(action_id = %pending.approval_id, outcome = "expired", "browser approval state changed");
+            }
+            drop(state);
             self.notify_approvals_changed();
         }
+        Ok(())
     }
 
     fn require_enabled(&self) -> Result<(), AppError> {
@@ -540,6 +618,170 @@ impl BrowserBroker {
                 "The selected browser transport is unavailable.",
             )
         })
+    }
+
+    fn outcome_repository(&self) -> Result<Option<Repositories>, AppError> {
+        let repository = self.lock().outcome_repository.clone();
+        #[cfg(not(test))]
+        if repository.is_none() {
+            return Err(AppError::new(
+                "browser_outcome_ledger_unavailable",
+                "The browser outcome ledger is unavailable.",
+            ));
+        }
+        Ok(repository)
+    }
+
+    async fn declare_outcome(
+        &self,
+        kind: BrowserTransportKind,
+        tool: &str,
+        session_id: &str,
+    ) -> Result<BrowserOutcomeDeclaration, AppError> {
+        let declaration = BrowserOutcomeDeclaration {
+            id: uuid::Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            outcome_class: BrowserOutcomeClass::for_tool(tool),
+        };
+        if let Some(repository) = self.outcome_repository()? {
+            repository
+                .declare_browser_action(
+                    &declaration.id,
+                    tool,
+                    kind.as_str(),
+                    session_id,
+                    declaration.outcome_class.map(BrowserOutcomeClass::as_str),
+                )
+                .await
+                .map_err(outcome_ledger_error)?;
+        }
+        Ok(declaration)
+    }
+
+    async fn evaluate_outcome(
+        &self,
+        declaration: &BrowserOutcomeDeclaration,
+        result_kind: &str,
+        result_code_class: Option<&str>,
+        outcome_verified: bool,
+    ) {
+        let Ok(Some(repository)) = self.outcome_repository() else {
+            return;
+        };
+        if let Err(error) = repository
+            .evaluate_browser_action(
+                &declaration.id,
+                result_kind,
+                result_code_class,
+                outcome_verified,
+            )
+            .await
+        {
+            tracing::error!(
+                action_id = %declaration.id,
+                error = %error,
+                "browser outcome evaluation persistence failed"
+            );
+        }
+    }
+
+    async fn finish_declared_response(
+        &self,
+        declaration: &BrowserOutcomeDeclaration,
+        response: Result<TransportResponse, AppError>,
+    ) -> Result<Value, AppError> {
+        match response {
+            Ok(response) => {
+                let verified = match declaration.outcome_class {
+                    Some(BrowserOutcomeClass::Artifact) => response.artifact.is_some(),
+                    Some(BrowserOutcomeClass::TargetState | BrowserOutcomeClass::ActionReceipt) => {
+                        true
+                    }
+                    None => false,
+                };
+                match self.finish_response(response) {
+                    Ok(value) => {
+                        self.evaluate_outcome(declaration, "executed", None, verified)
+                            .await;
+                        Ok(value)
+                    }
+                    Err(error) => {
+                        self.evaluate_outcome(
+                            declaration,
+                            "transport_error",
+                            Some(&error.code),
+                            false,
+                        )
+                        .await;
+                        Err(error)
+                    }
+                }
+            }
+            Err(error) => {
+                let result_kind = if is_broker_refusal_code(&error.code) {
+                    "refused"
+                } else {
+                    "transport_error"
+                };
+                self.evaluate_outcome(declaration, result_kind, Some(&error.code), false)
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn park_outcome(
+        &self,
+        declaration: &BrowserOutcomeDeclaration,
+        approval_id: &str,
+    ) -> Result<(), AppError> {
+        if let Some(repository) = self.outcome_repository()? {
+            repository
+                .park_browser_approval(&declaration.id, approval_id, &declaration.session_id)
+                .await
+                .map_err(outcome_ledger_error)?;
+        }
+        Ok(())
+    }
+
+    async fn record_approval_event(
+        &self,
+        pending: &PendingBrowserAction,
+        event_kind: &str,
+    ) -> Result<(), AppError> {
+        if let Some(repository) = self.outcome_repository()? {
+            repository
+                .record_browser_approval_event(
+                    &pending.ledger_action_id,
+                    &pending.approval_id,
+                    &pending.key.session_id,
+                    event_kind,
+                )
+                .await
+                .map_err(outcome_ledger_error)?;
+        }
+        Ok(())
+    }
+
+    async fn finish_approval(
+        &self,
+        pending: &PendingBrowserAction,
+        event_kind: &str,
+        result_code_class: &str,
+    ) -> Result<(), AppError> {
+        if let Some(repository) = self.outcome_repository()? {
+            repository
+                .finish_browser_approval(
+                    &pending.ledger_action_id,
+                    &pending.approval_id,
+                    &pending.key.session_id,
+                    event_kind,
+                    result_code_class,
+                )
+                .await
+                .map_err(outcome_ledger_error)?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn execute_for(
@@ -632,9 +874,19 @@ impl BrowserBroker {
         let transport = self.transport(kind)?;
         if tool == "start_session" {
             let session_id = uuid::Uuid::new_v4().to_string();
+            let declaration = self.declare_outcome(kind, tool, &session_id).await?;
             arguments = json!({ "session_id": &session_id });
             let inserted = {
-                transport.reserve_session(&session_id)?;
+                if let Err(error) = transport.reserve_session(&session_id) {
+                    self.evaluate_outcome(
+                        &declaration,
+                        "transport_error",
+                        Some(&error.code),
+                        false,
+                    )
+                    .await;
+                    return Err(error);
+                }
                 let mut state = self.lock();
                 let enabled = !state.transition_blocked
                     && state
@@ -659,6 +911,13 @@ impl BrowserBroker {
                 let _ = transport
                     .execute("close_session", json!({ "session_id": &session_id }))
                     .await;
+                self.evaluate_outcome(
+                    &declaration,
+                    "refused",
+                    Some("browser_access_disabled"),
+                    false,
+                )
+                .await;
                 return Err(AppError::new(
                     "browser_access_disabled",
                     "Browser use is not enabled.",
@@ -668,6 +927,17 @@ impl BrowserBroker {
             if let Err(error) = transport.execute(tool, arguments).await {
                 self.lock().sessions.remove(&session_id);
                 transport.terminate_session(&session_id);
+                self.evaluate_outcome(
+                    &declaration,
+                    if is_broker_refusal_code(&error.code) {
+                        "refused"
+                    } else {
+                        "transport_error"
+                    },
+                    Some(&error.code),
+                    false,
+                )
+                .await;
                 return Err(error);
             }
             let still_owned = {
@@ -683,11 +953,20 @@ impl BrowserBroker {
                 let _ = transport
                     .execute("close_session", json!({ "session_id": &session_id }))
                     .await;
+                self.evaluate_outcome(
+                    &declaration,
+                    "refused",
+                    Some("browser_access_disabled"),
+                    false,
+                )
+                .await;
                 return Err(AppError::new(
                     "browser_access_disabled",
                     "Browser use is not enabled.",
                 ));
             }
+            self.evaluate_outcome(&declaration, "executed", None, false)
+                .await;
             return Ok(json!({ "sessionId": session_id }));
         }
 
@@ -706,22 +985,30 @@ impl BrowserBroker {
 
         if tool == "close_session" {
             let _action = self.action_lock.lock().await;
+            let declaration = self.declare_outcome(kind, tool, &session_id).await?;
             let close_result = transport.execute(tool, arguments).await;
-            let approvals_changed = {
+            let cancelled = {
                 let mut state = self.lock();
                 state.sessions.remove(&session_id);
                 remove_actions_matching(&mut state, |key| key.session_id == session_id)
             };
-            if approvals_changed {
+            for pending in &cancelled {
+                self.finish_approval(
+                    pending,
+                    "cancelled_by_task_end",
+                    "browser_action_cancelled_by_task_end",
+                )
+                .await?;
+                tracing::info!(action_id = %pending.approval_id, outcome = "cancelled_by_task_end", "browser approval state changed");
+            }
+            if !cancelled.is_empty() {
                 self.notify_approvals_changed();
             }
-            close_result?;
+            self.finish_declared_response(&declaration, close_result)
+                .await?;
             return Ok(json!({ "closed": true }));
         }
 
-        if tool == "navigate" && kind == BrowserTransportKind::Attended {
-            validate_attended_url(required_string(&arguments, "url")?)?;
-        }
         if tool == "accept_shared_tab" {
             required_string(&arguments, "share_id")?;
         }
@@ -730,21 +1017,36 @@ impl BrowserBroker {
         // navigate path deliberately bypasses the attended URL check: the
         // transport enforces the stricter resolve-validate-pin policy instead.
         if kind == BrowserTransportKind::Managed {
-            return self.finish_response(transport.execute(tool, arguments).await?);
+            let declaration = self.declare_outcome(kind, tool, &session_id).await?;
+            return self
+                .finish_declared_response(&declaration, transport.execute(tool, arguments).await)
+                .await;
         }
 
         if matches!(tool, "open_tab" | "accept_shared_tab") {
-            let response = transport.execute(tool, arguments.clone()).await?;
-            let tab_id = response
-                .data
-                .get("tabId")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| {
-                    AppError::new(
-                        "extension_response_invalid",
-                        "The extension returned no tab id.",
+            let declaration = self.declare_outcome(kind, tool, &session_id).await?;
+            let response = match transport.execute(tool, arguments.clone()).await {
+                Ok(response) => response,
+                Err(error) => {
+                    self.evaluate_outcome(
+                        &declaration,
+                        "transport_error",
+                        Some(&error.code),
+                        false,
                     )
-                })?;
+                    .await;
+                    return Err(error);
+                }
+            };
+            let Some(tab_id) = response.data.get("tabId").and_then(Value::as_i64) else {
+                let error = AppError::new(
+                    "extension_response_invalid",
+                    "The extension returned no tab id.",
+                );
+                self.evaluate_outcome(&declaration, "transport_error", Some(&error.code), false)
+                    .await;
+                return Err(error);
+            };
             let accepted = {
                 let mut state = self.lock();
                 let collision = state
@@ -767,12 +1069,32 @@ impl BrowserBroker {
                         json!({ "session_id": session_id, "tab_id": tab_id }),
                     )
                     .await;
-                return Err(AppError::new(
+                let error = AppError::new(
                     "extension_tab_collision",
                     "The extension returned a tab id that cannot belong to this session.",
-                ));
+                );
+                self.evaluate_outcome(&declaration, "transport_error", Some(&error.code), false)
+                    .await;
+                return Err(error);
             }
+            self.evaluate_outcome(&declaration, "executed", None, false)
+                .await;
             return Ok(response.data);
+        }
+
+        if matches!(tool, "click" | "fill" | "press") {
+            return self
+                .execute_attended_interaction(transport, tool, arguments)
+                .await;
+        }
+
+        let declaration = self.declare_outcome(kind, tool, &session_id).await?;
+        if tool == "navigate" {
+            if let Err(error) = required_string(&arguments, "url").and_then(validate_attended_url) {
+                self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                    .await;
+                return Err(error);
+            }
         }
 
         if tool != "list_tabs" {
@@ -786,17 +1108,14 @@ impl BrowserBroker {
                 .get(&session_id)
                 .is_some_and(|session| session.tabs.contains(&tab_id));
             if !owned {
-                return Err(AppError::new(
+                let error = AppError::new(
                     "tab_not_owned",
                     "The tab is not owned by this Browser use session.",
-                ));
+                );
+                self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                    .await;
+                return Err(error);
             }
-        }
-
-        if matches!(tool, "click" | "fill" | "press") {
-            return self
-                .execute_attended_interaction(transport, tool, arguments)
-                .await;
         }
 
         let _action = if matches!(tool, "navigate" | "close_tab") {
@@ -804,7 +1123,8 @@ impl BrowserBroker {
         } else {
             None
         };
-        let mut response = transport.execute(tool, arguments.clone()).await?;
+        let response = async {
+            let mut response = transport.execute(tool, arguments.clone()).await?;
         if tool == "list_tabs" {
             let owned = self
                 .lock()
@@ -840,7 +1160,7 @@ impl BrowserBroker {
         }
         if tool == "close_tab" {
             let tab_id = arguments["tab_id"].as_i64().unwrap_or_default();
-            let approvals_changed = {
+            let cancelled = {
                 let mut state = self.lock();
                 if let Some(session) = state.sessions.get_mut(&session_id) {
                     session.tabs.remove(&tab_id);
@@ -849,11 +1169,23 @@ impl BrowserBroker {
                     key.session_id == session_id && key.tab_id == tab_id
                 })
             };
-            if approvals_changed {
+            for pending in &cancelled {
+                self.finish_approval(
+                    pending,
+                    "cancelled_by_task_end",
+                    "browser_action_cancelled_by_task_end",
+                )
+                .await?;
+                tracing::info!(action_id = %pending.approval_id, outcome = "cancelled_by_task_end", "browser approval state changed");
+            }
+            if !cancelled.is_empty() {
                 self.notify_approvals_changed();
             }
         }
-        self.finish_response(response)
+            Ok::<TransportResponse, AppError>(response)
+        }
+        .await;
+        self.finish_declared_response(&declaration, response).await
     }
 
     async fn execute_attended_interaction(
@@ -863,7 +1195,7 @@ impl BrowserBroker {
         arguments: Value,
     ) -> Result<Value, AppError> {
         let _action = self.action_lock.lock().await;
-        self.prune_expired_approvals();
+        self.prune_expired_approvals().await?;
         let key = browser_action_key(tool, &arguments)?;
         if let Some(outcome) = self.lock().resolved_actions.get(&key).cloned() {
             return resolved_action_result(outcome);
@@ -872,26 +1204,57 @@ impl BrowserBroker {
             return Ok(parked_action_result(&approval_id));
         }
 
-        let inspection = inspect_attended_reference(transport.as_ref(), &arguments).await?;
-        let origin = normalized_origin(&inspection.url)?;
-        let action = managed_action(tool, &key.value)?;
+        let declaration = self
+            .declare_outcome(BrowserTransportKind::Attended, tool, &key.session_id)
+            .await?;
+
+        let inspection = match inspect_attended_reference(transport.as_ref(), &arguments).await {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                self.evaluate_outcome(&declaration, "transport_error", Some(&error.code), false)
+                    .await;
+                return Err(error);
+            }
+        };
+        let origin = match normalized_origin(&inspection.url) {
+            Ok(origin) => origin,
+            Err(error) => {
+                self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                    .await;
+                return Err(error);
+            }
+        };
+        let action = match managed_action(tool, &key.value) {
+            Ok(action) => action,
+            Err(error) => {
+                self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                    .await;
+                return Err(error);
+            }
+        };
         match classify_managed_action(action, &inspection.element) {
             ActionClass::SensitiveField => {
-                return Err(AppError::new(
+                let error = AppError::new(
                     "browser_human_takeover_required",
                     "This field requires you to take over in the browser tab.",
-                ));
+                );
+                self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                    .await;
+                return Err(error);
             }
             ActionClass::Routine => {
-                return self.finish_response(
-                    act_on_attended_reference(
-                        transport.as_ref(),
-                        tool,
-                        arguments,
-                        &inspection.element,
+                return self
+                    .finish_declared_response(
+                        &declaration,
+                        act_on_attended_reference(
+                            transport.as_ref(),
+                            tool,
+                            arguments,
+                            &inspection.element,
+                        )
+                        .await,
                     )
-                    .await?,
-                );
+                    .await;
             }
             ActionClass::Consequential => {}
         }
@@ -902,10 +1265,18 @@ impl BrowserBroker {
             .get(&key.session_id)
             .is_some_and(|session| session.allowed_origins.contains(&origin));
         if site_allowed {
-            return self.finish_response(
-                act_on_attended_reference(transport.as_ref(), tool, arguments, &inspection.element)
-                    .await?,
-            );
+            return self
+                .finish_declared_response(
+                    &declaration,
+                    act_on_attended_reference(
+                        transport.as_ref(),
+                        tool,
+                        arguments,
+                        &inspection.element,
+                    )
+                    .await,
+                )
+                .await;
         }
 
         let approval_id = uuid::Uuid::new_v4().simple().to_string();
@@ -915,7 +1286,9 @@ impl BrowserBroker {
             origin,
             element: inspection.element,
             requested_at_ms: now_ms(),
+            ledger_action_id: declaration.id.clone(),
         };
+        self.park_outcome(&declaration, &approval_id).await?;
         {
             let mut state = self.lock();
             state.pending_by_action.insert(key, approval_id.clone());
@@ -934,22 +1307,34 @@ impl BrowserBroker {
     ) -> Result<(), AppError> {
         let _action = self.action_lock.lock().await;
         let pending = {
-            let mut state = self.lock();
-            let Some(pending) = state.pending_approvals.remove(approval_id) else {
+            let state = self.lock();
+            let Some(pending) = state.pending_approvals.get(approval_id).cloned() else {
                 return Err(AppError::new(
                     "browser_approval_not_found",
                     "That browser approval is no longer pending.",
                 ));
             };
-            state.pending_by_action.remove(&pending.key);
             pending
         };
-        self.notify_approvals_changed();
+        let declaration = BrowserOutcomeDeclaration {
+            id: pending.ledger_action_id.clone(),
+            session_id: pending.key.session_id.clone(),
+            outcome_class: Some(BrowserOutcomeClass::ActionReceipt),
+        };
 
         if now_ms().saturating_sub(pending.requested_at_ms) >= BROWSER_APPROVAL_TIMEOUT_MS {
-            self.lock()
-                .resolved_actions
-                .insert(pending.key, BrowserActionOutcome::NotExecuted);
+            self.finish_approval(&pending, "expired", "browser_approval_expired")
+                .await?;
+            {
+                let mut state = self.lock();
+                state.pending_approvals.remove(approval_id);
+                state.pending_by_action.remove(&pending.key);
+                state
+                    .resolved_actions
+                    .insert(pending.key, BrowserActionOutcome::NotExecuted);
+            }
+            tracing::info!(action_id = %approval_id, outcome = "expired", "browser approval state changed");
+            self.notify_approvals_changed();
             return Err(AppError::new(
                 "browser_approval_expired",
                 "The browser action was not executed because the approval expired.",
@@ -957,40 +1342,68 @@ impl BrowserBroker {
         }
 
         if !approve {
-            self.lock()
-                .resolved_actions
-                .insert(pending.key, BrowserActionOutcome::Declined);
+            self.finish_approval(&pending, "declined", "browser_action_declined")
+                .await?;
+            {
+                let mut state = self.lock();
+                state.pending_approvals.remove(approval_id);
+                state.pending_by_action.remove(&pending.key);
+                state
+                    .resolved_actions
+                    .insert(pending.key, BrowserActionOutcome::Declined);
+            }
             tracing::info!(action_id = %approval_id, outcome = "declined", "browser approval state changed");
+            self.notify_approvals_changed();
             return Ok(());
         }
 
-        self.require_enabled()?;
+        {
+            let mut state = self.lock();
+            state.pending_approvals.remove(approval_id);
+            state.pending_by_action.remove(&pending.key);
+        }
+        self.notify_approvals_changed();
+
+        if let Err(error) = self.require_enabled() {
+            self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                .await;
+            return Err(error);
+        }
         let transport = {
             let state = self.lock();
-            let Some(session) = state.sessions.get(&pending.key.session_id) else {
-                return Err(AppError::new(
+            match state.sessions.get(&pending.key.session_id) {
+                None => Err(AppError::new(
                     "browser_action_not_executed",
                     "The browser action was not executed because its task ended.",
-                ));
-            };
-            if session.transport_kind != BrowserTransportKind::Attended
-                || !session.tabs.contains(&pending.key.tab_id)
-            {
-                return Err(AppError::new(
+                )),
+                Some(session)
+                    if session.transport_kind != BrowserTransportKind::Attended
+                        || !session.tabs.contains(&pending.key.tab_id) =>
+                {
+                    Err(AppError::new(
                     "browser_action_not_executed",
                     "The browser action was not executed because its tab is no longer available.",
-                ));
+                    ))
+                }
+                Some(_) => state
+                    .transports
+                    .get(&BrowserTransportKind::Attended)
+                    .cloned()
+                    .ok_or_else(|| {
+                        AppError::new(
+                            "browser_action_not_executed",
+                            "The browser action was not executed because its transport is unavailable.",
+                        )
+                    }),
             }
-            state
-                .transports
-                .get(&BrowserTransportKind::Attended)
-                .cloned()
-                .ok_or_else(|| {
-                    AppError::new(
-                        "browser_action_not_executed",
-                        "The browser action was not executed because its transport is unavailable.",
-                    )
-                })?
+        };
+        let transport = match transport {
+            Ok(transport) => transport,
+            Err(error) => {
+                self.evaluate_outcome(&declaration, "refused", Some(&error.code), false)
+                    .await;
+                return Err(error);
+            }
         };
 
         let arguments = action_arguments(&pending.key);
@@ -1022,6 +1435,9 @@ impl BrowserBroker {
 
         match execution {
             Ok(()) => {
+                self.record_approval_event(&pending, "approved").await?;
+                self.evaluate_outcome(&declaration, "executed", None, true)
+                    .await;
                 let mut state = self.lock();
                 if allow_site {
                     if let Some(session) = state.sessions.get_mut(&pending.key.session_id) {
@@ -1041,6 +1457,13 @@ impl BrowserBroker {
                     BrowserActionOutcome::NotExecuted
                 };
                 self.lock().resolved_actions.insert(pending.key, outcome);
+                let result_kind = if is_broker_refusal_code(&error.code) {
+                    "refused"
+                } else {
+                    "transport_error"
+                };
+                self.evaluate_outcome(&declaration, result_kind, Some(&error.code), false)
+                    .await;
                 Err(error)
             }
         }
@@ -1244,20 +1667,22 @@ fn resolved_action_result(outcome: BrowserActionOutcome) -> Result<Value, AppErr
 fn remove_actions_matching(
     state: &mut BrowserBrokerState,
     predicate: impl Fn(&BrowserActionKey) -> bool,
-) -> bool {
+) -> Vec<PendingBrowserAction> {
     let pending_ids = state
         .pending_approvals
         .iter()
         .filter(|(_, pending)| predicate(&pending.key))
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
+    let mut removed = Vec::with_capacity(pending_ids.len());
     for id in &pending_ids {
         if let Some(pending) = state.pending_approvals.remove(id) {
             state.pending_by_action.remove(&pending.key);
+            removed.push(pending);
         }
     }
     state.resolved_actions.retain(|key, _| !predicate(key));
-    !pending_ids.is_empty()
+    removed
 }
 
 fn now_ms() -> u64 {
@@ -1265,6 +1690,34 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn outcome_ledger_error(error: sqlx::Error) -> AppError {
+    tracing::error!(error = %error, "browser outcome ledger persistence failed");
+    AppError::new(
+        "browser_outcome_ledger_failed",
+        "The browser outcome could not be recorded.",
+    )
+}
+
+fn is_broker_refusal_code(code: &str) -> bool {
+    matches!(
+        code,
+        "browser_access_disabled"
+            | "browser_routine_not_opted_in"
+            | "browser_policy_blocked"
+            | "browser_consequential_action_blocked"
+            | "browser_sensitive_field_blocked"
+            | "browser_human_takeover_required"
+            | "browser_url_invalid"
+            | "browser_url_not_allowed"
+            | "browser_tool_unavailable"
+            | "browser_action_declined"
+            | "browser_action_not_executed"
+            | "browser_approval_expired"
+            | "browser_stale_reference"
+            | "tab_not_owned"
+    )
 }
 
 fn validate_attended_url(raw: &str) -> Result<(), AppError> {
@@ -1348,6 +1801,18 @@ fn atomic_write(root: &Path, filename: &str, bytes: &[u8]) -> Result<(), AppErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn test_outcome_repositories() -> Repositories {
+        let pool = sqlx_sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory");
+        crate::db::migrations::run_migrations(&pool)
+            .await
+            .expect("migrations");
+        Repositories::new(pool)
+    }
 
     struct BlockingTransport {
         entered: Arc<tokio::sync::Notify>,
@@ -1618,7 +2083,7 @@ mod tests {
             .await
             .expect("accept explicitly shared tab");
         assert_eq!(shared["tabId"], 8);
-        assert!(broker.release_tab(8));
+        assert!(broker.release_tab(8).await.expect("release shared tab"));
         let revoked = broker
             .execute(
                 BrowserTransportKind::Attended,
@@ -1714,6 +2179,208 @@ mod tests {
         fn execute<'a>(&'a self, _tool: &'a str, _arguments: Value) -> TransportFuture<'a> {
             Box::pin(async { Err(AppError::new("unavailable", "unavailable")) })
         }
+    }
+
+    struct OutcomeLedgerTransport {
+        repositories: Repositories,
+        declarations_seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl BrowserTransport for OutcomeLedgerTransport {
+        fn execute<'a>(&'a self, tool: &'a str, arguments: Value) -> TransportFuture<'a> {
+            Box::pin(async move {
+                if matches!(tool, "navigate" | "screenshot" | "click" | "fill") {
+                    let session_id = required_string(&arguments, "session_id")?;
+                    let rows = self
+                        .repositories
+                        .browser_action_outcomes_for_session(session_id)
+                        .await
+                        .map_err(outcome_ledger_error)?;
+                    let declared = rows
+                        .iter()
+                        .rev()
+                        .find(|row| row.operation == tool)
+                        .expect("outcome is declared before transport dispatch");
+                    assert_eq!(declared.result_kind, "pending");
+                    assert!(declared.evaluated_at.is_none());
+                    self.declarations_seen
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                match tool {
+                    "screenshot" => Ok(TransportResponse::artifact(
+                        json!({}),
+                        TransportArtifact {
+                            kind: "screenshot".into(),
+                            mime_type: "image/png".into(),
+                            bytes: b"sentinel screenshot body".to_vec(),
+                        },
+                    )),
+                    "click" => Err(AppError::new(
+                        "browser_consequential_action_blocked",
+                        "The managed browser refused the action.",
+                    )),
+                    "fill" => Err(AppError::new(
+                        "browser_command_failed",
+                        "The browser transport failed.",
+                    )),
+                    _ => Ok(TransportResponse::data(json!({}))),
+                }
+            })
+        }
+    }
+
+    async fn managed_outcome_broker() -> (
+        tempfile::TempDir,
+        BrowserBroker,
+        Arc<OutcomeLedgerTransport>,
+        Repositories,
+        String,
+    ) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let flag = temp.path().join("browser-access");
+        std::fs::write(&flag, b"1").expect("grant");
+        let repositories = test_outcome_repositories().await;
+        let transport = Arc::new(OutcomeLedgerTransport {
+            repositories: repositories.clone(),
+            declarations_seen: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let broker = BrowserBroker::default();
+        broker.set_access_flag_path(flag);
+        broker.configure_outcome_repository(repositories.clone());
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            transport.clone(),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "job-1".into(),
+            server_name: "june_browser_routine_job1".into(),
+            token: "token".into(),
+            enabled: true,
+        });
+        let started = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("job-1".into()),
+                "start_session",
+                json!({}),
+            )
+            .await
+            .expect("start managed session");
+        let session_id = started["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+        (temp, broker, transport, repositories, session_id)
+    }
+
+    #[tokio::test]
+    async fn managed_transport_confirmations_verify_predeclared_outcomes() {
+        let (_temp, broker, transport, repositories, session_id) = managed_outcome_broker().await;
+        broker
+            .execute_for(
+                BrowserBrokerContext::Routine("job-1".into()),
+                "navigate",
+                json!({
+                    "session_id": &session_id,
+                    "url": "https://sentinel.invalid/private",
+                }),
+            )
+            .await
+            .expect("navigate");
+        broker
+            .execute_for(
+                BrowserBrokerContext::Routine("job-1".into()),
+                "screenshot",
+                json!({ "session_id": &session_id }),
+            )
+            .await
+            .expect("screenshot");
+
+        assert_eq!(
+            transport
+                .declarations_seen
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        let rows = repositories
+            .browser_action_outcomes_for_session(&session_id)
+            .await
+            .expect("ledger rows");
+        let navigate = rows
+            .iter()
+            .find(|row| row.operation == "navigate")
+            .expect("navigate row");
+        assert_eq!(navigate.outcome_class.as_deref(), Some("target_state"));
+        assert!(navigate.outcome_verified);
+        let screenshot = rows
+            .iter()
+            .find(|row| row.operation == "screenshot")
+            .expect("screenshot row");
+        assert_eq!(screenshot.outcome_class.as_deref(), Some("artifact"));
+        assert!(screenshot.outcome_verified);
+        assert!(!format!("{rows:?}").contains("sentinel.invalid"));
+        assert!(!format!("{rows:?}").contains("sentinel screenshot body"));
+    }
+
+    #[tokio::test]
+    async fn agent_lied_case_records_policy_and_transport_failures_without_success() {
+        let (_temp, broker, transport, repositories, session_id) = managed_outcome_broker().await;
+        let refused = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("job-1".into()),
+                "click",
+                json!({ "session_id": &session_id, "ref": "sentinel-label" }),
+            )
+            .await
+            .expect_err("policy refusal");
+        assert_eq!(refused.code, "browser_consequential_action_blocked");
+        let failed = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("job-1".into()),
+                "fill",
+                json!({
+                    "session_id": &session_id,
+                    "ref": "sentinel-label",
+                    "text": "sentinel-field-value",
+                }),
+            )
+            .await
+            .expect_err("transport error");
+        assert_eq!(failed.code, "browser_command_failed");
+
+        assert_eq!(
+            transport
+                .declarations_seen
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+        let rows = repositories
+            .browser_action_outcomes_for_session(&session_id)
+            .await
+            .expect("ledger rows");
+        let click = rows
+            .iter()
+            .find(|row| row.operation == "click")
+            .expect("click row");
+        assert_eq!(click.result_kind, "refused");
+        assert_eq!(
+            click.result_code_class.as_deref(),
+            Some("browser_consequential_action_blocked")
+        );
+        let fill = rows
+            .iter()
+            .find(|row| row.operation == "fill")
+            .expect("fill row");
+        assert_eq!(fill.result_kind, "transport_error");
+        assert_eq!(
+            fill.result_code_class.as_deref(),
+            Some("browser_command_failed")
+        );
+        assert!(rows.iter().all(|row| !row.outcome_verified));
+        let serialized = format!("{rows:?}");
+        assert!(!serialized.contains("sentinel-label"));
+        assert!(!serialized.contains("sentinel-field-value"));
     }
 
     struct ManagedPolicyTransport {
@@ -2041,13 +2708,16 @@ mod tests {
         BrowserBroker,
         Arc<AttendedInteractionTransport>,
         String,
+        Repositories,
     ) {
         let temp = tempfile::tempdir().expect("tempdir");
         let flag = temp.path().join("browser-access");
         std::fs::write(&flag, b"1").expect("grant");
         let transport = Arc::new(AttendedInteractionTransport::consequential(label));
+        let repositories = test_outcome_repositories().await;
         let broker = BrowserBroker::default();
         broker.set_access_flag_path(flag);
+        broker.configure_outcome_repository(repositories.clone());
         broker.configure_transport(
             BrowserTransportKind::Attended,
             transport.clone(),
@@ -2070,7 +2740,7 @@ mod tests {
             )
             .await
             .expect("open task tab");
-        (temp, broker, transport, session_id)
+        (temp, broker, transport, session_id, repositories)
     }
 
     fn click_arguments(session_id: &str, reference: &str) -> Value {
@@ -2079,8 +2749,9 @@ mod tests {
 
     #[tokio::test]
     async fn consequential_action_parks_then_approve_executes_exactly_once() {
-        let (_temp, broker, transport, session_id) =
-            attended_interaction_broker("Purchase now").await;
+        let (_temp, broker, transport, session_id, repositories) =
+            attended_interaction_broker("Purchase sentinel element label").await;
+        transport.set_url("https://sentinel.invalid/private?value=sentinel-field-value");
         let arguments = click_arguments(&session_id, "e0:n1");
         let parked = broker
             .execute(BrowserTransportKind::Attended, "click", arguments.clone())
@@ -2089,14 +2760,18 @@ mod tests {
         assert_eq!(parked["parked"], true);
         assert_eq!(transport.action_count(), 0);
         let approval_id = parked["actionId"].as_str().expect("action id");
-        assert_eq!(broker.pending_approvals().len(), 1);
+        assert_eq!(broker.pending_approvals().await.expect("pending").len(), 1);
 
         broker
             .respond_to_approval(approval_id, true, false)
             .await
             .expect("approve");
         assert_eq!(transport.action_count(), 1);
-        assert!(broker.pending_approvals().is_empty());
+        assert!(broker
+            .pending_approvals()
+            .await
+            .expect("pending")
+            .is_empty());
 
         let replay = broker
             .execute(BrowserTransportKind::Attended, "click", arguments)
@@ -2104,11 +2779,35 @@ mod tests {
             .expect("completed action replay");
         assert_eq!(replay["executed"], true);
         assert_eq!(transport.action_count(), 1);
+
+        let counts = repositories.browser_outcome_counts().await.expect("counts");
+        assert_eq!(counts.parked, 1);
+        assert_eq!(counts.approved, 1);
+        assert_eq!(counts.verified_successes, 1);
+        let rows = repositories
+            .browser_action_outcomes_for_session(&session_id)
+            .await
+            .expect("ledger rows");
+        let click = rows
+            .iter()
+            .find(|row| row.operation == "click")
+            .expect("click row");
+        assert_eq!(click.outcome_class.as_deref(), Some("action_receipt"));
+        assert_eq!(click.result_kind, "executed");
+        assert!(click.outcome_verified);
+        let serialized = format!("{rows:?}");
+        for sentinel in [
+            "sentinel.invalid",
+            "sentinel element label",
+            "sentinel-field-value",
+        ] {
+            assert!(!serialized.contains(sentinel));
+        }
     }
 
     #[tokio::test]
     async fn consequential_action_decline_never_executes_and_replays_stable_refusal() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, repositories) =
             attended_interaction_broker("Delete account").await;
         let arguments = click_arguments(&session_id, "e0:n1");
         let parked = broker
@@ -2126,11 +2825,15 @@ mod tests {
             .expect_err("declined action stays declined");
         assert_eq!(refusal.code, "browser_action_declined");
         assert_eq!(transport.action_count(), 0);
+        let counts = repositories.browser_outcome_counts().await.expect("counts");
+        assert_eq!(counts.parked, 1);
+        assert_eq!(counts.declined, 1);
+        assert_eq!(counts.verified_successes, 0);
     }
 
     #[tokio::test]
     async fn task_end_cancels_parked_action_without_execution() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, repositories) =
             attended_interaction_broker("Publish post").await;
         let parked = broker
             .execute(
@@ -2148,18 +2851,26 @@ mod tests {
             )
             .await
             .expect("end task");
-        assert!(broker.pending_approvals().is_empty());
+        assert!(broker
+            .pending_approvals()
+            .await
+            .expect("pending")
+            .is_empty());
         let refusal = broker
             .respond_to_approval(parked["actionId"].as_str().unwrap(), true, false)
             .await
             .expect_err("ended task cannot approve");
         assert_eq!(refusal.code, "browser_approval_not_found");
         assert_eq!(transport.action_count(), 0);
+        let counts = repositories.browser_outcome_counts().await.expect("counts");
+        assert_eq!(counts.parked, 1);
+        assert_eq!(counts.cancelled_by_task_end, 1);
+        assert_eq!(counts.verified_successes, 0);
     }
 
     #[tokio::test]
     async fn expired_approval_is_retired_without_execution() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, repositories) =
             attended_interaction_broker("Publish post").await;
         let arguments = click_arguments(&session_id, "e0:n1");
         let parked = broker
@@ -2174,18 +2885,26 @@ mod tests {
             .expect("pending approval")
             .requested_at_ms = now_ms().saturating_sub(BROWSER_APPROVAL_TIMEOUT_MS);
 
-        assert!(broker.pending_approvals().is_empty());
+        assert!(broker
+            .pending_approvals()
+            .await
+            .expect("pending")
+            .is_empty());
         let refusal = broker
             .execute(BrowserTransportKind::Attended, "click", arguments)
             .await
             .expect_err("expired action stays unexecuted");
         assert_eq!(refusal.code, "browser_action_not_executed");
         assert_eq!(transport.action_count(), 0);
+        let counts = repositories.browser_outcome_counts().await.expect("counts");
+        assert_eq!(counts.parked, 1);
+        assert_eq!(counts.expired, 1);
+        assert_eq!(counts.verified_successes, 0);
     }
 
     #[tokio::test]
     async fn grant_revoke_retires_parked_action_without_execution() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, repositories) =
             attended_interaction_broker("Send message").await;
         let parked = broker
             .execute(
@@ -2196,18 +2915,26 @@ mod tests {
             .await
             .expect("park");
         broker.set_enabled(false).await.expect("revoke");
-        assert!(broker.pending_approvals().is_empty());
+        assert!(broker
+            .pending_approvals()
+            .await
+            .expect("pending")
+            .is_empty());
         let refusal = broker
             .respond_to_approval(parked["actionId"].as_str().unwrap(), true, false)
             .await
             .expect_err("revoked action cannot be approved");
         assert_eq!(refusal.code, "browser_approval_not_found");
         assert_eq!(transport.action_count(), 0);
+        let counts = repositories.browser_outcome_counts().await.expect("counts");
+        assert_eq!(counts.parked, 1);
+        assert_eq!(counts.cancelled_by_task_end, 1);
+        assert_eq!(counts.verified_successes, 0);
     }
 
     #[tokio::test]
     async fn site_allow_skips_parking_then_expires_with_task() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, _repositories) =
             attended_interaction_broker("Send message").await;
         let first = broker
             .execute(
@@ -2268,7 +2995,7 @@ mod tests {
 
     #[tokio::test]
     async fn site_allow_uses_exact_normalized_origin_not_subdomains_or_other_ports() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, _repositories) =
             attended_interaction_broker("Confirm purchase").await;
         let first = broker
             .execute(
@@ -2313,7 +3040,8 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_fill_requires_human_takeover_and_never_dispatches_input() {
-        let (_temp, broker, transport, session_id) = attended_interaction_broker("Password").await;
+        let (_temp, broker, transport, session_id, _repositories) =
+            attended_interaction_broker("Password").await;
         transport.set_element(InteractiveElement {
             tag: "input".into(),
             input_type: "password".into(),
@@ -2336,12 +3064,16 @@ mod tests {
         assert_eq!(refusal.code, "browser_human_takeover_required");
         assert!(refusal.message.contains("take over"));
         assert_eq!(transport.action_count(), 0);
-        assert!(broker.pending_approvals().is_empty());
+        assert!(broker
+            .pending_approvals()
+            .await
+            .expect("pending")
+            .is_empty());
     }
 
     #[tokio::test]
     async fn approve_after_element_facts_change_aborts_without_execution() {
-        let (_temp, broker, transport, session_id) =
+        let (_temp, broker, transport, session_id, _repositories) =
             attended_interaction_broker("Purchase now").await;
         let parked = broker
             .execute(

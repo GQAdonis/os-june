@@ -1401,6 +1401,9 @@ async fn ensure_provider_proxy(
         .set_approvals_changed_notifier(Arc::new(move || {
             let _ = approvals_app.emit(BROWSER_APPROVALS_CHANGED_EVENT, ());
         }));
+    bridge
+        .browser_broker
+        .configure_outcome_repository(crate::commands::repositories(app).await?);
     bridge.browser_broker.configure_transport(
         BrowserTransportKind::Attended,
         Arc::new(ExtensionBrowserTransport::new(
@@ -2667,8 +2670,10 @@ pub async fn set_hermes_browser_access(
 }
 
 #[tauri::command]
-pub fn browser_approvals_pending(bridge: State<'_, HermesBridge>) -> Vec<PendingBrowserApproval> {
-    bridge.browser_broker.pending_approvals()
+pub async fn browser_approvals_pending(
+    bridge: State<'_, HermesBridge>,
+) -> Result<Vec<PendingBrowserApproval>, AppError> {
+    bridge.browser_broker.pending_approvals().await
 }
 
 #[tauri::command]
@@ -3812,7 +3817,12 @@ pub fn shutdown(app: &tauri::AppHandle) {
 
 pub(crate) fn release_shared_browser_tab(app: &tauri::AppHandle, tab_id: i64) {
     let bridge = app.state::<HermesBridge>();
-    bridge.browser_broker.release_tab(tab_id);
+    let browser_broker = Arc::clone(&bridge.browser_broker);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = browser_broker.release_tab(tab_id).await {
+            tracing::error!(code = %error.code, "shared browser tab release was not recorded");
+        }
+    });
 }
 
 /// Sends a dashboard API request to any live runtime process, sandboxed

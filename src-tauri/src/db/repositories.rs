@@ -95,9 +95,216 @@ pub struct RoutineBrowserGrantRecord {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserActionOutcomeRecord {
+    pub id: String,
+    pub operation: String,
+    pub transport_kind: String,
+    pub session_id: String,
+    pub approval_id: Option<String>,
+    pub outcome_class: Option<String>,
+    pub result_kind: String,
+    pub result_code_class: Option<String>,
+    pub outcome_verified: bool,
+    pub declared_at: String,
+    pub evaluated_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BrowserOutcomeCounts {
+    pub declared: u64,
+    pub verified_successes: u64,
+    pub executed: u64,
+    pub refused: u64,
+    pub transport_errors: u64,
+    pub parked: u64,
+    pub approved: u64,
+    pub declined: u64,
+    pub expired: u64,
+    pub cancelled_by_task_end: u64,
+}
+
 impl Repositories {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    pub async fn declare_browser_action(
+        &self,
+        id: &str,
+        operation: &str,
+        transport_kind: &str,
+        session_id: &str,
+        outcome_class: Option<&str>,
+    ) -> Result<(), sqlx::error::Error> {
+        query(
+            "INSERT INTO browser_action_outcomes (
+               id, operation, transport_kind, session_id, outcome_class, declared_at
+             ) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(operation)
+        .bind(transport_kind)
+        .bind(session_id)
+        .bind(outcome_class)
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn evaluate_browser_action(
+        &self,
+        id: &str,
+        result_kind: &str,
+        result_code_class: Option<&str>,
+        outcome_verified: bool,
+    ) -> Result<(), sqlx::error::Error> {
+        let result = query(
+            "UPDATE browser_action_outcomes
+             SET result_kind = ?, result_code_class = ?, outcome_verified = ?, evaluated_at = ?
+             WHERE id = ? AND result_kind = 'pending'",
+        )
+        .bind(result_kind)
+        .bind(result_code_class)
+        .bind(outcome_verified)
+        .bind(timestamp())
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 1 {
+            Ok(())
+        } else {
+            Err(sqlx::Error::RowNotFound)
+        }
+    }
+
+    pub async fn park_browser_approval(
+        &self,
+        action_id: &str,
+        approval_id: &str,
+        session_id: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        let mut tx = self.pool.begin().await?;
+        let updated = query(
+            "UPDATE browser_action_outcomes
+             SET approval_id = ?
+             WHERE id = ? AND result_kind = 'pending' AND approval_id IS NULL",
+        )
+        .bind(approval_id)
+        .bind(action_id)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        insert_browser_approval_event(&mut tx, approval_id, action_id, session_id, "parked")
+            .await?;
+        tx.commit().await
+    }
+
+    pub async fn record_browser_approval_event(
+        &self,
+        action_id: &str,
+        approval_id: &str,
+        session_id: &str,
+        event_kind: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        let mut tx = self.pool.begin().await?;
+        insert_browser_approval_event(&mut tx, approval_id, action_id, session_id, event_kind)
+            .await?;
+        tx.commit().await
+    }
+
+    pub async fn finish_browser_approval(
+        &self,
+        action_id: &str,
+        approval_id: &str,
+        session_id: &str,
+        event_kind: &str,
+        result_code_class: &str,
+    ) -> Result<(), sqlx::error::Error> {
+        let mut tx = self.pool.begin().await?;
+        insert_browser_approval_event(&mut tx, approval_id, action_id, session_id, event_kind)
+            .await?;
+        let updated = query(
+            "UPDATE browser_action_outcomes
+             SET result_kind = 'refused', result_code_class = ?, outcome_verified = 0,
+                 evaluated_at = ?
+             WHERE id = ? AND result_kind = 'pending'",
+        )
+        .bind(result_code_class)
+        .bind(timestamp())
+        .bind(action_id)
+        .execute(&mut *tx)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(sqlx::Error::RowNotFound);
+        }
+        tx.commit().await
+    }
+
+    pub async fn browser_action_outcomes_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<BrowserActionOutcomeRecord>, sqlx::error::Error> {
+        let rows = query(
+            "SELECT id, operation, transport_kind, session_id, approval_id, outcome_class,
+                    result_kind, result_code_class, outcome_verified, declared_at, evaluated_at
+             FROM browser_action_outcomes
+             WHERE session_id = ?
+             ORDER BY declared_at ASC, id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| BrowserActionOutcomeRecord {
+                id: row.get("id"),
+                operation: row.get("operation"),
+                transport_kind: row.get("transport_kind"),
+                session_id: row.get("session_id"),
+                approval_id: row.get("approval_id"),
+                outcome_class: row.get("outcome_class"),
+                result_kind: row.get("result_kind"),
+                result_code_class: row.get("result_code_class"),
+                outcome_verified: row.get("outcome_verified"),
+                declared_at: row.get("declared_at"),
+                evaluated_at: row.get("evaluated_at"),
+            })
+            .collect())
+    }
+
+    pub async fn browser_outcome_counts(&self) -> Result<BrowserOutcomeCounts, sqlx::error::Error> {
+        let row = query(
+            "SELECT
+               COUNT(*) AS declared,
+               COALESCE(SUM(outcome_verified), 0) AS verified_successes,
+               COALESCE(SUM(result_kind = 'executed'), 0) AS executed,
+               COALESCE(SUM(result_kind = 'refused'), 0) AS refused,
+               COALESCE(SUM(result_kind = 'transport_error'), 0) AS transport_errors,
+               (SELECT COUNT(*) FROM browser_approval_events WHERE event_kind = 'parked') AS parked,
+               (SELECT COUNT(*) FROM browser_approval_events WHERE event_kind = 'approved') AS approved,
+               (SELECT COUNT(*) FROM browser_approval_events WHERE event_kind = 'declined') AS declined,
+               (SELECT COUNT(*) FROM browser_approval_events WHERE event_kind = 'expired') AS expired,
+               (SELECT COUNT(*) FROM browser_approval_events WHERE event_kind = 'cancelled_by_task_end') AS cancelled_by_task_end
+             FROM browser_action_outcomes",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(BrowserOutcomeCounts {
+            declared: nonnegative_u64(row.get("declared")),
+            verified_successes: nonnegative_u64(row.get("verified_successes")),
+            executed: nonnegative_u64(row.get("executed")),
+            refused: nonnegative_u64(row.get("refused")),
+            transport_errors: nonnegative_u64(row.get("transport_errors")),
+            parked: nonnegative_u64(row.get("parked")),
+            approved: nonnegative_u64(row.get("approved")),
+            declined: nonnegative_u64(row.get("declined")),
+            expired: nonnegative_u64(row.get("expired")),
+            cancelled_by_task_end: nonnegative_u64(row.get("cancelled_by_task_end")),
+        })
     }
 
     pub async fn increment_p3a_counter(
@@ -3432,6 +3639,33 @@ pub fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+async fn insert_browser_approval_event(
+    tx: &mut sqlx::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    approval_id: &str,
+    action_id: &str,
+    session_id: &str,
+    event_kind: &str,
+) -> Result<(), sqlx::error::Error> {
+    query(
+        "INSERT INTO browser_approval_events (
+           id, approval_id, action_id, session_id, event_kind, recorded_at
+         ) VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(approval_id)
+    .bind(action_id)
+    .bind(session_id)
+    .bind(event_kind)
+    .bind(timestamp())
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn nonnegative_u64(value: i64) -> u64 {
+    value.max(0) as u64
+}
+
 /// True when `run_ended_at` is strictly before `approval_since`. Unparseable
 /// timestamps are treated as "not before" so a formatting quirk never silently
 /// drops a run from the earned-autonomy count.
@@ -3629,6 +3863,66 @@ mod tests {
 
     fn scopes(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[tokio::test]
+    async fn browser_outcome_ledger_is_queryable_and_content_free() {
+        let repos = test_repositories().await;
+        repos
+            .declare_browser_action(
+                "action-1",
+                "navigate",
+                "attended",
+                "session-1",
+                Some("target_state"),
+            )
+            .await
+            .expect("declare action");
+        repos
+            .park_browser_approval("action-1", "approval-1", "session-1")
+            .await
+            .expect("park approval");
+        repos
+            .record_browser_approval_event("action-1", "approval-1", "session-1", "approved")
+            .await
+            .expect("approve");
+        repos
+            .evaluate_browser_action("action-1", "executed", None, true)
+            .await
+            .expect("evaluate action");
+
+        let counts = repos.browser_outcome_counts().await.expect("counts");
+        assert_eq!(counts.declared, 1);
+        assert_eq!(counts.verified_successes, 1);
+        assert_eq!(counts.executed, 1);
+        assert_eq!(counts.parked, 1);
+        assert_eq!(counts.approved, 1);
+
+        let rows = repos
+            .browser_action_outcomes_for_session("session-1")
+            .await
+            .expect("rows");
+        let serialized = serde_json::to_string(&serde_json::json!({
+            "id": rows[0].id,
+            "operation": rows[0].operation,
+            "transportKind": rows[0].transport_kind,
+            "sessionId": rows[0].session_id,
+            "approvalId": rows[0].approval_id,
+            "outcomeClass": rows[0].outcome_class,
+            "resultKind": rows[0].result_kind,
+            "resultCodeClass": rows[0].result_code_class,
+            "outcomeVerified": rows[0].outcome_verified,
+            "declaredAt": rows[0].declared_at,
+            "evaluatedAt": rows[0].evaluated_at,
+        }))
+        .expect("serialize ledger row");
+        for sentinel in [
+            "https://sentinel.invalid/private",
+            "sentinel element label",
+            "sentinel field value",
+        ] {
+            assert!(!serialized.contains(sentinel));
+        }
     }
 
     #[tokio::test]
