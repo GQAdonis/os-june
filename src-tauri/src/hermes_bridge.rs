@@ -7420,8 +7420,16 @@ struct BuiltinMcpConfigs<'a> {
 /// ACTION servers are deliberately excluded: they are added per job only when
 /// the user picks approval or autonomous trust for that routine.
 fn cron_platform_toolsets(configs: &BuiltinMcpConfigs<'_>) -> String {
+    // When the user turns Memory off, the native Hermes `memory` toolset must
+    // go too — not just June's SOUL guidance and the june_context memory
+    // tools. Otherwise a routine could still read/write Hermes' unscoped,
+    // uninspectable memory store, contradicting the global off switch.
+    let memory_enabled = configs.context.map_or(true, |context| {
+        june_memory_enabled(&context.memory_settings_path)
+    });
     let mut items: Vec<String> = CRON_SANDBOXED_TOOLSETS
         .iter()
+        .filter(|toolset| memory_enabled || **toolset != "memory")
         .map(|toolset| toolset.to_string())
         .collect();
     if configs.context.is_some() {
@@ -13938,6 +13946,44 @@ mcp_servers:
                 "machine-touching toolset {toolset} must not be in the cron default",
             );
         }
+    }
+
+    #[test]
+    fn cron_toolsets_drop_native_memory_when_memory_is_disabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = dir.path().join("memory-settings.json");
+        let mut context = test_june_context_mcp_config();
+        context.memory_settings_path = settings.clone();
+        let configs = BuiltinMcpConfigs {
+            context: Some(&context),
+            web: None,
+            image: None,
+            video: None,
+            recorder: None,
+            gmail: None,
+            gmail_actions: None,
+            gcal: None,
+            gcal_actions: None,
+            connector_autos: &[],
+        };
+
+        // Missing settings file = enabled by default: native memory stays.
+        assert!(cron_platform_toolsets(&configs)
+            .split(", ")
+            .any(|toolset| toolset == "memory"));
+
+        // Memory turned off: the native memory toolset must be gone so a
+        // routine can't write Hermes' unscoped store behind the off switch.
+        std::fs::write(&settings, r#"{"enabled":false}"#).expect("disable memory");
+        assert!(!cron_platform_toolsets(&configs)
+            .split(", ")
+            .any(|toolset| toolset == "memory"));
+
+        // Re-enabled: native memory returns.
+        std::fs::write(&settings, r#"{"enabled":true}"#).expect("enable memory");
+        assert!(cron_platform_toolsets(&configs)
+            .split(", ")
+            .any(|toolset| toolset == "memory"));
     }
 
     #[test]
