@@ -75,6 +75,27 @@ beforeEach(() => {
 });
 
 describe("MemorySettingsSection", () => {
+  it("allows the user to add the first memory from the empty state", async () => {
+    mocks.listMemories.mockResolvedValueOnce([]);
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} />);
+
+    expect(await screen.findByText("Nothing remembered yet")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Add memory" }));
+
+    const addDialog = screen.getByRole("dialog", { name: "Add memory" });
+    await user.type(within(addDialog).getByRole("textbox", { name: "Memory" }), "Call Sam");
+    await user.click(within(addDialog).getByRole("button", { name: "Add memory" }));
+
+    await waitFor(() =>
+      expect(mocks.createMemory).toHaveBeenCalledWith({
+        content: "Call Sam",
+        source: "user",
+      }),
+    );
+    expect(await screen.findByText("Call Sam")).toBeInTheDocument();
+  });
+
   it("lists every memory with project tags, sources, and a count", async () => {
     render(<MemorySettingsSection folders={folders} />);
 

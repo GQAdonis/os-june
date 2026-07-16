@@ -154,6 +154,17 @@ export function MemorySettingsSection({
   );
 
   const addDefaultFolderId = scope !== SCOPE_ALL && scope !== SCOPE_GENERAL ? scope : undefined;
+  const addMemoryButton = (
+    <button
+      type="button"
+      className="primary-action primary-solid memory-add"
+      disabled={!enabled || !loaded}
+      onClick={() => setAddOpen(true)}
+    >
+      <IconPlusMedium size={14} />
+      Add memory
+    </button>
+  );
 
   return (
     <section className="settings-group memory-settings" aria-labelledby="memory-heading">
@@ -195,6 +206,7 @@ export function MemorySettingsSection({
           icon={<IconBrain size={28} />}
           title="Nothing remembered yet"
           description="June saves useful details as you work together and brings them back when they're relevant. What it remembers shows up here."
+          action={addMemoryButton}
         />
       ) : (
         <>
@@ -233,15 +245,7 @@ export function MemorySettingsSection({
                 onChange={setScope}
                 popoverWidth="trigger"
               />
-              <button
-                type="button"
-                className="primary-action primary-solid memory-add"
-                disabled={!enabled || !loaded}
-                onClick={() => setAddOpen(true)}
-              >
-                <IconPlusMedium size={14} />
-                Add memory
-              </button>
+              {addMemoryButton}
             </div>
             {filtered.length > 0 ? (
               <MemoryRows
