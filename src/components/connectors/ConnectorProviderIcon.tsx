@@ -1,21 +1,18 @@
 import { IconGoogle } from "central-icons/IconGoogle";
-import { IconLinear } from "central-icons/IconLinear";
+import obsidianLogo from "../../assets/obsidian-logo.svg";
 
-const PROVIDER_ICONS = {
-  google: IconGoogle,
-  linear: IconLinear,
-} as const;
-
-/** The monochrome brand mark for a connector provider (central-icons,
- * currentColor). Shared by the Connectors settings directory and the
- * approvals tray so provider identity renders the same everywhere. */
+/** Brand mark for a connector provider. Central-icons supplies available
+ * marks; Obsidian's official favicon is vendored because central-icons does not
+ * include that third-party brand. Shared by connector settings and approvals. */
 export function ConnectorProviderIcon({
   provider,
   size = 18,
 }: {
-  provider: "google" | "linear";
+  provider: "google" | "obsidian";
   size?: number;
 }) {
-  const Icon = PROVIDER_ICONS[provider];
-  return <Icon size={size} aria-hidden />;
+  if (provider === "obsidian") {
+    return <img src={obsidianLogo} width={size} height={size} alt="" aria-hidden />;
+  }
+  return <IconGoogle size={size} aria-hidden />;
 }
