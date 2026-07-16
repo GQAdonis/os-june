@@ -103,15 +103,18 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
     setAvatarBusy(true);
     try {
       const user = await refreshAvatar();
-      if (!mountedRef.current) return;
       if (user) {
+        // Propagate to App-level account state before the mounted guard: the
+        // callback is safe post-unmount and skipping it would strand the
+        // local-only copy until the next focus refresh.
         const currentAccount = accountRef.current;
-        if (!currentAccount.signedIn || currentAccount.user?.id !== user.id) return;
-        onAccountChanged({ ...currentAccount, user });
+        if (currentAccount.signedIn && currentAccount.user?.id === user.id) {
+          onAccountChanged({ ...currentAccount, user });
+        }
       }
-      if (!accountRef.current.signedIn && !accountRef.current.localDev) return;
+      if (!mountedRef.current) return;
       toast.success(
-        account.localDev ? "Avatar updated on this device" : "Avatar updated everywhere",
+        accountRef.current.localDev ? "Avatar updated on this device" : "Avatar updated everywhere",
       );
     } catch (error) {
       if (mountedRef.current && (accountRef.current.signedIn || accountRef.current.localDev)) {

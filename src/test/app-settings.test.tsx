@@ -711,11 +711,12 @@ describe("AppSettings", () => {
 
     const refreshedStyle = avatar?.getAttribute("style");
     expect(refreshedStyle).not.toBe(initialStyle);
-    const avatarStorageKey = Object.keys(localStorage).find((key) =>
-      key.startsWith("june:account-avatar-variant:"),
+    const pendingStorageKey = Object.keys(localStorage).find((key) =>
+      key.startsWith("june:account-avatar-pending:"),
     );
-    expect(avatarStorageKey).toBeDefined();
-    const seed = avatarStorageKey ? localStorage.getItem(avatarStorageKey) : undefined;
+    expect(pendingStorageKey).toBeDefined();
+    const pendingRaw = pendingStorageKey ? localStorage.getItem(pendingStorageKey) : undefined;
+    const seed = pendingRaw ? (JSON.parse(pendingRaw) as { seed: string }).seed : undefined;
     expect(seed).toMatch(/^v1:[0-9a-f]{32}$/);
     expect(mocks.osAccountsSetAvatarSeed).toHaveBeenCalledWith(seed);
     expect(onAccountChanged).toHaveBeenCalledWith({
@@ -723,9 +724,6 @@ describe("AppSettings", () => {
       user: { ...signedInAccount.user, avatarSeed: seed },
     });
     expect(mocks.toastSuccess).toHaveBeenCalledWith("Avatar updated everywhere");
-    expect(
-      Object.keys(localStorage).some((key) => key.startsWith("june:account-avatar-pending:")),
-    ).toBe(true);
     unmount();
 
     const { unmount: unmountSynced } = renderSettings({
@@ -905,6 +903,68 @@ describe("AppSettings", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("clears a pending seed when a newer synced seed arrives from another device", async () => {
+    const user = userEvent.setup();
+    const accountWithRemoteSeed = {
+      ...signedInAccount,
+      user: {
+        ...signedInAccount.user,
+        avatarSeed: "v1:00000000000000000000000000000000",
+      },
+    };
+    // The sync fails, so the refreshed pattern stays pending against the
+    // account's current remote seed.
+    mocks.osAccountsSetAvatarSeed.mockRejectedValueOnce({
+      code: "account_permission_required",
+      message: "Your current sign-in does not include this permission.",
+    });
+    const settings = (account: AccountStatus) => (
+      <AppSettings
+        account={account}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={vi.fn()}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        activeTab="general"
+        onTabChange={vi.fn()}
+      />
+    );
+    const { rerender } = render(settings(accountWithRemoteSeed));
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(
+      Object.keys(localStorage).some((key) => key.startsWith("june:account-avatar-pending:")),
+    ).toBe(true);
+    expect(screen.getByText("This pattern is saved only on this device.")).toBeInTheDocument();
+
+    const newerRemote = {
+      ...signedInAccount,
+      user: {
+        ...signedInAccount.user,
+        avatarSeed: "v1:ffffffffffffffffffffffffffffffff",
+      },
+    };
+    rerender(settings(newerRemote));
+
+    const avatar = document.querySelector<HTMLElement>(".account-avatar-preview");
+    for (const [property, value] of Object.entries(
+      accountAvatarStyle("v1:ffffffffffffffffffffffffffffffff"),
+    )) {
+      expect(avatar?.style.getPropertyValue(property)).toBe(value);
+    }
+    await waitFor(() =>
+      expect(
+        Object.keys(localStorage).some((key) => key.startsWith("june:account-avatar-pending:")),
+      ).toBe(false),
+    );
+    expect(
+      screen.queryByText("This pattern is saved only on this device."),
+    ).not.toBeInTheDocument();
+  });
+
   it("shows a local refresh made while the account uses a future Avatar version", async () => {
     const user = userEvent.setup();
     mocks.osAccountsSetAvatarSeed.mockRejectedValueOnce({
@@ -979,7 +1039,7 @@ describe("AppSettings", () => {
     expect(onAccountChanged).not.toHaveBeenCalled();
   });
 
-  it("ignores an avatar response that lands after settings unmounts", async () => {
+  it("propagates a late avatar response to app state after settings unmounts", async () => {
     const user = userEvent.setup();
     const onAccountChanged = vi.fn();
     let resolveAvatar: ((user: NonNullable<AccountStatus["user"]>) => void) | undefined;
@@ -1012,7 +1072,13 @@ describe("AppSettings", () => {
       });
     });
 
-    expect(onAccountChanged).not.toHaveBeenCalled();
+    // The App-level callback is safe post-unmount, so the synced seed still
+    // reaches app state; only the in-component toast stays behind the guard.
+    expect(onAccountChanged).toHaveBeenCalledWith({
+      ...signedInAccount,
+      user: { ...signedInAccount.user, avatarSeed: "v1:22222222222222222222222222222222" },
+    });
+    expect(mocks.toastSuccess).not.toHaveBeenCalled();
   });
 
   it("shows usage remaining as a percentage instead of dollars", async () => {

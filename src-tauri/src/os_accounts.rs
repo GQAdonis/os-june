@@ -742,20 +742,25 @@ pub async fn os_accounts_logout(request: Option<AccountsLogoutRequest>) -> Resul
         return Ok(());
     }
     let cfg = Config::load();
-    {
-        // Take locks in the same operation -> refresh order as status, login,
-        // and Avatar writes. This prevents an in-flight account request from
-        // returning signed-in state or mutating the profile after sign-out.
+    // Take locks in the same operation -> refresh order as status, login, and
+    // Avatar writes, but hold them only across the token load+clear. This
+    // prevents an in-flight account request from returning signed-in state or
+    // mutating the profile after sign-out.
+    let pair = {
         let _operation_guard = account_operation_lock().lock().await;
         let _refresh_guard = refresh_lock().lock().await;
-        if let Some(pair) = load_tokens().await {
-            let _ = http_client()
-                .post(format!("{}/auth/logout", cfg.api_url.trim_end_matches('/')))
-                .json(&serde_json::json!({ "refresh_token": pair.refresh_token }))
-                .send()
-                .await;
-        }
+        let pair = load_tokens().await;
         clear_tokens().await;
+        pair
+    };
+    // Best-effort external revocation. It does not participate in the lock
+    // ordering, so it runs after the locks are released.
+    if let Some(pair) = pair {
+        let _ = http_client()
+            .post(format!("{}/auth/logout", cfg.api_url.trim_end_matches('/')))
+            .json(&serde_json::json!({ "refresh_token": pair.refresh_token }))
+            .send()
+            .await;
     }
     set_cached_signed_in(false);
     if request
@@ -786,10 +791,9 @@ pub async fn os_accounts_set_avatar_seed(seed: String) -> Result<AccountUser, Ap
     }
 
     let _operation_guard = account_operation_lock().lock().await;
-    let requested_seed = seed.clone();
-    let me: MeWire = authed_patch(&cfg, "/me", avatar_seed_request(&seed)).await?;
+    let me: MeWire = authed_patch(&cfg, "/me", serde_json::json!({ "avatar_seed": seed })).await?;
     let user = AccountUser::from(me);
-    if user.avatar_seed.as_deref() != Some(requested_seed.as_str()) {
+    if user.avatar_seed.as_deref() != Some(seed.as_str()) {
         return Err(AppError::new(
             "avatar_sync_unavailable",
             "Synced avatars are not available on this OS Accounts deployment yet.",
@@ -813,10 +817,6 @@ fn validate_avatar_seed(seed: String) -> Result<String, AppError> {
         ));
     }
     Ok(seed)
-}
-
-fn avatar_seed_request(seed: &str) -> serde_json::Value {
-    serde_json::json!({ "avatar_seed": seed })
 }
 
 fn open_accounts_browser_logout(cfg: &Config) -> Result<(), AppError> {
@@ -1746,12 +1746,6 @@ async fn authed_patch<T: for<'de> Deserialize<'de>>(
 /// codes so the frontend never has to match on message text. Canonical-copy
 /// fallbacks cover envelopes that omit the message.
 fn accounts_request_error(error_code: Option<i64>, message: Option<String>) -> AppError {
-    if message.as_deref() == Some("access token is missing required scope") {
-        return AppError::new(
-            ACCOUNT_PERMISSION_REQUIRED_CODE,
-            "Your current sign-in does not include this permission.",
-        );
-    }
     let stable = |code: &str, fallback: &str, message: Option<String>| {
         AppError::new(code, message.unwrap_or_else(|| fallback.to_string()))
     };
@@ -1778,6 +1772,12 @@ fn accounts_request_error(error_code: Option<i64>, message: Option<String>) -> A
             PLAN_NOT_ENABLED_CODE,
             "That plan is not available yet.",
             message,
+        ),
+        // A known numeric code above always wins; the legacy scope token is
+        // only consulted when no numeric arm matched.
+        _ if message.as_deref() == Some("access token is missing required scope") => AppError::new(
+            ACCOUNT_PERMISSION_REQUIRED_CODE,
+            "Your current sign-in does not include this permission. Sign out and sign in again to update it.",
         ),
         _ => AppError::new("request_failed", accounts_request_failed_message(message)),
     }
@@ -2254,16 +2254,6 @@ mod tests {
     }
 
     #[test]
-    fn avatar_seed_request_matches_the_os_accounts_profile_contract() {
-        assert_eq!(
-            avatar_seed_request("v1:0123456789abcdef0123456789abcdef"),
-            serde_json::json!({
-                "avatar_seed": "v1:0123456789abcdef0123456789abcdef"
-            })
-        );
-    }
-
-    #[test]
     fn avatar_seed_validation_matches_the_os_accounts_contract() {
         assert!(validate_avatar_seed("v1:seed".to_string()).is_ok());
         assert!(validate_avatar_seed(format!("v1:{}", "x".repeat(125))).is_ok());
@@ -2383,8 +2373,16 @@ mod tests {
         assert_eq!(error.code, ACCOUNT_PERMISSION_REQUIRED_CODE);
         assert_eq!(
             error.message,
-            "Your current sign-in does not include this permission."
+            "Your current sign-in does not include this permission. Sign out and sign in again to update it."
         );
+
+        // A known numeric code takes precedence even when the legacy scope
+        // message rides along.
+        let error = accounts_request_error(
+            Some(ERR_ALREADY_ON_PLAN),
+            Some("access token is missing required scope".to_string()),
+        );
+        assert_eq!(error.code, ALREADY_ON_PLAN_CODE);
     }
 
     #[test]

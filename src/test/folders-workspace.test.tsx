@@ -122,7 +122,12 @@ beforeEach(() => {
   vi.clearAllMocks();
   for (let index = localStorage.length - 1; index >= 0; index -= 1) {
     const key = localStorage.key(index);
-    if (key?.startsWith("june:account-avatar-variant:")) localStorage.removeItem(key);
+    if (
+      key?.startsWith("june:account-avatar-variant:") ||
+      key?.startsWith("june:account-avatar-pending:")
+    ) {
+      localStorage.removeItem(key);
+    }
   }
   mocks.osAccountsReferralSummary.mockResolvedValue({
     code: "JUNE-ALEX",

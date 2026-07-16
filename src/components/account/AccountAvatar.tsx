@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
+import { ACCOUNT_AVATAR_CHANGED_EVENT } from "../../lib/events";
 import { osAccountsSetAvatarSeed } from "../../lib/tauri";
 import type { AccountStatus } from "../../lib/tauri";
 
 const ACCOUNT_AVATAR_VARIANT_STORAGE_PREFIX = "june:account-avatar-variant:";
 const ACCOUNT_AVATAR_PENDING_STORAGE_PREFIX = "june:account-avatar-pending:";
-const ACCOUNT_AVATAR_CHANGED_EVENT = "june://account-avatar-change";
 
 type AccountAvatarStyle = CSSProperties & {
   "--avatar-cloud-x": string;
@@ -42,38 +42,25 @@ export function useAccountAvatar(account: AccountStatus) {
   const userId = account.user?.id?.trim() || identity;
   const storedSeed = account.user?.avatarSeed;
   const remoteSeed = supportedAccountAvatarSeed(storedSeed);
-  const hasUnsupportedStoredSeed = Boolean(storedSeed && !remoteSeed);
-  const readPendingSeed = useCallback(
-    () => readApplicablePendingAccountAvatarSeed(identity, storedSeed),
-    [identity, storedSeed],
-  );
-  const pendingSeed = useSyncExternalStore(
-    subscribeAccountAvatar,
-    readPendingSeed,
-    () => undefined,
-  );
   const defaultSeed = resolvedAccountAvatarSeed(storedSeed, userId);
-  const getSnapshot = useCallback(
+  const getOverride = useCallback(
     () =>
       readApplicablePendingAccountAvatarSeed(identity, storedSeed) ??
-      (account.localDev ? readLocalAccountAvatarSeed(identity) : undefined) ??
-      defaultSeed,
-    [account.localDev, defaultSeed, identity, storedSeed],
+      (account.localDev ? readLocalAccountAvatarSeed(identity) : undefined),
+    [account.localDev, identity, storedSeed],
   );
-  const seed = useSyncExternalStore(subscribeAccountAvatar, getSnapshot, () => defaultSeed);
+  const override = useSyncExternalStore(subscribeAccountAvatar, getOverride, () => undefined);
+  const seed = override ?? defaultSeed;
+  const pendingSeed = account.localDev ? undefined : override;
 
   useEffect(() => {
     const pending = readPendingAccountAvatar(identity);
     if (remoteSeed && pending?.seed === remoteSeed) {
       clearPendingAccountAvatarSeed(identity);
-    } else if (
-      hasUnsupportedStoredSeed &&
-      pending &&
-      !pendingAccountAvatarAppliesToStoredSeed(pending, storedSeed)
-    ) {
+    } else if (pending && !pendingAccountAvatarAppliesToStoredSeed(pending, storedSeed)) {
       clearPendingAccountAvatarSeed(identity);
     }
-  }, [hasUnsupportedStoredSeed, identity, remoteSeed, storedSeed]);
+  }, [identity, remoteSeed, storedSeed]);
 
   return {
     style: accountAvatarStyle(seed),
@@ -82,8 +69,9 @@ export function useAccountAvatar(account: AccountStatus) {
       const next = createAccountAvatarSeed();
       if (account.signedIn && !account.localDev) {
         writePendingAccountAvatarSeed(identity, next, storedSeed);
+      } else if (account.localDev) {
+        writeLocalAccountAvatarSeed(identity, next);
       }
-      writeLocalAccountAvatarSeed(identity, next);
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent(ACCOUNT_AVATAR_CHANGED_EVENT));
       }
@@ -166,8 +154,6 @@ function readPendingAccountAvatar(identity: string): PendingAccountAvatarSeed | 
   if (typeof window === "undefined") return undefined;
   try {
     const stored = window.localStorage.getItem(accountAvatarPendingStorageKey(identity));
-    const legacySeed = supportedAccountAvatarSeed(stored);
-    if (legacySeed) return { seed: legacySeed };
     if (!stored) return undefined;
     const pending = JSON.parse(stored) as PendingAccountAvatarSeed;
     const seed = supportedAccountAvatarSeed(pending.seed);
@@ -191,11 +177,7 @@ export function pendingAccountAvatarAppliesToStoredSeed(
   pending: PendingAccountAvatarSeed,
   storedSeed: string | null | undefined,
 ): boolean {
-  return (
-    !storedSeed ||
-    Boolean(supportedAccountAvatarSeed(storedSeed)) ||
-    pending.baseSeed === storedSeed
-  );
+  return !storedSeed || storedSeed === pending.seed || pending.baseSeed === storedSeed;
 }
 
 function writePendingAccountAvatarSeed(

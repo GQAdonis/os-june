@@ -39,4 +39,15 @@ describe("Open Software Avatar v1 contract", () => {
     ).toBe(true);
     expect(pendingAccountAvatarAppliesToStoredSeed({ seed: "v1:stale" }, "v2:future")).toBe(false);
   });
+
+  it("yields a pending seed to a newer supported remote seed from another device", () => {
+    const pending = { seed: "v1:pending", baseSeed: "v1:base" };
+    // A different supported remote seed synced elsewhere must win.
+    expect(pendingAccountAvatarAppliesToStoredSeed(pending, "v1:newer-remote")).toBe(false);
+    // ...but the legit windows still hold: unchanged base, an optimistic
+    // render over its own just-synced seed, and no prior seed at all.
+    expect(pendingAccountAvatarAppliesToStoredSeed(pending, "v1:base")).toBe(true);
+    expect(pendingAccountAvatarAppliesToStoredSeed(pending, "v1:pending")).toBe(true);
+    expect(pendingAccountAvatarAppliesToStoredSeed(pending, undefined)).toBe(true);
+  });
 });
