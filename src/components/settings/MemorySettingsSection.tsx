@@ -518,13 +518,16 @@ function MemoryDialog({
           />
         </DialogField>
         {folders ? (
-          <DialogField label="Project" hint="Optional. Leave blank to apply everywhere.">
+          <DialogField label="Project" hint="Optional. Choose General to apply everywhere.">
             <Select
-              value={scope}
-              options={folders.map((folder) => ({ value: folder.id, label: folder.name }))}
+              value={scope ?? SCOPE_GENERAL}
+              options={[
+                { value: SCOPE_GENERAL, label: "General" },
+                ...folders.map((folder) => ({ value: folder.id, label: folder.name })),
+              ]}
               placeholder="Select a project"
               ariaLabel="Memory project"
-              onChange={setScope}
+              onChange={(value) => setScope(value === SCOPE_GENERAL ? null : value)}
               popoverWidth="trigger"
             />
           </DialogField>

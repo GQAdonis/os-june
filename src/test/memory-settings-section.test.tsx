@@ -141,6 +141,30 @@ describe("MemorySettingsSection", () => {
     expect(screen.queryByText("Use concise answers")).toBeNull();
   });
 
+  it("can change a project-scoped new memory back to General", async () => {
+    const user = userEvent.setup();
+    render(<MemorySettingsSection folders={folders} initialFolderFilter="project-a" />);
+    await screen.findByText("Launch day is Friday");
+
+    await user.click(screen.getByRole("button", { name: "Add memory" }));
+    const addDialog = screen.getByRole("dialog", { name: "Add memory" });
+    expect(within(addDialog).getByRole("button", { name: "Memory project" })).toHaveTextContent(
+      "Alpha",
+    );
+
+    await user.click(within(addDialog).getByRole("button", { name: "Memory project" }));
+    await user.click(screen.getByRole("option", { name: "General" }));
+    await user.type(within(addDialog).getByRole("textbox", { name: "Memory" }), "Call Sam");
+    await user.click(within(addDialog).getByRole("button", { name: "Add memory" }));
+
+    await waitFor(() =>
+      expect(mocks.createMemory).toHaveBeenCalledWith({
+        content: "Call Sam",
+        source: "user",
+      }),
+    );
+  });
+
   it("adds a memory, then edits and deletes through the bindings", async () => {
     const user = userEvent.setup();
     render(<MemorySettingsSection folders={folders} />);
