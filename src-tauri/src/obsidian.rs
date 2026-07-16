@@ -4,11 +4,22 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 use tauri::AppHandle;
 
 pub const OBSIDIAN_VAULT_PATH_ENV: &str = "OBSIDIAN_VAULT_PATH";
 const OBSIDIAN_CONFIG_FILE: &str = "obsidian.json";
+const HERMES_ENV_PROJECTION_LOCK_FILE: &str = ".june-obsidian-env.lock";
+const HERMES_ENV_PROJECTION_LOCK_WAIT: Duration = Duration::from_secs(2);
+const HERMES_ENV_PROJECTION_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
+
+/// Serializes June's read-modify-write updates to the shared Hermes `.env`.
+/// Hermes itself does not edit this key, and every June runtime entrypoint
+/// re-syncs the projection, so a process-local guard prevents competing June
+/// commands from losing unrelated settings between read and atomic replace.
+static HERMES_ENV_PROJECTION_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -71,10 +82,11 @@ pub fn obsidian_disconnect(app: AppHandle) -> Result<ObsidianStatus, AppError> {
     })
 }
 
-pub(crate) fn configured_vault_path(app: &AppHandle) -> Option<PathBuf> {
-    read_config(app)
-        .ok()
-        .and_then(|config| validate_vault_path(Path::new(&config.vault_path)).ok())
+pub(crate) fn configured_vault_path(app: &AppHandle) -> Result<Option<PathBuf>, AppError> {
+    let Some(config) = read_config_optional(app)? else {
+        return Ok(None);
+    };
+    validate_vault_path(Path::new(&config.vault_path)).map(Some)
 }
 
 /// Synchronizes June's selected vault into the Hermes runtime's `.env` file.
@@ -86,7 +98,22 @@ pub(crate) fn sync_hermes_env_projection(
     hermes_home: &Path,
     vault_path: Option<&Path>,
 ) -> Result<(), AppError> {
+    let _guard = HERMES_ENV_PROJECTION_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| {
+            AppError::new(
+                "obsidian_runtime_config_unavailable",
+                "Could not update the Hermes runtime configuration.",
+            )
+        })?;
     let env_path = hermes_home.join(".env");
+    let _file_guard = acquire_hermes_env_projection_lock(hermes_home).map_err(|_| {
+        AppError::new(
+            "obsidian_runtime_config_unavailable",
+            "Could not update the Hermes runtime configuration.",
+        )
+    })?;
     let existing = match fs::read_to_string(&env_path) {
         Ok(contents) => Some(contents),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -178,6 +205,56 @@ fn write_config(app: &AppHandle, config: &ObsidianConfig) -> Result<(), AppError
         .map_err(|error| AppError::new("obsidian_config_unavailable", error.to_string()))?;
     fs::write(path, format!("{text}\n"))
         .map_err(|error| AppError::new("obsidian_config_unavailable", error.to_string()))
+}
+
+#[derive(Debug)]
+struct HermesEnvProjectionFileLock {
+    path: PathBuf,
+}
+
+impl Drop for HermesEnvProjectionFileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Cross-process counterpart to the in-process mutex. Every June process holds
+/// this same-directory lock while it reads and atomically replaces `.env`; the
+/// bounded stale-lock recovery avoids a crash wedging future app launches.
+fn acquire_hermes_env_projection_lock(
+    hermes_home: &Path,
+) -> std::io::Result<HermesEnvProjectionFileLock> {
+    fs::create_dir_all(hermes_home)?;
+    let path = hermes_home.join(HERMES_ENV_PROJECTION_LOCK_FILE);
+    let deadline = Instant::now() + HERMES_ENV_PROJECTION_LOCK_WAIT;
+    loop {
+        match OpenOptions::new().create_new(true).write(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(std::process::id().to_string().as_bytes())?;
+                file.sync_all()?;
+                return Ok(HermesEnvProjectionFileLock { path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(&path)
+                    .and_then(|metadata| metadata.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > HERMES_ENV_PROJECTION_STALE_LOCK_AGE);
+                if stale {
+                    let _ = fs::remove_file(&path);
+                    continue;
+                }
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::WouldBlock,
+                        "Hermes runtime environment is busy",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn render_hermes_env_projection(
@@ -370,8 +447,9 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::normalize_vault_path_for_external_use;
     use super::{
-        dotenv_single_quote, is_active_obsidian_assignment, reject_dotenv_unsafe_path,
-        render_hermes_env_projection, sync_hermes_env_projection, validate_vault_path,
+        acquire_hermes_env_projection_lock, dotenv_single_quote, is_active_obsidian_assignment,
+        reject_dotenv_unsafe_path, render_hermes_env_projection, sync_hermes_env_projection,
+        validate_vault_path, HERMES_ENV_PROJECTION_LOCK_FILE,
     };
 
     #[test]
@@ -442,6 +520,15 @@ mod tests {
     fn rejects_dotenv_line_break_injection() {
         let error = reject_dotenv_unsafe_path("vault\nOTHER=value").expect_err("line break");
         assert_eq!(error.code, "obsidian_vault_invalid");
+    }
+
+    #[test]
+    fn projection_lock_refuses_an_active_cross_process_update() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let _guard = acquire_hermes_env_projection_lock(home.path()).expect("first lock");
+        let error = acquire_hermes_env_projection_lock(home.path()).expect_err("second lock");
+        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+        assert!(home.path().join(HERMES_ENV_PROJECTION_LOCK_FILE).exists());
     }
 
     #[test]
