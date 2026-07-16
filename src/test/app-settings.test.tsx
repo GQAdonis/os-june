@@ -643,6 +643,11 @@ describe("AppSettings", () => {
       permissionsHeading.compareDocumentPosition(privacyHeading) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(screen.getByText(/Anonymous counts of feature usage/)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Choose whether June shares anonymous usage statistics with OpenSoftware. Off by default.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.queryByText("How usage statistics work")).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Learn how it works" })).toHaveAttribute(
       "href",
@@ -659,6 +664,45 @@ describe("AppSettings", () => {
       await screen.findByText("Anonymous usage statistics are on for this device."),
     ).toBeInTheDocument();
     expect(screen.queryByText("2026-W28")).not.toBeInTheDocument();
+  });
+
+  it("refreshes and persists the account avatar from General settings", async () => {
+    const user = userEvent.setup();
+    const renderSettings = () =>
+      render(
+        <AppSettings
+          account={signedInAccount}
+          accountLoading={false}
+          sourceMode="microphoneOnly"
+          checkingSourceReadiness={false}
+          onAccountChanged={vi.fn()}
+          onAccountRefresh={vi.fn()}
+          onSourceModeChange={vi.fn()}
+          onEnableSystemAudio={vi.fn()}
+          activeTab="general"
+          onTabChange={vi.fn()}
+        />,
+      );
+
+    const { unmount } = renderSettings();
+    const avatar = document.querySelector(".account-avatar-preview");
+    const initialStyle = avatar?.getAttribute("style");
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    const refreshedStyle = avatar?.getAttribute("style");
+    expect(refreshedStyle).not.toBe(initialStyle);
+    const avatarStorageKey = Object.keys(localStorage).find((key) =>
+      key.startsWith("june:account-avatar-variant:"),
+    );
+    expect(avatarStorageKey).toBeDefined();
+    expect(avatarStorageKey ? localStorage.getItem(avatarStorageKey) : undefined).toBe("1");
+    unmount();
+
+    renderSettings();
+    expect(document.querySelector(".account-avatar-preview")?.getAttribute("style")).toBe(
+      refreshedStyle,
+    );
   });
 
   it("shows usage remaining as a percentage instead of dollars", async () => {

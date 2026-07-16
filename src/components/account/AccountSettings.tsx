@@ -1,4 +1,5 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
+import { IconShuffle } from "central-icons/IconShuffle";
 import { useEffect, useState } from "react";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { hasLiveSubscription } from "../../lib/account-gate";
@@ -43,6 +44,7 @@ import {
   osAccountsUpgradeSession,
 } from "../../lib/tauri";
 import type { AccountStatus, SubscriptionPlan } from "../../lib/tauri";
+import { AccountAvatar, useAccountAvatar } from "./AccountAvatar";
 
 const FREE_PLAN_NAME = "Free plan";
 const PRO_PLAN_NAME = "Pro plan";
@@ -82,6 +84,7 @@ export function AccountSettings({ account, loading, onAccountChanged, onRefresh 
 export function AccountSettingsSection({ account, loading, onAccountChanged }: Props) {
   const [busy, setBusy] = useState(false);
   const [accountStatus, setAccountStatus] = useState<string>();
+  const { refresh: refreshAvatar } = useAccountAvatar(account);
 
   async function handleSignIn() {
     setBusy(true);
@@ -179,6 +182,23 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
               )}
             </div>
           </div>
+          {account.signedIn || account.localDev ? (
+            <div className="settings-row">
+              <div className="settings-row-info">
+                <h3 className="settings-row-title">Avatar</h3>
+                <p className="settings-row-description">
+                  A private pattern generated locally for this account.
+                </p>
+              </div>
+              <div className="settings-row-control">
+                <AccountAvatar account={account} className="account-avatar-preview" />
+                <button type="button" className="btn btn-secondary" onClick={refreshAvatar}>
+                  <IconShuffle size={14} />
+                  Refresh
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
