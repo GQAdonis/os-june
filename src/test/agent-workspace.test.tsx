@@ -10,6 +10,7 @@ import {
   AgentWorkspace,
   HERO_GREETINGS,
   SkillsToolsPanel,
+  canShareAgentSession,
   composerInSteerStateFor,
   generatedImagePathAliases,
   projectAgentActivityLevels,
@@ -682,6 +683,19 @@ describe("AgentWorkspace", () => {
 
     expect(composerInSteerStateFor({ ...base, selectedSessionId: "session-1" })).toBe(true);
     expect(composerInSteerStateFor({ ...base, selectedSessionId: "session-2" })).toBe(false);
+  });
+
+  it("allows sharing only after a selected session has finished working", () => {
+    const readySession = {
+      selectedSessionId: "session-1",
+      newSessionMode: false,
+      provisional: false,
+      historyLoaded: true,
+      working: false,
+    };
+
+    expect(canShareAgentSession(readySession)).toBe(true);
+    expect(canShareAgentSession({ ...readySession, working: true })).toBe(false);
   });
 
   it("lets users cancel a clean skill editor without making changes", async () => {
