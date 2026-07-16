@@ -89,10 +89,13 @@ failure cannot suppress publication of the correlated extension. Unchanged
 bytes are rechecked against live store state after the desktop publish too.
 
 The desktop release is assembled as a draft. Every expected asset is uploaded
-and verified against SHA-256 values in `stable-build.json`; only then is the
-release published and marked latest. The signing job also passes that provenance
-to bookkeeping through an immutable Actions artifact. The Homebrew job refuses
-to hash a downloaded DMG unless it matches this signing-job evidence.
+and verified against SHA-256 values in `stable-build.json`. The signing job then
+freezes that provenance as an immutable Actions artifact before a separate job
+can publish the draft and mark it latest. Publication and Homebrew both verify
+downloaded release assets against that earlier artifact; neither can bootstrap
+trust from the mutable release copy of `stable-build.json`. A lost publication
+response is retried in the original workflow run so the same artifact remains
+the authority. A new promotion run refuses an already-public release.
 
 The RC and stable-promotion workflows share one non-cancelling concurrency lock,
 so a newer fixed RC release cannot replace a candidate during promotion. The

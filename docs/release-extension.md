@@ -99,7 +99,9 @@ a stable `extension-build.json`. Unchanged bytes are checked again at this
 post-desktop boundary. Homebrew and source-repo version bookkeeping then run in
 a separate job, so their failure cannot suppress the correlated extension step.
 The desktop release remains a draft until all of its assets verify, and the
-Homebrew DMG is checked against immutable provenance from the signing job.
+signing job freezes their hashes in an immutable Actions artifact before a
+separate job can publish it. Publication and Homebrew verify the release bytes
+against that artifact, not the release's mutable metadata copy.
 
 ## Review timing and recovery
 
@@ -125,6 +127,10 @@ staged.
   submissions expire after 30 days.
 - **Desktop stable succeeded, extension publish failed** - rerun the failed
   `extension-stable` job. Publishing and metadata upload are idempotent.
+- **Desktop publication lost its response** - rerun the failed
+  `publish-desktop` job in the original workflow run. It accepts an
+  already-public release only when every asset and the public metadata match the
+  immutable pre-publication artifact. Do not start a new promotion run.
 - **Store API says visibility changed** - complete one manual dashboard publish,
   then rerun.
 

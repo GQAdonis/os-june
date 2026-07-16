@@ -392,7 +392,7 @@ jobs:
           args: --bundles app,dmg --target universal-apple-darwin -- --locked
           includeUpdaterJson: false
 
-      - name: Notarize, verify, and publish stable release assets
+      - name: Notarize, verify, and stage stable release assets
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
@@ -508,11 +508,14 @@ jobs:
           }
 
           verify_stable_assets() {
+            local release_dir="$1"
+            local trusted_metadata="$2"
+            cmp "$release_dir/stable-build.json" "$trusted_metadata"
             node scripts/stable-release-provenance.mjs verify \
-              --dir "$1" \
+              --dir "$release_dir" \
               --version "$VERSION" \
               --source-commit "$BUILD_COMMIT" \
-              --metadata "$1/stable-build.json"
+              --metadata "$trusted_metadata"
           }
 
           release_state="missing"
@@ -524,55 +527,52 @@ jobs:
           fi
 
           if [ "$release_state" = "published" ]; then
-            # Idempotent retry after the desktop boundary already committed:
-            # trust only the complete, internally hashed asset set for this
-            # exact version and source commit.
-            published_dir="$RUNNER_TEMP/published-stable-release"
-            download_stable_assets "$published_dir"
-            verify_stable_assets "$published_dir"
-            cp "$published_dir/stable-build.json" "$stable_build_json"
-          else
-            if [ "$release_state" = "draft" ]; then
-              gh release edit "v$VERSION" \
-                --repo open-software-network/os-june-releases \
-                --title "June v$VERSION" \
-                --notes-file "$release_notes_file" \
-                --draft \
-                --prerelease=false
-            else
-              gh release create "v$VERSION" \
-                --repo open-software-network/os-june-releases \
-                --title "June v$VERSION" \
-                --notes-file "$release_notes_file" \
-                --draft \
-                --latest=false \
-                --target main
-            fi
+            echo "::error::Release v$VERSION is already public. Rerun the original failed publication job so it can use the immutable provenance from that workflow run."
+            exit 1
+          fi
 
-            gh release upload "v$VERSION" \
-              "$stable_dmg" \
-              "$legacy_dmg" \
-              "$app_archive" \
-              "$app_signature" \
-              "$latest_json" \
-              "$stable_build_json" \
-              --repo open-software-network/os-june-releases \
-              --clobber
-
-            uploaded_dir="$RUNNER_TEMP/uploaded-stable-release"
-            download_stable_assets "$uploaded_dir"
-            verify_stable_assets "$uploaded_dir"
-
-            # Publishing is the desktop boundary. Until this final operation,
-            # partial asset failures remain invisible in a draft release.
+          if [ "$release_state" = "draft" ]; then
             gh release edit "v$VERSION" \
               --repo open-software-network/os-june-releases \
               --title "June v$VERSION" \
               --notes-file "$release_notes_file" \
-              --draft=false \
-              --prerelease=false \
-              --latest
+              --draft \
+              --prerelease=false
+          else
+            gh release create "v$VERSION" \
+              --repo open-software-network/os-june-releases \
+              --title "June v$VERSION" \
+              --notes-file "$release_notes_file" \
+              --draft \
+              --latest=false \
+              --target main
           fi
+
+          # A retried draft may contain a partial or obsolete asset set. Clear
+          # it before uploading so only the six provenance-bound files can
+          # cross the publication boundary.
+          while IFS= read -r asset_name; do
+            [ -n "$asset_name" ] || continue
+            gh release delete-asset "v$VERSION" "$asset_name" \
+              --repo open-software-network/os-june-releases \
+              --yes
+          done < <(gh release view "v$VERSION" \
+            --repo open-software-network/os-june-releases \
+            --json assets --jq '.assets[].name')
+
+          gh release upload "v$VERSION" \
+            "$stable_dmg" \
+            "$legacy_dmg" \
+            "$app_archive" \
+            "$app_signature" \
+            "$latest_json" \
+            "$stable_build_json" \
+            --repo open-software-network/os-june-releases \
+            --clobber
+
+          uploaded_dir="$RUNNER_TEMP/uploaded-stable-release"
+          download_stable_assets "$uploaded_dir"
+          verify_stable_assets "$uploaded_dir" "$stable_build_json"
 
       - name: Preserve immutable desktop release provenance
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -583,9 +583,100 @@ jobs:
           overwrite: true
           retention-days: 7
 
+  publish-desktop:
+    name: Publish verified desktop release
+    needs: [extension-preflight, promote]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Mint release token (GitHub App)
+        id: app-token
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
+        with:
+          app-id: ${{ secrets.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: open-software-network
+          repositories: os-june,os-june-releases
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.extension-preflight.outputs.source_commit }}
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+
+      - name: Download immutable desktop release provenance
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: stable-desktop-release-provenance
+          path: ${{ runner.temp }}/stable-release-provenance
+
+      - name: Verify and publish desktop release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          RC_VERSION: ${{ needs.extension-preflight.outputs.desktop_version }}
+          BUILD_COMMIT: ${{ needs.extension-preflight.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          version="${RC_VERSION%-rc.*}"
+          release_dir="$RUNNER_TEMP/stable-release-assets"
+          mkdir -p "$release_dir"
+          gh release download "v$version" \
+            --repo open-software-network/os-june-releases \
+            --pattern "June_universal.dmg" \
+            --pattern "June_aarch64.dmg" \
+            --pattern "June_universal.app.tar.gz" \
+            --pattern "June_universal.app.tar.gz.sig" \
+            --pattern "latest.json" \
+            --pattern "stable-build.json" \
+            --dir "$release_dir"
+
+          trusted_metadata="$RUNNER_TEMP/stable-release-provenance/stable-build.json"
+          expected_assets="$(printf '%s\n' \
+            June_aarch64.dmg \
+            June_universal.app.tar.gz \
+            June_universal.app.tar.gz.sig \
+            June_universal.dmg \
+            latest.json \
+            stable-build.json)"
+          actual_assets="$(gh release view "v$version" \
+            --repo open-software-network/os-june-releases \
+            --json assets --jq '.assets[].name' | sort)"
+          if [ "$actual_assets" != "$expected_assets" ]; then
+            echo "::error::Stable release asset set differs from the frozen publication contract."
+            diff <(printf '%s\n' "$expected_assets") <(printf '%s\n' "$actual_assets") || true
+            exit 1
+          fi
+          cmp "$release_dir/stable-build.json" "$trusted_metadata"
+          node scripts/stable-release-provenance.mjs verify \
+            --dir "$release_dir" \
+            --version "$version" \
+            --source-commit "$BUILD_COMMIT" \
+            --metadata "$trusted_metadata"
+
+          release_state="$(gh release view "v$version" \
+            --repo open-software-network/os-june-releases \
+            --json isDraft --jq 'if .isDraft then "draft" else "published" end')"
+          if [ "$release_state" = "published" ]; then
+            echo "Release v$version is already public with the exact frozen assets."
+            exit 0
+          fi
+
+          # Publishing is the desktop boundary. Until this final operation,
+          # partial asset failures remain invisible in a draft release.
+          gh release edit "v$version" \
+            --repo open-software-network/os-june-releases \
+            --draft=false \
+            --prerelease=false \
+            --latest
+
   extension-stable:
     name: Publish reviewed extension to stable
-    needs: [extension-preflight, promote]
+    needs: [extension-preflight, publish-desktop]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     environment: production
     permissions:
