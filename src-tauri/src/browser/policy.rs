@@ -120,6 +120,13 @@ pub fn is_sensitive_field(element: &InteractiveElement) -> bool {
             "one time code",
             "one-time code",
             "otp",
+            "verification code",
+            "authentication code",
+            "auth code",
+            "2fa code",
+            "2 fa code",
+            "mfa code",
+            "two factor code",
             "security code",
             "card number",
             "credit card",
@@ -152,7 +159,7 @@ fn contains_consequential_term(element: &InteractiveElement) -> bool {
             "delete",
             "remove",
             "confirm",
-            "save changes",
+            "save",
         ],
     )
 }
@@ -1046,6 +1053,7 @@ mod tests {
             "Publish post",
             "Purchase now",
             "Delete account",
+            "Save",
         ] {
             let element = InteractiveElement {
                 tag: "button".into(),
@@ -1072,6 +1080,21 @@ mod tests {
             InteractiveElement {
                 tag: "input".into(),
                 autocomplete: "one-time-code".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                label: "Verification code".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                label: "2FA code".into(),
+                ..InteractiveElement::default()
+            },
+            InteractiveElement {
+                tag: "input".into(),
+                label: "Authentication code".into(),
                 ..InteractiveElement::default()
             },
             InteractiveElement {

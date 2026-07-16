@@ -374,6 +374,30 @@ impl ManagedBrowserSession {
         Ok(())
     }
 
+    async fn enforce_final_public_url(
+        &self,
+        final_url: &str,
+    ) -> Result<(), super::policy::PolicyViolation> {
+        if final_url == "about:blank" {
+            return Ok(());
+        }
+        if let Err(violation) =
+            validate_final_public_url(final_url, self.resolver.as_ref(), &self.policy).await
+        {
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            let _ = self
+                .cdp
+                .call(
+                    Some(&self.cdp_session_id),
+                    "Page.navigate",
+                    json!({ "url": "about:blank" }),
+                )
+                .await;
+            return Err(violation);
+        }
+        Ok(())
+    }
+
     pub async fn navigate(&self, raw_url: &str) -> Result<Value, AppError> {
         self.ensure_open()?;
         self.touch();
@@ -433,22 +457,9 @@ impl ManagedBrowserSession {
         // parks the page back on about:blank if it somehow landed somewhere
         // non-public.
         let final_url = self.evaluate_string("location.href").await?;
-        if final_url != "about:blank" {
-            if let Err(violation) =
-                validate_final_public_url(&final_url, self.resolver.as_ref(), &self.policy).await
-            {
-                self.epoch.fetch_add(1, Ordering::SeqCst);
-                let _ = self
-                    .cdp
-                    .call(
-                        Some(&self.cdp_session_id),
-                        "Page.navigate",
-                        json!({ "url": "about:blank" }),
-                    )
-                    .await;
-                return Err(policy_error(violation));
-            }
-        }
+        self.enforce_final_public_url(&final_url)
+            .await
+            .map_err(policy_error)?;
 
         let title = self.evaluate_string("document.title").await.ok();
         Ok(json!({
@@ -509,6 +520,9 @@ impl ManagedBrowserSession {
             .await;
 
         let url = self.evaluate_string("location.href").await?;
+        self.enforce_final_public_url(&url)
+            .await
+            .map_err(policy_error)?;
         let title = self.evaluate_string("document.title").await.ok();
         Ok(json!({
             "url": url,
@@ -667,20 +681,7 @@ impl ManagedBrowserSession {
             let final_url = self.evaluate_string("location.href").await.map_err(|_| {
                 reference_error("browser_reference_failed", operation, &self.id, reference)
             })?;
-            if final_url != "about:blank"
-                && validate_final_public_url(&final_url, self.resolver.as_ref(), &self.policy)
-                    .await
-                    .is_err()
-            {
-                self.epoch.fetch_add(1, Ordering::SeqCst);
-                let _ = self
-                    .cdp
-                    .call(
-                        Some(&self.cdp_session_id),
-                        "Page.navigate",
-                        json!({ "url": "about:blank" }),
-                    )
-                    .await;
+            if self.enforce_final_public_url(&final_url).await.is_err() {
                 return Err(AppError::new(
                     "browser_policy_blocked",
                     format!(
