@@ -10,6 +10,25 @@ export type PreparedProjectPrompt = {
   contextSignature: string | null;
 };
 
+/** Pick the project that supplies context for a session. An explicit project
+ * origin wins over assignment order because legacy sessions can still have
+ * more than one project assignment; opening one from a project must apply the
+ * project the user actually opened. */
+export function selectSessionProjectContext<T extends { id: string }>(
+  projects: readonly T[],
+  assignedProjectIds: readonly string[] | undefined,
+  openedProjectId?: string,
+): T | undefined {
+  if (openedProjectId) {
+    const openedProject = projects.find((project) => project.id === openedProjectId);
+    if (openedProject) return openedProject;
+  }
+  const assignedProjectId = assignedProjectIds?.[0];
+  return assignedProjectId
+    ? projects.find((project) => project.id === assignedProjectId)
+    : undefined;
+}
+
 const CONTEXT_OPEN_MARKER = "[June project context]";
 const CONTEXT_CLOSE_MARKER = "[/June project context]";
 
@@ -100,14 +119,31 @@ export function prepareProjectPrompt(
 }
 
 const SIGNATURES_STORAGE_KEY = "june.project-context.signatures";
-const SIGNATURES_MAX_ENTRIES = 500;
+const DETAILED_SIGNATURES_MAX_ENTRIES = 500;
+
+/** Compact replacement for an older detailed signature. It preserves the
+ * safety-relevant fact that this session's history contains project context:
+ * leaving the project still emits a clearing block, while re-opening it in a
+ * project reinjects the current details. Real signatures are JSON arrays, so
+ * this sentinel cannot collide with one. */
+export const DELIVERED_CONTEXT_SIGNATURE = "delivered";
+
+function isDetailedContextSignature(signature: string | null): boolean {
+  return (
+    signature !== null &&
+    signature !== CLEARED_CONTEXT_SIGNATURE &&
+    signature !== DELIVERED_CONTEXT_SIGNATURE
+  );
+}
 
 /** Last delivered context signature per stored session id, persisted so a
  * June restart still knows a past conversation carries a project block —
  * without this, moving an old session out of its project after a reload
  * would skip the clearing marker and stale instructions would keep applying.
  * Losing the store is safe in the other direction: an empty map merely
- * reinjects. Insertion-ordered; pruned to the newest entries. */
+ * reinjects. Detailed signatures are bounded, but older entries are compacted
+ * to a sentinel rather than deleted so every retained session can still clear
+ * stale instructions. */
 export class ProjectContextSignatureStore {
   private entries: Map<string, string | null>;
 
@@ -138,14 +174,21 @@ export class ProjectContextSignatureStore {
   }
 
   set(sessionId: string, signature: string | null): void {
-    // Re-inserting moves the entry to the newest position so pruning drops
-    // genuinely stale sessions first.
+    // Re-inserting moves the entry to the newest position so compaction drops
+    // genuinely stale detailed signatures first.
     this.entries.delete(sessionId);
     this.entries.set(sessionId, signature);
-    while (this.entries.size > SIGNATURES_MAX_ENTRIES) {
-      const oldest = this.entries.keys().next().value;
-      if (oldest === undefined) break;
-      this.entries.delete(oldest);
+    let detailedCount = 0;
+    for (const value of this.entries.values()) {
+      if (isDetailedContextSignature(value)) detailedCount += 1;
+    }
+    if (detailedCount > DETAILED_SIGNATURES_MAX_ENTRIES) {
+      for (const [storedSessionId, value] of this.entries) {
+        if (!isDetailedContextSignature(value)) continue;
+        this.entries.set(storedSessionId, DELIVERED_CONTEXT_SIGNATURE);
+        detailedCount -= 1;
+        if (detailedCount <= DETAILED_SIGNATURES_MAX_ENTRIES) break;
+      }
     }
     this.persist();
   }

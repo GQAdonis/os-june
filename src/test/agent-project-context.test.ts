@@ -3,6 +3,7 @@ import {
   COMPACTED_CONTEXT_SIGNATURE,
   prepareProjectPrompt,
   ProjectContextSignatureStore,
+  selectSessionProjectContext,
   stripProjectContext,
   stripProjectContextFromPreview,
   type AgentProjectContext,
@@ -15,6 +16,21 @@ const project: AgentProjectContext = {
 };
 
 describe("agent project context", () => {
+  it("uses the project a multi-filed session was opened from", () => {
+    const projects = [
+      { id: "project-1", name: "First" },
+      { id: "project-2", name: "Opened" },
+    ];
+
+    expect(selectSessionProjectContext(projects, ["project-1", "project-2"], "project-2")).toBe(
+      projects[1],
+    );
+    expect(selectSessionProjectContext(projects, ["project-1", "project-2"])).toBe(projects[0]);
+    expect(selectSessionProjectContext(projects, ["project-1"], "deleted-project")).toBe(
+      projects[0],
+    );
+  });
+
   it("injects the context block on the first project prompt", () => {
     const prepared = prepareProjectPrompt("What changed?", project, undefined);
 
@@ -148,13 +164,24 @@ describe("agent project context", () => {
       expect(cleared.text).toContain("no longer filed in a project");
     });
 
-    it("starts fresh from corrupt storage and prunes oldest entries", () => {
+    it("starts fresh from corrupt storage and compacts old signatures without losing clearing", () => {
       window.localStorage.setItem(KEY, "{not json");
       const store = new ProjectContextSignatureStore(KEY);
       expect(store.get("anything")).toBeUndefined();
       for (let i = 0; i < 505; i += 1) store.set(`session-${i}`, `sig-${i}`);
-      expect(store.get("session-0")).toBeUndefined();
+      expect(store.get("session-0")).toBeDefined();
       expect(store.get("session-504")).toBe("sig-504");
+
+      const cleared = prepareProjectPrompt(
+        "After old session leaves",
+        undefined,
+        store.get("session-0"),
+      );
+      expect(cleared.injected).toBe(true);
+      expect(cleared.text).toContain("no longer filed in a project");
+
+      const reloaded = new ProjectContextSignatureStore(KEY);
+      expect(reloaded.get("session-0")).toBeDefined();
     });
 
     it("deletes entries durably (compaction path)", () => {

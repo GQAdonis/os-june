@@ -112,6 +112,7 @@ import {
   type AgentRunSettledDetail,
   type AgentSessionStatusDetail,
 } from "../lib/agent-events";
+import { selectSessionProjectContext } from "../lib/agent-project-context";
 import {
   notifyAgentRunSettled,
   notifyAgentSessionStatus,
@@ -1051,12 +1052,15 @@ export function App() {
     agentOrigin?.kind === "project"
       ? state.folders.find((folder) => folder.id === agentOrigin.folderId)
       : undefined;
-  // The active session's own project. Sessions opened outside a project (the
-  // Sessions view, the sidebar) still crumb to the project they're filed in,
-  // so membership is visible wherever the session was entered from — same as
-  // meeting notes showing their project up top.
+  // The active session's project. Legacy sessions may have multiple project
+  // assignments, so an explicit project origin wins over assignment order;
+  // sessions opened elsewhere fall back to their first assignment.
   const activeAgentSessionFolder = activeAgentSessionId
-    ? state.folders.find((folder) => folder.id === sessionFolders[activeAgentSessionId]?.[0])
+    ? selectSessionProjectContext(
+        state.folders,
+        sessionFolders[activeAgentSessionId],
+        agentOrigin?.kind === "project" ? agentOrigin.folderId : undefined,
+      )
     : undefined;
   const agentProjectContextFolder =
     activeAgentSessionFolder ??
@@ -3864,9 +3868,10 @@ export function App() {
                   onTopUp={handleTopUp}
                   sessionInProject={Boolean(activeAgentSessionFolder)}
                   resolveSessionProjectContext={(sessionId) => {
-                    const folder = state.folders.find(
-                      (candidate) => candidate.id === sessionFolders[sessionId]?.[0],
-                    );
+                    const folder =
+                      sessionId === activeAgentSessionId
+                        ? activeAgentSessionFolder
+                        : selectSessionProjectContext(state.folders, sessionFolders[sessionId]);
                     return folder
                       ? {
                           id: folder.id,
