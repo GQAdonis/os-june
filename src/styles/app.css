@@ -26307,13 +26307,9 @@ button.memory-project:hover {
   color: var(--foreground);
 }
 
-.connector-logo-obsidian {
-  background: var(--foreground);
-}
-
-.connector-provider-icon-obsidian {
-  display: block;
-  filter: brightness(0) invert(1);
+.connector-provider-icon-linear {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
 }
 
 .connector-main {
