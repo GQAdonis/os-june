@@ -689,6 +689,42 @@ impl ManagedBrowserSession {
                     ),
                 ));
             }
+        } else if operation == "fill" {
+            if value.is_empty() {
+                for event_type in ["rawKeyDown", "keyUp"] {
+                    self.cdp
+                        .call(
+                            Some(&self.cdp_session_id),
+                            "Input.dispatchKeyEvent",
+                            json!({
+                                "type": event_type,
+                                "key": "Backspace",
+                                "code": "Backspace",
+                                "windowsVirtualKeyCode": 8,
+                            }),
+                        )
+                        .await
+                        .map_err(|_| {
+                            reference_error(
+                                "browser_reference_failed",
+                                operation,
+                                &self.id,
+                                reference,
+                            )
+                        })?;
+                }
+            } else {
+                self.cdp
+                    .call(
+                        Some(&self.cdp_session_id),
+                        "Input.insertText",
+                        json!({ "text": value }),
+                    )
+                    .await
+                    .map_err(|_| {
+                        reference_error("browser_reference_failed", operation, &self.id, reference)
+                    })?;
+            }
         }
         Ok(())
     }
@@ -1636,10 +1672,18 @@ const ACT_ON_REFERENCE_JS: &str = r#"function(operation, reference, value, expec
   } else if (operation === "fill") {
     if (!("value" in el) && !el.isContentEditable) return {status: "unsupported"};
     el.focus();
-    if (el.isContentEditable) el.textContent = value;
-    else el.value = value;
-    el.dispatchEvent(new Event("input", {bubbles: true}));
-    el.dispatchEvent(new Event("change", {bubbles: true}));
+    if (el.isContentEditable) {
+      const selection = getSelection();
+      if (!selection) return {status: "unsupported"};
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else if (typeof el.select === "function") {
+      el.select();
+    } else {
+      return {status: "unsupported"};
+    }
   } else if (operation === "press") {
     el.focus();
   } else {
@@ -1686,5 +1730,13 @@ mod interaction_tests {
             main_frame_navigation_wait(&same_document, "session-1", "main-frame"),
             Some(false)
         );
+    }
+
+    #[test]
+    fn fill_prepares_a_selection_for_native_cdp_text_input() {
+        assert!(ACT_ON_REFERENCE_JS.contains("selectNodeContents(el)"));
+        assert!(ACT_ON_REFERENCE_JS.contains("el.select()"));
+        assert!(!ACT_ON_REFERENCE_JS.contains("el.value = value"));
+        assert!(!ACT_ON_REFERENCE_JS.contains("el.textContent = value"));
     }
 }

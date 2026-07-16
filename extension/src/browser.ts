@@ -518,10 +518,18 @@ const ACT_ON_REFERENCE_FUNCTION = `function(operation, value, expected) {
   } else if (operation === "fill") {
     if (!("value" in this) && !this.isContentEditable) return {status: "unsupported"};
     this.focus();
-    if (this.isContentEditable) this.textContent = value;
-    else this.value = value;
-    this.dispatchEvent(new Event("input", {bubbles: true}));
-    this.dispatchEvent(new Event("change", {bubbles: true}));
+    if (this.isContentEditable) {
+      const selection = getSelection();
+      if (!selection) return {status: "unsupported"};
+      const range = document.createRange();
+      range.selectNodeContents(this);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    } else if (typeof this.select === "function") {
+      this.select();
+    } else {
+      return {status: "unsupported"};
+    }
   } else if (operation === "press") {
     this.focus();
   } else {
@@ -815,6 +823,23 @@ export class BrowserController {
         const text = [...value].length === 1 ? value : "";
         for (const type of ["keyDown", "keyUp"]) {
           await cdp(tabId, "Input.dispatchKeyEvent", { type, key: value, text });
+        }
+      } else if (operation === "fill") {
+        if (value.length > 0) {
+          await cdp(tabId, "Input.insertText", { text: value });
+        } else {
+          await cdp(tabId, "Input.dispatchKeyEvent", {
+            type: "rawKeyDown",
+            key: "Backspace",
+            code: "Backspace",
+            windowsVirtualKeyCode: 8,
+          });
+          await cdp(tabId, "Input.dispatchKeyEvent", {
+            type: "keyUp",
+            key: "Backspace",
+            code: "Backspace",
+            windowsVirtualKeyCode: 8,
+          });
         }
       }
     } catch (error) {

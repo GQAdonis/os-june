@@ -3041,6 +3041,7 @@ pub async fn routine_browser_access_set(
                     });
                 return Err(error);
             }
+            bridge.browser_broker.revoke_routine_sessions(job_id).await;
         }
         Ok(RoutineBrowserAccessStatus {
             enabled: false,
@@ -3568,6 +3569,10 @@ pub async fn delete_hermes_bridge_cron_job(
         }
     }
     bridge.browser_broker.remove_routine_grant(&request.job_id);
+    bridge
+        .browser_broker
+        .revoke_routine_sessions(&request.job_id)
+        .await;
     Ok(result)
 }
 

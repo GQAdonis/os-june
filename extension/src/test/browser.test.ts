@@ -404,6 +404,43 @@ describe("attended reference actions", () => {
     expect(readyChecks).toBeGreaterThan(0);
   });
 
+  it("fills fields through native CDP text input", async () => {
+    const { controller, sendCommand } = interactionController();
+    sendCommand.mockImplementation(
+      async (_target: unknown, method: string, _params?: Record<string, unknown>) => {
+        if (method === "DOM.resolveNode") return { object: { objectId: "node-20" } };
+        if (method === "Runtime.callFunctionOn") {
+          return { result: { value: { status: "ok" } } };
+        }
+        if (method === "Accessibility.getFullAXTree") return { nodes: [] };
+        if (method === "Runtime.evaluate") return { result: { value: "complete" } };
+        return {};
+      },
+    );
+
+    await expect(
+      controller.execute(
+        browserRequest(23, "fill", {
+          session_id: "task",
+          tab_id: 10,
+          ref: "e0:n20",
+          expected: element,
+          text: "June input",
+        }),
+      ),
+    ).resolves.toMatchObject({ response: { success: true, data: { epoch: 1 } } });
+    expect(sendCommand).toHaveBeenCalledWith({ tabId: 10 }, "Input.insertText", {
+      text: "June input",
+    });
+    const actionDeclaration = sendCommand.mock.calls.find(
+      (call) =>
+        call[1] === "Runtime.callFunctionOn" &&
+        String(call[2]?.functionDeclaration).includes("operation, value, expected"),
+    )?.[2]?.functionDeclaration;
+    expect(actionDeclaration).toContain("this.select()");
+    expect(actionDeclaration).not.toContain("this.value = value");
+  });
+
   it("aborts the act message when element facts no longer match", async () => {
     const { controller, sendCommand } = interactionController();
     sendCommand.mockImplementation(async (_target: unknown, method: string) => {

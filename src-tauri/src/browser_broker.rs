@@ -398,6 +398,55 @@ impl BrowserBroker {
         Some(state.routine_grants.remove(index))
     }
 
+    /// Tear down every managed browser session owned by a routine whose grant
+    /// has been disabled or removed. This bypasses the routine opt-in gate so
+    /// revocation cannot strand a session that the routine is no longer
+    /// authorized to close itself.
+    pub(crate) async fn revoke_routine_sessions(&self, job_id: &str) {
+        let _action = self.action_lock.lock().await;
+        let (transports, sessions) = {
+            let mut state = self.lock();
+            let session_ids = state
+                .sessions
+                .iter()
+                .filter(|(_, session)| session.routine_id.as_deref() == Some(job_id))
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            let sessions = session_ids
+                .into_iter()
+                .filter_map(|id| {
+                    state
+                        .sessions
+                        .remove(&id)
+                        .map(|session| (id, session.transport_kind))
+                })
+                .collect::<Vec<_>>();
+            (state.transports.clone(), sessions)
+        };
+
+        // Termination is synchronous for managed Chromium, interrupting any
+        // in-flight CDP call before the best-effort graceful close.
+        for (session_id, kind) in &sessions {
+            if let Some(transport) = transports.get(kind) {
+                transport.terminate_session(session_id);
+            }
+        }
+        for (session_id, kind) in sessions {
+            if let Some(transport) = transports.get(&kind) {
+                if let Err(error) = transport
+                    .execute("close_session", json!({ "session_id": session_id }))
+                    .await
+                {
+                    tracing::warn!(
+                        code = %error.code,
+                        transport = kind.as_str(),
+                        "browser session teardown failed after routine access revocation"
+                    );
+                }
+            }
+        }
+    }
+
     pub(crate) fn routine_grant_for_token(&self, token: &str) -> Option<RoutineBrowserGrant> {
         self.lock()
             .routine_grants
@@ -2500,6 +2549,61 @@ mod tests {
             )
             .await
             .expect("attended revoke does not tear down the opted-in routine");
+    }
+
+    #[tokio::test]
+    async fn routine_revoke_terminates_and_closes_its_live_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let transport = Arc::new(TeardownTrackingTransport::default());
+        let broker = BrowserBroker::default();
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            transport.clone(),
+            temp.path().join("images"),
+            temp.path().join("artifacts"),
+        );
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-revoked".into(),
+            server_name: "june_browser_routine_revoked".into(),
+            token: "routine-token".into(),
+            enabled: true,
+        });
+        let started = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("routine-revoked".into()),
+                "start_session",
+                json!({}),
+            )
+            .await
+            .expect("start routine session");
+
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-revoked".into(),
+            server_name: "june_browser_routine_revoked".into(),
+            token: "routine-token".into(),
+            enabled: false,
+        });
+        broker.revoke_routine_sessions("routine-revoked").await;
+
+        assert_eq!(
+            transport
+                .terminated
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        assert_eq!(
+            transport.closed.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        let error = broker
+            .execute_for(
+                BrowserBrokerContext::Routine("routine-revoked".into()),
+                "close_session",
+                json!({ "session_id": started["sessionId"] }),
+            )
+            .await
+            .expect_err("a revoked routine cannot retain a live session");
+        assert_eq!(error.code, "browser_routine_not_opted_in");
     }
 
     #[tokio::test]
