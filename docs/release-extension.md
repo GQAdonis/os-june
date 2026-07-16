@@ -98,6 +98,8 @@ calls `DEFAULT_PUBLISH` for the staged submission and verifies the version is
 a stable `extension-build.json`. Unchanged bytes are checked again at this
 post-desktop boundary. Homebrew and source-repo version bookkeeping then run in
 a separate job, so their failure cannot suppress the correlated extension step.
+The desktop release remains a draft until all of its assets verify, and the
+Homebrew DMG is checked against immutable provenance from the signing job.
 
 ## Review timing and recovery
 

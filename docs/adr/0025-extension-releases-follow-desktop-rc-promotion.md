@@ -88,6 +88,12 @@ They are deliberately outside the desktop-publication job so a bookkeeping
 failure cannot suppress publication of the correlated extension. Unchanged
 bytes are rechecked against live store state after the desktop publish too.
 
+The desktop release is assembled as a draft. Every expected asset is uploaded
+and verified against SHA-256 values in `stable-build.json`; only then is the
+release published and marked latest. The signing job also passes that provenance
+to bookkeeping through an immutable Actions artifact. The Homebrew job refuses
+to hash a downloaded DMG unless it matches this signing-job evidence.
+
 The RC and stable-promotion workflows share one non-cancelling concurrency lock,
 so a newer fixed RC release cannot replace a candidate during promotion. The
 two external stores cannot be updated atomically. The desktop therefore

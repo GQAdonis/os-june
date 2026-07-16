@@ -111,7 +111,8 @@ ships the same source you tested with a clean version string. It then:
 
 - publishes the `vX.Y.Z` stable release (marked latest) with the DMG, updater
   archive + signature, a regenerated `latest.json`, and a `stable-build.json`
-  recording the source commit (so the Windows build reuses the same tree);
+  recording the source commit and asset SHA-256 values (so the Windows build
+  reuses the same tree); the release stays draft until every asset verifies;
 - publishes the exact staged extension (or rechecks unchanged store state)
   immediately after the desktop release boundary;
 - generates the changelog (first-parent commits since the previous `release: v...`)
@@ -119,7 +120,8 @@ ships the same source you tested with a clean version string. It then:
 - updates the Homebrew tap and commits `release: vX.Y.Z` directly to `main`
   only after the extension step succeeds (the release bot is on the
   branch-protection bypass list), advancing the version files so the next RC's
-  gate and the next changelog can anchor on it. No PR to merge.
+  gate and the next changelog can anchor on it. The tap DMG must match immutable
+  signing-job provenance. No PR to merge.
 
 ### 4. Cut the Windows release
 

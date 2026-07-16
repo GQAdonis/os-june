@@ -450,12 +450,7 @@ jobs:
           cp "${app_archives[0]}" "$app_archive"
           cp "${app_signatures[0]}" "$app_signature"
 
-          # Record the source commit on the stable release so the Windows build
-          # can rebuild the exact tree this macOS release shipped, independent of
-          # how far main has advanced (mirrors the rc's rc-build.json).
           stable_build_json="$release_dir/stable-build.json"
-          printf '{\n  "version": "%s",\n  "commit": "%s"\n}\n' \
-            "$VERSION" "$BUILD_COMMIT" > "$stable_build_json"
 
           SIGNATURE_PATH="$app_signature" \
           LATEST_JSON_PATH="$latest_json" \
@@ -486,34 +481,107 @@ jobs:
           );
           NODE
 
+          # Record both the source commit and every stable asset digest. The
+          # digest file is also passed to later jobs as an immutable Actions
+          # artifact, so Homebrew never trusts mutable release bytes alone.
+          node scripts/stable-release-provenance.mjs write \
+            --dir "$release_dir" \
+            --version "$VERSION" \
+            --source-commit "$BUILD_COMMIT" \
+            --output "$stable_build_json"
+
           release_notes_file="${RELEASE_CHANGELOG_PATH:?}"
-          # --latest marks this the repo's latest release so the stable channel
-          # URL (releases/latest/download/latest.json) resolves here.
-          if gh release view "v$VERSION" --repo open-software-network/os-june-releases >/dev/null 2>&1; then
+
+          download_stable_assets() {
+            local destination="$1"
+            rm -rf "$destination"
+            mkdir -p "$destination"
+            gh release download "v$VERSION" \
+              --repo open-software-network/os-june-releases \
+              --pattern "June_universal.dmg" \
+              --pattern "June_aarch64.dmg" \
+              --pattern "June_universal.app.tar.gz" \
+              --pattern "June_universal.app.tar.gz.sig" \
+              --pattern "latest.json" \
+              --pattern "stable-build.json" \
+              --dir "$destination"
+          }
+
+          verify_stable_assets() {
+            node scripts/stable-release-provenance.mjs verify \
+              --dir "$1" \
+              --version "$VERSION" \
+              --source-commit "$BUILD_COMMIT" \
+              --metadata "$1/stable-build.json"
+          }
+
+          release_state="missing"
+          if gh release view "v$VERSION" \
+            --repo open-software-network/os-june-releases >/dev/null 2>&1; then
+            release_state="$(gh release view "v$VERSION" \
+              --repo open-software-network/os-june-releases \
+              --json isDraft --jq 'if .isDraft then "draft" else "published" end')"
+          fi
+
+          if [ "$release_state" = "published" ]; then
+            # Idempotent retry after the desktop boundary already committed:
+            # trust only the complete, internally hashed asset set for this
+            # exact version and source commit.
+            published_dir="$RUNNER_TEMP/published-stable-release"
+            download_stable_assets "$published_dir"
+            verify_stable_assets "$published_dir"
+            cp "$published_dir/stable-build.json" "$stable_build_json"
+          else
+            if [ "$release_state" = "draft" ]; then
+              gh release edit "v$VERSION" \
+                --repo open-software-network/os-june-releases \
+                --title "June v$VERSION" \
+                --notes-file "$release_notes_file" \
+                --draft \
+                --prerelease=false
+            else
+              gh release create "v$VERSION" \
+                --repo open-software-network/os-june-releases \
+                --title "June v$VERSION" \
+                --notes-file "$release_notes_file" \
+                --draft \
+                --latest=false \
+                --target main
+            fi
+
+            gh release upload "v$VERSION" \
+              "$stable_dmg" \
+              "$legacy_dmg" \
+              "$app_archive" \
+              "$app_signature" \
+              "$latest_json" \
+              "$stable_build_json" \
+              --repo open-software-network/os-june-releases \
+              --clobber
+
+            uploaded_dir="$RUNNER_TEMP/uploaded-stable-release"
+            download_stable_assets "$uploaded_dir"
+            verify_stable_assets "$uploaded_dir"
+
+            # Publishing is the desktop boundary. Until this final operation,
+            # partial asset failures remain invisible in a draft release.
             gh release edit "v$VERSION" \
               --repo open-software-network/os-june-releases \
               --title "June v$VERSION" \
               --notes-file "$release_notes_file" \
+              --draft=false \
               --prerelease=false \
               --latest
-          else
-            gh release create "v$VERSION" \
-              --repo open-software-network/os-june-releases \
-              --title "June v$VERSION" \
-              --notes-file "$release_notes_file" \
-              --latest \
-              --target main
           fi
 
-          gh release upload "v$VERSION" \
-            "$stable_dmg" \
-            "$legacy_dmg" \
-            "$app_archive" \
-            "$app_signature" \
-            "$latest_json" \
-            "$stable_build_json" \
-            --repo open-software-network/os-june-releases \
-            --clobber
+      - name: Preserve immutable desktop release provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stable-desktop-release-provenance
+          path: ${{ runner.temp }}/stable-release-assets/stable-build.json
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
 
   extension-stable:
     name: Publish reviewed extension to stable
@@ -640,10 +708,17 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Resolve stable release and download its DMG
+      - name: Download immutable desktop release provenance
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: stable-desktop-release-provenance
+          path: ${{ runner.temp }}/stable-release-provenance
+
+      - name: Resolve and verify stable release assets
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RC_VERSION: ${{ needs.extension-preflight.outputs.desktop_version }}
+          BUILD_COMMIT: ${{ needs.extension-preflight.outputs.source_commit }}
         run: |
           set -euo pipefail
           version="${RC_VERSION%-rc.*}"
@@ -653,7 +728,16 @@ jobs:
           gh release download "v$version" \
             --repo open-software-network/os-june-releases \
             --pattern "June_universal.dmg" \
+            --pattern "June_aarch64.dmg" \
+            --pattern "June_universal.app.tar.gz" \
+            --pattern "June_universal.app.tar.gz.sig" \
+            --pattern "latest.json" \
             --dir "$release_dir"
+          node scripts/stable-release-provenance.mjs verify \
+            --dir "$release_dir" \
+            --version "$version" \
+            --source-commit "$BUILD_COMMIT" \
+            --metadata "$RUNNER_TEMP/stable-release-provenance/stable-build.json"
 
       # Keep the org tap cask (open-software-network/homebrew-tap, Casks/june.rb)
       # pointing at the stable DMG. This job runs only after the correlated

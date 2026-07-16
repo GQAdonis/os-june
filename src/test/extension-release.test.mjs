@@ -19,6 +19,11 @@ import {
   validateExtensionMetadata,
   writeStableExtensionMetadata,
 } from "../../scripts/extension-release.mjs";
+import {
+  STABLE_ASSET_NAMES,
+  verifyStableReleaseProvenance,
+  writeStableReleaseProvenance,
+} from "../../scripts/stable-release-provenance.mjs";
 import manifest from "../../extension/public/manifest.json";
 
 const extensionId = "adckhkfngpnenaapncoipkalcfpjbgcn";
@@ -117,6 +122,64 @@ describe("Chrome extension release versioning", () => {
     expect(await extensionPayloadFingerprint(first)).not.toBe(
       await extensionPayloadFingerprint(second),
     );
+  });
+});
+
+describe("stable desktop release provenance", () => {
+  it("binds every published desktop asset to the exact version and source commit", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "june-stable-release-"));
+    for (const name of STABLE_ASSET_NAMES) {
+      await writeFile(join(directory, name), `release bytes for ${name}\n`);
+    }
+    const metadataPath = join(directory, "stable-build.json");
+    const metadata = await writeStableReleaseProvenance({
+      releaseDir: directory,
+      version: "1.2.3",
+      sourceCommit,
+      outputPath: metadataPath,
+    });
+
+    await expect(
+      verifyStableReleaseProvenance({
+        releaseDir: directory,
+        version: "1.2.3",
+        sourceCommit,
+        metadataPath,
+      }),
+    ).resolves.toEqual(metadata);
+
+    await writeFile(join(directory, "June_universal.dmg"), "mutated bytes\n");
+    await expect(
+      verifyStableReleaseProvenance({
+        releaseDir: directory,
+        version: "1.2.3",
+        sourceCommit,
+        metadataPath,
+      }),
+    ).rejects.toThrow("June_universal.dmg does not match its provenance");
+  });
+
+  it("rejects provenance from a different stable promotion", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "june-stable-identity-"));
+    for (const name of STABLE_ASSET_NAMES) {
+      await writeFile(join(directory, name), name);
+    }
+    const metadataPath = join(directory, "stable-build.json");
+    await writeStableReleaseProvenance({
+      releaseDir: directory,
+      version: "1.2.3",
+      sourceCommit,
+      outputPath: metadataPath,
+    });
+
+    await expect(
+      verifyStableReleaseProvenance({
+        releaseDir: directory,
+        version: "1.2.4",
+        sourceCommit,
+        metadataPath,
+      }),
+    ).rejects.toThrow("does not match the promoted version and source commit");
   });
 });
 
