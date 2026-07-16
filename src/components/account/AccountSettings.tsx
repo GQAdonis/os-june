@@ -1,6 +1,6 @@
 import { IconArrowRotateClockwise } from "central-icons/IconArrowRotateClockwise";
 import { IconShuffle } from "central-icons/IconShuffle";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { hasLiveSubscription } from "../../lib/account-gate";
 import { errorCode } from "../../lib/errors";
@@ -85,20 +85,29 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
   const [busy, setBusy] = useState(false);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [accountStatus, setAccountStatus] = useState<string>();
+  const accountRef = useRef(account);
+  accountRef.current = account;
   const { refresh: refreshAvatar } = useAccountAvatar(account);
 
   async function handleRefreshAvatar() {
     setAvatarBusy(true);
     try {
       const user = await refreshAvatar();
-      if (user) onAccountChanged({ ...account, user });
+      if (user) {
+        const currentAccount = accountRef.current;
+        if (!currentAccount.signedIn || currentAccount.user?.id !== user.id) return;
+        onAccountChanged({ ...currentAccount, user });
+      }
+      if (!accountRef.current.signedIn && !accountRef.current.localDev) return;
       setAccountStatus(
         account.localDev
           ? "Avatar refreshed on this device."
           : "Avatar synced with your OpenSoftware account.",
       );
     } catch (error) {
-      setAccountStatus(messageFromError(error));
+      if (accountRef.current.signedIn || accountRef.current.localDev) {
+        setAccountStatus(messageFromError(error));
+      }
     } finally {
       setAvatarBusy(false);
     }
@@ -175,7 +184,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  disabled={busy}
+                  disabled={busy || avatarBusy}
                   onClick={() => void handleSignOut()}
                 >
                   Sign out
@@ -215,7 +224,7 @@ export function AccountSettingsSection({ account, loading, onAccountChanged }: P
                 <button
                   type="button"
                   className="btn btn-secondary"
-                  disabled={avatarBusy}
+                  disabled={avatarBusy || busy}
                   onClick={() => void handleRefreshAvatar()}
                 >
                   <IconShuffle size={14} />

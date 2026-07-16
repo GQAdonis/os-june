@@ -52,10 +52,10 @@ export function useAccountAvatar(account: AccountStatus) {
     style: accountAvatarStyle(seed),
     refresh: async () => {
       const next = createAccountAvatarSeed();
-      writeLocalAccountAvatarSeed(identity, next);
       if (account.signedIn && !account.localDev) {
         writePendingAccountAvatarSeed(identity, next);
       }
+      writeLocalAccountAvatarSeed(identity, next);
       if (typeof window !== "undefined") {
         window.dispatchEvent(new CustomEvent(ACCOUNT_AVATAR_CHANGED_EVENT));
       }

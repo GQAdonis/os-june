@@ -792,6 +792,45 @@ describe("AppSettings", () => {
     );
   });
 
+  it("ignores an avatar response that lands after the account signs out", async () => {
+    const user = userEvent.setup();
+    const onAccountChanged = vi.fn();
+    let resolveAvatar: ((user: NonNullable<AccountStatus["user"]>) => void) | undefined;
+    mocks.osAccountsSetAvatarSeed.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveAvatar = resolve;
+      }),
+    );
+    const settings = (account: AccountStatus) => (
+      <AppSettings
+        account={account}
+        accountLoading={false}
+        sourceMode="microphoneOnly"
+        checkingSourceReadiness={false}
+        onAccountChanged={onAccountChanged}
+        onAccountRefresh={vi.fn()}
+        onSourceModeChange={vi.fn()}
+        onEnableSystemAudio={vi.fn()}
+        activeTab="general"
+        onTabChange={vi.fn()}
+      />
+    );
+    const { rerender } = render(settings(signedInAccount));
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(screen.getByRole("button", { name: "Sign out" })).toBeDisabled();
+    rerender(settings({ signedIn: false, configured: true }));
+    await act(async () => {
+      resolveAvatar?.({
+        ...signedInAccount.user,
+        avatarSeed: "v1:11111111111111111111111111111111",
+      });
+    });
+
+    expect(onAccountChanged).not.toHaveBeenCalled();
+  });
+
   it("shows usage remaining as a percentage instead of dollars", async () => {
     const user = userEvent.setup();
     render(
