@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   removeNoteFromFolder: vi.fn(),
   listNotes: vi.fn(),
   listFolders: vi.fn(),
+  listHermesSessions: vi.fn(),
   getNote: vi.fn(),
   deleteNote: vi.fn(),
   deleteNotes: vi.fn(),
@@ -89,6 +90,11 @@ vi.mock("../lib/recording-sounds", () => ({
 
 vi.mock("../lib/agent-sounds", () => ({
   preloadAgentSounds: mocks.preloadAgentSounds,
+}));
+
+vi.mock("../lib/hermes-adapter", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/hermes-adapter")>()),
+  listHermesSessions: mocks.listHermesSessions,
 }));
 
 vi.mock("../lib/tauri", () => ({
@@ -245,6 +251,7 @@ describe("notes recording reliability", () => {
     mocks.listeners.clear();
     resetActiveHermesProfileForTests();
     mocks.listFolders.mockResolvedValue([]);
+    mocks.listHermesSessions.mockResolvedValue([]);
 
     const payload: BootstrapResponse = {
       folders: [],
