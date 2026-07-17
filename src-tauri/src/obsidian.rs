@@ -373,7 +373,14 @@ fn validate_vault_path(path: &Path) -> Result<PathBuf, AppError> {
             "Choose an existing Obsidian vault folder.",
         ));
     }
-    if !canonical.join(".obsidian").is_dir() {
+    let obsidian_dir = canonical.join(".obsidian");
+    let obsidian_metadata = fs::symlink_metadata(&obsidian_dir).map_err(|_| {
+        AppError::new(
+            "obsidian_vault_invalid",
+            "Choose a folder that contains an .obsidian directory.",
+        )
+    })?;
+    if obsidian_metadata.file_type().is_symlink() || !obsidian_metadata.is_dir() {
         return Err(AppError::new(
             "obsidian_vault_invalid",
             "Choose a folder that contains an .obsidian directory.",
@@ -452,6 +459,20 @@ mod tests {
     fn rejects_non_obsidian_directory() {
         let temp = tempfile::tempdir().expect("tempdir");
         let err = validate_vault_path(temp.path()).expect_err("not a vault");
+        assert_eq!(err.code, "obsidian_vault_invalid");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_obsidian_marker_symlink() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let vault = temp.path().join("Vault");
+        let external = temp.path().join("External Marker");
+        std::fs::create_dir_all(&vault).expect("vault");
+        std::fs::create_dir_all(&external).expect("external marker");
+        std::os::unix::fs::symlink(&external, vault.join(".obsidian")).expect("symlink");
+
+        let err = validate_vault_path(&vault).expect_err("symlink marker rejected");
         assert_eq!(err.code, "obsidian_vault_invalid");
     }
 

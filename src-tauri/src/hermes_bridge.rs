@@ -1710,11 +1710,11 @@ pub(crate) async fn reapply_hermes_runtime(
         }
     }
     // Do not call Hermes' `/api/gateway/restart`: it launches a replacement
-    // outside June's supervision and loses June-owned spawn configuration. Run
-    // the same June-supervised gateway start path used at app startup instead so
-    // the launchd-managed gateway reloads the freshly rendered config.
+    // from the jailed dashboard request handler. Run the Hermes CLI restart as a
+    // direct June child instead so an already-running launchd-managed gateway is
+    // forced to reload the freshly rendered config.
     if let Some(connection) = live_connections(bridge)?.first() {
-        if let Err(error) = run_hermes_gateway_start(connection).await {
+        if let Err(error) = run_hermes_gateway_restart(connection).await {
             tracing::warn!(
                 ?error,
                 "reapply: restarting the Hermes gateway failed after runtime reapply"
@@ -5657,25 +5657,37 @@ fn spawn_hermes_gateway_start(connection: &HermesBridgeConnection) -> Result<(),
 }
 
 async fn run_hermes_gateway_start(connection: &HermesBridgeConnection) -> Result<(), AppError> {
-    let mut cmd = hermes_gateway_start_command(connection);
+    let cmd = hermes_gateway_start_command(connection);
+    run_hermes_gateway_lifecycle_command(cmd, "start").await
+}
+
+async fn run_hermes_gateway_restart(connection: &HermesBridgeConnection) -> Result<(), AppError> {
+    let cmd = hermes_gateway_restart_command(connection);
+    run_hermes_gateway_lifecycle_command(cmd, "restart").await
+}
+
+async fn run_hermes_gateway_lifecycle_command(
+    mut cmd: Command,
+    action: &'static str,
+) -> Result<(), AppError> {
     let status = tauri::async_runtime::spawn_blocking(move || cmd.status())
         .await
         .map_err(|error| {
             AppError::new(
                 "hermes_gateway_start_failed",
-                format!("Could not wait for `hermes gateway start`. {error}"),
+                format!("Could not wait for `hermes gateway {action}`. {error}"),
             )
         })?
         .map_err(|error| {
             AppError::new(
                 "hermes_gateway_start_failed",
-                format!("Could not run `hermes gateway start`. {error}"),
+                format!("Could not run `hermes gateway {action}`. {error}"),
             )
         })?;
     if !status.success() {
         return Err(AppError::new(
             "hermes_gateway_start_failed",
-            format!("`hermes gateway start` exited with {status}. See logs/gateway-start.log."),
+            format!("`hermes gateway {action}` exited with {status}. See logs/gateway-start.log."),
         ));
     }
     Ok(())
@@ -5684,7 +5696,19 @@ async fn run_hermes_gateway_start(connection: &HermesBridgeConnection) -> Result
 fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Command {
     let hermes_home = PathBuf::from(&connection.hermes_home);
     let mut cmd = build_hermes_gateway_start_command(connection, &hermes_home);
-    match open_gateway_start_log(&hermes_home) {
+    attach_gateway_lifecycle_log(&mut cmd, &hermes_home);
+    cmd
+}
+
+fn hermes_gateway_restart_command(connection: &HermesBridgeConnection) -> Command {
+    let hermes_home = PathBuf::from(&connection.hermes_home);
+    let mut cmd = build_hermes_gateway_restart_command(connection, &hermes_home);
+    attach_gateway_lifecycle_log(&mut cmd, &hermes_home);
+    cmd
+}
+
+fn attach_gateway_lifecycle_log(cmd: &mut Command, hermes_home: &Path) {
+    match open_gateway_start_log(hermes_home) {
         Some((log_for_stdout, log_for_stderr)) => {
             cmd.stdout(log_for_stdout).stderr(log_for_stderr);
         }
@@ -5692,7 +5716,6 @@ fn hermes_gateway_start_command(connection: &HermesBridgeConnection) -> Command 
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
     }
-    cmd
 }
 
 /// Pure command construction so a test can assert the spawn is the bare hermes
@@ -5701,10 +5724,25 @@ fn build_hermes_gateway_start_command(
     connection: &HermesBridgeConnection,
     hermes_home: &Path,
 ) -> Command {
+    build_hermes_gateway_lifecycle_command(connection, hermes_home, "start")
+}
+
+fn build_hermes_gateway_restart_command(
+    connection: &HermesBridgeConnection,
+    hermes_home: &Path,
+) -> Command {
+    build_hermes_gateway_lifecycle_command(connection, hermes_home, "restart")
+}
+
+fn build_hermes_gateway_lifecycle_command(
+    connection: &HermesBridgeConnection,
+    hermes_home: &Path,
+    action: &'static str,
+) -> Command {
     let mut cmd = Command::new(&connection.command);
-    cmd.args(["gateway", "start"]);
-    // No sandbox-status hint: `gateway start` is a helper invocation, not the
-    // agent runtime, so it never builds a system prompt.
+    cmd.args(["gateway", action]);
+    // No sandbox-status hint: gateway lifecycle commands are helper invocations,
+    // not the agent runtime, so they never build a system prompt.
     apply_isolated_hermes_env(&mut cmd, hermes_home, &connection.token, None, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(hermes_home);
@@ -5802,6 +5840,10 @@ fn build_hermes_tui_debug_launcher_script(
             shell_single_quote(hint)
         ));
     }
+    script.push_str(&format!(
+        "unset {}\n",
+        crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
+    ));
     if let Some(vault_path) = obsidian_vault_path {
         script.push_str(&format!(
             "export {}={}\n",
@@ -6783,6 +6825,7 @@ fn apply_isolated_hermes_env(
     if let Some(hint) = environment_hint {
         cmd.env("HERMES_ENVIRONMENT_HINT", hint);
     }
+    cmd.env_remove(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV);
     if let Some(vault_path) = obsidian_vault_path {
         cmd.env(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV, vault_path);
     }
@@ -15197,9 +15240,8 @@ mcp_servers:
             .collect()
     }
 
-    #[test]
-    fn gateway_start_spawns_the_bare_hermes_cli_outside_the_sandbox() {
-        let connection = HermesBridgeConnection {
+    fn test_gateway_connection() -> HermesBridgeConnection {
+        HermesBridgeConnection {
             base_url: "http://127.0.0.1:1".to_string(),
             ws_url: "ws://127.0.0.1:1/api/ws".to_string(),
             token: "session-token".to_string(),
@@ -15211,8 +15253,12 @@ mcp_servers:
             pid: 3,
             sandboxed: true,
             full_mode: false,
-        };
+        }
+    }
 
+    #[test]
+    fn gateway_start_spawns_the_bare_hermes_cli_outside_the_sandbox() {
+        let connection = test_gateway_connection();
         let cmd = build_hermes_gateway_start_command(&connection, Path::new("/tmp/hermes-home"));
 
         // The whole point of the direct spawn: the program is the hermes CLI
@@ -15243,6 +15289,21 @@ mcp_servers:
             envs.get("HERMES_NONINTERACTIVE").map(String::as_str),
             Some("1")
         );
+        assert!(command_env_removals(&cmd).contains(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV));
+        assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/hermes-home")));
+    }
+
+    #[test]
+    fn gateway_restart_spawns_the_bare_hermes_cli_outside_the_sandbox() {
+        let connection = test_gateway_connection();
+        let cmd = build_hermes_gateway_restart_command(&connection, Path::new("/tmp/hermes-home"));
+
+        assert_eq!(cmd.get_program(), "/opt/hermes/bin/hermes");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["gateway", "restart"]);
         assert!(command_env_removals(&cmd).contains(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV));
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/hermes-home")));
     }
@@ -15319,8 +15380,36 @@ mcp_servers:
             "unset {}",
             crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
         )));
+        assert!(!script.contains(&format!(
+            "export {}=",
+            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
+        )));
         // The session->TUI trace line is echoed in the terminal.
         assert!(script.contains("echo 'trace: june session sess-1'"));
+    }
+
+    #[test]
+    fn tui_debug_launcher_exports_configured_obsidian_vault() {
+        let args = hermes_tui_resume_args("sess-obsidian");
+        let script = build_hermes_tui_debug_launcher_script(
+            "/opt/hermes/bin/hermes",
+            &args,
+            Path::new("/tmp/hermes-home"),
+            "tok",
+            None,
+            None,
+            "trace",
+            Some(Path::new("/tmp/My Vault")),
+        );
+
+        assert!(script.contains(&format!(
+            "unset {}",
+            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
+        )));
+        assert!(script.contains(&format!(
+            "export {}='/tmp/My Vault'",
+            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
+        )));
     }
 
     #[test]
