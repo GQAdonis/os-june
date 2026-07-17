@@ -184,6 +184,7 @@ export function ConnectorsSection() {
   const [obsidian, setObsidian] = useState<ObsidianStatus | null>(null);
   const [obsidianError, setObsidianError] = useState<string | null>(null);
   const [obsidianBusy, setObsidianBusy] = useState(false);
+  const [obsidianDisconnecting, setObsidianDisconnecting] = useState(false);
 
   // Linear team-selection dialog: the account id it's open for (null =
   // closed). Kept separate from the fetched team list/selection so a fetch
@@ -426,6 +427,7 @@ export function ConnectorsSection() {
     if (obsidianBusy) return;
     setObsidianError(null);
     setObsidianBusy(true);
+    setObsidianDisconnecting(true);
     try {
       // Keep the configured row visible until the live runtime has dropped
       // the vault capability. Persistence removal is idempotent, so a failed
@@ -438,6 +440,7 @@ export function ConnectorsSection() {
       setObsidianError(messageFromError(err));
     } finally {
       setObsidianBusy(false);
+      setObsidianDisconnecting(false);
     }
   }
 
@@ -564,9 +567,10 @@ export function ConnectorsSection() {
                   className="btn btn-ghost"
                   aria-label="Disconnect Obsidian"
                   disabled={obsidianBusy}
+                  aria-busy={obsidianDisconnecting || undefined}
                   onClick={() => void disconnectObsidian()}
                 >
-                  Disconnect
+                  {obsidianDisconnecting ? "Disconnecting…" : "Disconnect"}
                 </button>
               ) : null}
             </div>

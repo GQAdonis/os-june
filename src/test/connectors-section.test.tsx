@@ -139,14 +139,12 @@ describe("ConnectorsSection", () => {
 
   it("connects an Obsidian vault and applies it to the runtime", async () => {
     mocks.openFileDialog.mockResolvedValue("/vaults/work");
-    mocks.obsidianStatus
-      .mockResolvedValueOnce({ connected: false })
-      .mockResolvedValue({
-        connected: true,
-        available: true,
-        vaultPath: "/vaults/work",
-        vaultName: "work",
-      });
+    mocks.obsidianStatus.mockResolvedValueOnce({ connected: false }).mockResolvedValue({
+      connected: true,
+      available: true,
+      vaultPath: "/vaults/work",
+      vaultName: "work",
+    });
 
     render(<ConnectorsSection />);
     await userEvent.click(await findEnabledConnect("Connect Obsidian"));
@@ -170,6 +168,32 @@ describe("ConnectorsSection", () => {
     expect(screen.getByText(/vault unavailable at \/Volumes\/External\/Work/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Change Obsidian vault" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Disconnect Obsidian" })).toBeEnabled();
+  });
+
+  it("shows immediate progress while disconnecting Obsidian", async () => {
+    let finishRuntimeApply: () => void = () => {};
+    mocks.obsidianStatus.mockResolvedValue({
+      connected: true,
+      available: true,
+      vaultPath: "/vaults/work",
+      vaultName: "work",
+    });
+    mocks.obsidianApplyRuntime.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishRuntimeApply = resolve;
+      }),
+    );
+
+    render(<ConnectorsSection />);
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect Obsidian" }));
+
+    const disconnecting = await screen.findByRole("button", { name: "Disconnect Obsidian" });
+    expect(disconnecting).toBeDisabled();
+    expect(disconnecting).toHaveTextContent("Disconnecting…");
+    expect(disconnecting).toHaveAttribute("aria-busy", "true");
+
+    finishRuntimeApply();
+    await waitFor(() => expect(mocks.obsidianApplyRuntime).toHaveBeenCalledTimes(1));
   });
 
   it("keeps Obsidian disconnect retryable until the runtime apply succeeds", async () => {
