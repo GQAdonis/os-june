@@ -5229,7 +5229,10 @@ mod tests {
         source: &str,
         checksum: &str,
     ) -> (String, String) {
-        let note = repos.create_note(None).await.expect("create note");
+        let note = repos
+            .create_note("default", None)
+            .await
+            .expect("create note");
         repos
             .create_recording_session(
                 &note.id,
@@ -5914,7 +5917,10 @@ mod tests {
     #[tokio::test]
     async fn retry_prefers_substantial_unprocessed_session_over_newest_artifact() {
         let repos = test_repositories().await;
-        let note = repos.create_note(None).await.expect("create note");
+        let note = repos
+            .create_note("default", None)
+            .await
+            .expect("create note");
 
         repos
             .create_recording_session(
@@ -6028,7 +6034,10 @@ mod tests {
             2
         );
 
-        let other_note = repos.create_note(None).await.expect("create other note");
+        let other_note = repos
+            .create_note("default", None)
+            .await
+            .expect("create other note");
         assert!(repos
             .valid_audio_artifact_paths_for_session(&other_note.id, "meeting-session")
             .await
@@ -6040,11 +6049,11 @@ mod tests {
     async fn memory_create_list_and_update_round_trip_across_scopes() {
         let repos = test_repositories().await;
         let folder = repos
-            .create_folder("Client work", None)
+            .create_folder("default", "Client work", None)
             .await
             .expect("create folder");
         let other_folder = repos
-            .create_folder("Internal", None)
+            .create_folder("default", "Internal", None)
             .await
             .expect("create other folder");
         let global = repos
@@ -6130,7 +6139,7 @@ mod tests {
     async fn create_memory_rejects_a_deleted_folder() {
         let repos = test_repositories().await;
         let folder = repos
-            .create_folder("Archived project", None)
+            .create_folder("default", "Archived project", None)
             .await
             .expect("create folder");
         repos
@@ -6149,11 +6158,11 @@ mod tests {
     async fn deleting_folder_removes_scoped_memories_and_writes_tombstones() {
         let repos = test_repositories().await;
         let folder = repos
-            .create_folder("Archived project", None)
+            .create_folder("default", "Archived project", None)
             .await
             .expect("create folder");
         let other_folder = repos
-            .create_folder("Active project", None)
+            .create_folder("default", "Active project", None)
             .await
             .expect("create other folder");
         let global = repos
@@ -6201,7 +6210,7 @@ mod tests {
     async fn folder_instructions_and_memory_disabled_persist_and_round_trip() {
         let repos = test_repositories().await;
         let folder = repos
-            .create_folder("Research", Some("Background"))
+            .create_folder("default", "Research", Some("Background"))
             .await
             .expect("create folder");
         assert_eq!(folder.instructions, None);
@@ -6221,7 +6230,7 @@ mod tests {
             .expect("disable memory");
         assert!(folder.memory_disabled);
 
-        let listed = repos.list_folders().await.expect("list folders");
+        let listed = repos.list_folders("default").await.expect("list folders");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].instructions, folder.instructions);
         assert!(listed[0].memory_disabled);

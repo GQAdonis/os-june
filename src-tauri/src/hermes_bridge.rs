@@ -13403,7 +13403,7 @@ assert capped["has_more"] is True, capped
         let (project_memory, _pool, _settings_dir) = test_memory_proxy_context(true).await;
         let folder = project_memory
             .repositories
-            .create_folder("Project", None)
+            .create_folder("default", "Project", None)
             .await
             .expect("create folder");
         project_memory
@@ -13447,7 +13447,7 @@ assert capped["has_more"] is True, capped
         let (memory, pool, _settings_dir) = test_memory_proxy_context(true).await;
         let folder = memory
             .repositories
-            .create_folder("Project", None)
+            .create_folder("default", "Project", None)
             .await
             .expect("create folder");
         let saved_body = serde_json::json!({

@@ -2987,7 +2987,7 @@ mod retry_audio_source_tests {
         let repos = Repositories::new(pool);
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::from_data_dir(temp.path().join("data")).expect("app paths");
-        let note = repos.create_note(None).await.expect("note");
+        let note = repos.create_note("default", None).await.expect("note");
         let session_id = "retry-missing-source";
         let session_dir = paths
             .recording_session_dir(&note.id, session_id)
@@ -3155,7 +3155,7 @@ mod tests {
                 for folder_scoped in [false, true] {
                     let repos = test_repositories().await;
                     let folder = repos
-                        .create_folder("Project", None)
+                        .create_folder("default", "Project", None)
                         .await
                         .expect("create folder");
                     repos
@@ -3201,7 +3201,7 @@ mod tests {
     async fn update_memory_rejects_content_in_a_disabled_folder() {
         let repos = test_repositories().await;
         let folder = repos
-            .create_folder("Project", None)
+            .create_folder("default", "Project", None)
             .await
             .expect("create folder");
         let memory = repos
