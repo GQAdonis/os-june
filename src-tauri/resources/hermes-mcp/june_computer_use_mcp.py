@@ -25,6 +25,8 @@ TOOL_SCHEMA = {
         "list_apps, capture a specific window, then prefer numbered elements "
         "over coordinates. Never ask for approval in chat and never ask the "
         "user to reply yes or approve. Call the requested action immediately. "
+        "For a settable text entry, use set_value directly instead of clicking "
+        "the field first, then capture again to verify the exact result. "
         "The first access to each target app pauses once for June's native "
         "Allow for this task or Deny decision; later actions in that app do "
         "not ask again until the task ends. Use open_app with an app display name when "
@@ -35,7 +37,10 @@ TOOL_SCHEMA = {
         "window to June's current Stage Manager group without another decision. "
         "After open_app, use its top-level window_id; never substitute a shelf "
         "thumbnail. If current-stage restore fails, do not retry focus or capture "
-        "for that window during the same task; report the failure once."
+        "for that window during the same task; report the failure once and stop. "
+        "Never use Terminal, a shell, AppleScript, execute_code, or a substitute "
+        "file to bypass a Computer use failure. Never claim success unless a "
+        "Computer use capture confirms the requested state."
     ),
     "inputSchema": {
         "type": "object",
@@ -119,7 +124,14 @@ TOOL_SCHEMA = {
             "amount": {"type": "integer", "minimum": 1, "maximum": 50},
             "value": {"type": "string", "maxLength": 10000},
             "text": {"type": "string", "maxLength": 10000},
-            "keys": {"type": "string", "maxLength": 64},
+            "keys": {
+                "type": "string",
+                "maxLength": 64,
+                "description": (
+                    "For key only: one key or shortcut as text, for example "
+                    "escape, return, cmd+n, or cmd+shift+s."
+                ),
+            },
             "seconds": {"type": "number", "minimum": 0, "maximum": 30},
             "raise_window": {
                 "type": "boolean",

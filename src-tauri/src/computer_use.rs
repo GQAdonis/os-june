@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 #[cfg(debug_assertions)]
 use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicUsize;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsStr,
@@ -52,6 +54,9 @@ const DEFAULT_MAX_ELEMENTS: usize = 100;
 const MAX_ELEMENTS: usize = 1000;
 const ROLLOUT_RETRY_AFTER_FAILURE: Duration = Duration::from_secs(30);
 const RELEASE_SELF_TEST_MAX_LINE_BYTES: usize = 256 * 1024;
+
+#[cfg(target_os = "macos")]
+static MAIN_WINDOW_ORIGINAL_COLLECTION_BEHAVIOR: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1619,6 +1624,7 @@ async fn stop_inner(app: &AppHandle, state: &ComputerUseState) {
     }
     clear_app_authorizations(state);
     clear_capture_dir(app);
+    let _ = set_june_stage_companion(app, false);
 }
 
 /// Ends resources for a completed attended run without erasing a newer run
@@ -1643,6 +1649,7 @@ async fn stop_if_idle(app: &AppHandle, state: &ComputerUseState, generation: u64
     }
     clear_app_authorizations(state);
     clear_capture_dir(app);
+    let _ = set_june_stage_companion(app, false);
 }
 
 fn clear_app_authorizations(state: &ComputerUseState) {
@@ -2020,6 +2027,104 @@ async fn refresh_window_target(
         .ok_or_else(stale_target_error)
 }
 
+#[cfg(target_os = "macos")]
+fn computer_use_stage_companion_behavior(
+    current: objc2_app_kit::NSWindowCollectionBehavior,
+) -> objc2_app_kit::NSWindowCollectionBehavior {
+    use objc2_app_kit::NSWindowCollectionBehavior;
+
+    let mutually_exclusive = NSWindowCollectionBehavior::MoveToActiveSpace
+        | NSWindowCollectionBehavior::Primary
+        | NSWindowCollectionBehavior::Auxiliary
+        | NSWindowCollectionBehavior::CanJoinAllApplications;
+    (current & !mutually_exclusive)
+        | NSWindowCollectionBehavior::CanJoinAllSpaces
+        | NSWindowCollectionBehavior::CanJoinAllApplications
+}
+
+fn native_stage_join_verified(result: &Value) -> bool {
+    structured(result).is_some_and(|details| {
+        let activated = details
+            .get("activated_application")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let focused = details
+            .get("focused_without_space_follow")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let raised = details
+            .get("raised_with_accessibility")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        activated || (focused && raised)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn set_june_stage_companion(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
+    use objc2_app_kit::{NSWindow, NSWindowCollectionBehavior};
+
+    let main = app.get_webview_window("main").ok_or_else(|| {
+        AppError::new(
+            "computer_use_window_restore_failed",
+            "June's main window is not available for the Computer use task.",
+        )
+    })?;
+    let handle = main.ns_window().map_err(|error| {
+        AppError::new(
+            "computer_use_window_restore_failed",
+            format!("June could not prepare its window for Computer use. {error}"),
+        )
+    })?;
+    if handle.is_null() {
+        return Err(AppError::new(
+            "computer_use_window_restore_failed",
+            "June could not prepare its window for Computer use.",
+        ));
+    }
+
+    let window = handle as usize;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || {
+        let window = unsafe { &*(window as *const NSWindow) };
+        if enabled {
+            let current = window.collectionBehavior();
+            let _ = MAIN_WINDOW_ORIGINAL_COLLECTION_BEHAVIOR.compare_exchange(
+                usize::MAX,
+                current.0,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            );
+            window.setCollectionBehavior(computer_use_stage_companion_behavior(current));
+        } else {
+            let original =
+                MAIN_WINDOW_ORIGINAL_COLLECTION_BEHAVIOR.swap(usize::MAX, Ordering::SeqCst);
+            if original != usize::MAX {
+                window.setCollectionBehavior(NSWindowCollectionBehavior(original));
+            }
+        }
+        let _ = sender.send(());
+    })
+    .map_err(|error| {
+        AppError::new(
+            "computer_use_window_restore_failed",
+            format!("June could not prepare its window for Computer use. {error}"),
+        )
+    })?;
+    receiver.recv_timeout(Duration::from_secs(1)).map_err(|_| {
+        AppError::new(
+            "computer_use_window_restore_failed",
+            "June could not prepare its window for Computer use.",
+        )
+    })?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_june_stage_companion(_app: &AppHandle, _enabled: bool) -> Result<(), AppError> {
+    Ok(())
+}
+
 async fn join_target_to_june_stage(
     app: &AppHandle,
     state: &ComputerUseState,
@@ -2033,9 +2138,10 @@ async fn join_target_to_june_stage(
         let _ = main.unminimize();
         let _ = main.set_focus();
     }
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    set_june_stage_companion(app, true)?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     ensure_task_generation_current(state, task_generation)?;
-    driver_call(
+    let stage_join_result = driver_call(
         app,
         state,
         "join_current_stage",
@@ -2043,15 +2149,36 @@ async fn join_target_to_june_stage(
         Some(epoch),
     )
     .await?;
-    tokio::time::sleep(Duration::from_millis(350)).await;
-    let restored = refresh_window_target(app, state, target, epoch).await?;
-    if window_needs_restore(&restored) {
-        return Err(AppError::new(
-            "computer_use_window_restore_failed",
-            "June could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
-        ));
+    // The driver activates the target while June's main window is an AppKit
+    // Stage Manager companion. WindowManager can therefore show both apps in
+    // the active set without a cursor-moving shelf click. Keep the wait bounded
+    // while WindowServer finishes the transition and verify the exact window.
+    let native_verified = native_stage_join_verified(&stage_join_result);
+    let mut last_seen = target.clone();
+    for _ in 0..if native_verified { 2 } else { 4 } {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        ensure_task_generation_current(state, task_generation)?;
+        let restored = refresh_window_target(app, state, target, epoch).await?;
+        if !window_needs_restore(&restored) {
+            return Ok(restored);
+        }
+        last_seen = restored;
     }
-    Ok(restored)
+    // Screen-sharing privacy overlays can make WindowServer keep reporting the
+    // exact window as off-screen after AppKit accepted application activation.
+    // Treat that activation as authoritative; if it is unavailable, require
+    // both exact-window SkyLight focus and Accessibility raise. Combined with
+    // June's companion collection behavior, either proof avoids turning a
+    // successful stage change into a slow false failure.
+    if native_verified {
+        last_seen.is_on_screen = true;
+        last_seen.on_current_space = Some(true);
+        return Ok(last_seen);
+    }
+    Err(AppError::new(
+        "computer_use_window_restore_failed",
+        "June could not add that app window to the current Stage Manager group. Do not retry this window during the current task.",
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -2928,11 +3055,21 @@ fn validate_sensitive_action(
         }
         let (key, modifiers) = parse_key_combo(keys)?;
         if modifiers.is_empty() {
-            let element = element_arg(arguments, "element")?;
-            if key_can_enter_text(&key) {
-                ensure_element_accepts_text(target, element)?;
+            if let Some(element) = arguments
+                .get("element")
+                .map(|_| element_arg(arguments, "element"))
+                .transpose()?
+            {
+                if key_can_enter_text(&key) {
+                    ensure_element_accepts_text(target, element)?;
+                }
+                ensure_element_not_sensitive(target, element)?;
+            } else if key != "escape" {
+                return Err(AppError::new(
+                    "computer_use_element_required",
+                    "An unmodified key needs a numbered target, except Escape which targets the exact window.",
+                ));
             }
-            ensure_element_not_sensitive(target, element)?;
         } else if arguments.get("element").is_some() {
             return Err(AppError::new(
                 "computer_use_element_invalid",
@@ -3086,8 +3223,8 @@ fn driver_action(
             let (key, modifiers) = parse_key_combo(keys)?;
             if modifiers.is_empty() {
                 object.insert("key".to_string(), json!(key));
+                object.insert("window_id".to_string(), json!(target.window_id));
                 if let Some(element) = arguments.get("element").and_then(Value::as_u64) {
-                    object.insert("window_id".to_string(), json!(target.window_id));
                     object.insert("element_index".to_string(), json!(element));
                 }
                 Ok(("press_key", args))
@@ -3735,6 +3872,11 @@ fn normalize_key(key: &str) -> String {
         "command" | "⌘" => "cmd".to_string(),
         "control" => "ctrl".to_string(),
         "alt" | "⌥" => "option".to_string(),
+        "esc" => "escape".to_string(),
+        "enter" => "return".to_string(),
+        "del" => "delete".to_string(),
+        "pgup" | "page_up" => "pageup".to_string(),
+        "pgdn" | "page_down" => "pagedown".to_string(),
         other => other.to_string(),
     }
 }
@@ -4293,6 +4435,7 @@ mod tests {
         );
         assert!(validate_sensitive_action("key", &json!({ "keys": "shift+a" }), &target).is_err());
         assert!(validate_sensitive_action("key", &json!({ "keys": "cmd+s" }), &target).is_ok());
+        assert!(validate_sensitive_action("key", &json!({ "keys": "esc" }), &target).is_ok());
     }
 
     #[test]
@@ -4317,6 +4460,66 @@ mod tests {
         }
         assert!(!blocked_key_combo("cmd+s"));
         assert!(!blocked_key_combo("return"));
+    }
+
+    #[test]
+    fn mcp_guidance_forbids_non_computer_use_fallbacks() {
+        assert!(MCP_SCRIPT
+            .contains("Never use Terminal, a shell, AppleScript, execute_code, or a substitute"));
+        assert!(MCP_SCRIPT.contains("Never claim success unless a "));
+        assert!(MCP_SCRIPT.contains("Computer use capture confirms the requested state."));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn stage_companion_behavior_joins_apps_without_conflicting_stage_roles() {
+        use objc2_app_kit::NSWindowCollectionBehavior;
+
+        let current = NSWindowCollectionBehavior::Managed
+            | NSWindowCollectionBehavior::MoveToActiveSpace
+            | NSWindowCollectionBehavior::Primary
+            | NSWindowCollectionBehavior::FullScreenNone;
+        let companion = computer_use_stage_companion_behavior(current);
+
+        assert!(companion.contains(NSWindowCollectionBehavior::Managed));
+        assert!(companion.contains(NSWindowCollectionBehavior::FullScreenNone));
+        assert!(companion.contains(NSWindowCollectionBehavior::CanJoinAllSpaces));
+        assert!(companion.contains(NSWindowCollectionBehavior::CanJoinAllApplications));
+        assert!(!companion.contains(NSWindowCollectionBehavior::MoveToActiveSpace));
+        assert!(!companion.contains(NSWindowCollectionBehavior::Primary));
+        assert!(!companion.contains(NSWindowCollectionBehavior::Auxiliary));
+    }
+
+    #[test]
+    fn stage_join_accepts_exact_native_activation_and_raise_proof() {
+        assert!(native_stage_join_verified(&json!({
+            "structuredContent": {
+                "activated_application": true,
+                "focused_without_space_follow": false,
+                "raised_with_accessibility": false,
+            }
+        })));
+        assert!(native_stage_join_verified(&json!({
+            "structuredContent": {
+                "activated_application": false,
+                "focused_without_space_follow": true,
+                "raised_with_accessibility": true,
+            }
+        })));
+    }
+
+    #[test]
+    fn stage_join_rejects_partial_native_dispatch() {
+        for result in [
+            json!({"structuredContent": {"raised_with_accessibility": true}}),
+            json!({"structuredContent": {"focused_without_space_follow": true}}),
+            json!({"structuredContent": {
+                "focused_without_space_follow": true,
+                "raised_with_accessibility": false,
+            }}),
+        ] {
+            assert!(!native_stage_join_verified(&result));
+        }
     }
 
     #[test]
@@ -4458,6 +4661,11 @@ mod tests {
                 "key": "return",
             })
         );
+
+        let (tool, args) =
+            driver_action("key", &json!({ "keys": "esc" }), &target).expect("escape alias");
+        assert_eq!(tool, "press_key");
+        assert_eq!(args, json!({ "pid": 42, "window_id": 84, "key": "escape" }));
 
         let (tool, args) =
             driver_action("key", &json!({ "keys": "cmd+s" }), &target).expect("shortcut");

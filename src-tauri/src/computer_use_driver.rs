@@ -531,16 +531,27 @@ fn join_current_stage_result(arguments: &Value) -> Value {
         });
     };
 
+    let activated_application = activate_application(pid);
+    if activated_application {
+        std::thread::sleep(std::time::Duration::from_millis(350));
+    }
     let focused_without_space_follow =
         platform_macos::input::skylight::activate_without_raise(pid, window_id);
-    if raise_ax_window(pid, window_id) {
+    let raised_with_accessibility = raise_ax_window(pid, window_id);
+    if stage_join_was_dispatched(
+        activated_application,
+        focused_without_space_follow,
+        raised_with_accessibility,
+    ) {
         json!({
             "content": [{ "type": "text", "text": format!("Added app window {window_id} to the current stage.") }],
             "structuredContent": {
                 "pid": pid,
                 "window_id": window_id,
                 "raised": true,
-                "focused_without_space_follow": focused_without_space_follow
+                "activated_application": activated_application,
+                "focused_without_space_follow": focused_without_space_follow,
+                "raised_with_accessibility": raised_with_accessibility
             },
             "isError": false
         })
@@ -551,11 +562,36 @@ fn join_current_stage_result(arguments: &Value) -> Value {
                 "pid": pid,
                 "window_id": window_id,
                 "raised": false,
-                "focused_without_space_follow": focused_without_space_follow
+                "activated_application": activated_application,
+                "focused_without_space_follow": focused_without_space_follow,
+                "raised_with_accessibility": raised_with_accessibility
             },
             "isError": true
         })
     }
+}
+
+#[cfg(target_os = "macos")]
+fn stage_join_was_dispatched(
+    activated_application: bool,
+    focused_without_space_follow: bool,
+    raised_with_accessibility: bool,
+) -> bool {
+    // The broker re-lists the exact window after a native path is dispatched.
+    // AppKit activation is authoritative for the Stage Manager transition;
+    // SkyLight focus and Accessibility raise are reported separately so the
+    // broker can require both when AppKit activation is unavailable.
+    activated_application || focused_without_space_follow || raised_with_accessibility
+}
+
+#[cfg(target_os = "macos")]
+fn activate_application(pid: i32) -> bool {
+    use objc2_app_kit::{NSApplicationActivationOptions, NSRunningApplication};
+
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some_and(|application| {
+        !application.isTerminated()
+            && application.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -669,6 +705,15 @@ where
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stage_join_continues_when_any_native_path_dispatched() {
+        assert!(stage_join_was_dispatched(true, false, false));
+        assert!(stage_join_was_dispatched(false, true, false));
+        assert!(stage_join_was_dispatched(false, false, true));
+        assert!(stage_join_was_dispatched(true, true, true));
+        assert!(!stage_join_was_dispatched(false, false, false));
+    }
 
     #[test]
     fn development_peer_accepts_cargo_and_tauri_runner_names_only() {
