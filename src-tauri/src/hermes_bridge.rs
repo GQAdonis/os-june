@@ -148,6 +148,12 @@ const JUNE_WEB_MCP_SCRIPT: &str = include_str!("hermes/june_web_mcp.py");
 /// Environment variable the `june_web` MCP reads its loopback proxy token from.
 /// Kept out of argv so it does not appear in process listings.
 const JUNE_WEB_MCP_TOKEN_ENV: &str = "JUNE_WEB_PROXY_TOKEN";
+const JUNE_OBSIDIAN_MCP_SERVER_NAME: &str = "june_obsidian";
+const JUNE_OBSIDIAN_MCP_SCRIPT_NAME: &str = "june_obsidian_mcp.py";
+const JUNE_OBSIDIAN_MCP_SCRIPT: &str = include_str!("hermes/june_obsidian_mcp.py");
+/// Dedicated to current-vault discovery. It cannot authorize model, memory,
+/// recorder, connector, or computer-use routes.
+const JUNE_OBSIDIAN_MCP_TOKEN_ENV: &str = "JUNE_OBSIDIAN_PROXY_TOKEN";
 const JUNE_IMAGE_MCP_SERVER_NAME: &str = "june_image";
 const JUNE_IMAGE_MCP_SCRIPT_NAME: &str = "june_image_mcp.py";
 const JUNE_IMAGE_MCP_SCRIPT: &str = include_str!("hermes/june_image_mcp.py");
@@ -597,7 +603,6 @@ const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "REQUESTS_CA_BUNDLE",
     "SSL_CERT_FILE",
     "NODE_EXTRA_CA_CERTS",
-    crate::obsidian::OBSIDIAN_VAULT_PATH_ENV,
 ];
 
 /// The pinned runtime's `hermes-cli` composite includes its own browser and
@@ -752,6 +757,7 @@ struct SharedProviderProxy {
     recorder_token: String,
     connector_token: String,
     computer_use_token: String,
+    obsidian_token: String,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
@@ -773,6 +779,9 @@ struct ProviderProxyState {
     /// reach exactly the Rust policy broker and cannot use the provider,
     /// recorder, or connector routes with this credential.
     computer_use_token: String,
+    /// Vault discovery routes require this token and disclose a path only
+    /// after Rust validates the current selection.
+    obsidian_token: String,
     image_sources: ImageSourceCapabilities,
     videos_dir: PathBuf,
     video_generation_enabled: bool,
@@ -1422,8 +1431,6 @@ async fn start_hermes_bridge_inner(
     );
     let hermes_home = resolve_june_hermes_home(app)?;
     let command_resolution = resolve_hermes_command(app, &hermes_home).await?;
-    let obsidian_vault_path = crate::obsidian::configured_vault_path(app)?;
-    crate::obsidian::sync_hermes_env_projection(&hermes_home, obsidian_vault_path.as_deref())?;
     let command = command_resolution.command;
     let _command_source = command_resolution.source;
     let default_cwd = hermes_home.join("workspace");
@@ -1440,6 +1447,7 @@ async fn start_hermes_bridge_inner(
     let provider_proxy = ensure_provider_proxy(app, bridge, &hermes_home).await?;
     let june_context_mcp = sync_june_context_mcp(app, &command)?;
     let june_web_mcp = sync_june_web_mcp(app, &command)?;
+    let june_obsidian_mcp = sync_june_obsidian_mcp(app, &command)?;
     let june_image_mcp = sync_june_image_mcp(app, &hermes_home, &command)?;
     let video_generation_enabled = crate::feature_flags::VIDEO_GENERATION_ENABLED;
     let june_video_mcp = if video_generation_enabled {
@@ -1474,9 +1482,11 @@ async fn start_hermes_bridge_inner(
         &provider_proxy.recorder_token,
         &provider_proxy.connector_token,
         &provider_proxy.computer_use_token,
+        &provider_proxy.obsidian_token,
         supports_vision,
         &june_context_mcp,
         &june_web_mcp,
+        &june_obsidian_mcp,
         &june_image_mcp,
         june_video_mcp.as_ref(),
         &june_recorder_mcp,
@@ -1584,7 +1594,6 @@ async fn start_hermes_bridge_inner(
         &hermes_home,
         &token,
         environment_hint_for_spawn(full_mode, sandbox_available),
-        obsidian_vault_path.as_deref(),
     );
     if computer_use_ready {
         // Only the visible interactive dashboard gets this capability. The
@@ -1744,6 +1753,7 @@ async fn ensure_provider_proxy(
     let recorder_token = random_token();
     let connector_token = random_token();
     let computer_use_token = random_token();
+    let obsidian_token = random_token();
     let app_data_dir = crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
     let image_sources = ImageSourceCapabilities {
@@ -1757,6 +1767,7 @@ async fn ensure_provider_proxy(
         recorder_token.clone(),
         connector_token.clone(),
         computer_use_token.clone(),
+        obsidian_token.clone(),
         image_sources,
         videos_dir,
         crate::feature_flags::VIDEO_GENERATION_ENABLED,
@@ -1777,6 +1788,7 @@ async fn ensure_provider_proxy(
         recorder_token: recorder_token.clone(),
         connector_token: connector_token.clone(),
         computer_use_token: computer_use_token.clone(),
+        obsidian_token: obsidian_token.clone(),
         shutdown: Some(started.shutdown),
     });
     Ok(SharedProviderProxyInfo {
@@ -1786,6 +1798,7 @@ async fn ensure_provider_proxy(
         recorder_token,
         connector_token,
         computer_use_token,
+        obsidian_token,
     })
 }
 
@@ -1808,6 +1821,12 @@ struct JuneContextMcpConfig {
 
 #[derive(Debug, Clone)]
 struct JuneWebMcpConfig {
+    command: String,
+    script_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct JuneObsidianMcpConfig {
     command: String,
     script_path: PathBuf,
 }
@@ -1996,16 +2015,6 @@ pub(crate) async fn apply_runtime_config_change(
 }
 
 #[tauri::command]
-pub async fn obsidian_apply_runtime(
-    app: AppHandle,
-    bridge: State<'_, HermesBridge>,
-) -> Result<(), AppError> {
-    let hermes_home = resolve_june_hermes_home(&app)?;
-    let vault_path = crate::obsidian::configured_vault_path(&app)?;
-    crate::obsidian::sync_hermes_env_projection(&hermes_home, vault_path.as_deref())?;
-    reapply_hermes_runtime(&app, &bridge).await
-}
-
 /// Serializes `reapply_hermes_runtime` so two rapid settings toggles cannot
 /// interleave their stop/restart cycles.
 static REAPPLY_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -4161,7 +4170,7 @@ fn build_hermes_mcp_login_command(
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
-    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None, None);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
     // Off macOS there is no PTY wrapper: keep the explicit non-interactive
     // marker so a future Hermes that honors it prints the URL instead of
     // blocking on a prompt June cannot answer. On macOS the PTY carries the
@@ -4581,7 +4590,7 @@ fn build_hermes_skill_reset_command(
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
-    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None, None);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(&hermes_home);
     cmd.stdin(Stdio::null());
@@ -4780,7 +4789,7 @@ fn build_hermes_skill_tap_command(
     if let Some(profile) = profile {
         cmd.args(["--profile", profile]);
     }
-    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None, None);
+    apply_isolated_hermes_env(&mut cmd, &hermes_home, &connection.token, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(&hermes_home);
     cmd.stdin(Stdio::null());
@@ -6126,7 +6135,7 @@ fn build_hermes_gateway_lifecycle_command(
     cmd.args(["gateway", action]);
     // No sandbox-status hint: gateway lifecycle commands are helper invocations,
     // not the agent runtime, so they never build a system prompt.
-    apply_isolated_hermes_env(&mut cmd, hermes_home, &connection.token, None, None);
+    apply_isolated_hermes_env(&mut cmd, hermes_home, &connection.token, None);
     cmd.env("HERMES_NONINTERACTIVE", "1");
     cmd.current_dir(hermes_home);
     cmd.stdin(Stdio::null());
@@ -6195,7 +6204,6 @@ fn build_hermes_tui_debug_launcher_script(
     environment_hint: Option<&str>,
     sandbox_profile: Option<&Path>,
     trace_line: &str,
-    obsidian_vault_path: Option<&Path>,
 ) -> String {
     let mut script = String::new();
     script.push_str("#!/bin/sh\n");
@@ -6221,17 +6229,6 @@ fn build_hermes_tui_debug_launcher_script(
         script.push_str(&format!(
             "export HERMES_ENVIRONMENT_HINT={}\n",
             shell_single_quote(hint)
-        ));
-    }
-    script.push_str(&format!(
-        "unset {}\n",
-        crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
-    ));
-    if let Some(vault_path) = obsidian_vault_path {
-        script.push_str(&format!(
-            "export {}={}\n",
-            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV,
-            shell_single_quote(&vault_path.to_string_lossy())
         ));
     }
     let quoted_args: Vec<String> = args.iter().map(|arg| shell_single_quote(arg)).collect();
@@ -6278,8 +6275,6 @@ pub async fn open_hermes_tui_debug(
 
     let hermes_home = resolve_june_hermes_home(&app)?;
     let command_resolution = resolve_hermes_command(&app, &hermes_home).await?;
-    let obsidian_vault_path = crate::obsidian::configured_vault_path(&app)?;
-    crate::obsidian::sync_hermes_env_projection(&hermes_home, obsidian_vault_path.as_deref())?;
     let command = command_resolution.command;
 
     // Mirror the dashboard spawn's mode resolution: unrestricted => no jail;
@@ -6321,7 +6316,6 @@ pub async fn open_hermes_tui_debug(
         environment_hint,
         sandbox_profile.as_deref(),
         &trace_line,
-        obsidian_vault_path.as_deref(),
     );
 
     launch_hermes_tui_debug_terminal(&hermes_home, &session_id, &script)
@@ -7706,7 +7700,6 @@ fn apply_isolated_hermes_env(
     hermes_home: &std::path::Path,
     token: &str,
     environment_hint: Option<&str>,
-    obsidian_vault_path: Option<&Path>,
 ) {
     for name in ISOLATED_HERMES_ENV_VARS {
         cmd.env_remove(name);
@@ -7726,10 +7719,6 @@ fn apply_isolated_hermes_env(
         .env("no_proxy", "127.0.0.1,localhost,::1");
     if let Some(hint) = environment_hint {
         cmd.env("HERMES_ENVIRONMENT_HINT", hint);
-    }
-    cmd.env_remove(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV);
-    if let Some(vault_path) = obsidian_vault_path {
-        cmd.env(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV, vault_path);
     }
 }
 
@@ -8173,6 +8162,24 @@ fn june_memory_enabled(path: &Path) -> bool {
     }
 }
 
+fn sync_june_obsidian_mcp(
+    app: &AppHandle,
+    hermes_command: &str,
+) -> Result<JuneObsidianMcpConfig, AppError> {
+    let data_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("june_obsidian_mcp_failed", error.to_string()))?;
+    let mcp_dir = data_dir.join(JUNE_CONTEXT_MCP_DIR_NAME);
+    fs::create_dir_all(&mcp_dir)
+        .map_err(|error| AppError::new("june_obsidian_mcp_failed", error.to_string()))?;
+    let script_path = mcp_dir.join(JUNE_OBSIDIAN_MCP_SCRIPT_NAME);
+    fs::write(&script_path, JUNE_OBSIDIAN_MCP_SCRIPT)
+        .map_err(|error| AppError::new("june_obsidian_mcp_failed", error.to_string()))?;
+    Ok(JuneObsidianMcpConfig {
+        command: hermes_python_command(hermes_command),
+        script_path,
+    })
+}
+
 fn sync_june_web_mcp(app: &AppHandle, hermes_command: &str) -> Result<JuneWebMcpConfig, AppError> {
     let data_dir = crate::app_paths::app_data_dir(app)
         .map_err(|error| AppError::new("june_web_mcp_failed", error.to_string()))?;
@@ -8518,9 +8525,11 @@ fn sync_hermes_config(
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
+    obsidian_proxy_token: &str,
     supports_vision: bool,
     june_context_mcp: &JuneContextMcpConfig,
     june_web_mcp: &JuneWebMcpConfig,
+    june_obsidian_mcp: &JuneObsidianMcpConfig,
     june_image_mcp: &JuneImageMcpConfig,
     june_video_mcp: Option<&JuneVideoMcpConfig>,
     june_recorder_mcp: &JuneRecorderMcpConfig,
@@ -8535,9 +8544,11 @@ fn sync_hermes_config(
         recorder_proxy_token,
         connector_proxy_token,
         computer_use_proxy_token,
+        obsidian_proxy_token,
         supports_vision,
         june_context_mcp,
         june_web_mcp,
+        june_obsidian_mcp,
         june_image_mcp,
         june_video_mcp,
         june_recorder_mcp,
@@ -8556,9 +8567,11 @@ fn sync_hermes_config_with_external_dirs(
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
+    obsidian_proxy_token: &str,
     supports_vision: bool,
     june_context_mcp: &JuneContextMcpConfig,
     june_web_mcp: &JuneWebMcpConfig,
+    june_obsidian_mcp: &JuneObsidianMcpConfig,
     june_image_mcp: &JuneImageMcpConfig,
     june_video_mcp: Option<&JuneVideoMcpConfig>,
     june_recorder_mcp: &JuneRecorderMcpConfig,
@@ -8576,6 +8589,7 @@ fn sync_hermes_config_with_external_dirs(
     let mcp_configs = BuiltinMcpConfigs {
         context: Some(june_context_mcp),
         web: Some(june_web_mcp),
+        obsidian: Some(june_obsidian_mcp),
         image: Some(june_image_mcp),
         video: june_video_mcp,
         recorder: Some(june_recorder_mcp),
@@ -8603,6 +8617,7 @@ fn sync_hermes_config_with_external_dirs(
         recorder_proxy_token,
         connector_proxy_token,
         computer_use_proxy_token,
+        obsidian_proxy_token,
         &cron_toolsets,
         &external_skill_dirs,
         mcp_configs,
@@ -8619,6 +8634,7 @@ fn sync_hermes_config_with_external_dirs(
         serde_yaml::from_str::<serde_yaml::Value>(&merge_hermes_config(&config_path, &config))
             .map_err(|error| AppError::new("hermes_bridge_config_failed", error.to_string()))?;
     let repaired_invalid_shape = apply_memory_toolset_policy(&mut merged, memory_enabled);
+    apply_obsidian_skill_policy(&mut merged);
     if repaired_invalid_shape && !source_backup_created {
         match fs::read(&config_path) {
             Ok(existing) => {
@@ -8719,6 +8735,31 @@ fn apply_memory_toolset_policy(config: &mut serde_yaml::Value, memory_enabled: b
     disabled.retain(|item| item.as_str() != Some("memory"));
     disabled.push(serde_yaml::Value::String("memory".to_string()));
     repaired_invalid_shape
+}
+
+/// The pinned upstream `obsidian` skill guesses an ambient vault path. June
+/// owns the replacement under a distinct name, so disable only that upstream
+/// identity while preserving every unrelated user skill preference.
+fn apply_obsidian_skill_policy(config: &mut serde_yaml::Value) {
+    let serde_yaml::Value::Mapping(root) = config else {
+        return;
+    };
+    let skills_key = serde_yaml::Value::String("skills".to_string());
+    let disabled_key = serde_yaml::Value::String("disabled".to_string());
+    let skills = root
+        .entry(skills_key)
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    let Some(skills) = skills.as_mapping_mut() else {
+        return;
+    };
+    let disabled = skills
+        .entry(disabled_key)
+        .or_insert_with(|| serde_yaml::Value::Sequence(Vec::new()));
+    let Some(disabled) = disabled.as_sequence_mut() else {
+        return;
+    };
+    disabled.retain(|item| item.as_str() != Some("obsidian"));
+    disabled.push(serde_yaml::Value::String("obsidian".to_string()));
 }
 
 fn hermes_config_has_invalid_root(config: &serde_yaml::Value) -> bool {
@@ -9093,6 +9134,7 @@ fn deep_merge_yaml(base: serde_yaml::Value, overlay: serde_yaml::Value) -> serde
 struct BuiltinMcpConfigs<'a> {
     context: Option<&'a JuneContextMcpConfig>,
     web: Option<&'a JuneWebMcpConfig>,
+    obsidian: Option<&'a JuneObsidianMcpConfig>,
     image: Option<&'a JuneImageMcpConfig>,
     video: Option<&'a JuneVideoMcpConfig>,
     recorder: Option<&'a JuneRecorderMcpConfig>,
@@ -9140,6 +9182,8 @@ fn cron_platform_toolsets(configs: &BuiltinMcpConfigs<'_>) -> String {
     if configs.web.is_some() {
         items.push(JUNE_WEB_MCP_SERVER_NAME.to_string());
     }
+    // Vault paths are intentional interactive discovery only. Routines do not
+    // receive this server through their ambient cron allowlist.
     if configs.image.is_some() {
         items.push(JUNE_IMAGE_MCP_SERVER_NAME.to_string());
     }
@@ -9286,6 +9330,7 @@ fn render_hermes_config(
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
+    obsidian_proxy_token: &str,
     cron_toolsets: &str,
     external_skill_dirs: &[PathBuf],
     mcp_configs: BuiltinMcpConfigs<'_>,
@@ -9307,6 +9352,7 @@ fn render_hermes_config(
         recorder_proxy_token,
         connector_proxy_token,
         computer_use_proxy_token,
+        obsidian_proxy_token,
     );
     format!(
         r#"model:
@@ -9341,6 +9387,7 @@ fn render_mcp_servers_config(
     recorder_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
+    obsidian_proxy_token: &str,
 ) -> String {
     let mut entries = String::new();
     if let Some(config) = configs.context {
@@ -9352,6 +9399,13 @@ fn render_mcp_servers_config(
     }
     if let Some(config) = configs.web {
         entries.push_str(&render_web_mcp_entry(config, base_url, proxy_token));
+    }
+    if let Some(config) = configs.obsidian {
+        entries.push_str(&render_obsidian_mcp_entry(
+            config,
+            base_url,
+            obsidian_proxy_token,
+        ));
     }
     if let Some(config) = configs.image {
         entries.push_str(&render_image_mcp_entry(config, base_url, proxy_token));
@@ -9507,6 +9561,33 @@ fn render_web_mcp_entry(config: &JuneWebMcpConfig, base_url: &str, proxy_token: 
 /// directory as arguments, and the proxy token via the environment (kept out of
 /// argv). The timeout stays above June API's image route timeout so a retry
 /// with the same request id can replay a settled call.
+fn render_obsidian_mcp_entry(
+    config: &JuneObsidianMcpConfig,
+    base_url: &str,
+    proxy_token: &str,
+) -> String {
+    format!(
+        r#"  {server_name}:
+    enabled: true
+    command: {command}
+    args:
+      - {script_path}
+      - {base_url}
+    env:
+      PYTHONUNBUFFERED: "1"
+      {token_env}: {token}
+    timeout: 30
+    connect_timeout: 10
+"#,
+        server_name = JUNE_OBSIDIAN_MCP_SERVER_NAME,
+        command = yaml_string(&config.command),
+        script_path = yaml_string(&config.script_path.to_string_lossy()),
+        base_url = yaml_string(base_url),
+        token_env = JUNE_OBSIDIAN_MCP_TOKEN_ENV,
+        token = yaml_string(proxy_token),
+    )
+}
+
 fn render_image_mcp_entry(
     config: &JuneImageMcpConfig,
     base_url: &str,
@@ -10118,6 +10199,7 @@ async fn start_june_provider_proxy(
     recorder_token: String,
     connector_token: String,
     computer_use_token: String,
+    obsidian_token: String,
     image_sources: ImageSourceCapabilities,
     videos_dir: PathBuf,
     video_generation_enabled: bool,
@@ -10151,6 +10233,7 @@ async fn start_june_provider_proxy(
             recorder_token,
             connector_token,
             computer_use_token,
+            obsidian_token,
             image_sources,
             videos_dir,
             video_generation_enabled,
@@ -10223,6 +10306,7 @@ async fn handle_june_provider_connection(
         &state.recorder_token,
         &state.connector_token,
         &state.computer_use_token,
+        &state.obsidian_token,
     );
     // Authenticate on the parsed headers BEFORE reading the body, so an
     // unauthenticated local process cannot force the loopback proxy to buffer a
@@ -10451,6 +10535,19 @@ async fn handle_june_provider_connection(
             };
             let result = crate::computer_use::handle_proxy_action(app, body).await;
             write_json_response(&mut stream, 200, result).await?;
+        }
+        ("GET", "/v1/obsidian/vault") => {
+            let body = match state.app.as_ref() {
+                Some(app) => serde_json::to_value(
+                    crate::obsidian::discovery_for_app(app)
+                        .map_err(|error| io::Error::other(error.message))?,
+                )
+                .map_err(io::Error::other)?,
+                None => {
+                    serde_json::json!({ "connected": false, "available": false, "vault": null })
+                }
+            };
+            write_json_response(&mut stream, 200, body).await?;
         }
         ("POST", path) if matches!(path, "/v1/memory/save" | "/v1/memory/forget") => {
             handle_memory_route(&mut stream, &state, path, &request.body).await?;
@@ -12531,8 +12628,11 @@ fn provider_proxy_required_token<'a>(
     recorder_token: &'a str,
     connector_token: &'a str,
     computer_use_token: &'a str,
+    obsidian_token: &'a str,
 ) -> &'a str {
-    if path.starts_with("/v1/memory/") {
+    if path == "/v1/obsidian/vault" {
+        obsidian_token
+    } else if path.starts_with("/v1/memory/") {
         memory_token
     } else if path.starts_with("/v1/recorder/") {
         recorder_token
@@ -14563,6 +14663,7 @@ assert capped["has_more"] is True, capped
             recorder_token: "recorder-token".to_string(),
             connector_token: "connector-token".to_string(),
             computer_use_token: "computer-use-token".to_string(),
+            obsidian_token: "obsidian-token".to_string(),
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
                 secret: [7; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
@@ -14653,6 +14754,7 @@ assert capped["has_more"] is True, capped
             connector_token: "connector-token".to_string(),
             computer_use_token: "computer-use-token".to_string(),
             memory_token: "memory-token".to_string(),
+            obsidian_token: "obsidian-token".to_string(),
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
                 secret: [7; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
@@ -15158,111 +15260,51 @@ assert capped["has_more"] is True, capped
 
     #[test]
     fn sensitive_routes_require_their_scoped_token_and_vice_versa() {
-        // The general provider token every model call carries must never
-        // authorize microphone control, and the recorder secret must not
-        // open the provider surface.
+        let required = |path| {
+            provider_proxy_required_token(
+                path,
+                "provider-tok",
+                "memory-tok",
+                "recorder-tok",
+                "connector-tok",
+                "computer-use-tok",
+                "obsidian-tok",
+            )
+        };
         for path in ["/v1/memory/save", "/v1/memory/forget"] {
-            assert_eq!(
-                provider_proxy_required_token(
-                    path,
-                    "provider-tok",
-                    "memory-tok",
-                    "recorder-tok",
-                    "connector-tok",
-                    "computer-use-tok"
-                ),
-                "memory-tok"
-            );
+            assert_eq!(required(path), "memory-tok");
         }
         for path in [
             "/v1/recorder/start",
             "/v1/recorder/stop",
             "/v1/recorder/status",
         ] {
-            assert_eq!(
-                provider_proxy_required_token(
-                    path,
-                    "provider-tok",
-                    "memory-tok",
-                    "recorder-tok",
-                    "connector-tok",
-                    "computer-use-tok"
-                ),
-                "recorder-tok"
-            );
+            assert_eq!(required(path), "recorder-tok");
         }
-        for path in [
-            "/v1/models",
-            "/v1/chat/completions",
-            "/v1/image/generate",
-            "/v1/recorder",
-        ] {
-            assert_eq!(
-                provider_proxy_required_token(
-                    path,
-                    "provider-tok",
-                    "memory-tok",
-                    "recorder-tok",
-                    "connector-tok",
-                    "computer-use-tok"
-                ),
-                "provider-tok"
-            );
+        for path in ["/v1/models", "/v1/chat/completions", "/v1/image/generate"] {
+            assert_eq!(required(path), "provider-tok");
         }
-        // Connector routes (mail/calendar/Linear) require the connector-scoped
-        // secret, never the general provider token.
         for path in [
             "/v1/gmail/search_threads",
             "/v1/gmail-actions/send_email",
             "/v1/gcal/list_events",
             "/v1/gcal-actions/create_event",
             "/v1/linear/list_teams",
-            "/v1/linear/search_issues",
-            "/v1/linear/get_issue",
             "/v1/linear-actions/create_issue",
-            "/v1/linear-actions/update_issue",
         ] {
-            assert_eq!(
-                provider_proxy_required_token(
-                    path,
-                    "provider-tok",
-                    "memory-tok",
-                    "recorder-tok",
-                    "connector-tok",
-                    "computer-use-tok"
-                ),
-                "connector-tok"
-            );
+            assert_eq!(required(path), "connector-tok");
         }
+        assert_eq!(required("/v1/obsidian/vault"), "obsidian-tok");
 
         let provider_bearer = request_with_authorization("Bearer provider-tok");
         let recorder_bearer = request_with_authorization("Bearer recorder-tok");
         let connector_bearer = request_with_authorization("Bearer connector-tok");
         let computer_use_bearer = request_with_authorization("Bearer computer-use-tok");
-        let recorder_required = provider_proxy_required_token(
-            "/v1/recorder/start",
-            "provider-tok",
-            "memory-tok",
-            "recorder-tok",
-            "connector-tok",
-            "computer-use-tok",
-        );
-        let provider_required = provider_proxy_required_token(
-            "/v1/models",
-            "provider-tok",
-            "memory-tok",
-            "recorder-tok",
-            "connector-tok",
-            "computer-use-tok",
-        );
-        let computer_use_required = provider_proxy_required_token(
-            crate::computer_use::PROXY_PATH,
-            "provider-tok",
-            "memory-tok",
-            "recorder-tok",
-            "connector-tok",
-            "computer-use-tok",
-        );
+        let obsidian_bearer = request_with_authorization("Bearer obsidian-tok");
+        let recorder_required = required("/v1/recorder/start");
+        let provider_required = required("/v1/models");
+        let computer_use_required = required(crate::computer_use::PROXY_PATH);
+        let obsidian_required = required("/v1/obsidian/vault");
         assert!(!provider_proxy_authorized(
             &provider_bearer,
             recorder_required
@@ -15289,7 +15331,12 @@ assert capped["has_more"] is True, capped
                 wrong_scope,
                 computer_use_required
             ));
+            assert!(!provider_proxy_authorized(wrong_scope, obsidian_required));
         }
+        assert!(provider_proxy_authorized(
+            &obsidian_bearer,
+            obsidian_required
+        ));
     }
 
     #[test]
@@ -15317,6 +15364,7 @@ assert capped["has_more"] is True, capped
             "recorder-token",
             "connector-token",
             "computer-use-token",
+            "obsidian-token",
         );
         assert!(!provider_proxy_authorized(
             &request_with_authorization("Bearer proxy-token"),
@@ -16265,11 +16313,13 @@ mcp_servers:
             "recorder-token",
             "connector-token",
             "computer-use-token",
+            "obsidian-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: Some(&test_june_context_mcp_config()),
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -16365,6 +16415,23 @@ mcp_servers:
             config["mcp_servers"]["user_server"]["url"],
             "https://example.com/mcp"
         );
+    }
+
+    #[test]
+    fn obsidian_skill_policy_disables_only_the_upstream_skill() {
+        let mut config: serde_yaml::Value = serde_yaml::from_str(
+            "skills:\n  disabled: [other, obsidian, obsidian]\n  config:\n    user-skill:\n      enabled: true\n",
+        )
+        .expect("valid config");
+
+        apply_obsidian_skill_policy(&mut config);
+
+        assert_eq!(
+            config["skills"]["disabled"],
+            serde_yaml::from_str::<serde_yaml::Value>("[other, obsidian]")
+                .expect("expected disabled skills")
+        );
+        assert_eq!(config["skills"]["config"]["user-skill"]["enabled"], true);
     }
 
     #[test]
@@ -16644,11 +16711,13 @@ mcp_servers:
             "recorder",
             "connector",
             "computer-use",
+            "obsidian",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: Some(&test_june_context_mcp_config()),
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -16869,9 +16938,11 @@ mcp_servers:
             "recorder-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
+            "obsidian-proxy-token",
             false,
             &test_june_context_mcp_config(),
             &test_june_web_mcp_config(),
+            &test_june_obsidian_mcp_config(),
             &test_june_image_mcp_config(),
             None,
             &test_june_recorder_mcp_config(),
@@ -16923,11 +16994,13 @@ mcp_servers:
             "recorder-tok",
             "connector-tok",
             "computer-use-tok",
+            "obsidian-proxy-tok",
             "web, memory",
             &dirs,
             BuiltinMcpConfigs {
                 context: None,
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -16970,11 +17043,13 @@ mcp_servers:
             "recorder-tok",
             "connector-tok",
             "computer-use-tok",
+            "obsidian-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: None,
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -16997,6 +17072,13 @@ mcp_servers:
         JuneWebMcpConfig {
             command: "/tmp/hermes/venv/bin/python".to_string(),
             script_path: PathBuf::from("/tmp/june/hermes-mcp/june_web_mcp.py"),
+        }
+    }
+
+    fn test_june_obsidian_mcp_config() -> JuneObsidianMcpConfig {
+        JuneObsidianMcpConfig {
+            command: "/tmp/hermes/venv/bin/python".to_string(),
+            script_path: PathBuf::from("/tmp/june/hermes-mcp/june_obsidian_mcp.py"),
         }
     }
 
@@ -17054,6 +17136,7 @@ mcp_servers:
     fn render_hermes_config_registers_june_context_mcp_server() {
         let context = test_june_context_mcp_config();
         let web = test_june_web_mcp_config();
+        let obsidian = test_june_obsidian_mcp_config();
         let image = test_june_image_mcp_config();
         let video = test_june_video_mcp_config();
         let recorder = test_june_recorder_mcp_config();
@@ -17085,11 +17168,13 @@ mcp_servers:
             "recorder-proxy-tok",
             "connector-proxy-tok",
             "computer-use-proxy-tok",
+            "obsidian-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: Some(&context),
                 web: Some(&web),
+                obsidian: Some(&obsidian),
                 image: Some(&image),
                 video: Some(&video),
                 recorder: Some(&recorder),
@@ -17107,6 +17192,7 @@ mcp_servers:
         // All four built-in servers live under one mcp_servers map.
         assert!(config.contains("mcp_servers:\n  june_context:\n"));
         assert!(config.contains("  june_web:\n"));
+        assert!(config.contains("  june_obsidian:\n"));
         assert!(config.contains("  june_recorder:\n"));
         assert!(config.contains("  june_computer_use:\n"));
         assert!(config
@@ -17140,6 +17226,9 @@ mcp_servers:
         assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_web_mcp.py\"\n"));
         assert!(config.contains("      - \"http://127.0.0.1:9/v1\"\n"));
         assert!(config.contains("      JUNE_WEB_PROXY_TOKEN: \"proxy-tok\"\n"));
+        assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_obsidian_mcp.py\"\n"));
+        assert!(config.contains("      JUNE_OBSIDIAN_PROXY_TOKEN: \"obsidian-proxy-tok\"\n"));
+        assert!(!config.contains("JUNE_OBSIDIAN_PROXY_TOKEN: \"proxy-tok\""));
         // The image server gets the loopback proxy URL and its images dir as
         // args. Source-byte reads stay in Rust, so no upload/source directory
         // is passed to the MCP.
@@ -17245,11 +17334,13 @@ mcp_servers:
             "recorder-proxy-tok",
             "connector-proxy-tok",
             "computer-use-proxy-tok",
+            "obsidian-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: Some(&context),
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -17286,11 +17377,13 @@ mcp_servers:
             "recorder-proxy-tok",
             "connector-proxy-tok",
             "computer-use-proxy-tok",
+            "obsidian-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: Some(&context),
                 web: Some(&web),
+                obsidian: None,
                 image: Some(&image),
                 video: None,
                 recorder: None,
@@ -17324,11 +17417,13 @@ mcp_servers:
             "recorder-tok",
             "connector-tok",
             "computer-use-tok",
+            "obsidian-proxy-tok",
             "web",
             &[],
             BuiltinMcpConfigs {
                 context: None,
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -17362,11 +17457,13 @@ mcp_servers:
             "recorder-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
+            "obsidian-proxy-tok",
             "web, memory",
             &[],
             BuiltinMcpConfigs {
                 context: None,
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -17391,11 +17488,13 @@ mcp_servers:
             "recorder-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
+            "obsidian-proxy-tok",
             "web, memory",
             &[],
             BuiltinMcpConfigs {
                 context: None,
                 web: None,
+                obsidian: None,
                 image: None,
                 video: None,
                 recorder: None,
@@ -17583,7 +17682,6 @@ mcp_servers:
             envs.get("HERMES_NONINTERACTIVE").map(String::as_str),
             Some("1")
         );
-        assert!(command_env_removals(&cmd).contains(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV));
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/hermes-home")));
     }
 
@@ -17652,7 +17750,6 @@ mcp_servers:
             Some(JUNE_HINT_SANDBOXED),
             Some(Path::new("/tmp/profile.sb")),
             "trace: june session sess-1",
-            None,
         );
 
         // Sandboxed sessions must resume under the same Seatbelt jail June used.
@@ -17667,43 +17764,9 @@ mcp_servers:
             "export HERMES_ENVIRONMENT_HINT={}",
             shell_single_quote(JUNE_HINT_SANDBOXED)
         )));
-        // Stale inherited values are scrubbed first, including an old vault
-        // when the user has disconnected Obsidian.
         assert!(script.contains("unset HERMES_HOME"));
-        assert!(script.contains(&format!(
-            "unset {}",
-            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
-        )));
-        assert!(!script.contains(&format!(
-            "export {}=",
-            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
-        )));
         // The session->TUI trace line is echoed in the terminal.
         assert!(script.contains("echo 'trace: june session sess-1'"));
-    }
-
-    #[test]
-    fn tui_debug_launcher_exports_configured_obsidian_vault() {
-        let args = hermes_tui_resume_args("sess-obsidian");
-        let script = build_hermes_tui_debug_launcher_script(
-            "/opt/hermes/bin/hermes",
-            &args,
-            Path::new("/tmp/hermes-home"),
-            "tok",
-            None,
-            None,
-            "trace",
-            Some(Path::new("/tmp/My Vault")),
-        );
-
-        assert!(script.contains(&format!(
-            "unset {}",
-            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
-        )));
-        assert!(script.contains(&format!(
-            "export {}='/tmp/My Vault'",
-            crate::obsidian::OBSIDIAN_VAULT_PATH_ENV
-        )));
     }
 
     #[test]
@@ -17717,7 +17780,6 @@ mcp_servers:
             Some(JUNE_HINT_UNRESTRICTED),
             None,
             "trace: june session sess-2",
-            None,
         );
 
         // No jail => no sandbox-exec wrapper; the runtime is launched directly.
@@ -17742,7 +17804,6 @@ mcp_servers:
             None,
             None,
             "trace",
-            None,
         );
         // The id stays one inert single-quoted literal: its embedded quote is
         // escaped (`'\''`), so `rm` is data passed to --resume, never a command.
@@ -17794,7 +17855,6 @@ mcp_servers:
             Path::new("/tmp/hermes-home"),
             "token",
             Some(JUNE_HINT_UNRESTRICTED),
-            None,
         );
         assert_eq!(
             envs_of(&hinted)
@@ -17803,51 +17863,12 @@ mcp_servers:
             Some(JUNE_HINT_UNRESTRICTED)
         );
 
-        // Without a hint or configured vault the vars are scrubbed, not
-        // inherited: stale parent-process values must never reach the runtime.
         let mut bare = Command::new("hermes");
         std::env::set_var("HERMES_ENVIRONMENT_HINT", "stale-from-shell");
-        std::env::set_var(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV, "/stale-vault");
-        apply_isolated_hermes_env(
-            &mut bare,
-            Path::new("/tmp/hermes-home"),
-            "token",
-            None,
-            None,
-        );
+        apply_isolated_hermes_env(&mut bare, Path::new("/tmp/hermes-home"), "token", None);
         std::env::remove_var("HERMES_ENVIRONMENT_HINT");
-        std::env::remove_var(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV);
         assert!(!envs_of(&bare).contains_key("HERMES_ENVIRONMENT_HINT"));
         assert!(!envs_of(&bare).contains_key("HERMES_TUI_TOOLSETS"));
-        assert!(!envs_of(&bare).contains_key(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV));
-    }
-
-    #[test]
-    fn isolated_env_sets_obsidian_vault_path_when_configured() {
-        let mut cmd = Command::new("hermes");
-        apply_isolated_hermes_env(
-            &mut cmd,
-            Path::new("/tmp/hermes-home"),
-            "token",
-            None,
-            Some(Path::new("/tmp/My Vault")),
-        );
-        let envs: std::collections::HashMap<String, String> = cmd
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect();
-        assert_eq!(
-            envs.get(crate::obsidian::OBSIDIAN_VAULT_PATH_ENV)
-                .map(String::as_str),
-            Some("/tmp/My Vault")
-        );
     }
 
     #[test]
@@ -17860,6 +17881,7 @@ mcp_servers:
   cron: [web]
 mcp_servers:
   june_context: { enabled: true }
+  june_obsidian: { enabled: true }
   june_gmail: { enabled: true }
   june_gmail_actions: { enabled: true }
   june_gmail_auto_job_a: { enabled: true }
@@ -17878,6 +17900,7 @@ mcp_servers:
         assert!(!selected.contains(&"browser".to_string()));
         assert!(!selected.contains(&"computer_use".to_string()));
         assert!(selected.contains(&"june_context".to_string()));
+        assert!(selected.contains(&"june_obsidian".to_string()));
         assert!(selected.contains(&"june_gmail".to_string()));
         assert!(selected.contains(&"june_gmail_actions".to_string()));
         assert!(selected.contains(&"user_server".to_string()));
@@ -17969,9 +17992,11 @@ mcp_servers:
             "recorder-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
+            "obsidian-proxy-token",
             false,
             &mcp,
             &web,
+            &test_june_obsidian_mcp_config(),
             &image,
             Some(&video),
             &recorder,
@@ -18009,6 +18034,13 @@ mcp_servers:
             .map(|toolset| serde_yaml::Value::String(toolset.to_string()))
             .collect();
         assert_eq!(cron, &expected, "cron allowlist mismatch:\n{config}");
+        assert!(parsed["mcp_servers"]["june_obsidian"].is_mapping());
+        assert!(
+            !cron
+                .iter()
+                .any(|toolset| toolset.as_str() == Some("june_obsidian")),
+            "vault discovery must remain excluded from ambient routine toolsets"
+        );
         // The connector ACTION servers and per-job AUTO servers are NEVER in
         // the cron default: approval and autonomy are opted into per job by
         // trust-mode enabled_toolsets. The exact sequence match above proves
@@ -18041,6 +18073,7 @@ mcp_servers:
         let configs = BuiltinMcpConfigs {
             context: Some(&context),
             web: None,
+            obsidian: None,
             image: None,
             video: None,
             recorder: None,
@@ -18095,9 +18128,11 @@ mcp_servers:
             "recorder-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
+            "obsidian-proxy-token",
             false,
             &context,
             &web,
+            &test_june_obsidian_mcp_config(),
             &image,
             None,
             &recorder,
@@ -18152,9 +18187,11 @@ mcp_servers:
             "recorder-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
+            "obsidian-proxy-token",
             false,
             &context,
             &web,
+            &test_june_obsidian_mcp_config(),
             &image,
             None,
             &recorder,

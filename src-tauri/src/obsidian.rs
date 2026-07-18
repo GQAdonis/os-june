@@ -4,15 +4,10 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
 };
 use tauri::AppHandle;
 
-pub const OBSIDIAN_VAULT_PATH_ENV: &str = "OBSIDIAN_VAULT_PATH";
 const OBSIDIAN_CONFIG_FILE: &str = "obsidian.json";
-const HERMES_ENV_PROJECTION_LOCK_FILE: &str = ".june-obsidian-env.lock";
-const HERMES_ENV_PROJECTION_LOCK_WAIT: Duration = Duration::from_secs(2);
-const HERMES_ENV_PROJECTION_STALE_LOCK_AGE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -23,6 +18,22 @@ pub struct ObsidianStatus {
     pub vault_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObsidianDiscovery {
+    pub connected: bool,
+    pub available: bool,
+    pub vault: Option<ObsidianDiscoveryVault>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ObsidianDiscoveryVault {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,7 +58,7 @@ pub fn obsidian_configure(
     app: AppHandle,
     request: ObsidianConfigureRequest,
 ) -> Result<ObsidianStatus, AppError> {
-    reject_dotenv_unsafe_path(request.vault_path.trim())?;
+    reject_unsafe_path(request.vault_path.trim())?;
     let vault_path = validate_vault_path(Path::new(request.vault_path.trim()))?;
     ensure_readable(&vault_path)?;
     ensure_writable(&vault_path)?;
@@ -71,89 +82,62 @@ pub fn obsidian_disconnect(app: AppHandle) -> Result<ObsidianStatus, AppError> {
             ));
         }
     }
-    Ok(ObsidianStatus {
-        connected: false,
-        available: false,
-        vault_path: None,
-        vault_name: None,
-    })
+    Ok(disconnected_status())
 }
 
-pub(crate) fn configured_vault_path(app: &AppHandle) -> Result<Option<PathBuf>, AppError> {
+/// Resolves the selected vault at the point the MCP request is handled. The
+/// MCP adapter deliberately does not interpret `obsidian.json` itself, so all
+/// validation and unavailable-vault privacy behavior remain June-owned.
+pub(crate) fn discovery_for_app(app: &AppHandle) -> Result<ObsidianDiscovery, AppError> {
     let Some(config) = read_config_optional(app)? else {
-        return Ok(None);
+        return Ok(ObsidianDiscovery {
+            connected: false,
+            available: false,
+            vault: None,
+        });
     };
-    Ok(runtime_vault_path(&config))
+    Ok(discovery_from_config(&config))
 }
 
-fn runtime_vault_path(config: &ObsidianConfig) -> Option<PathBuf> {
+fn discovery_from_config(config: &ObsidianConfig) -> ObsidianDiscovery {
+    let name = vault_name(&config.vault_path);
     match validate_vault_path(Path::new(&config.vault_path)) {
-        Ok(path) => Some(path),
+        Ok(path) => ObsidianDiscovery {
+            connected: true,
+            available: true,
+            vault: Some(ObsidianDiscoveryVault {
+                name,
+                path: Some(path.to_string_lossy().into_owned()),
+            }),
+        },
         Err(error) => {
-            // A selected vault can disappear temporarily when an external drive
-            // is ejected or a network share goes offline. Obsidian is optional:
-            // omit its runtime capability until the path returns rather than
-            // preventing every Hermes session from starting.
-            tracing::warn!(
-                ?error,
-                vault_path = %config.vault_path,
-                "configured Obsidian vault is unavailable; starting Hermes without it"
-            );
-            None
+            tracing::warn!(?error, "configured Obsidian vault is unavailable");
+            ObsidianDiscovery {
+                connected: true,
+                available: false,
+                // The saved path is sensitive. A temporarily unavailable vault
+                // is identifiable by name only; its absolute path is disclosed
+                // exclusively when the current validation succeeds.
+                vault: Some(ObsidianDiscoveryVault { name, path: None }),
+            }
         }
     }
-}
-
-/// Synchronizes June's selected vault into the Hermes runtime's `.env` file.
-/// `obsidian.json` remains the source of truth; this file is a narrowly owned
-/// projection because the pinned Hermes runtime reloads it with precedence over
-/// the process environment. June owns only `OBSIDIAN_VAULT_PATH` and preserves
-/// every unrelated setting, comment, and secret.
-pub(crate) fn sync_hermes_env_projection(
-    hermes_home: &Path,
-    vault_path: Option<&Path>,
-) -> Result<(), AppError> {
-    let env_path = hermes_home.join(".env");
-    let _file_guard = acquire_hermes_env_projection_lock(hermes_home).map_err(|_| {
-        AppError::new(
-            "obsidian_runtime_config_unavailable",
-            "Could not update the Hermes runtime configuration.",
-        )
-    })?;
-    let existing = match fs::read_to_string(&env_path) {
-        Ok(contents) => Some(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => {
-            return Err(AppError::new(
-                "obsidian_runtime_config_unavailable",
-                "Could not update the Hermes runtime configuration.",
-            ));
-        }
-    };
-    let projected = render_hermes_env_projection(existing.as_deref().unwrap_or(""), vault_path)?;
-    if existing.as_deref() == Some(projected.as_str())
-        || (existing.is_none() && projected.is_empty())
-    {
-        return Ok(());
-    }
-    atomic_write_env(&env_path, &projected).map_err(|_| {
-        AppError::new(
-            "obsidian_runtime_config_unavailable",
-            "Could not update the Hermes runtime configuration.",
-        )
-    })
 }
 
 fn status_for_app(app: &AppHandle) -> Result<ObsidianStatus, AppError> {
     let Some(config) = read_config_optional(app)? else {
-        return Ok(ObsidianStatus {
-            connected: false,
-            available: false,
-            vault_path: None,
-            vault_name: None,
-        });
+        return Ok(disconnected_status());
     };
     Ok(status_from_config(&config))
+}
+
+fn disconnected_status() -> ObsidianStatus {
+    ObsidianStatus {
+        connected: false,
+        available: false,
+        vault_path: None,
+        vault_name: None,
+    }
 }
 
 fn status_from_config(config: &ObsidianConfig) -> ObsidianStatus {
@@ -162,7 +146,6 @@ fn status_from_config(config: &ObsidianConfig) -> ObsidianStatus {
         Err(error) => {
             tracing::warn!(
                 ?error,
-                vault_path = %config.vault_path,
                 "configured Obsidian vault is unavailable in Settings"
             );
             status_from_saved_path(&config.vault_path, false)
@@ -175,17 +158,21 @@ fn status_from_path(path: PathBuf) -> ObsidianStatus {
 }
 
 fn status_from_saved_path(path: &str, available: bool) -> ObsidianStatus {
-    let vault_name = Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .map(str::to_string);
     ObsidianStatus {
         connected: true,
         available,
         vault_path: Some(path.to_string()),
-        vault_name,
+        vault_name: Some(vault_name(path)),
     }
+}
+
+fn vault_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("Vault")
+        .to_string()
 }
 
 fn config_path(app: &AppHandle) -> Result<PathBuf, AppError> {
@@ -223,105 +210,7 @@ fn write_config(app: &AppHandle, config: &ObsidianConfig) -> Result<(), AppError
         .map_err(|error| AppError::new("obsidian_config_unavailable", error.to_string()))
 }
 
-#[derive(Debug)]
-struct HermesEnvProjectionFileLock {
-    path: PathBuf,
-}
-
-impl Drop for HermesEnvProjectionFileLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Cross-process counterpart to the in-process mutex. Every June process holds
-/// this same-directory lock while it reads and atomically replaces `.env`; the
-/// bounded stale-lock recovery avoids a crash wedging future app launches.
-fn acquire_hermes_env_projection_lock(
-    hermes_home: &Path,
-) -> std::io::Result<HermesEnvProjectionFileLock> {
-    fs::create_dir_all(hermes_home)?;
-    let path = hermes_home.join(HERMES_ENV_PROJECTION_LOCK_FILE);
-    let deadline = Instant::now() + HERMES_ENV_PROJECTION_LOCK_WAIT;
-    loop {
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(std::process::id().to_string().as_bytes())?;
-                file.sync_all()?;
-                return Ok(HermesEnvProjectionFileLock { path });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let stale = fs::metadata(&path)
-                    .and_then(|metadata| metadata.modified())
-                    .ok()
-                    .and_then(|modified| modified.elapsed().ok())
-                    .is_some_and(|age| age > HERMES_ENV_PROJECTION_STALE_LOCK_AGE);
-                if stale {
-                    let _ = fs::remove_file(&path);
-                    continue;
-                }
-                if Instant::now() >= deadline {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::WouldBlock,
-                        "Hermes runtime environment is busy",
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
-fn render_hermes_env_projection(
-    existing: &str,
-    vault_path: Option<&Path>,
-) -> Result<String, AppError> {
-    let mut retained = Vec::new();
-    for line in existing.split_inclusive('\n') {
-        if !is_active_obsidian_assignment(line) {
-            retained.push(line);
-        }
-    }
-    // `split_inclusive` intentionally retains every unrelated line byte-for-byte.
-    // A final line without a newline remains intact, but append a separator before
-    // June's derived key so it cannot join that line.
-    let mut rendered = retained.concat();
-    if let Some(vault_path) = vault_path {
-        let vault_path = vault_path.to_string_lossy();
-        reject_dotenv_unsafe_path(&vault_path)?;
-        if !rendered.is_empty() && !rendered.ends_with('\n') {
-            rendered.push('\n');
-        }
-        rendered.push_str(OBSIDIAN_VAULT_PATH_ENV);
-        rendered.push('=');
-        rendered.push_str(&dotenv_single_quote(&vault_path));
-        rendered.push('\n');
-    }
-    Ok(rendered)
-}
-
-/// Matches only an uncommented dotenv assignment to the one key June owns.
-/// Leading whitespace is permitted by python-dotenv; commented examples are
-/// deliberately retained, as are similarly named keys such as `X_OBSIDIAN…`.
-fn is_active_obsidian_assignment(line: &str) -> bool {
-    let line = line.trim_start_matches([' ', '\t']);
-    let line = line
-        .strip_prefix("export")
-        .filter(|suffix| suffix.starts_with([' ', '\t']))
-        .map(str::trim_start)
-        .unwrap_or(line);
-    let Some((key, _)) = line.split_once('=') else {
-        return false;
-    };
-    key.trim() == OBSIDIAN_VAULT_PATH_ENV
-}
-
-fn dotenv_single_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
-fn reject_dotenv_unsafe_path(value: &str) -> Result<(), AppError> {
+fn reject_unsafe_path(value: &str) -> Result<(), AppError> {
     if value.contains(['\0', '\r', '\n']) {
         return Err(AppError::new(
             "obsidian_vault_invalid",
@@ -329,60 +218,6 @@ fn reject_dotenv_unsafe_path(value: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
-}
-
-fn atomic_write_env(path: &Path, content: &str) -> std::io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "runtime environment path has no parent",
-        )
-    })?;
-    fs::create_dir_all(parent)?;
-    let temp_path = parent.join(format!(
-        ".june-obsidian-env-{}-{}.tmp",
-        std::process::id(),
-        rand::random::<u64>()
-    ));
-    let result = (|| -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp_path)?;
-        if let Ok(metadata) = fs::metadata(path) {
-            file.set_permissions(metadata.permissions())?;
-        }
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        drop(file);
-        replace_env_file(&temp_path, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    result
-}
-
-#[cfg(windows)]
-fn replace_env_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
-    match fs::rename(temp_path, path) {
-        Ok(()) => Ok(()),
-        Err(error)
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::PermissionDenied
-            ) =>
-        {
-            fs::remove_file(path)?;
-            fs::rename(temp_path, path)
-        }
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(not(windows))]
-fn replace_env_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
-    fs::rename(temp_path, path)
 }
 
 fn validate_vault_path(path: &Path) -> Result<PathBuf, AppError> {
@@ -420,10 +255,6 @@ fn validate_vault_path(path: &Path) -> Result<PathBuf, AppError> {
     Ok(normalize_vault_path_for_external_use(canonical))
 }
 
-/// `std::fs::canonicalize` returns a Windows extended-length path (`\\?\C:\…`)
-/// even when the user picked a normal drive-letter path. The prefix is useful to
-/// Win32 internals but confusing in Settings and not consistently accepted by
-/// tools the runtime launches, so persist and pass the conventional form.
 #[cfg(target_os = "windows")]
 fn normalize_vault_path_for_external_use(path: PathBuf) -> PathBuf {
     let path = path.to_string_lossy();
@@ -465,72 +296,55 @@ fn ensure_writable(path: &Path) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "windows")]
-    use super::normalize_vault_path_for_external_use;
-    use super::{
-        acquire_hermes_env_projection_lock, dotenv_single_quote, is_active_obsidian_assignment,
-        reject_dotenv_unsafe_path, render_hermes_env_projection, runtime_vault_path,
-        status_from_config, sync_hermes_env_projection, validate_vault_path, ObsidianConfig,
-        HERMES_ENV_PROJECTION_LOCK_FILE,
-    };
+    use super::{discovery_from_config, status_from_config, validate_vault_path, ObsidianConfig};
 
     #[test]
     fn validates_real_vault_and_canonicalizes() {
         let temp = tempfile::tempdir().expect("tempdir");
         let vault = temp.path().join("My Vault");
         std::fs::create_dir_all(vault.join(".obsidian")).expect("vault");
-        std::fs::create_dir_all(vault.join("folder")).expect("child");
-        let child = vault.join("folder").join("..");
-        let validated = validate_vault_path(&child).expect("valid vault");
+        let validated = validate_vault_path(&vault).expect("valid vault");
         assert_eq!(validated, vault.canonicalize().expect("canonical"));
     }
 
     #[test]
-    fn runtime_omits_a_configured_vault_that_is_no_longer_available() {
+    fn discovery_discloses_only_a_current_available_path() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let vault = temp.path().join("External Vault");
+        let vault = temp.path().join("Work");
         std::fs::create_dir_all(vault.join(".obsidian")).expect("vault");
-        let config = ObsidianConfig {
+        let connected = discovery_from_config(&ObsidianConfig {
             vault_path: vault.to_string_lossy().into_owned(),
-        };
+        });
+        assert!(connected.connected);
+        assert!(connected.available);
         assert_eq!(
-            runtime_vault_path(&config),
-            Some(vault.canonicalize().expect("canonical"))
+            connected.vault.and_then(|vault| vault.path),
+            Some(
+                vault
+                    .canonicalize()
+                    .expect("canonical")
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
 
-        std::fs::remove_dir_all(&vault).expect("unmount vault");
-        assert_eq!(runtime_vault_path(&config), None);
+        let unavailable = discovery_from_config(&ObsidianConfig {
+            vault_path: "/missing/Work".to_string(),
+        });
+        assert!(unavailable.connected);
+        assert!(!unavailable.available);
+        assert_eq!(unavailable.vault.and_then(|vault| vault.path), None);
     }
 
     #[test]
     fn status_keeps_an_unavailable_configured_vault_disconnectable() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let vault = temp.path().join("Moved Vault");
         let config = ObsidianConfig {
-            vault_path: vault.to_string_lossy().into_owned(),
+            vault_path: "/missing/Moved Vault".to_string(),
         };
-
         let status = status_from_config(&config);
-
         assert!(status.connected);
         assert!(!status.available);
-        assert_eq!(
-            status.vault_path.as_deref(),
-            Some(config.vault_path.as_str())
-        );
         assert_eq!(status.vault_name.as_deref(), Some("Moved Vault"));
-    }
-
-    #[test]
-    fn runtime_validation_does_not_create_a_write_probe() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let vault = temp.path().join("Vault");
-        std::fs::create_dir_all(vault.join(".obsidian")).expect("vault");
-
-        validate_vault_path(&vault).expect("runtime validation");
-
-        let probe = vault.join(format!(".june-obsidian-write-probe-{}", std::process::id()));
-        assert!(!probe.exists());
     }
 
     #[test]
@@ -538,130 +352,5 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let err = validate_vault_path(temp.path()).expect_err("not a vault");
         assert_eq!(err.code, "obsidian_vault_invalid");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn rejects_obsidian_marker_symlink() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let vault = temp.path().join("Vault");
-        let external = temp.path().join("External Marker");
-        std::fs::create_dir_all(&vault).expect("vault");
-        std::fs::create_dir_all(&external).expect("external marker");
-        std::os::unix::fs::symlink(&external, vault.join(".obsidian")).expect("symlink");
-
-        let err = validate_vault_path(&vault).expect_err("symlink marker rejected");
-        assert_eq!(err.code, "obsidian_vault_invalid");
-    }
-
-    #[test]
-    fn rejects_relative_path() {
-        let err =
-            validate_vault_path(std::path::Path::new("relative/vault")).expect_err("relative");
-        assert_eq!(err.code, "obsidian_vault_invalid");
-    }
-
-    #[test]
-    fn projects_only_the_obsidian_key_into_hermes_env() {
-        let existing = "# Keep this comment\nOPENAI_API_KEY=secret-value\n\nOBSIDIAN_VAULT_PATH=stale\nexport OBSIDIAN_VAULT_PATH = old\n# OBSIDIAN_VAULT_PATH=example\nOTHER=value\n";
-        let rendered = render_hermes_env_projection(
-            existing,
-            Some(std::path::Path::new("C:\\Users\\jimmy\\Vault #1")),
-        )
-        .expect("projection");
-
-        assert_eq!(
-            rendered,
-            "# Keep this comment\nOPENAI_API_KEY=secret-value\n\n# OBSIDIAN_VAULT_PATH=example\nOTHER=value\nOBSIDIAN_VAULT_PATH='C:\\\\Users\\\\jimmy\\\\Vault #1'\n"
-        );
-        assert!(!is_active_obsidian_assignment(
-            "# OBSIDIAN_VAULT_PATH=example"
-        ));
-        assert!(is_active_obsidian_assignment(
-            " export OBSIDIAN_VAULT_PATH = value"
-        ));
-    }
-
-    #[test]
-    fn disconnect_projection_removes_only_active_obsidian_assignments() {
-        let rendered = render_hermes_env_projection(
-            "A=1\nOBSIDIAN_VAULT_PATH=old\n# OBSIDIAN_VAULT_PATH=example\nB=2\n",
-            None,
-        )
-        .expect("projection");
-        assert_eq!(rendered, "A=1\n# OBSIDIAN_VAULT_PATH=example\nB=2\n");
-    }
-
-    #[test]
-    fn dotenv_values_escape_backslashes_and_quotes() {
-        assert_eq!(
-            dotenv_single_quote("C:\\Vault O'Brien"),
-            "'C:\\\\Vault O\\'Brien'"
-        );
-    }
-
-    #[test]
-    fn rejects_dotenv_line_break_injection() {
-        let error = reject_dotenv_unsafe_path("vault\nOTHER=value").expect_err("line break");
-        assert_eq!(error.code, "obsidian_vault_invalid");
-    }
-
-    #[test]
-    fn projection_lock_refuses_an_active_cross_process_update() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let _guard = acquire_hermes_env_projection_lock(home.path()).expect("first lock");
-        let error = acquire_hermes_env_projection_lock(home.path()).expect_err("second lock");
-        assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-        assert!(home.path().join(HERMES_ENV_PROJECTION_LOCK_FILE).exists());
-    }
-
-    #[test]
-    fn sync_writes_and_removes_its_derived_assignment() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let env_path = home.path().join(".env");
-        std::fs::write(&env_path, "EXISTING=value\n").expect("seed env");
-
-        sync_hermes_env_projection(home.path(), Some(std::path::Path::new("/vault path")))
-            .expect("write projection");
-        assert_eq!(
-            std::fs::read_to_string(&env_path).expect("read projection"),
-            "EXISTING=value\nOBSIDIAN_VAULT_PATH='/vault path'\n"
-        );
-
-        sync_hermes_env_projection(home.path(), None).expect("remove projection");
-        assert_eq!(
-            std::fs::read_to_string(&env_path).expect("read removal"),
-            "EXISTING=value\n"
-        );
-    }
-
-    #[test]
-    fn invalid_runtime_env_is_not_overwritten() {
-        let home = tempfile::tempdir().expect("tempdir");
-        let env_path = home.path().join(".env");
-        let original = [0xff, b'\n'];
-        std::fs::write(&env_path, original).expect("write invalid env");
-
-        let error = sync_hermes_env_projection(home.path(), Some(std::path::Path::new("/vault")))
-            .expect_err("invalid env");
-        assert_eq!(error.code, "obsidian_runtime_config_unavailable");
-        assert_eq!(std::fs::read(&env_path).expect("read original"), original);
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn normalizes_windows_extended_length_vault_paths() {
-        assert_eq!(
-            normalize_vault_path_for_external_use(std::path::PathBuf::from(
-                r"\\?\C:\Users\jimmy\OneDrive\Dokumen\Jimmy",
-            )),
-            std::path::PathBuf::from(r"C:\Users\jimmy\OneDrive\Dokumen\Jimmy"),
-        );
-        assert_eq!(
-            normalize_vault_path_for_external_use(std::path::PathBuf::from(
-                r"\\?\UNC\server\share\Vault",
-            )),
-            std::path::PathBuf::from(r"\\server\share\Vault"),
-        );
     }
 }

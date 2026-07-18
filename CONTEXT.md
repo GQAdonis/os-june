@@ -320,6 +320,15 @@ group; an MCP server is an external tool provider (June ships `june_context`,
 servers `june_gmail`/`june_gcal` plus their `*_actions` counterparts).
 _Avoid_: using "tool" for all three.
 
+**Obsidian plugin**:
+The June-owned local capability for discovering the user-selected Obsidian vault
+at task time through the `june_obsidian` MCP server. The vault selection is
+stored in June-owned `obsidian.json`; it is not a Hermes environment variable.
+Discovery is current state, not write authorization. Disconnect removes future
+discovery but cannot revoke a path already disclosed to a live unrestricted
+runtime.
+_Avoid_: Obsidian connector, `OBSIDIAN_VAULT_PATH`.
+
 **Plugin**:
 A user-facing capability bundle in June's Plugins area. A plugin may combine
 Skills, Toolsets, app-owned MCP servers, routine templates, and optional

@@ -338,7 +338,6 @@ pub fn run() {
             connectors::approvals::connector_approval_respond,
             connectors::approvals::connector_approvals_respond_all,
             hermes_bridge::connectors_apply_runtime,
-            hermes_bridge::obsidian_apply_runtime,
             computer_use::computer_use_status,
             computer_use::set_computer_use_grant,
             computer_use::computer_use_request_permissions,

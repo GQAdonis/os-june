@@ -2295,10 +2295,6 @@ export async function obsidianDisconnect() {
   return invoke<ObsidianStatus>("obsidian_disconnect");
 }
 
-export async function obsidianApplyRuntime() {
-  return invoke<void>("obsidian_apply_runtime");
-}
-
 export async function connectorsApplyRuntime() {
   return invoke<void>("connectors_apply_runtime");
 }

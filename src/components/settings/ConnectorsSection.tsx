@@ -20,7 +20,6 @@ import {
   connectorsLinearTeams,
   connectorsList,
   connectorsSetSelectedTeams,
-  obsidianApplyRuntime,
   obsidianConfigure,
   obsidianDisconnect,
   obsidianStatus,
@@ -414,7 +413,6 @@ export function ConnectorsSection() {
       const selected = await openFileDialog({ directory: true, multiple: false });
       if (typeof selected !== "string") return;
       setObsidian(await obsidianConfigure(selected));
-      await obsidianApplyRuntime();
       await refresh();
       toast.success("Obsidian vault connected");
     } catch (err) {
@@ -430,11 +428,7 @@ export function ConnectorsSection() {
     setObsidianBusy(true);
     setObsidianDisconnecting(true);
     try {
-      // Keep the configured row visible until the live runtime has dropped
-      // the vault capability. Persistence removal is idempotent, so a failed
-      // runtime apply leaves Disconnect as a safe retry action.
       await obsidianDisconnect();
-      await obsidianApplyRuntime();
       await refresh();
       toast.success("Obsidian disconnected");
     } catch (err) {

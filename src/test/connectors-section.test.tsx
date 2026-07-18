@@ -15,7 +15,6 @@ const mocks = vi.hoisted(() => ({
   obsidianStatus: vi.fn(),
   obsidianConfigure: vi.fn(),
   obsidianDisconnect: vi.fn(),
-  obsidianApplyRuntime: vi.fn(),
   openFileDialog: vi.fn(),
   listen: vi.fn(),
 }));
@@ -32,7 +31,6 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   obsidianStatus: mocks.obsidianStatus,
   obsidianConfigure: mocks.obsidianConfigure,
   obsidianDisconnect: mocks.obsidianDisconnect,
-  obsidianApplyRuntime: mocks.obsidianApplyRuntime,
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -99,7 +97,6 @@ beforeEach(() => {
     vaultName: "work",
   });
   mocks.obsidianDisconnect.mockResolvedValue({ connected: false });
-  mocks.obsidianApplyRuntime.mockResolvedValue(undefined);
   mocks.openFileDialog.mockResolvedValue(null);
   mocks.listen.mockImplementation(async (_event: string, handler: () => void) => {
     connectorsChangedListener = handler;
@@ -134,10 +131,9 @@ describe("ConnectorsSection", () => {
     resolvePicker(null);
     await waitFor(() => expect(connect).toBeEnabled());
     expect(mocks.obsidianConfigure).not.toHaveBeenCalled();
-    expect(mocks.obsidianApplyRuntime).not.toHaveBeenCalled();
   });
 
-  it("connects an Obsidian vault and applies it to the runtime", async () => {
+  it("connects an Obsidian vault without restarting Hermes", async () => {
     mocks.openFileDialog.mockResolvedValue("/vaults/work");
     mocks.obsidianStatus.mockResolvedValueOnce({ connected: false }).mockResolvedValue({
       connected: true,
@@ -150,7 +146,6 @@ describe("ConnectorsSection", () => {
     await userEvent.click(await findEnabledConnect("Connect Obsidian"));
 
     await waitFor(() => expect(mocks.obsidianConfigure).toHaveBeenCalledWith("/vaults/work"));
-    await waitFor(() => expect(mocks.obsidianApplyRuntime).toHaveBeenCalledTimes(1));
     expect(await screen.findByRole("button", { name: "Change Obsidian vault" })).toBeEnabled();
   });
 
@@ -171,16 +166,16 @@ describe("ConnectorsSection", () => {
   });
 
   it("shows immediate progress while disconnecting Obsidian", async () => {
-    let finishRuntimeApply: () => void = () => {};
+    let finishDisconnect: () => void = () => {};
     mocks.obsidianStatus.mockResolvedValue({
       connected: true,
       available: true,
       vaultPath: "/vaults/work",
       vaultName: "work",
     });
-    mocks.obsidianApplyRuntime.mockReturnValue(
+    mocks.obsidianDisconnect.mockReturnValue(
       new Promise<void>((resolve) => {
-        finishRuntimeApply = resolve;
+        finishDisconnect = resolve;
       }),
     );
 
@@ -192,35 +187,8 @@ describe("ConnectorsSection", () => {
     expect(disconnecting).toHaveTextContent("Disconnecting…");
     expect(disconnecting).toHaveAttribute("aria-busy", "true");
 
-    finishRuntimeApply();
-    await waitFor(() => expect(mocks.obsidianApplyRuntime).toHaveBeenCalledTimes(1));
-  });
-
-  it("keeps Obsidian disconnect retryable until the runtime apply succeeds", async () => {
-    const connected = {
-      connected: true,
-      available: true,
-      vaultPath: "/vaults/work",
-      vaultName: "work",
-    };
-    mocks.obsidianStatus.mockResolvedValueOnce(connected).mockResolvedValue({ connected: false });
-    mocks.obsidianApplyRuntime
-      .mockRejectedValueOnce({ message: "Runtime apply failed" })
-      .mockResolvedValueOnce(undefined);
-
-    render(<ConnectorsSection />);
-    const disconnect = await screen.findByRole("button", { name: "Disconnect Obsidian" });
-
-    await userEvent.click(disconnect);
-    expect(await screen.findByText("Runtime apply failed")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Disconnect Obsidian" })).toBeEnabled();
-    expect(mocks.obsidianDisconnect).toHaveBeenCalledTimes(1);
-
-    await userEvent.click(screen.getByRole("button", { name: "Disconnect Obsidian" }));
-
-    await waitFor(() => expect(mocks.obsidianDisconnect).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(mocks.obsidianApplyRuntime).toHaveBeenCalledTimes(2));
-    expect(await findEnabledConnect("Connect Obsidian")).toBeInTheDocument();
+    finishDisconnect();
+    await waitFor(() => expect(mocks.obsidianDisconnect).toHaveBeenCalledTimes(1));
   });
 
   it("lists Google with a capability blurb", async () => {
