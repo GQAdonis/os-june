@@ -16,10 +16,16 @@ pub fn discover(home: &Path, already_added: &HashSet<PathBuf>) -> Vec<ClaudeProj
     discover_from_config(home, &mut discovered);
     discover_from_session_history(home, &mut discovered);
 
-    let mut candidates = discovered
+    let mut canonical_discovered: BTreeMap<PathBuf, Option<SystemTime>> = BTreeMap::new();
+    for (path, last_used) in discovered {
+        if let Some(path) = eligible_project_path(home, &path) {
+            remember(&mut canonical_discovered, path, last_used);
+        }
+    }
+
+    let mut candidates = canonical_discovered
         .into_iter()
         .filter_map(|(path, last_used)| {
-            let path = eligible_project_path(home, &path)?;
             let name = path.file_name()?.to_string_lossy().trim().to_string();
             if name.is_empty() {
                 return None;
@@ -221,5 +227,40 @@ mod tests {
         .expect("config");
 
         assert!(discover(home, &HashSet::new()).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deduplicates_project_aliases_after_canonicalizing() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path();
+        let project = home.join("code").join("project");
+        let alias = home.join("project-alias");
+        fs::create_dir_all(&project).expect("project");
+        symlink(&project, &alias).expect("project alias");
+        fs::write(
+            home.join(".claude.json"),
+            serde_json::json!({
+                "projects": {
+                    project.to_string_lossy(): {},
+                    alias.to_string_lossy(): {}
+                }
+            })
+            .to_string(),
+        )
+        .expect("config");
+
+        let candidates = discover(home, &HashSet::new());
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].path,
+            project
+                .canonicalize()
+                .expect("canonical project")
+                .to_string_lossy()
+        );
     }
 }
