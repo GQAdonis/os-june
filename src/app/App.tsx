@@ -2839,6 +2839,11 @@ export function App() {
       // and in-flight state intact, and surfacing the error keeps a failed
       // context-menu action from looking like it silently did nothing.
       if (pending.get(sessionId) === chained) {
+        // This toggle never persisted, so it must not keep shadowing the
+        // initial load: un-tracking the id lets a still-in-flight boot snapshot
+        // restore the session's true completed state (matters when the toggle
+        // was made before that load settled).
+        sessionCompletionTouchedRef.current.delete(sessionId);
         setCompletedSessions((prev) => {
           const next = { ...prev };
           if (priorValue === undefined) delete next[sessionId];
