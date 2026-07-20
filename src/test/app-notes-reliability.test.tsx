@@ -359,6 +359,17 @@ describe("notes recording reliability", () => {
     });
   }
 
+  async function startRecordingDirectlyOnFirstNote() {
+    render(<App />);
+    await waitFor(() => expect(mocks.getNote).toHaveBeenCalledWith("note-1"));
+    await userEvent.click(await screen.findByRole("button", { name: "Meeting notes" }));
+    await userEvent.click(screen.getByRole("button", { name: "First note Preview" }));
+    await userEvent.click(screen.getByRole("button", { name: "Record" }));
+    await waitFor(() =>
+      expect(mocks.startRecording).toHaveBeenCalledWith("note-1", "microphonePlusSystem"),
+    );
+  }
+
   it("stays on meeting notes after deleting the last note", async () => {
     mocks.bootstrapApp.mockResolvedValue({
       folders: [],
@@ -919,6 +930,62 @@ describe("notes recording reliability", () => {
     await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalledWith("rec-1"));
 
     await waitFor(() => expect(screen.getByText(/Transcribing audio/)).toBeInTheDocument());
+  });
+
+  it("clears a stale failure when Stop optimistically starts transcription", async () => {
+    const failedNote = {
+      ...first,
+      processingStatus: "failed" as const,
+      lastError: "Microphone: upstream_provider_failed",
+    };
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [failedNote, second],
+      activeRecoveries: [],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) =>
+      noteId === "note-2" ? second : failedNote,
+    );
+    const pendingFinish = deferred<never>();
+    mocks.finishRecording.mockReturnValue(pendingFinish.promise);
+
+    await startRecordingDirectlyOnFirstNote();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalledWith("rec-1"));
+
+    expect(await screen.findByText(/Transcribing audio/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert", { name: "Transcription warning" })).toBeNull();
+    expect(
+      screen.queryByText(/The transcription provider could not process this audio\./),
+    ).toBeNull();
+  });
+
+  it("preserves an active warning when Stop queues another recording", async () => {
+    const warningNote = {
+      ...first,
+      processingStatus: "transcribing" as const,
+      lastError: "authorization_denied",
+    };
+    mocks.bootstrapApp.mockResolvedValue({
+      folders: [],
+      notes: [warningNote, second],
+      activeRecoveries: [],
+      providerConfigured: true,
+    });
+    mocks.getNote.mockImplementation(async (noteId: string) =>
+      noteId === "note-2" ? second : warningNote,
+    );
+    const pendingFinish = deferred<never>();
+    mocks.finishRecording.mockReturnValue(pendingFinish.promise);
+
+    await startRecordingDirectlyOnFirstNote();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    await waitFor(() => expect(mocks.finishRecording).toHaveBeenCalledWith("rec-1"));
+
+    expect(screen.getByRole("alert", { name: "Transcription warning" })).toHaveTextContent(
+      "The service is busy right now. Wait a minute, then retry.",
+    );
   });
 
   it("polls newly persisted turns while note transcription remains active", async () => {
