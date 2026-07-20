@@ -1197,6 +1197,35 @@ export async function setHermesAgentCliAccess(enabled: boolean) {
   });
 }
 
+export type BrowserAccessStatus = {
+  enabled: boolean;
+};
+
+export type BrowserTransportPolicy = {
+  attendedEnabled: boolean;
+  managedEnabled: boolean;
+};
+
+export const BROWSER_TRANSPORT_POLICY_CHANGED_EVENT = "june://browser-transport-policy-changed";
+
+/** Last successfully fetched remote policy for the two Browser use transports. */
+export async function browserTransportPolicy() {
+  return invoke<BrowserTransportPolicy>("browser_transport_policy");
+}
+
+/** Whether the stored Browser access grant is enabled. */
+export async function hermesBrowserAccess() {
+  return invoke<BrowserAccessStatus>("hermes_browser_access");
+}
+
+/** Persists the Browser access grant and retires both runtime modes so the
+ * next sessions receive matching june_browser config. */
+export async function setHermesBrowserAccess(enabled: boolean) {
+  return invoke<BrowserAccessStatus>("set_hermes_browser_access", {
+    request: { enabled },
+  });
+}
+
 export type JuneCharacterStatus = {
   /** The effective character text (the default when no custom one is set). */
   character: string;
@@ -2156,6 +2185,48 @@ export async function latestDictationEvent() {
   return parseDictationHelperEvent(payload);
 }
 
+// --- Browser extension pairing (JUN-287) ---
+
+export type ExtensionPairingStatus = {
+  paired: boolean;
+  listenerRunning: boolean;
+  extensionVersion?: string;
+  protocolVersion?: number;
+};
+
+/** Emitted by the extension host whenever pairing state changes. */
+export const EXTENSION_PAIRING_CHANGED_EVENT = "june://extension-pairing-changed";
+
+export async function extensionPairingStatus() {
+  return invoke<ExtensionPairingStatus>("extension_pairing_status");
+}
+
+export type RegisterBrowserExtensionHostResult = {
+  manifestPath: string;
+  shimPath: string;
+};
+
+/** Writes native messaging host manifests for the supported Chromium-family
+ * browsers, pinning the June extension id to the bundled shim. */
+export async function registerBrowserExtensionHost() {
+  return invoke<RegisterBrowserExtensionHostResult>("register_browser_extension_host");
+}
+
+export type RoutineBrowserAccess = {
+  enabled: boolean;
+  serverName?: string | null;
+};
+
+export async function routineBrowserAccessGet(jobId: string) {
+  return invoke<RoutineBrowserAccess>("routine_browser_access_get", { jobId });
+}
+
+export async function routineBrowserAccessSet(input: { jobId: string; enabled: boolean }) {
+  return invoke<RoutineBrowserAccess>("routine_browser_access_set", {
+    request: input,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Private connectors (local mode): Google and Linear
 // ---------------------------------------------------------------------------
@@ -2248,6 +2319,16 @@ export type PendingConnectorApproval = {
   accountEmail: string;
   summary: string;
   argsPreview: string;
+  requestedAtMs: number;
+};
+
+/** One attended Browser use action parked in the Rust broker. Page content is
+ * limited to the exact origin and element label needed for informed consent. */
+export type PendingBrowserApproval = {
+  approvalId: string;
+  site: string;
+  action: "click" | "fill" | "press";
+  elementLabel: string;
   requestedAtMs: number;
 };
 
@@ -2539,6 +2620,22 @@ export async function connectorApprovalsRespondAll(input: {
   return invoke<void>("connector_approvals_respond_all", {
     approve: input.approve,
     approvalIds: input.approvalIds,
+  });
+}
+
+export async function browserApprovalsPending() {
+  return invoke<PendingBrowserApproval[]>("browser_approvals_pending");
+}
+
+export async function browserApprovalRespond(input: {
+  approvalId: string;
+  approve: boolean;
+  allowSite?: boolean;
+}) {
+  return invoke<void>("browser_approval_respond", {
+    approvalId: input.approvalId,
+    approve: input.approve,
+    allowSite: input.allowSite ?? false,
   });
 }
 

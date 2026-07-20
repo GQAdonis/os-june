@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ConnectorsSection } from "../components/settings/ConnectorsSection";
@@ -10,6 +10,11 @@ const mocks = vi.hoisted(() => ({
   connectorsCancelConnect: vi.fn(),
   connectorsDisconnect: vi.fn(),
   connectorsApplyRuntime: vi.fn(),
+  hermesBrowserAccess: vi.fn(),
+  setHermesBrowserAccess: vi.fn(),
+  extensionPairingStatus: vi.fn(),
+  registerBrowserExtensionHost: vi.fn(),
+  browserTransportPolicy: vi.fn(),
   connectorsLinearTeams: vi.fn(),
   connectorsSetSelectedTeams: vi.fn(),
   obsidianStatus: vi.fn(),
@@ -23,6 +28,13 @@ const mocks = vi.hoisted(() => ({
   toastError: vi.fn(),
 }));
 
+// Pin BROWSER_USE_ENABLED on so the Browser use capability row stays testable
+// regardless of the committed flag value.
+vi.mock("../lib/feature-flags", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../lib/feature-flags")>()),
+  BROWSER_USE_ENABLED: true,
+}));
+
 vi.mock("../lib/tauri", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/tauri")>()),
   connectorsList: mocks.connectorsList,
@@ -30,6 +42,12 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   connectorsCancelConnect: mocks.connectorsCancelConnect,
   connectorsDisconnect: mocks.connectorsDisconnect,
   connectorsApplyRuntime: mocks.connectorsApplyRuntime,
+  hermesBrowserAccess: mocks.hermesBrowserAccess,
+  setHermesBrowserAccess: mocks.setHermesBrowserAccess,
+  extensionPairingStatus: mocks.extensionPairingStatus,
+  registerBrowserExtensionHost: mocks.registerBrowserExtensionHost,
+  browserTransportPolicy: mocks.browserTransportPolicy,
+  EXTENSION_PAIRING_CHANGED_EVENT: "june://extension-pairing-changed",
   connectorsLinearTeams: mocks.connectorsLinearTeams,
   connectorsSetSelectedTeams: mocks.connectorsSetSelectedTeams,
   obsidianStatus: mocks.obsidianStatus,
@@ -103,6 +121,17 @@ beforeEach(() => {
     truncated: false,
   });
   mocks.connectorsSetSelectedTeams.mockResolvedValue(linearAccount({ selectedTeams: [TEAM_ENG] }));
+  mocks.hermesBrowserAccess.mockResolvedValue({ enabled: false });
+  mocks.setHermesBrowserAccess.mockImplementation(async (enabled: boolean) => ({ enabled }));
+  mocks.extensionPairingStatus.mockResolvedValue({ paired: false, listenerRunning: true });
+  mocks.registerBrowserExtensionHost.mockResolvedValue({
+    manifestPath: "/tmp/co.opensoftware.june.extension.json",
+    shimPath: "/tmp/june-nm-shim",
+  });
+  mocks.browserTransportPolicy.mockResolvedValue({
+    attendedEnabled: true,
+    managedEnabled: true,
+  });
   mocks.obsidianStatus.mockResolvedValue({ connected: false });
   mocks.obsidianConfigure.mockResolvedValue({
     connected: true,
@@ -132,6 +161,120 @@ async function findEnabledConnect(name: string) {
 }
 
 describe("ConnectorsSection", () => {
+  it("lists Browser use as a capability beside the account directory", async () => {
+    render(<ConnectorsSection />);
+
+    const row = (await screen.findByText("Browser use")).closest("li");
+    expect(row).not.toBeNull();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Connect" })).toBeEnabled();
+    expect(within(row as HTMLElement).getByText(/page text and screenshots/i)).toBeInTheDocument();
+  });
+
+  it("explains and disables attended setup when its transport is remotely disabled", async () => {
+    mocks.browserTransportPolicy.mockResolvedValue({
+      attendedEnabled: false,
+      managedEnabled: true,
+    });
+    render(<ConnectorsSection />);
+
+    const row = (await screen.findByText("Browser use")).closest("li") as HTMLElement;
+    expect(
+      await within(row).findByText(/attended sessions is temporarily unavailable/i),
+    ).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "Connect" })).toBeDisabled();
+    expect(within(row).getByText("Temporarily unavailable")).toBeInTheDocument();
+  });
+
+  it("connects Browser use by granting access before registering the native host", async () => {
+    render(<ConnectorsSection />);
+
+    const row = (await screen.findByText("Browser use")).closest("li") as HTMLElement;
+    await userEvent.click(within(row).getByRole("button", { name: "Connect" }));
+
+    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(true));
+    expect(mocks.registerBrowserExtensionHost).toHaveBeenCalledOnce();
+    expect(mocks.setHermesBrowserAccess.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.registerBrowserExtensionHost.mock.invocationCallOrder[0],
+    );
+    expect(await within(row).findByText(/Browser access is on/i)).toBeInTheDocument();
+  });
+
+  it("shows a granted but unpaired capability as actionable setup", async () => {
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: true });
+    render(<ConnectorsSection />);
+
+    const row = (await screen.findByText("Browser use")).closest("li") as HTMLElement;
+    expect(await within(row).findByText("Finish setup")).toBeInTheDocument();
+    expect(within(row).getByText(/Browser access is on/i)).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "Set up extension" })).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: "Disconnect" })).toBeInTheDocument();
+    expect(within(row).queryByRole("alert")).toBeNull();
+  });
+
+  it("updates Browser use to connected when the extension pairing event arrives", async () => {
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    mocks.listen.mockImplementation((event: string, handler: (e: { payload: unknown }) => void) => {
+      handlers.set(event, handler);
+      return Promise.resolve(() => {});
+    });
+    render(<ConnectorsSection />);
+
+    const row = (await screen.findByText("Browser use")).closest("li") as HTMLElement;
+    await userEvent.click(await within(row).findByRole("button", { name: "Connect" }));
+    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(handlers.has("june://extension-pairing-changed")).toBe(true));
+    act(() => {
+      handlers.get("june://extension-pairing-changed")?.({
+        payload: { paired: true, listenerRunning: true, extensionVersion: "0.1.0" },
+      });
+    });
+
+    expect(await within(row).findByText("Connected")).toBeInTheDocument();
+    expect(within(row).getByText(/version 0\.1\.0/)).toBeInTheDocument();
+    expect(within(row).queryByRole("button", { name: "Set up extension" })).toBeNull();
+    expect(within(row).queryByText(/finish connecting/i)).toBeNull();
+  });
+
+  it("subscribes before reading pairing state and ignores an older snapshot", async () => {
+    const handlers = new Map<string, (event: { payload: unknown }) => void>();
+    let finishPairingListen: ((cleanup: () => void) => void) | undefined;
+    let finishStatus: ((status: { paired: boolean; listenerRunning: boolean }) => void) | undefined;
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: true });
+    mocks.extensionPairingStatus.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishStatus = resolve;
+        }),
+    );
+    mocks.listen.mockImplementation((event: string, handler: (e: { payload: unknown }) => void) => {
+      handlers.set(event, handler);
+      if (event === "june://extension-pairing-changed") {
+        return new Promise((resolve) => {
+          finishPairingListen = resolve;
+        });
+      }
+      return Promise.resolve(() => {});
+    });
+
+    render(<ConnectorsSection />);
+
+    await waitFor(() => expect(finishPairingListen).toBeDefined());
+    expect(mocks.extensionPairingStatus).not.toHaveBeenCalled();
+    act(() => finishPairingListen?.(() => {}));
+    await waitFor(() => expect(mocks.extensionPairingStatus).toHaveBeenCalledOnce());
+
+    act(() => {
+      handlers.get("june://extension-pairing-changed")?.({
+        payload: { paired: true, listenerRunning: true, extensionVersion: "0.1.0" },
+      });
+      finishStatus?.({ paired: false, listenerRunning: true });
+    });
+
+    const row = (await screen.findByText("Browser use")).closest("li") as HTMLElement;
+    expect(await within(row).findByText("Connected")).toBeInTheDocument();
+    expect(within(row).queryByText("Finish setup")).toBeNull();
+  });
+
   it("uses plugin terminology for Obsidian status errors", async () => {
     mocks.obsidianStatus.mockRejectedValue(new Error("Could not read the saved vault"));
 

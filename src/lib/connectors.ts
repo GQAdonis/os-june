@@ -463,7 +463,11 @@ export function providerFromServer(server: string): "google" | "linear" | "notio
  */
 export function routineToolsetsFor(
   trust: RoutineTrustMode,
-  options: { unrestricted: boolean; autonomousServers?: string[] },
+  options: {
+    unrestricted: boolean;
+    autonomousServers?: string[];
+    routineBrowserServer?: string;
+  },
 ): string[] {
   const base = options.unrestricted
     ? UNRESTRICTED_ROUTINE_TOOLSETS
@@ -471,6 +475,7 @@ export function routineToolsetsFor(
   const toolsets = [...base, ...CONNECTOR_READ_TOOLSETS];
   if (trust === "approval") toolsets.push(...CONNECTOR_ACTION_TOOLSETS);
   if (trust === "autonomous") toolsets.push(...(options.autonomousServers ?? []));
+  if (options.routineBrowserServer) toolsets.push(options.routineBrowserServer);
   return [...new Set(toolsets)];
 }
 

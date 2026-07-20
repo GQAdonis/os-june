@@ -92,6 +92,7 @@ const mocks = vi.hoisted(() => ({
   ensureHermesBridgeSession: vi.fn(),
   finalizeHermesBridgeBranch: vi.fn(),
   hermesAgentCliAccess: vi.fn(),
+  hermesBrowserAccess: vi.fn(),
   hermesBridgeFilesystemSnapshot: vi.fn(),
   hermesBridgeStatus: vi.fn(),
   listAgentTasks: vi.fn(),
@@ -233,6 +234,7 @@ vi.mock("../lib/tauri", () => ({
   ensureHermesBridgeSession: mocks.ensureHermesBridgeSession,
   finalizeHermesBridgeBranch: mocks.finalizeHermesBridgeBranch,
   hermesAgentCliAccess: mocks.hermesAgentCliAccess,
+  hermesBrowserAccess: mocks.hermesBrowserAccess,
   hermesBridgeFilesystemSnapshot: mocks.hermesBridgeFilesystemSnapshot,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
   listAgentTasks: mocks.listAgentTasks,
@@ -389,6 +391,7 @@ describe("App shortcuts", () => {
     mocks.osAccountsUpgrade.mockResolvedValue(undefined);
     mocks.ensureHermesBridgeSession.mockResolvedValue({});
     mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: false });
     mocks.hermesBridgeFilesystemSnapshot.mockResolvedValue({ roots: [] });
     mocks.hermesBridgeStatus.mockResolvedValue({
       running: false,

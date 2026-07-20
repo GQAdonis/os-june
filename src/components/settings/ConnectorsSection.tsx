@@ -36,6 +36,8 @@ import { Dialog } from "../ui/Dialog";
 import { InlineNotice } from "../ui/InlineNotice";
 import { toast } from "../ui/Toaster";
 import { SettingsPageHeader } from "./AppSettings";
+import { BROWSER_USE_ENABLED } from "../../lib/feature-flags";
+import { BrowserUseCapabilityRow } from "./BrowserExtensionSettings";
 
 // Read-only by default: Google gets mail read and calendar read, Linear gets
 // workspace read. Write scopes are opt-in checkboxes, so a fresh connect
@@ -314,8 +316,10 @@ function connectDescription(
  * always listed) with a feature-bundle picker per provider, reconnect for
  * lapsed grants, and disconnect with optional provider-side revoke. A
  * connected Linear workspace also needs a team selection before June can
- * read or write anything in it. Local mode only: tokens live in the Mac's
- * Keychain and provider calls originate on this device.
+ * read or write anything in it. Browser use is a separate capability row
+ * because its grant and extension pairing have no account, email, or scopes.
+ * Local mode only: tokens live in the Mac's Keychain and provider calls
+ * originate on this device.
  */
 export function ConnectorsSection() {
   const [accounts, setAccounts] = useState<ConnectorAccount[] | null>(null);
@@ -733,6 +737,7 @@ export function ConnectorsSection() {
 
       <div className="settings-card connectors-card">
         <ul className="connectors-list">
+          {BROWSER_USE_ENABLED ? <BrowserUseCapabilityRow /> : null}
           <li className="connector-row">
             <span className="connector-logo" aria-hidden>
               <ConnectorProviderIcon provider="obsidian" />

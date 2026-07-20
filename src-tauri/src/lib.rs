@@ -1,6 +1,8 @@
 pub mod agent_hud;
 pub mod app_paths;
 pub mod audio;
+pub mod browser;
+mod browser_broker;
 pub mod commands;
 pub mod computer_use;
 mod computer_use_permission_drag;
@@ -8,6 +10,7 @@ pub mod connectors;
 pub mod db;
 pub mod dictation;
 pub mod domain;
+pub mod extension_host;
 pub mod feature_flags;
 pub mod hermes_bridge;
 pub mod image_safety;
@@ -251,6 +254,11 @@ pub fn run() {
             hermes_bridge::update_hermes_bridge_messaging_platform,
             hermes_bridge::hermes_agent_cli_access,
             hermes_bridge::set_hermes_agent_cli_access,
+            hermes_bridge::hermes_browser_access,
+            hermes_bridge::browser_transport_policy,
+            hermes_bridge::set_hermes_browser_access,
+            hermes_bridge::routine_browser_access_get,
+            hermes_bridge::routine_browser_access_set,
             hermes_bridge::june_character,
             hermes_bridge::set_june_character,
             hermes_bridge::open_hermes_tui_debug,
@@ -333,6 +341,8 @@ pub fn run() {
             os_accounts::os_accounts_change_plan,
             os_accounts::os_accounts_open_portal,
             os_accounts::os_accounts_referral_summary,
+            extension_host::extension_pairing_status,
+            extension_host::register_browser_extension_host,
             connectors::commands::connectors_list,
             connectors::commands::connectors_connect,
             connectors::commands::connectors_cancel_connect,
@@ -356,6 +366,8 @@ pub fn run() {
             connectors::approvals::connector_approvals_pending,
             connectors::approvals::connector_approval_respond,
             connectors::approvals::connector_approvals_respond_all,
+            hermes_bridge::browser_approvals_pending,
+            hermes_bridge::browser_approval_respond,
             hermes_bridge::connectors_apply_runtime,
             computer_use::computer_use_status,
             computer_use::set_computer_use_grant,
@@ -376,9 +388,11 @@ pub fn run() {
         .manage(hermes_bridge::HermesBridge::default())
         .manage(computer_use::ComputerUseState::default())
         .manage(os_accounts::LoginFlow::default())
+        .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
         .manage(connectors::NotionConnectFlow::default())
         .setup(|app| {
+            browser::setup_on_app_start();
             setup_app_menu(app)?;
             menu_bar::setup(app)?;
             providers::setup(app);
@@ -392,6 +406,7 @@ pub fn run() {
             meeting_detection::setup(app);
             repair_agent_task_statuses_on_app_start(app);
             hermes_bridge::start_on_app_start(app);
+            extension_host::setup(app);
             // Poll Google for the events routines subscribe to (email arrivals,
             // upcoming meetings) and wake the matching routine. Runs after the
             // bridge init so cron triggers have a runtime to fire into.

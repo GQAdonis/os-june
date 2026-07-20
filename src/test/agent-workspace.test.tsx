@@ -8,6 +8,7 @@ import {
   AGENT_SESSION_RENAMED_EVENT,
   AGENT_SESSIONS_CHANGED_EVENT,
   AgentWorkspace,
+  BrowserApprovalCard,
   HERO_GREETINGS,
   SkillsToolsPanel,
   canShareAgentSession,
@@ -104,6 +105,9 @@ const mocks = vi.hoisted(() => ({
   listHermesSessionMessages: vi.fn(),
   hermesAgentCliAccess: vi.fn(),
   setHermesAgentCliAccess: vi.fn(),
+  hermesBrowserAccess: vi.fn(),
+  registerBrowserExtensionHost: vi.fn(),
+  setHermesBrowserAccess: vi.fn(),
   listHermesSessions: vi.fn(),
   listSessionProfiles: vi.fn(),
   gatewayRequest: vi.fn(),
@@ -165,6 +169,8 @@ vi.mock("../lib/tauri", () => ({
   hermesBridgeFileText: mocks.hermesBridgeFileText,
   hermesBridgeMessagingPlatforms: mocks.hermesBridgeMessagingPlatforms,
   hermesAgentCliAccess: mocks.hermesAgentCliAccess,
+  hermesBrowserAccess: mocks.hermesBrowserAccess,
+  registerBrowserExtensionHost: mocks.registerBrowserExtensionHost,
   hermesBridgeSkills: mocks.hermesBridgeSkills,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
   hermesBridgeToolsets: mocks.hermesBridgeToolsets,
@@ -181,6 +187,7 @@ vi.mock("../lib/tauri", () => ({
   videoStatus: mocks.videoStatus,
   retryAgentTask: mocks.retryAgentTask,
   setHermesAgentCliAccess: mocks.setHermesAgentCliAccess,
+  setHermesBrowserAccess: mocks.setHermesBrowserAccess,
   setImageSafeMode: mocks.setImageSafeMode,
   setImageSafeModePromptDismissed: mocks.setImageSafeModePromptDismissed,
   setCostQuality: mocks.setCostQuality,
@@ -206,11 +213,12 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: mocks.openFileDialog,
 }));
 
-// Pin VIDEO_GENERATION_ENABLED on so the /video surfaces stay testable
-// regardless of the committed flag value.
+// Pin VIDEO_GENERATION_ENABLED and BROWSER_USE_ENABLED on so the /video and
+// Browser use surfaces stay testable regardless of the committed flag values.
 vi.mock("../lib/feature-flags", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/feature-flags")>()),
   VIDEO_GENERATION_ENABLED: true,
+  BROWSER_USE_ENABLED: true,
 }));
 
 vi.mock("../lib/hermes-adapter", async (importOriginal) => ({
@@ -451,6 +459,39 @@ async function settleUnderFakeTimers(
   assertion();
 }
 
+describe("BrowserApprovalCard", () => {
+  it("shows the informed-consent facts and all three broker decisions", async () => {
+    const onRespond = vi.fn();
+    render(
+      <BrowserApprovalCard
+        approval={{
+          approvalId: "browser-approval-1",
+          site: "https://shop.example",
+          action: "click",
+          elementLabel: "Purchase now",
+          requestedAtMs: 1,
+        }}
+        submitting={false}
+        onRespond={onRespond}
+      />,
+    );
+
+    expect(screen.getByText("Browser approval required")).toBeInTheDocument();
+    expect(screen.getByText(/Site: https:\/\/shop\.example/)).toBeInTheDocument();
+    expect(screen.getByText(/Action: Click/)).toBeInTheDocument();
+    expect(screen.getByText(/Element: Purchase now/)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Approve" }));
+    expect(onRespond).toHaveBeenLastCalledWith(true, false);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Approve all on this site for this task" }),
+    );
+    expect(onRespond).toHaveBeenLastCalledWith(true, true);
+    await userEvent.click(screen.getByRole("button", { name: "Decline" }));
+    expect(onRespond).toHaveBeenLastCalledWith(false, false);
+  });
+});
+
 describe("AgentWorkspace", () => {
   it("accepts concise topic titles without treating their first word as dialogue", () => {
     expect(isAgentSessionTitleCandidate("How to deploy June")).toBe(true);
@@ -602,6 +643,11 @@ describe("AgentWorkspace", () => {
     mocks.listSessionProfiles.mockResolvedValue([]);
     mocks.listHermesSessionMessages.mockResolvedValue([]);
     mocks.hermesAgentCliAccess.mockResolvedValue({ enabled: false });
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: false });
+    mocks.registerBrowserExtensionHost.mockResolvedValue({
+      manifestPath: "/tmp/june-browser-host.json",
+      shimPath: "/tmp/june-nm-shim",
+    });
     mocks.hermesBridgeSkills.mockResolvedValue([]);
     mocks.getHermesBridgeSkill.mockImplementation(async (name: string) => ({
       name,
@@ -6149,6 +6195,129 @@ describe("AgentWorkspace", () => {
     // The card resolves quietly; nothing is sent into the session.
     expect(await screen.findByText("Not now")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Enable Agent CLI access" })).toBeNull();
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+  });
+
+  it("renders June's browser use request as a card and enables the grant", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "u1",
+        role: "user",
+        content: "check my dashboard and summarize it",
+        timestamp: "2026-07-14T10:00:00Z",
+      },
+      {
+        id: "a1",
+        role: "assistant",
+        content: "That page needs a live browser session.\n\n[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+    mocks.setHermesBrowserAccess.mockResolvedValue({ enabled: true });
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    expect(await screen.findByText("Browser use requested")).toBeInTheDocument();
+    // The token renders as the card, never as literal text.
+    expect(screen.queryByText(/REQUEST:BROWSER_ACCESS/)).toBeNull();
+    expect(screen.getByText(/needs a live browser session/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Enable Browser use" }));
+
+    // Approving persists the same stored grant as the Settings toggle (the
+    // setter also restarts both runtime modes)...
+    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(true));
+    expect(mocks.registerBrowserExtensionHost).toHaveBeenCalledOnce();
+    // ...and June is told the grant is live, so it retries the turn that
+    // asked on the restarted runtime.
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: expect.stringContaining("I enabled Browser use"),
+      }),
+    );
+    expect(mocks.setHermesBrowserAccess.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.registerBrowserExtensionHost.mock.invocationCallOrder[0],
+    );
+    const submitIndex = mocks.gatewayRequest.mock.calls.findIndex(
+      ([method]) => method === "prompt.submit",
+    );
+    expect(submitIndex).toBeGreaterThanOrEqual(0);
+    expect(mocks.registerBrowserExtensionHost.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.gatewayRequest.mock.invocationCallOrder[submitIndex],
+    );
+    expect(await screen.findByText("Browser use enabled")).toBeInTheDocument();
+  });
+
+  it("blocks the browser-use follow-up at the shared paid dispatch boundary", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+    mocks.setHermesBrowserAccess.mockResolvedValue({ enabled: true });
+    const user = userEvent.setup();
+
+    render(
+      <AgentWorkspace
+        initialSession={existingSession}
+        creditActionsDisabledReason="Add credits to send messages or generate images and videos."
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Enable Browser use" }));
+
+    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(true));
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
+    expect(
+      screen.getAllByText("Add credits to send messages or generate images and videos.").length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("shows the browser use request as already granted when the grant is on", async () => {
+    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: true });
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    // Already granted resolves to the quiet collapsed receipt row — the full
+    // "requested" prompt title is not shown, only the enabled outcome.
+    expect(await screen.findByText("Browser use enabled")).toBeInTheDocument();
+    expect(screen.queryByText("Browser use requested")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Enable Browser use" })).toBeNull();
+  });
+
+  it("dismisses the browser use request without changing the grant", async () => {
+    mocks.listHermesSessionMessages.mockResolvedValue([
+      {
+        id: "a1",
+        role: "assistant",
+        content: "The page needs a browser.\n\n[REQUEST:BROWSER_ACCESS]",
+        timestamp: "2026-07-14T10:00:05Z",
+      },
+    ]);
+    const user = userEvent.setup();
+
+    render(<AgentWorkspace initialSession={existingSession} />);
+
+    await user.click(await screen.findByRole("button", { name: "Not now" }));
+
+    // Declining leaves the grant off and the session usable: nothing is sent
+    // into the session and the card resolves quietly.
+    expect(mocks.setHermesBrowserAccess).not.toHaveBeenCalled();
+    expect(await screen.findByText("Not now")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Enable Browser use" })).toBeNull();
     expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", expect.anything());
   });
 

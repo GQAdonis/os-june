@@ -1,4 +1,12 @@
 use crate::domain::types::{AppError, MemorySettingsDto};
+use crate::{
+    browser::managed::ManagedBrowserTransport,
+    browser_broker::{
+        BrowserBroker, BrowserBrokerContext, BrowserTransportKind, BrowserTransportPolicy,
+        ExtensionBrowserTransport, PendingBrowserApproval, RoutineBrowserGrant,
+        BROWSER_APPROVALS_CHANGED_EVENT,
+    },
+};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::{distributions::Alphanumeric, Rng, RngCore};
 use serde::{Deserialize, Serialize};
@@ -18,12 +26,16 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt, AsyncWrite, AsyncWriteExt},
     sync::oneshot,
 };
 
 const READY_TIMEOUT: Duration = Duration::from_secs(45);
 const READY_POLL: Duration = Duration::from_millis(500);
+const BROWSER_TRANSPORT_POLICY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const BROWSER_TRANSPORT_POLICY_CACHE_FILE: &str = "browser-transport-policy.json";
+pub(crate) const BROWSER_TRANSPORT_POLICY_CHANGED_EVENT: &str =
+    "june://browser-transport-policy-changed";
 #[cfg(target_os = "macos")]
 const HERMES_RUNTIME_OWNER_RECORD_PREFIX: &str = "hermes-runtime-owner-";
 #[cfg(target_os = "macos")]
@@ -195,6 +207,22 @@ const JUNE_COMPUTER_USE_MCP_TOKEN_ENV: &str = "JUNE_COMPUTER_USE_PROXY_TOKEN";
 /// timeout stack (proxy lease < python client < this), pinned by
 /// `recorder_timeout_stack_ordering_holds`.
 const JUNE_RECORDER_MCP_TOOL_TIMEOUT_SECS: u64 = 620;
+const JUNE_BROWSER_MCP_SERVER_NAME: &str = "june_browser";
+const JUNE_BROWSER_MCP_SCRIPT_NAME: &str = "june_browser_mcp.py";
+const JUNE_BROWSER_MCP_SCRIPT: &str = include_str!("hermes/june_browser_mcp.py");
+/// Environment variables the `june_browser` MCP reads its context-bound
+/// loopback credentials from. The routine token is rendered into the shared
+/// config because the launchd gateway receives no arbitrary parent env. The
+/// attended token is only interpolated from the dashboard process environment,
+/// so a routine can read its own config without learning the attended secret.
+const JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV: &str = "JUNE_BROWSER_ROUTINE_PROXY_TOKEN";
+const JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV: &str = "JUNE_BROWSER_ATTENDED_PROXY_TOKEN";
+/// Each distinct MCP entry carries the caller context bound to its credential.
+/// Hermes initializes long-lived MCP processes before it sets gateway/cron
+/// session markers, so those runtime markers cannot identify the subprocess.
+const JUNE_BROWSER_MCP_CALL_CONTEXT_ENV: &str = "JUNE_BROWSER_CALL_CONTEXT";
+const LEGACY_JUNE_BROWSER_MCP_CRON_CONTEXT_ENV: &str = "JUNE_BROWSER_CRON_SESSION";
+const LEGACY_JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV: &str = "JUNE_BROWSER_GATEWAY_SESSION";
 // Private Google connectors: Gmail and Calendar read/action MCP servers,
 // registered only when at least one Google account is connected.
 // They call the loopback provider proxy's /v1/gmail*, /v1/gcal*, /v1/linear*
@@ -412,6 +440,34 @@ const JUNE_SOUL_CLI_ALLOWED_MD: &str = r#"
 Agent CLIs (Claude Code, Codex, Gemini, opencode): the user enabled Agent CLI access, so sandboxed sessions can also write those tools' own state folders (~/.claude and ~/.claude.json, ~/.codex, ~/.gemini, opencode's config and state). Driving the user's installed CLIs is a first-class job: run them directly; they can keep sessions and refreshed credentials. Everything else stays jailed. Do not edit their settings or hook files unless the user explicitly asks, because configuration in those folders runs outside this sandbox later. Interactive logins (for example `claude /login`) are browser flows you can never complete; ask the user to run them once in their own terminal.
 "#;
 
+/// Appended when the user has NOT enabled Browser use (the Browser access
+/// grant is off): the `june_browser` tools are rendered disabled and the
+/// broker refuses their requests, so the agent must not pretend it can
+/// browse — instead it can request the grant in-chat via a literal token the
+/// app turns into a one-click approval card. The agent itself can never flip
+/// the setting: the flag file lives outside every sandbox write root by
+/// design. When the grant is ON, `JUNE_SOUL_BROWSER_ENABLED_MD` takes its
+/// place: tool descriptions alone do not stop the model defaulting to "I
+/// can't browse".
+///
+/// `BROWSER_ACCESS_REQUEST_TOKEN` in `src/lib/browser-access.ts` must match
+/// the token spelled out below.
+const JUNE_SOUL_BROWSER_BLOCKED_MD: &str = r#"
+Browser use (the june_browser tools): the user has not enabled Browser use, so those tools are disabled and any call to them fails with browser_access_disabled. Never pretend you browsed or invent page content. When a task genuinely needs a live browser (a page behind a login, operating a web app, content the fetch tools cannot reach), say plainly that Browser use is off, then request it directly: put the literal token [REQUEST:BROWSER_ACCESS] on its own line in your reply. The June app replaces that token with an approval card; one click enables "Browser use" in Settings, restarts the runtime, and prompts you to retry. Use the token only for this setting and at most once per reply. The user can instead turn it on themselves in Settings, Connectors. For public pages that need no login or interaction, prefer the june_web tools; they work without Browser use.
+"#;
+
+/// Appended when the user HAS enabled Browser use. Without this, an enabled
+/// session sees the `june_browser` tools but no framing, and the model falls
+/// back to its default "I can't access your browser" refusal instead of using
+/// them — which is exactly what happens in practice. This section tells the
+/// model plainly that it can operate the user's browser and when to reach for
+/// it, so a request like "check my notifications" drives the tools instead of
+/// a refusal. It never carries the request token (the grant is already on).
+const JUNE_SOUL_BROWSER_ENABLED_MD: &str = r#"
+Browser use (the june_browser tools): the user enabled Browser use, so in an attended chat session you can operate their browser, not only read the web. You open your own task tabs (kept in a visible, marked group), navigate, read pages with snapshot, take screenshots, and act on sites the user is already signed into; their session is available to you. You act only in your own task tabs and tabs the user explicitly shares; their other tabs are off limits. Reach for these tools whenever a task wants a live or signed-in browser: "check my notifications", "read my feed", "what's on my dashboard", filling a form, or operating a web app. Do this directly; never tell the user you cannot access their browser or their accounts, because now you can. For a public page that needs no sign-in or interaction, still prefer the june_web tools; they are lighter and open no tab. Consequential actions (submitting, sending, publishing, purchasing, deleting) pause for the user's one-click approval, so move toward them without hesitating. Never type a password, one-time code, or payment detail; ask the user to take over those fields.
+In a routine the browser is different: it is available only when that specific routine has Browser use enabled. Routine browsing is anonymous, limited to public pages, and cannot use the user's signed-in browser. Consequential actions in routines are blocked. If a routine call fails with browser_routine_not_opted_in, say plainly that this routine has not been granted browsing.
+"#;
+
 /// Per-process sandbox-status line, delivered via `HERMES_ENVIRONMENT_HINT`
 /// (Hermes reads it at prompt-build time and injects it into the system
 /// prompt's environment notes). SOUL.md is one file shared by both runtime
@@ -442,6 +498,16 @@ fn environment_hint_for_spawn(full_mode: bool, sandbox_available: bool) -> Optio
 /// opt-in. A file rather than a DB row so the synchronous spawn path can
 /// read it without async storage plumbing.
 const AGENT_CLI_ACCESS_FLAG_FILE: &str = "agent-cli-access";
+
+/// Flag file in the app data dir that records the Browser access grant (the
+/// stored grant behind Browser use). A presence flag like
+/// `AGENT_CLI_ACCESS_FLAG_FILE`, kept in the app data dir itself — outside every
+/// Hermes sandbox write root — so the jailed runtime can never grant itself
+/// browser access. An unrestricted runtime has no Seatbelt profile and can
+/// create this file, so grant integrity against that mode remains a shared
+/// follow-up with Agent CLI access. Read synchronously on every spawn and by the
+/// broker for every browser request.
+const BROWSER_ACCESS_FLAG_FILE: &str = "browser-access";
 
 /// State locations of the agent CLIs the opt-in covers, relative to $HOME.
 /// Directories become `subpath` grants. Kept in sync with the SOUL.md
@@ -587,6 +653,8 @@ const ISOLATED_HERMES_ENV_VARS: &[&str] = &[
     "HERMES_DASHBOARD_SESSION_TOKEN",
     "HERMES_ENVIRONMENT_HINT",
     "HERMES_TUI_TOOLSETS",
+    JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV,
+    JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV,
     "HERMES_MODEL",
     "HERMES_PROVIDER",
     "HERMES_CUA_DRIVER_CMD",
@@ -674,6 +742,13 @@ pub struct HermesBridge {
     /// Recently delivered recorder request ids (see
     /// `recorder_request_recently_completed`).
     recorder_completed: Mutex<std::collections::VecDeque<String>>,
+    /// The in-process browser broker (JUN-286): the persisted Browser access
+    /// grant lookup plus an in-memory session registry, shared with the
+    /// provider proxy so `/v1/browser/status` can read the grant and active
+    /// session count. The extension, native-messaging shim, and real browser
+    /// actions are JUN-287's; nothing here drives a browser.
+    browser_broker: Arc<BrowserBroker>,
+    browser_transport_policy_refresh_started: AtomicBool,
     /// Latched once at app teardown (`shutdown`). A start that observes it set
     /// must not leave a registered runtime behind, so the teardown that is about
     /// to reap the process tree does not race an in-flight start that re-orphans
@@ -769,10 +844,41 @@ struct SharedProviderProxy {
     token: String,
     memory_token: String,
     recorder_token: String,
+    routine_browser_token: BrowserProxyToken,
+    attended_browser_token: BrowserProxyToken,
     connector_token: String,
     computer_use_token: String,
     obsidian_token: String,
     shutdown: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Clone)]
+struct BrowserProxyToken {
+    value: Arc<Mutex<String>>,
+}
+
+impl BrowserProxyToken {
+    fn new(value: String) -> Self {
+        Self {
+            value: Arc::new(Mutex::new(value)),
+        }
+    }
+
+    fn current(&self) -> String {
+        self.value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn rotate(&self) -> String {
+        let next = random_token();
+        *self
+            .value
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next.clone();
+        next
+    }
 }
 
 #[derive(Clone)]
@@ -785,6 +891,13 @@ struct ProviderProxyState {
     /// `june_recorder` MCP: microphone control must not be reachable with the
     /// general provider token every model call carries.
     recorder_token: String,
+    /// Browser routes accept one of two context-bound secrets. The bearer
+    /// determines the transport; request data can only cross-check it.
+    routine_browser_token: BrowserProxyToken,
+    attended_browser_token: BrowserProxyToken,
+    /// The browser broker, shared with `HermesBridge`, so `/v1/browser/status`
+    /// reads the live Browser access grant and active session count.
+    browser_broker: Arc<BrowserBroker>,
     /// Connector routes require this dedicated secret, handed only to the
     /// connector MCP servers: provider data must not be reachable with the
     /// general provider token.
@@ -1481,6 +1594,14 @@ async fn start_hermes_bridge_inner(
         None
     };
     let june_recorder_mcp = sync_june_recorder_mcp(app, &command)?;
+    // Read the Browser access grant fresh for the rendered `june_browser`
+    // `enabled` leaf. Broker authorization does not use this spawn snapshot: it
+    // re-reads the persisted flag for every `/v1/browser/*` request.
+    let browser_access = browser_access_enabled(app);
+    let june_browser_mcp = sync_june_browser_mcp(app, &command, browser_access).await?;
+    bridge
+        .browser_broker
+        .replace_routine_grants(june_browser_mcp.routine_grants.clone());
     // Resolved from the live catalog so Hermes' vision tools attach an image
     // straight to a vision-capable model's context instead of falling back to
     // the (unconfigured) auxiliary vision LLM. `provider: custom` hides the
@@ -1507,6 +1628,7 @@ async fn start_hermes_bridge_inner(
         &provider_proxy.token,
         &provider_proxy.memory_token,
         &provider_proxy.recorder_token,
+        &provider_proxy.routine_browser_token,
         &provider_proxy.connector_token,
         &provider_proxy.computer_use_token,
         &provider_proxy.obsidian_token,
@@ -1517,6 +1639,7 @@ async fn start_hermes_bridge_inner(
         &june_image_mcp,
         june_video_mcp.as_ref(),
         &june_recorder_mcp,
+        &june_browser_mcp,
         &june_computer_use_mcp,
         june_connector_mcp.as_ref(),
     )?;
@@ -1545,6 +1668,9 @@ async fn start_hermes_bridge_inner(
         &hermes_home,
         sandbox_available,
         agent_cli_access,
+        // None (feature-flagged out) renders no browser SOUL section at all;
+        // the grant only matters once the feature exists in this build.
+        crate::feature_flags::BROWSER_USE_ENABLED.then_some(browser_access),
         june_memory_enabled(&june_context_mcp.memory_settings_path),
         video_generation_enabled,
         connectors_registered,
@@ -1621,6 +1747,13 @@ async fn start_hermes_bridge_inner(
         &hermes_home,
         &token,
         environment_hint_for_spawn(full_mode, sandbox_available),
+    );
+    // The shared config contains only an interpolation placeholder for this
+    // secret. Cron runs execute in the separate launchd gateway, which never
+    // receives this dashboard-only environment value.
+    cmd.env(
+        JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV,
+        &provider_proxy.attended_browser_token,
     );
     if computer_use_ready {
         // Only the visible interactive dashboard gets this capability. The
@@ -1760,6 +1893,39 @@ async fn ensure_provider_proxy(
     bridge: &HermesBridge,
     hermes_home: &Path,
 ) -> Result<SharedProviderProxyInfo, AppError> {
+    let app_data_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("june_provider_proxy_failed", error.to_string()))?;
+    bridge
+        .browser_broker
+        .set_access_flag_path(app_data_dir.join(BROWSER_ACCESS_FLAG_FILE));
+    let approvals_app = app.clone();
+    bridge
+        .browser_broker
+        .set_approvals_changed_notifier(Arc::new(move || {
+            let _ = approvals_app.emit(BROWSER_APPROVALS_CHANGED_EVENT, ());
+        }));
+    bridge
+        .browser_broker
+        .configure_outcome_repository(crate::commands::repositories(app).await?);
+    bridge.browser_broker.configure_transport(
+        BrowserTransportKind::Attended,
+        Arc::new(ExtensionBrowserTransport::new(
+            app.state::<crate::extension_host::ExtensionHost>()
+                .inner()
+                .clone(),
+        )),
+        hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
+        hermes_home.join("workspace").join("browser-artifacts"),
+    );
+    ensure_browser_transport_policy_refresh(app, bridge).await;
+    bridge.browser_broker.configure_transport(
+        BrowserTransportKind::Managed,
+        Arc::new(ManagedBrowserTransport::production(
+            hermes_home.join("workspace").join("browser-artifacts"),
+        )),
+        hermes_home.join(JUNE_IMAGE_MCP_IMAGES_DIR_NAME),
+        hermes_home.join("workspace").join("browser-artifacts"),
+    );
     {
         let guard = bridge.provider_proxy.lock().map_err(|_| {
             AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed.")
@@ -1770,6 +1936,8 @@ async fn ensure_provider_proxy(
                 token: proxy.token.clone(),
                 memory_token: proxy.memory_token.clone(),
                 recorder_token: proxy.recorder_token.clone(),
+                routine_browser_token: proxy.routine_browser_token.current(),
+                attended_browser_token: proxy.attended_browser_token.current(),
                 connector_token: proxy.connector_token.clone(),
                 computer_use_token: proxy.computer_use_token.clone(),
                 obsidian_token: proxy.obsidian_token.clone(),
@@ -1779,6 +1947,8 @@ async fn ensure_provider_proxy(
     let token = random_token();
     let memory_token = random_token();
     let recorder_token = random_token();
+    let routine_browser_token = BrowserProxyToken::new(random_token());
+    let attended_browser_token = BrowserProxyToken::new(random_token());
     let connector_token = random_token();
     let computer_use_token = random_token();
     let obsidian_token = random_token();
@@ -1793,6 +1963,9 @@ async fn ensure_provider_proxy(
         token.clone(),
         memory_token.clone(),
         recorder_token.clone(),
+        routine_browser_token.clone(),
+        attended_browser_token.clone(),
+        Arc::clone(&bridge.browser_broker),
         connector_token.clone(),
         computer_use_token.clone(),
         obsidian_token.clone(),
@@ -1814,6 +1987,8 @@ async fn ensure_provider_proxy(
         token: token.clone(),
         memory_token: memory_token.clone(),
         recorder_token: recorder_token.clone(),
+        routine_browser_token: routine_browser_token.clone(),
+        attended_browser_token: attended_browser_token.clone(),
         connector_token: connector_token.clone(),
         computer_use_token: computer_use_token.clone(),
         obsidian_token: obsidian_token.clone(),
@@ -1824,10 +1999,143 @@ async fn ensure_provider_proxy(
         token,
         memory_token,
         recorder_token,
+        routine_browser_token: routine_browser_token.current(),
+        attended_browser_token: attended_browser_token.current(),
         connector_token,
         computer_use_token,
         obsidian_token,
     })
+}
+
+async fn ensure_browser_transport_policy_refresh(app: &AppHandle, bridge: &HermesBridge) {
+    if bridge
+        .browser_transport_policy_refresh_started
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    match load_browser_transport_policy_cache(app) {
+        Ok(Some(policy)) if policy != bridge.browser_broker.transport_policy() => {
+            bridge.browser_broker.set_transport_policy(policy).await;
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::warn!(
+                code = %error.code,
+                "browser transport policy cache could not be read; using fail-open defaults"
+            );
+        }
+    }
+    refresh_browser_transport_policy(app, &bridge.browser_broker).await;
+    let app = app.clone();
+    let broker = Arc::clone(&bridge.browser_broker);
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(BROWSER_TRANSPORT_POLICY_REFRESH_INTERVAL);
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            refresh_browser_transport_policy(&app, &broker).await;
+        }
+    });
+}
+
+async fn refresh_browser_transport_policy(app: &AppHandle, broker: &BrowserBroker) {
+    let fetched = crate::june_api::fetch_browser_transport_policy().await;
+    let successful_policy = fetched.as_ref().ok().map(|policy| match policy {
+        Some(policy) => BrowserTransportPolicy {
+            attended_enabled: policy.attended_enabled,
+            managed_enabled: policy.managed_enabled,
+        },
+        None => BrowserTransportPolicy::default(),
+    });
+    let changed = apply_browser_transport_policy_fetch_result(broker, fetched).await;
+    if let Some(policy) = successful_policy {
+        if let Err(error) = persist_browser_transport_policy_cache(app, policy) {
+            tracing::warn!(
+                code = %error.code,
+                "browser transport policy cache could not be persisted"
+            );
+        }
+    }
+    if changed {
+        let _ = app.emit(
+            BROWSER_TRANSPORT_POLICY_CHANGED_EVENT,
+            broker.transport_policy(),
+        );
+    }
+}
+
+fn browser_transport_policy_cache_path(app: &AppHandle) -> Result<PathBuf, AppError> {
+    crate::app_paths::app_data_dir(app)
+        .map(|path| path.join(BROWSER_TRANSPORT_POLICY_CACHE_FILE))
+        .map_err(|error| AppError::new("browser_transport_policy_cache_failed", error.to_string()))
+}
+
+fn load_browser_transport_policy_cache(
+    app: &AppHandle,
+) -> Result<Option<BrowserTransportPolicy>, AppError> {
+    let path = browser_transport_policy_cache_path(app)?;
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AppError::new(
+                "browser_transport_policy_cache_failed",
+                error.to_string(),
+            ));
+        }
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|error| AppError::new("browser_transport_policy_cache_failed", error.to_string()))
+}
+
+fn persist_browser_transport_policy_cache(
+    app: &AppHandle,
+    policy: BrowserTransportPolicy,
+) -> Result<(), AppError> {
+    let path = browser_transport_policy_cache_path(app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::new("browser_transport_policy_cache_failed", error.to_string())
+        })?;
+    }
+    let bytes = serde_json::to_vec(&policy).map_err(|error| {
+        AppError::new("browser_transport_policy_cache_failed", error.to_string())
+    })?;
+    let temporary = path.with_extension("json.tmp");
+    std::fs::write(&temporary, bytes).map_err(|error| {
+        AppError::new("browser_transport_policy_cache_failed", error.to_string())
+    })?;
+    std::fs::rename(temporary, path)
+        .map_err(|error| AppError::new("browser_transport_policy_cache_failed", error.to_string()))
+}
+
+async fn apply_browser_transport_policy_fetch_result(
+    broker: &BrowserBroker,
+    fetched: Result<Option<crate::june_api::BrowserTransportPolicyDto>, AppError>,
+) -> bool {
+    let next = match fetched {
+        Ok(Some(policy)) => BrowserTransportPolicy {
+            attended_enabled: policy.attended_enabled,
+            managed_enabled: policy.managed_enabled,
+        },
+        Ok(None) => BrowserTransportPolicy::default(),
+        Err(error) => {
+            tracing::warn!(
+                code = %error.code,
+                "browser transport policy refresh failed; keeping last known policy"
+            );
+            return false;
+        }
+    };
+    if broker.transport_policy() == next {
+        return false;
+    }
+    broker.set_transport_policy(next).await;
+    true
 }
 
 struct SharedProviderProxyInfo {
@@ -1835,6 +2143,8 @@ struct SharedProviderProxyInfo {
     token: String,
     memory_token: String,
     recorder_token: String,
+    routine_browser_token: String,
+    attended_browser_token: String,
     connector_token: String,
     computer_use_token: String,
     obsidian_token: String,
@@ -1879,6 +2189,17 @@ struct JuneVideoMcpConfig {
 struct JuneRecorderMcpConfig {
     command: String,
     script_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct JuneBrowserMcpConfig {
+    command: String,
+    script_path: PathBuf,
+    /// The stored Browser access grant, read every spawn. Rendered verbatim as
+    /// the `june_browser` entry's `enabled` leaf so the key June owns always
+    /// reflects the grant.
+    enabled: bool,
+    routine_grants: Vec<RoutineBrowserGrant>,
 }
 
 #[derive(Debug, Clone)]
@@ -3079,6 +3400,281 @@ pub fn set_hermes_agent_cli_access(
     })
 }
 
+#[derive(Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAccessStatus {
+    pub enabled: bool,
+}
+
+/// Whether the user granted Browser use (the stored Browser access grant).
+#[tauri::command]
+pub fn hermes_browser_access(app: AppHandle) -> BrowserAccessStatus {
+    BrowserAccessStatus {
+        enabled: browser_access_enabled(&app),
+    }
+}
+
+#[tauri::command]
+pub fn browser_transport_policy(bridge: State<'_, HermesBridge>) -> BrowserTransportPolicy {
+    bridge.browser_broker.transport_policy()
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetBrowserAccessRequest {
+    pub enabled: bool,
+}
+
+/// Records (or clears) the Browser access grant and applies the transition to
+/// broker state at once. Revoke first refuses new broker commands, waits for
+/// in-flight commands, then closes every broker session so the extension
+/// detaches debugger control before credentials rotate. Both currently
+/// registered runtime mode slots are retired so the next spawn regenerates
+/// `config.yaml` with the `june_browser` `enabled` leaf following the new grant.
+/// An in-flight spawn that registers after teardown may keep its spawn-time
+/// config, but the broker re-checks the persisted grant on every request.
+#[tauri::command]
+pub async fn set_hermes_browser_access(
+    app: AppHandle,
+    bridge: State<'_, HermesBridge>,
+    request: SetBrowserAccessRequest,
+) -> Result<BrowserAccessStatus, AppError> {
+    if request.enabled && !crate::feature_flags::BROWSER_USE_ENABLED {
+        return Err(AppError::new(
+            "browser_use_disabled",
+            "Browser use is not available in this build.",
+        ));
+    }
+    let path = browser_access_flag_path(&app).ok_or_else(|| {
+        AppError::new(
+            "browser_access_unavailable",
+            "Could not resolve the app data directory.",
+        )
+    })?;
+    bridge.browser_broker.set_access_flag_path(path.clone());
+    apply_browser_access_transition(
+        &bridge.browser_broker,
+        request.enabled,
+        || persist_browser_access(&path, request.enabled),
+        || rotate_browser_proxy_token(&bridge),
+    )
+    .await?;
+    stop_hermes_mode(&bridge, false)?;
+    stop_hermes_mode(&bridge, true)?;
+    Ok(BrowserAccessStatus {
+        enabled: bridge.browser_broker.is_enabled(),
+    })
+}
+
+#[tauri::command]
+pub async fn browser_approvals_pending(
+    bridge: State<'_, HermesBridge>,
+) -> Result<Vec<PendingBrowserApproval>, AppError> {
+    bridge.browser_broker.pending_approvals().await
+}
+
+#[tauri::command]
+pub async fn browser_approval_respond(
+    bridge: State<'_, HermesBridge>,
+    approval_id: String,
+    approve: bool,
+    allow_site: bool,
+) -> Result<(), AppError> {
+    bridge
+        .browser_broker
+        .respond_to_approval(&approval_id, approve, allow_site)
+        .await
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutineBrowserAccessStatus {
+    pub enabled: bool,
+    pub server_name: Option<String>,
+}
+
+#[tauri::command]
+pub async fn routine_browser_access_get(
+    app: AppHandle,
+    job_id: String,
+) -> Result<RoutineBrowserAccessStatus, AppError> {
+    let grant = crate::commands::repositories(&app)
+        .await?
+        .routine_browser_grant(&job_id)
+        .await?;
+    Ok(RoutineBrowserAccessStatus {
+        enabled: grant.as_ref().is_some_and(|grant| grant.enabled),
+        server_name: grant.map(|grant| grant.server_name),
+    })
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetRoutineBrowserAccessRequest {
+    pub job_id: String,
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub async fn routine_browser_access_set(
+    app: AppHandle,
+    bridge: State<'_, HermesBridge>,
+    request: SetRoutineBrowserAccessRequest,
+) -> Result<RoutineBrowserAccessStatus, AppError> {
+    let job_id = request.job_id.trim();
+    if job_id.is_empty() {
+        return Err(AppError::new(
+            "invalid_arguments",
+            "A routine id is required.",
+        ));
+    }
+    if request.enabled {
+        bridge
+            .browser_broker
+            .require_routine_entitlement(job_id)
+            .await?;
+    }
+    let repos = crate::commands::repositories(&app).await?;
+    let previous = repos.routine_browser_grant(job_id).await?;
+    if request.enabled {
+        if !crate::feature_flags::BROWSER_USE_ENABLED {
+            return Err(AppError::new(
+                "browser_use_disabled",
+                "Browser use is not available in this build.",
+            ));
+        }
+        let grant = previous.clone().unwrap_or_else(|| {
+            let digest = Sha256::digest(job_id.as_bytes());
+            let suffix = digest[..8]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            crate::db::repositories::RoutineBrowserGrantRecord {
+                job_id: job_id.to_string(),
+                server_name: format!("june_browser_routine_{suffix}"),
+                token: random_token(),
+                enabled: true,
+            }
+        });
+        let grant = crate::db::repositories::RoutineBrowserGrantRecord {
+            enabled: true,
+            ..grant
+        };
+        let broker_grant = RoutineBrowserGrant {
+            job_id: grant.job_id.clone(),
+            server_name: grant.server_name.clone(),
+            token: grant.token.clone(),
+            enabled: true,
+        };
+        bridge.browser_broker.set_routine_grant(broker_grant);
+        if let Err(error) = repos.set_routine_browser_grant(&grant).await {
+            if let Some(previous) = previous {
+                bridge
+                    .browser_broker
+                    .set_routine_grant(RoutineBrowserGrant {
+                        job_id: previous.job_id,
+                        server_name: previous.server_name,
+                        token: previous.token,
+                        enabled: previous.enabled,
+                    });
+            } else {
+                bridge.browser_broker.remove_routine_grant(job_id);
+            }
+            return Err(error);
+        }
+        Ok(RoutineBrowserAccessStatus {
+            enabled: true,
+            server_name: Some(grant.server_name),
+        })
+    } else {
+        if let Some(previous) = previous {
+            let previous_for_rollback = previous.clone();
+            let disabled = crate::db::repositories::RoutineBrowserGrantRecord {
+                enabled: false,
+                ..previous
+            };
+            bridge
+                .browser_broker
+                .set_routine_grant(RoutineBrowserGrant {
+                    job_id: disabled.job_id.clone(),
+                    server_name: disabled.server_name.clone(),
+                    token: disabled.token.clone(),
+                    enabled: false,
+                });
+            if let Err(error) = repos.set_routine_browser_grant(&disabled).await {
+                bridge
+                    .browser_broker
+                    .set_routine_grant(RoutineBrowserGrant {
+                        job_id: previous_for_rollback.job_id,
+                        server_name: previous_for_rollback.server_name,
+                        token: previous_for_rollback.token,
+                        enabled: previous_for_rollback.enabled,
+                    });
+                return Err(error);
+            }
+            bridge.browser_broker.revoke_routine_sessions(job_id).await;
+        }
+        Ok(RoutineBrowserAccessStatus {
+            enabled: false,
+            server_name: None,
+        })
+    }
+}
+
+fn persist_browser_access(path: &Path, enabled: bool) -> Result<(), AppError> {
+    if enabled {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| AppError::new("browser_access_failed", error.to_string()))?;
+        }
+        std::fs::write(path, b"1")
+            .map_err(|error| AppError::new("browser_access_failed", error.to_string()))?;
+    } else if let Err(error) = std::fs::remove_file(path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(AppError::new("browser_access_failed", error.to_string()));
+        }
+    }
+    Ok(())
+}
+
+async fn apply_browser_access_transition(
+    browser_broker: &BrowserBroker,
+    enabled: bool,
+    persist: impl FnOnce() -> Result<(), AppError>,
+    rotate_token: impl FnOnce() -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let _transition = browser_broker.lock_transition().await;
+    if enabled {
+        persist()?;
+        rotate_token()?;
+        browser_broker.set_enabled(true).await?;
+    } else {
+        // Revocation is an ordered handshake: close the in-memory gate and
+        // clear sessions before touching persisted state, so no concurrent
+        // command can enter after revoke begins.
+        browser_broker.set_enabled(false).await?;
+        persist()?;
+        rotate_token()?;
+        // The persisted flag is now the steady-state gate. Release the
+        // transition-only deny override so any later explicit grant is read
+        // directly from disk without requiring a respawn.
+        browser_broker.set_enabled(true).await?;
+    }
+    Ok(())
+}
+
+fn rotate_browser_proxy_token(bridge: &HermesBridge) -> Result<(), AppError> {
+    let proxy = bridge
+        .provider_proxy
+        .lock()
+        .map_err(|_| AppError::new("hermes_bridge_unavailable", "Hermes bridge lock failed."))?;
+    if let Some(proxy) = proxy.as_ref() {
+        proxy.routine_browser_token.rotate();
+        proxy.attended_browser_token.rotate();
+    }
+    Ok(())
+}
+
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct JuneCharacterStatus {
@@ -3530,11 +4126,11 @@ pub async fn delete_hermes_bridge_cron_job(
         None,
     )
     .await?;
-    // A deleted routine must leave no connector footprint: drop its triggers,
-    // trust, credited runs, and autonomy grants so the poller stops firing a
-    // missing job and no auto MCP server or grant token outlives it. Best
-    // effort so a cleanup hiccup never blocks the delete the user asked for;
-    // the next config sync also prunes any orphaned MCP entries.
+    // A deleted routine must leave no June-owned capability footprint: drop
+    // its triggers, trust, credited runs, connector grants, and browser opt-in
+    // so no per-job MCP server or token outlives it. Best effort so a cleanup
+    // hiccup never blocks the delete the user asked for; the next config sync
+    // also prunes any orphaned MCP entries.
     if let Ok(repos) = crate::commands::repositories(&app).await {
         if let Err(error) = repos.delete_routine_connector_state(&request.job_id).await {
             tracing::warn!(
@@ -3543,6 +4139,11 @@ pub async fn delete_hermes_bridge_cron_job(
             );
         }
     }
+    bridge.browser_broker.remove_routine_grant(&request.job_id);
+    bridge
+        .browser_broker
+        .revoke_routine_sessions(&request.job_id)
+        .await;
     Ok(result)
 }
 
@@ -4026,6 +4627,7 @@ pub fn shutdown(app: &tauri::AppHandle) {
     // spawned but not-yet-registered would be missed by the drain and orphaned
     // when `relaunch_for_update` restarts the app moments later.
     await_starts_quiesced(&bridge, SHUTDOWN_START_QUIESCE_TIMEOUT);
+    bridge.browser_broker.terminate_sessions();
     let _ = stop_hermes_bridge_inner(&bridge);
     let proxy = bridge
         .provider_proxy
@@ -4056,6 +4658,16 @@ fn await_starts_quiesced(bridge: &HermesBridge, timeout: Duration) {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+pub(crate) fn release_shared_browser_tab(app: &tauri::AppHandle, tab_id: i64) {
+    let bridge = app.state::<HermesBridge>();
+    let browser_broker = Arc::clone(&bridge.browser_broker);
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = browser_broker.release_tab(tab_id).await {
+            tracing::error!(code = %error.code, "shared browser tab release was not recorded");
+        }
+    });
 }
 
 /// Sends a dashboard API request to any live runtime process, sandboxed
@@ -6189,13 +6801,6 @@ fn attach_gateway_lifecycle_log(cmd: &mut Command, hermes_home: &Path) {
 
 /// Pure command construction so a test can assert the spawn is the bare hermes
 /// executable (no `sandbox-exec` wrapper) with the isolated environment.
-fn build_hermes_gateway_start_command(
-    connection: &HermesBridgeConnection,
-    hermes_home: &Path,
-) -> Command {
-    build_hermes_gateway_lifecycle_command(connection, hermes_home, "start")
-}
-
 fn build_hermes_gateway_lifecycle_command(
     connection: &HermesBridgeConnection,
     hermes_home: &Path,
@@ -7814,14 +8419,16 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let runtime_dir = managed_hermes_runtime_dir(app).ok()?;
     let app_data_dir = crate::app_paths::app_data_dir(app).ok()?;
-    let image_source_key_path = image_source_capability_secret_path(&app_data_dir);
+    // The image-source capability secret and the extension-host descriptor (the
+    // listener credential a jailed runtime must never read, or it could forge a
+    // paired extension).
+    let mut secret_read_paths = sandbox_secret_read_paths(&app_data_dir);
     let write_roots = sandbox_write_roots(hermes_home, &runtime_dir);
     let config_write_path = sandbox_config_write_path(hermes_home);
     let config_temp_prefix = sandbox_config_temp_prefix(&config_write_path);
     // Block the jailed agent from reading the connector token stores: the
     // Keychain is already denied above; add the dev plaintext connector token
     // files (debug builds' fallback custody, one per provider) explicitly.
-    let mut secret_read_paths = vec![image_source_key_path];
     #[cfg(debug_assertions)]
     secret_read_paths.push(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -7855,6 +8462,14 @@ fn prepare_sandbox(app: &AppHandle, hermes_home: &Path, agent_cli_access: bool) 
     }
 }
 
+#[cfg(target_os = "macos")]
+fn sandbox_secret_read_paths(app_data_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        image_source_capability_secret_path(app_data_dir),
+        crate::extension_host::descriptor_path(app_data_dir),
+    ]
+}
+
 #[cfg(not(target_os = "macos"))]
 fn prepare_sandbox(
     _app: &AppHandle,
@@ -7873,6 +8488,23 @@ fn agent_cli_access_flag_path(app: &AppHandle) -> Option<PathBuf> {
 /// Whether the user opted into Agent CLI access (Settings, Agent tab).
 pub(crate) fn agent_cli_access_enabled(app: &AppHandle) -> bool {
     agent_cli_access_flag_path(app).is_some_and(|path| path.exists())
+}
+
+fn browser_access_flag_path(app: &AppHandle) -> Option<PathBuf> {
+    crate::app_paths::app_data_dir(app)
+        .ok()
+        .map(|dir| dir.join(BROWSER_ACCESS_FLAG_FILE))
+}
+
+/// Whether the user granted Browser use (the stored Browser access grant). The
+/// flag is outside every jailed Hermes write root, but an unrestricted runtime
+/// can write it; integrity-binding both this and Agent CLI access is deferred.
+/// While the `BROWSER_USE_ENABLED` feature flag is off the grant reads as
+/// disabled regardless of the flag file, so a grant persisted by an earlier
+/// build cannot resurface a hidden capability.
+pub(crate) fn browser_access_enabled(app: &AppHandle) -> bool {
+    crate::feature_flags::BROWSER_USE_ENABLED
+        && browser_access_flag_path(app).is_some_and(|path| path.exists())
 }
 
 /// Whether a *sandboxed* spawn on this machine would actually engage the
@@ -8189,6 +8821,29 @@ const CRON_SANDBOXED_TOOLSETS: &[&str] = &[
     "context_engine",
 ];
 
+/// Upstream toolsets June never exposes, in any session, under any grant.
+///
+/// June's browser and computer-use capabilities are reached only through
+/// June's own `june_browser` contract, where the Rust broker is the policy
+/// choke point (ADR 0017). The runtime ships its own `browser` and
+/// `computer_use` toolsets that would bypass that choke point entirely: the
+/// upstream browser toolset is attach-only with no policy layer, and the
+/// upstream computer-use toolset would run its own network installer to fetch
+/// a driver June deliberately bundles and pins. Neither is gated by the
+/// Browser access grant, so this list is unconditional: the grant governs
+/// `june_browser`, never these.
+///
+/// Interactive sessions carry no `enabled_toolsets`, so they would otherwise
+/// receive the runtime's full default toolset set. `agent.disabled_toolsets`
+/// is applied by the runtime as an unconditional subtraction after toolset
+/// resolution (`_compute_tool_definitions` in model_tools.py: "Always apply
+/// disabled toolsets as a subtraction step at the end"), so it strips these
+/// even out of composite toolsets. Routines are gated separately by
+/// `CRON_SANDBOXED_TOOLSETS` (which already omits both) and, for the
+/// Unrestricted opt-in, by per-job `enabled_toolsets`; this subtraction
+/// applies on top of either.
+const UPSTREAM_DISABLED_TOOLSETS: &[&str] = &["browser", "computer_use"];
+
 fn sync_june_context_mcp(
     app: &AppHandle,
     hermes_command: &str,
@@ -8339,6 +8994,53 @@ fn sync_june_recorder_mcp(
     Ok(JuneRecorderMcpConfig {
         command: hermes_python_command(hermes_command),
         script_path,
+    })
+}
+
+/// Writes the `june_browser` MCP script into the managed Hermes home and returns
+/// its config. `enabled` carries the stored Browser access grant, read fresh on
+/// every spawn, so the rendered `june_browser` entry's `enabled` leaf follows
+/// the grant. The script and its config are always written regardless of the
+/// grant (only the `enabled` leaf reflects it).
+async fn sync_june_browser_mcp(
+    app: &AppHandle,
+    hermes_command: &str,
+    enabled: bool,
+) -> Result<JuneBrowserMcpConfig, AppError> {
+    let data_dir = crate::app_paths::app_data_dir(app)
+        .map_err(|error| AppError::new("june_browser_mcp_failed", error.to_string()))?;
+    let mcp_dir = data_dir.join(JUNE_CONTEXT_MCP_DIR_NAME);
+    fs::create_dir_all(&mcp_dir)
+        .map_err(|error| AppError::new("june_browser_mcp_failed", error.to_string()))?;
+    let script_path = mcp_dir.join(JUNE_BROWSER_MCP_SCRIPT_NAME);
+    fs::write(&script_path, JUNE_BROWSER_MCP_SCRIPT)
+        .map_err(|error| AppError::new("june_browser_mcp_failed", error.to_string()))?;
+
+    // While the Browser use feature flag is off, persisted routine opt-ins
+    // stay dormant: no per-routine server is rendered and the broker's grant
+    // table is replaced with nothing, so a dev-build opt-in cannot resurface.
+    let routine_grants = if crate::feature_flags::BROWSER_USE_ENABLED {
+        crate::commands::repositories(app)
+            .await?
+            .list_routine_browser_grants()
+            .await?
+            .into_iter()
+            .map(|grant| RoutineBrowserGrant {
+                job_id: grant.job_id,
+                server_name: grant.server_name,
+                token: grant.token,
+                enabled: grant.enabled,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(JuneBrowserMcpConfig {
+        command: hermes_python_command(hermes_command),
+        script_path,
+        enabled,
+        routine_grants,
     })
 }
 
@@ -8624,6 +9326,7 @@ fn sync_hermes_config(
     provider_proxy_token: &str,
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
+    routine_browser_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
     obsidian_proxy_token: &str,
@@ -8634,6 +9337,7 @@ fn sync_hermes_config(
     june_image_mcp: &JuneImageMcpConfig,
     june_video_mcp: Option<&JuneVideoMcpConfig>,
     june_recorder_mcp: &JuneRecorderMcpConfig,
+    june_browser_mcp: &JuneBrowserMcpConfig,
     june_computer_use_mcp: &JuneComputerUseMcpConfig,
     june_connector_mcp: Option<&ConnectorMcpConfigs>,
 ) -> Result<(), AppError> {
@@ -8643,6 +9347,7 @@ fn sync_hermes_config(
         provider_proxy_token,
         memory_proxy_token,
         recorder_proxy_token,
+        routine_browser_proxy_token,
         connector_proxy_token,
         computer_use_proxy_token,
         obsidian_proxy_token,
@@ -8653,6 +9358,7 @@ fn sync_hermes_config(
         june_image_mcp,
         june_video_mcp,
         june_recorder_mcp,
+        june_browser_mcp,
         june_computer_use_mcp,
         june_connector_mcp,
         &builtin_external_skill_dirs(app),
@@ -8666,6 +9372,7 @@ fn sync_hermes_config_with_external_dirs(
     provider_proxy_token: &str,
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
+    routine_browser_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
     obsidian_proxy_token: &str,
@@ -8676,6 +9383,7 @@ fn sync_hermes_config_with_external_dirs(
     june_image_mcp: &JuneImageMcpConfig,
     june_video_mcp: Option<&JuneVideoMcpConfig>,
     june_recorder_mcp: &JuneRecorderMcpConfig,
+    june_browser_mcp: &JuneBrowserMcpConfig,
     june_computer_use_mcp: &JuneComputerUseMcpConfig,
     june_connector_mcp: Option<&ConnectorMcpConfigs>,
     default_external_skill_dirs: &[PathBuf],
@@ -8694,6 +9402,7 @@ fn sync_hermes_config_with_external_dirs(
         image: Some(june_image_mcp),
         video: june_video_mcp,
         recorder: Some(june_recorder_mcp),
+        browser: Some(june_browser_mcp),
         computer_use: Some(june_computer_use_mcp),
         gmail: connector_base.and_then(|base| base.gmail.as_ref()),
         gmail_actions: connector_base.and_then(|base| base.gmail_actions.as_ref()),
@@ -8718,6 +9427,7 @@ fn sync_hermes_config_with_external_dirs(
         provider_proxy_token,
         memory_proxy_token,
         recorder_proxy_token,
+        routine_browser_proxy_token,
         connector_proxy_token,
         computer_use_proxy_token,
         obsidian_proxy_token,
@@ -8775,13 +9485,15 @@ fn merge_hermes_config(existing_path: &std::path::Path, rendered: &str) -> Strin
     let Ok(overlay) = serde_yaml::from_str::<serde_yaml::Value>(rendered) else {
         return rendered.to_string();
     };
-    // Drop June-owned connector MCP entries from the existing config before
+    // Drop June-owned ephemeral per-routine and connector MCP entries before
     // merging. The overlay re-adds them only while the connector is active, so
     // a disconnect (or a removed auto grant) renders none and the deep merge
     // must not preserve the old june_gmail*/june_gcal*/per-job auto-server keys
     // and keep exposing stale connector tools. User-added servers and June's
     // always-rendered entries (june_context, june_web, ...) are untouched.
     prune_connector_mcp_servers(&mut existing);
+    prune_routine_browser_mcp_servers(&mut existing);
+    prune_legacy_browser_context_env(&mut existing);
     let merged = deep_merge_yaml(existing, overlay);
     serde_yaml::to_string(&merged).unwrap_or_else(|_| rendered.to_string())
 }
@@ -9137,6 +9849,45 @@ fn prune_connector_mcp_servers(config: &mut serde_yaml::Value) {
     });
 }
 
+fn prune_routine_browser_mcp_servers(config: &mut serde_yaml::Value) {
+    let Some(mcp_servers) = config
+        .get_mut("mcp_servers")
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    mcp_servers.retain(|key, _| {
+        key.as_str()
+            .map(|name| !is_routine_browser_server_name(name))
+            .unwrap_or(true)
+    });
+}
+
+/// Removes the session-marker interpolation used before browser MCP entries
+/// carried an explicit context. A recursive merge preserves omitted mapping
+/// leaves, so this migration must delete the obsolete June-owned env keys.
+fn prune_legacy_browser_context_env(config: &mut serde_yaml::Value) {
+    let Some(env) = config
+        .get_mut("mcp_servers")
+        .and_then(|servers| servers.get_mut(JUNE_BROWSER_MCP_SERVER_NAME))
+        .and_then(|browser| browser.get_mut("env"))
+        .and_then(serde_yaml::Value::as_mapping_mut)
+    else {
+        return;
+    };
+    env.retain(|key, _| {
+        !matches!(
+            key.as_str(),
+            Some(LEGACY_JUNE_BROWSER_MCP_CRON_CONTEXT_ENV)
+                | Some(LEGACY_JUNE_BROWSER_MCP_GATEWAY_CONTEXT_ENV)
+        )
+    });
+}
+
+fn is_routine_browser_server_name(name: &str) -> bool {
+    name.starts_with("june_browser_routine_")
+}
+
 /// True for every MCP server name June owns for connectors. The `_` prefixes
 /// cover the `_actions` servers (including `june_linear_actions`) and the
 /// per-job `_auto_<jobid>` servers.
@@ -9177,7 +9928,7 @@ fn hermes_interactive_toolsets(config_path: &Path) -> Vec<String> {
             items
                 .iter()
                 .filter_map(|item| item.as_str().map(str::to_string))
-                .filter(|name| !is_june_connector_auto_server_name(name))
+                .filter(|name| !is_per_routine_mcp_server_name(name))
                 .collect()
         })
         .unwrap_or_else(|| vec!["hermes-cli".to_string()]);
@@ -9226,7 +9977,7 @@ fn hermes_interactive_toolsets(config_path: &Path) -> Vec<String> {
                 .get("enabled")
                 .and_then(serde_yaml::Value::as_bool)
                 .unwrap_or(true);
-            (enabled && !is_june_connector_auto_server_name(name)).then(|| name.to_string())
+            (enabled && !is_per_routine_mcp_server_name(name)).then(|| name.to_string())
         })
         .collect();
     let has_explicit_mcp = selected.iter().any(|name| enabled_mcp.contains(name));
@@ -9240,6 +9991,10 @@ fn hermes_interactive_toolsets(config_path: &Path) -> Vec<String> {
 
 fn is_june_connector_auto_server_name(name: &str) -> bool {
     name.starts_with("june_gmail_auto_") || name.starts_with("june_gcal_auto_")
+}
+
+fn is_per_routine_mcp_server_name(name: &str) -> bool {
+    is_june_connector_auto_server_name(name) || is_routine_browser_server_name(name)
 }
 
 /// Recursive overlay merge: mappings merge key by key (overlay wins on leaf
@@ -9267,6 +10022,7 @@ struct BuiltinMcpConfigs<'a> {
     image: Option<&'a JuneImageMcpConfig>,
     video: Option<&'a JuneVideoMcpConfig>,
     recorder: Option<&'a JuneRecorderMcpConfig>,
+    browser: Option<&'a JuneBrowserMcpConfig>,
     /// Always rendered so a revoked or not-yet-ready grant overwrites any
     /// stale enabled value left in the merged Hermes config.
     computer_use: Option<&'a JuneComputerUseMcpConfig>,
@@ -9462,6 +10218,7 @@ fn render_hermes_config(
     provider_proxy_token: &str,
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
+    routine_browser_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
     obsidian_proxy_token: &str,
@@ -9484,6 +10241,7 @@ fn render_hermes_config(
         provider_proxy_token,
         memory_proxy_token,
         recorder_proxy_token,
+        routine_browser_proxy_token,
         connector_proxy_token,
         computer_use_proxy_token,
         obsidian_proxy_token,
@@ -9498,7 +10256,7 @@ fn render_hermes_config(
   supports_vision: {supports_vision}
 agent:
   max_turns: 90
-  disabled_toolsets: [browser, computer_use]
+  disabled_toolsets: [{upstream_disabled_toolsets}]
 display:
   skin: mono
 platform_toolsets:
@@ -9508,17 +10266,20 @@ skills:
         model = yaml_string(model),
         base_url = yaml_string(base_url),
         provider_proxy_token = yaml_string(provider_proxy_token),
+        upstream_disabled_toolsets = &UPSTREAM_DISABLED_TOOLSETS.join(", "),
     )
 }
 
 /// registers. Built-in entries live under one key so Hermes deep-merges a
 /// single map; an empty map is emitted when none are configured.
+#[allow(clippy::too_many_arguments)]
 fn render_mcp_servers_config(
     configs: BuiltinMcpConfigs<'_>,
     base_url: &str,
     proxy_token: &str,
     memory_proxy_token: &str,
     recorder_proxy_token: &str,
+    _routine_browser_proxy_token: &str,
     connector_proxy_token: &str,
     computer_use_proxy_token: &str,
     obsidian_proxy_token: &str,
@@ -9553,6 +10314,12 @@ fn render_mcp_servers_config(
             base_url,
             recorder_proxy_token,
         ));
+    }
+    if let Some(config) = configs.browser {
+        entries.push_str(&render_browser_mcp_entry(config, base_url));
+        for grant in config.routine_grants.iter().filter(|grant| grant.enabled) {
+            entries.push_str(&render_routine_browser_mcp_entry(config, base_url, grant));
+        }
     }
     if let Some(config) = configs.computer_use {
         entries.push_str(&render_computer_use_mcp_entry(
@@ -9828,6 +10595,75 @@ fn render_recorder_mcp_entry(
         base_url = yaml_string(base_url),
         token_env = JUNE_RECORDER_MCP_TOKEN_ENV,
         token = yaml_string(proxy_token),
+    )
+}
+
+/// The `june_browser` entry is ALWAYS rendered; its `enabled` leaf exactly
+/// follows the stored Browser access grant (`false` when off). June owns this
+/// key, so a deep-merge omission would leave a stale or user-added `enabled:
+/// true` in place and fail to revoke — writing the leaf every spawn keeps the
+/// grant authoritative. The shared entry carries only the attended credential,
+/// interpolated from dashboard process state. Opted-in routines get separate
+/// entries below, each with a per-job credential. The broker binds transport
+/// and routine identity to whichever credential authenticated the request; the
+/// body context is only a consistency check.
+fn render_browser_mcp_entry(config: &JuneBrowserMcpConfig, base_url: &str) -> String {
+    let token_entry = if config.enabled {
+        format!(
+            "      {attended_token_env}: \"${{{attended_token_env}}}\"\n",
+            attended_token_env = JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        r#"  {server_name}:
+    enabled: {enabled}
+    command: {command}
+    args:
+      - {script_path}
+      - {base_url}
+    env:
+      PYTHONUNBUFFERED: "1"
+      {call_context_env}: "attended"
+{token_entry}    timeout: 30
+    connect_timeout: 10
+"#,
+        server_name = JUNE_BROWSER_MCP_SERVER_NAME,
+        enabled = config.enabled,
+        command = yaml_string(&config.command),
+        script_path = yaml_string(&config.script_path.to_string_lossy()),
+        base_url = yaml_string(base_url),
+        call_context_env = JUNE_BROWSER_MCP_CALL_CONTEXT_ENV,
+    )
+}
+
+fn render_routine_browser_mcp_entry(
+    config: &JuneBrowserMcpConfig,
+    base_url: &str,
+    grant: &RoutineBrowserGrant,
+) -> String {
+    format!(
+        r#"  {server_name}:
+    enabled: true
+    command: {command}
+    args:
+      - {script_path}
+      - {base_url}
+    env:
+      PYTHONUNBUFFERED: "1"
+      {call_context_env}: "routine"
+      {routine_token_env}: {routine_token}
+    timeout: 30
+    connect_timeout: 10
+"#,
+        server_name = yaml_map_key(&grant.server_name),
+        command = yaml_string(&config.command),
+        script_path = yaml_string(&config.script_path.to_string_lossy()),
+        base_url = yaml_string(base_url),
+        call_context_env = JUNE_BROWSER_MCP_CALL_CONTEXT_ENV,
+        routine_token_env = JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV,
+        routine_token = yaml_string(&grant.token),
     )
 }
 
@@ -10110,10 +10946,15 @@ fn write_june_character(hermes_home: &Path, character: &str) -> Result<(), AppEr
 /// this machine actually engage the jail (it's omitted when sandbox-exec is
 /// missing or the escape-hatch env var disabled it, so the agent never
 /// claims a protection that isn't enforced).
+/// `browser_access`: `None` means Browser use is feature-flagged out of this
+/// build - neither browser SOUL section renders (the blocked variant would
+/// teach the agent to request a setting the UI does not show). `Some(grant)`
+/// picks the enabled or blocked section from the stored grant.
 fn sync_june_soul(
     hermes_home: &std::path::Path,
     sandbox_available: bool,
     agent_cli_access: bool,
+    browser_access: Option<bool>,
     memory_enabled: bool,
     video_generation_enabled: bool,
     connectors_registered: bool,
@@ -10137,6 +10978,15 @@ fn sync_june_soul(
     } else {
         ""
     };
+    // The Browser access grant is independent of the sandbox: the broker
+    // enforces it for every mode, so browser guidance rides along in both
+    // states — request-the-grant when off, use-the-tools when on. `None`
+    // (feature-flagged out) renders neither section.
+    let browser_section = match browser_access {
+        None => "",
+        Some(true) => JUNE_SOUL_BROWSER_ENABLED_MD,
+        Some(false) => JUNE_SOUL_BROWSER_BLOCKED_MD,
+    };
     let soul = if sandbox_available {
         let cli_section = if agent_cli_access {
             JUNE_SOUL_CLI_ALLOWED_MD
@@ -10144,10 +10994,10 @@ fn sync_june_soul(
             JUNE_SOUL_CLI_BLOCKED_MD
         };
         format!(
-            "{base}{JUNE_SOUL_CONTEXT_MD}{memory_section}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}{JUNE_SOUL_SANDBOX_MD}{cli_section}"
+            "{base}{JUNE_SOUL_CONTEXT_MD}{memory_section}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}{browser_section}{JUNE_SOUL_SANDBOX_MD}{cli_section}"
         )
     } else {
-        format!("{base}{JUNE_SOUL_CONTEXT_MD}{memory_section}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}")
+        format!("{base}{JUNE_SOUL_CONTEXT_MD}{memory_section}{JUNE_SOUL_CLARIFY_MD}{JUNE_SOUL_WEB_MD}{JUNE_SOUL_IMAGE_MD}{video_section}{JUNE_SOUL_RECORDER_MD}{connectors_section}{browser_section}")
     };
     std::fs::write(hermes_home.join("SOUL.md"), soul)
         .map_err(|error| AppError::new("hermes_bridge_soul_failed", error.to_string()))
@@ -10351,6 +11201,9 @@ async fn start_june_provider_proxy(
     token: String,
     memory_token: String,
     recorder_token: String,
+    routine_browser_token: BrowserProxyToken,
+    attended_browser_token: BrowserProxyToken,
+    browser_broker: Arc<BrowserBroker>,
     connector_token: String,
     computer_use_token: String,
     obsidian_token: String,
@@ -10386,6 +11239,9 @@ async fn start_june_provider_proxy(
             token,
             memory_token,
             recorder_token,
+            routine_browser_token,
+            attended_browser_token,
+            browser_broker,
             connector_token,
             computer_use_token,
             obsidian_token,
@@ -10454,19 +11310,35 @@ async fn handle_june_provider_connection(
             return Ok(());
         }
     };
+    let routine_browser_token = state.routine_browser_token.current();
+    let attended_browser_token = state.attended_browser_token.current();
     let required_token = provider_proxy_required_token(
         &request.path,
         &state.token,
         &state.memory_token,
         &state.recorder_token,
+        &routine_browser_token,
         &state.connector_token,
         &state.computer_use_token,
         &state.obsidian_token,
     );
+    let is_browser_request = request.path.starts_with("/v1/browser/");
+    let browser_context = if is_browser_request {
+        provider_proxy_browser_context(&request, &state.browser_broker, &attended_browser_token)
+    } else {
+        None
+    };
     // Authenticate on the parsed headers BEFORE reading the body, so an
     // unauthenticated local process cannot force the loopback proxy to buffer a
-    // declared (up to 12 MiB) body before the 401 (JUN-336 review).
-    if !provider_proxy_authorized(&request, required_token) {
+    // declared (up to 12 MiB) body before the 401 (JUN-336 review). Browser
+    // routes authenticate through their credential-bound caller context so the
+    // broker, not a request-body declaration, selects Attended vs Routine.
+    let authorized = if is_browser_request {
+        browser_context.is_some()
+    } else {
+        provider_proxy_authorized(&request, required_token)
+    };
+    if !authorized {
         write_json_response(
             &mut stream,
             401,
@@ -10672,6 +11544,12 @@ async fn handle_june_provider_connection(
         }
         ("GET", "/v1/recorder/status") => {
             write_json_response(&mut stream, 200, recorder_status_body()).await?;
+        }
+        ("GET", "/v1/browser/status") => {
+            handle_browser_status(&mut stream, &state, browser_context).await?;
+        }
+        ("POST", "/v1/browser/execute") => {
+            handle_browser_execute(&mut stream, &state, browser_context, &request.body).await?;
         }
         ("POST", crate::computer_use::PROXY_PATH) => {
             let body = serde_json::from_slice::<serde_json::Value>(&request.body)
@@ -12625,6 +13503,261 @@ fn recorder_status_body() -> serde_json::Value {
     }
 }
 
+/// `GET /v1/browser/status`. The dedicated credential upstream prevents MCP
+/// subprocess cross-talk and selects the caller context. Status re-checks the
+/// matching attended grant or per-routine opt-in plus the remote transport
+/// policy, and reports only sessions owned by that context.
+async fn handle_browser_status(
+    stream: &mut tokio::net::TcpStream,
+    state: &ProviderProxyState,
+    authenticated_context: Option<BrowserCallerContext>,
+) -> io::Result<()> {
+    let Some(authenticated_context) = authenticated_context else {
+        return write_json_response(
+            stream,
+            403,
+            serde_json::json!({
+                "success": false,
+                "message": "Browser use is unavailable because the caller context could not be verified.",
+                "errorCode": "browser_context_unknown",
+            }),
+        )
+        .await;
+    };
+    let broker_context = authenticated_context.broker_context();
+    if let BrowserCallerContext::Routine(job_id) = &authenticated_context {
+        if let Err(error) = state
+            .browser_broker
+            .require_routine_entitlement(job_id)
+            .await
+        {
+            return write_json_response(
+                stream,
+                403,
+                serde_json::json!({
+                    "success": false,
+                    "message": error.message,
+                    "errorCode": error.code,
+                }),
+            )
+            .await;
+        }
+    }
+    if matches!(&authenticated_context, BrowserCallerContext::Attended)
+        && !state.browser_broker.is_enabled_for(&broker_context)
+    {
+        return write_json_response(
+            stream,
+            403,
+            serde_json::json!({
+                "success": false,
+                "message": "Browser use is not enabled.",
+                "errorCode": "browser_access_disabled",
+            }),
+        )
+        .await;
+    }
+    if !state
+        .browser_broker
+        .is_transport_enabled_for(&broker_context)
+    {
+        return write_json_response(
+            stream,
+            503,
+            serde_json::json!({
+                "success": false,
+                "message": "This browser capability is temporarily disabled.",
+                "errorCode": "browser_transport_disabled_remotely",
+            }),
+        )
+        .await;
+    }
+    if matches!(&authenticated_context, BrowserCallerContext::Routine(_))
+        && !state.browser_broker.is_enabled_for(&broker_context)
+    {
+        return write_json_response(
+            stream,
+            403,
+            serde_json::json!({
+                "success": false,
+                "message": "This routine has not been granted Browser use.",
+                "errorCode": "browser_routine_not_opted_in",
+            }),
+        )
+        .await;
+    }
+    write_json_response(stream, 200, browser_status_body(state, &broker_context)).await
+}
+
+fn browser_status_body(
+    state: &ProviderProxyState,
+    context: &BrowserBrokerContext,
+) -> serde_json::Value {
+    serde_json::json!({
+        "success": true,
+        "data": {
+            "enabled": true,
+            "activeSessions": state.browser_broker.active_session_count_for(context),
+        }
+    })
+}
+
+async fn handle_browser_execute(
+    stream: &mut (impl AsyncWrite + Unpin),
+    state: &ProviderProxyState,
+    authenticated_context: Option<BrowserCallerContext>,
+    body: &[u8],
+) -> io::Result<()> {
+    // The grant is deliberately re-read inside every broker execution. The
+    // context-bound bearer selects the transport; request data can only agree
+    // with it, never widen a routine into the attended browser.
+    let request = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(request) => request,
+        Err(_) => {
+            return write_json_response(
+                stream,
+                400,
+                serde_json::json!({
+                    "success": false,
+                    "message": "Browser request body must be valid JSON.",
+                    "errorCode": "invalid_arguments",
+                }),
+            )
+            .await;
+        }
+    };
+    let Some(tool) = request.get("tool").and_then(serde_json::Value::as_str) else {
+        return write_json_response(
+            stream,
+            400,
+            serde_json::json!({
+                "success": false,
+                "message": "tool is required.",
+                "errorCode": "invalid_arguments",
+            }),
+        )
+        .await;
+    };
+    let claimed_context = match request
+        .get("callContext")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("routine") => Some("routine"),
+        Some("attended") => Some("attended"),
+        _ => None,
+    };
+    let Some(authenticated_context) = authenticated_context else {
+        return write_json_response(
+            stream,
+            403,
+            serde_json::json!({
+                "success": false,
+                "message": "Browser use is unavailable because the caller context could not be verified.",
+                "errorCode": "browser_context_unknown",
+            }),
+        )
+        .await;
+    };
+    match claimed_context {
+        Some("routine") if matches!(&authenticated_context, BrowserCallerContext::Routine(_)) => {}
+        Some("attended") if authenticated_context == BrowserCallerContext::Attended => {}
+        Some(_) => {
+            return write_json_response(
+                stream,
+                403,
+                serde_json::json!({
+                    "success": false,
+                    "message": "Browser request context did not match its credential.",
+                    "errorCode": "browser_context_mismatch",
+                }),
+            )
+            .await;
+        }
+        _ => {
+            return write_json_response(
+                stream,
+                403,
+                serde_json::json!({
+                    "success": false,
+                    "message": "Browser use is unavailable because the caller context could not be verified.",
+                    "errorCode": "browser_context_unknown",
+                }),
+            )
+            .await;
+        }
+    }
+    let arguments = match request.get("arguments") {
+        Some(arguments) if arguments.is_object() => arguments.clone(),
+        None => serde_json::json!({}),
+        Some(_) => {
+            return write_json_response(
+                stream,
+                400,
+                serde_json::json!({
+                    "success": false,
+                    "message": "arguments must be an object.",
+                    "errorCode": "invalid_arguments",
+                }),
+            )
+            .await;
+        }
+    };
+    match state
+        .browser_broker
+        .execute_for(authenticated_context.broker_context(), tool, arguments)
+        .await
+    {
+        Ok(data) => {
+            write_json_response(
+                stream,
+                200,
+                serde_json::json!({ "success": true, "data": data }),
+            )
+            .await
+        }
+        Err(error) => {
+            let status = match error.code.as_str() {
+                "browser_access_disabled"
+                | "browser_context_unknown"
+                | "browser_routine_not_opted_in" => 403,
+                "browser_session_not_found" | "tab_not_owned" | "share_not_found" => 404,
+                "tab_already_owned" => 409,
+                "not_implemented" | "browser_tool_unavailable" => 501,
+                "browser_session_limit" => 429,
+                "invalid_arguments"
+                | "unknown_browser_tool"
+                | "browser_url_invalid"
+                | "browser_url_not_allowed"
+                | "browser_policy_blocked"
+                | "browser_reference_invalid"
+                | "browser_stale_reference"
+                | "browser_action_unsupported"
+                | "browser_consequential_action_blocked"
+                | "browser_sensitive_field_blocked"
+                | "browser_human_takeover_required"
+                | "browser_action_declined"
+                | "browser_action_not_executed"
+                | "browser_approval_expired" => 400,
+                "extension_not_paired"
+                | "browser_transport_unavailable"
+                | "browser_transport_disabled_remotely"
+                | "browser_not_found" => 503,
+                _ => 502,
+            };
+            write_json_response(
+                stream,
+                status,
+                serde_json::json!({
+                    "success": false,
+                    "message": error.message,
+                    "errorCode": error.code,
+                }),
+            )
+            .await
+        }
+    }
+}
+
 struct HttpRequest {
     method: String,
     path: String,
@@ -12901,6 +14034,12 @@ fn provider_models_body(
     serde_json::json!({ "object": "list", "data": data })
 }
 
+/// Recorder mutations require the recorder-scoped token and browser routes the
+/// browser-scoped token; every other route keeps the general provider token.
+/// The distinct tokens prevent cross-talk between MCP subprocesses. They are
+/// readable from the agent's config and therefore do not authorize the agent;
+/// the Browser access grant enforced in the broker is the sole authorization
+/// gate for `/v1/browser/*`.
 fn model_catalog_with_fallback(
     cache: &Mutex<Vec<crate::june_api::ModelDto>>,
     fetched: Result<Vec<crate::june_api::ModelDto>, AppError>,
@@ -12931,14 +14070,18 @@ fn model_catalog_with_fallback(
     }
 }
 
-/// Memory writes, recorder mutations, and connector routes each require their
-/// own scoped secret; every other route keeps the general provider token.
-/// Distinct secrets, so none authorizes another's surface.
+/// Memory writes, recorder mutations, browser routes, and connector routes each
+/// require their own scoped secret; every other route keeps the general provider
+/// token. Browser routes return the routine token for scope classification here,
+/// but the connection auth path accepts both browser tokens through
+/// `provider_proxy_browser_context` and binds the transport to the one that
+/// matched. Distinct secrets, so none authorizes another's surface.
 fn provider_proxy_required_token<'a>(
     path: &str,
     provider_token: &'a str,
     memory_token: &'a str,
     recorder_token: &'a str,
+    routine_browser_token: &'a str,
     connector_token: &'a str,
     computer_use_token: &'a str,
     obsidian_token: &'a str,
@@ -12949,12 +14092,48 @@ fn provider_proxy_required_token<'a>(
         memory_token
     } else if path.starts_with("/v1/recorder/") {
         recorder_token
+    } else if path.starts_with("/v1/browser/") {
+        routine_browser_token
     } else if path == crate::computer_use::PROXY_PATH {
         computer_use_token
     } else if provider_proxy_is_connector_route(path) {
         connector_token
     } else {
         provider_token
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrowserCallerContext {
+    Routine(String),
+    Attended,
+}
+
+impl BrowserCallerContext {
+    fn broker_context(&self) -> BrowserBrokerContext {
+        match self {
+            Self::Routine(job_id) => BrowserBrokerContext::Routine(job_id.clone()),
+            Self::Attended => BrowserBrokerContext::Attended,
+        }
+    }
+}
+
+fn provider_proxy_browser_context(
+    request: &HttpRequest,
+    browser_broker: &BrowserBroker,
+    attended_token: &str,
+) -> Option<BrowserCallerContext> {
+    let candidate = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .and_then(|(_, value)| bearer_token(value))?;
+    if constant_time_eq(candidate, attended_token) {
+        Some(BrowserCallerContext::Attended)
+    } else {
+        browser_broker
+            .routine_grant_for_token(candidate)
+            .map(|grant| BrowserCallerContext::Routine(grant.job_id))
     }
 }
 
@@ -13009,7 +14188,7 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 }
 
 async fn write_json_response(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl AsyncWrite + Unpin),
     status: u16,
     body: serde_json::Value,
 ) -> io::Result<()> {
@@ -14067,7 +15246,7 @@ fn ensure_video_duration_resolution_defaults(
 }
 
 async fn write_raw_response(
-    stream: &mut tokio::net::TcpStream,
+    stream: &mut (impl AsyncWrite + Unpin),
     status: u16,
     content_type: &str,
     body: &[u8],
@@ -14123,10 +15302,12 @@ fn http_status_reason(status: u16) -> &'static str {
         400 => "Bad Request",
         401 => "Unauthorized",
         402 => "Payment Required",
+        403 => "Forbidden",
         404 => "Not Found",
         429 => "Too Many Requests",
         500 => "Internal Server Error",
         502 => "Bad Gateway",
+        503 => "Service Unavailable",
         _ => "OK",
     }
 }
@@ -15058,6 +16239,9 @@ assert capped["has_more"] is True, capped
             token: "proxy-token".to_string(),
             memory_token: "memory-token".to_string(),
             recorder_token: "recorder-token".to_string(),
+            routine_browser_token: BrowserProxyToken::new("browser-token".to_string()),
+            attended_browser_token: BrowserProxyToken::new("attended-browser-token".to_string()),
+            browser_broker: Arc::new(BrowserBroker::default()),
             connector_token: "connector-token".to_string(),
             computer_use_token: "computer-use-token".to_string(),
             obsidian_token: "obsidian-token".to_string(),
@@ -15153,10 +16337,13 @@ assert capped["has_more"] is True, capped
         let addr = listener.local_addr().expect("listener addr");
         let state = Arc::new(ProviderProxyState {
             token: "proxy-token".to_string(),
+            memory_token: "memory-token".to_string(),
             recorder_token: "recorder-token".to_string(),
+            routine_browser_token: BrowserProxyToken::new("browser-token".to_string()),
+            attended_browser_token: BrowserProxyToken::new("attended-browser-token".to_string()),
+            browser_broker: Arc::new(BrowserBroker::default()),
             connector_token: "connector-token".to_string(),
             computer_use_token: "computer-use-token".to_string(),
-            memory_token: "memory-token".to_string(),
             obsidian_token: "obsidian-token".to_string(),
             image_sources: ImageSourceCapabilities {
                 images_dir: home.path().join("images"),
@@ -15670,6 +16857,7 @@ assert capped["has_more"] is True, capped
                 "provider-tok",
                 "memory-tok",
                 "recorder-tok",
+                "browser-tok",
                 "connector-tok",
                 "computer-use-tok",
                 "obsidian-tok",
@@ -15685,7 +16873,12 @@ assert capped["has_more"] is True, capped
         ] {
             assert_eq!(required(path), "recorder-tok");
         }
-        for path in ["/v1/models", "/v1/chat/completions", "/v1/image/generate"] {
+        for path in [
+            "/v1/models",
+            "/v1/chat/completions",
+            "/v1/image/generate",
+            "/v1/recorder",
+        ] {
             assert_eq!(required(path), "provider-tok");
         }
         // Connector routes require the connector-scoped secret, never the
@@ -15734,8 +16927,10 @@ assert capped["has_more"] is True, capped
                     "provider-tok",
                     "memory-tok",
                     "recorder-tok",
+                    "browser-tok",
                     "connector-tok",
-                    "computer-use-tok"
+                    "computer-use-tok",
+                    "obsidian-tok"
                 ),
                 "connector-tok"
             );
@@ -15782,8 +16977,10 @@ assert capped["has_more"] is True, capped
             "provider-tok",
             "memory-tok",
             "recorder-tok",
+            "browser-tok",
             "connector-tok",
             "computer-use-tok",
+            "obsidian-tok",
         );
         assert!(!provider_proxy_authorized(
             &provider_bearer,
@@ -15812,6 +17009,1082 @@ assert capped["has_more"] is True, capped
     }
 
     #[test]
+    fn browser_recorder_provider_token_scopes_are_mutually_isolated() {
+        // Browser routes use their two context-bound tokens, recorder routes
+        // the recorder token, and everything else the provider token.
+        let required = |path: &str| {
+            provider_proxy_required_token(
+                path,
+                "provider-tok",
+                "memory-tok",
+                "recorder-tok",
+                "browser-tok",
+                "connector-tok",
+                "computer-use-tok",
+                "obsidian-tok",
+            )
+            .to_string()
+        };
+        assert_eq!(required("/v1/browser/status"), "browser-tok");
+        assert_eq!(required("/v1/recorder/status"), "recorder-tok");
+        // A path that merely shares the prefix without the trailing slash keeps
+        // the provider token (it is not a browser route).
+        assert_eq!(required("/v1/browser"), "provider-tok");
+
+        let browser = request_with_authorization("Bearer browser-tok");
+        let attended = request_with_authorization("Bearer attended-browser-tok");
+        let recorder = request_with_authorization("Bearer recorder-tok");
+        let provider = request_with_authorization("Bearer provider-tok");
+        let broker = BrowserBroker::default();
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-1".to_string(),
+            server_name: "june_browser_routine_1".to_string(),
+            token: "browser-tok".to_string(),
+            enabled: true,
+        });
+        // The browser token opens only the browser scope.
+        assert!(provider_proxy_authorized(&browser, "browser-tok"));
+        assert!(!provider_proxy_authorized(&browser, "recorder-tok"));
+        assert!(!provider_proxy_authorized(&browser, "provider-tok"));
+        // ...and neither of the other two opens the browser scope.
+        assert!(!provider_proxy_authorized(&recorder, "browser-tok"));
+        assert!(!provider_proxy_authorized(&provider, "browser-tok"));
+        assert_eq!(
+            provider_proxy_browser_context(&browser, &broker, "attended-browser-tok"),
+            Some(BrowserCallerContext::Routine("routine-1".to_string()))
+        );
+        assert_eq!(
+            provider_proxy_browser_context(&attended, &broker, "attended-browser-tok"),
+            Some(BrowserCallerContext::Attended)
+        );
+        assert_eq!(
+            provider_proxy_browser_context(&provider, &broker, "attended-browser-tok"),
+            None
+        );
+    }
+
+    fn broker_for_access_flag(path: &Path) -> Arc<BrowserBroker> {
+        broker_for_access_flag_with_routine(path, true)
+    }
+
+    #[tokio::test]
+    async fn absent_browser_transport_policy_endpoint_fails_open() {
+        let broker = BrowserBroker::default();
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: false,
+            })
+            .await;
+
+        assert!(
+            apply_browser_transport_policy_fetch_result(&broker, Ok(None)).await,
+            "404 absence should replace the cache with fail-open defaults"
+        );
+        assert_eq!(broker.transport_policy(), BrowserTransportPolicy::default());
+    }
+
+    #[tokio::test]
+    async fn failed_browser_transport_policy_refresh_keeps_successful_kill() {
+        let broker = BrowserBroker::default();
+        let killed = crate::june_api::BrowserTransportPolicyDto {
+            attended_enabled: false,
+            managed_enabled: true,
+        };
+        assert!(apply_browser_transport_policy_fetch_result(&broker, Ok(Some(killed))).await);
+
+        assert!(
+            !apply_browser_transport_policy_fetch_result(
+                &broker,
+                Err(AppError::new("june_request_failed", "network unavailable")),
+            )
+            .await
+        );
+        assert_eq!(
+            broker.transport_policy(),
+            BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: true,
+            }
+        );
+    }
+
+    fn broker_for_access_flag_with_routine(
+        path: &Path,
+        routine_enabled: bool,
+    ) -> Arc<BrowserBroker> {
+        let broker = Arc::new(BrowserBroker::default());
+        broker.set_access_flag_path(path.to_path_buf());
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-1".to_string(),
+            server_name: "june_browser_routine_1".to_string(),
+            token: "browser-token".to_string(),
+            enabled: routine_enabled,
+        });
+        broker
+    }
+
+    async fn browser_proxy_response_with_broker(
+        broker: Arc<BrowserBroker>,
+        request: &str,
+    ) -> String {
+        let home = tempfile::tempdir().expect("tempdir");
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind proxy listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let state = Arc::new(ProviderProxyState {
+            token: "proxy-token".to_string(),
+            memory_token: "memory-token".to_string(),
+            recorder_token: "recorder-token".to_string(),
+            routine_browser_token: BrowserProxyToken::new("browser-token".to_string()),
+            attended_browser_token: BrowserProxyToken::new("attended-browser-token".to_string()),
+            connector_token: "connector-token".to_string(),
+            computer_use_token: "computer-use-token".to_string(),
+            obsidian_token: "obsidian-token".to_string(),
+            model_catalog_cache: Default::default(),
+            browser_broker: broker,
+            image_sources: ImageSourceCapabilities {
+                images_dir: home.path().join("images"),
+                secret: [7; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
+            },
+            videos_dir: home.path().join("videos"),
+            video_generation_enabled: false,
+            app: None,
+            image_safe_mode_pins: Arc::new(Mutex::new(VecDeque::new())),
+            recorder_requests: Arc::new(Mutex::new(HashMap::new())),
+            memory: None,
+        });
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept connection");
+            handle_june_provider_connection(stream, state)
+                .await
+                .expect("handle connection");
+        });
+
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect proxy");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        let mut response = String::new();
+        stream
+            .read_to_string(&mut response)
+            .await
+            .expect("read response");
+        server.await.expect("server task");
+        response
+    }
+
+    async fn browser_status_response_with_broker_and_token(
+        broker: Arc<BrowserBroker>,
+        token: &str,
+    ) -> String {
+        browser_proxy_response_with_broker(
+            broker,
+            &format!(
+                "GET /v1/browser/status HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 0\r\n\r\n"
+            ),
+        )
+        .await
+    }
+
+    async fn browser_status_response_with_broker(broker: Arc<BrowserBroker>) -> String {
+        browser_status_response_with_broker_and_token(broker, "attended-browser-token").await
+    }
+
+    async fn browser_status_response(grant_enabled: bool) -> String {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        if grant_enabled {
+            std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        }
+        browser_status_response_with_broker(broker_for_access_flag(&access_flag)).await
+    }
+
+    #[tokio::test]
+    async fn browser_status_refuses_the_browser_token_while_grant_is_off() {
+        let response = browser_status_response(false).await;
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "grant off must refuse even the correct browser token: {response}"
+        );
+        assert!(response.contains("browser_access_disabled"));
+    }
+
+    #[tokio::test]
+    async fn browser_status_answers_while_grant_is_on() {
+        let response = browser_status_response(true).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "grant on must answer: {response}"
+        );
+        assert!(response.contains("\"enabled\":true"));
+        assert!(response.contains("\"activeSessions\":0"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_uses_its_own_opt_in_without_attended_access() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let broker = broker_for_access_flag_with_routine(&access_flag, true);
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "an opted-in routine must not depend on attended Browser access: {response}"
+        );
+        assert!(response.contains("\"enabled\":true"));
+        assert!(response.contains("\"activeSessions\":0"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_refuses_an_account_without_the_paid_capability() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let broker = broker_for_access_flag_with_routine(&access_flag, true);
+        broker.set_routine_entitlement_for_test(false);
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "a routine grant must not bypass the account capability: {response}"
+        );
+        assert!(response.contains("browser_routine_pro_required"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_refuses_a_disabled_routine_even_with_attended_access() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag_with_routine(&access_flag, false);
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+        assert!(response.contains("browser_routine_not_opted_in"));
+    }
+
+    #[tokio::test]
+    async fn attended_browser_status_respects_the_remote_transport_policy() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: false,
+                managed_enabled: true,
+            })
+            .await;
+
+        let response = browser_status_response_with_broker(broker).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{response}"
+        );
+        assert!(response.contains("browser_transport_disabled_remotely"));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_status_respects_the_remote_transport_policy() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let broker = broker_for_access_flag_with_routine(&access_flag, true);
+        broker
+            .set_transport_policy(BrowserTransportPolicy {
+                attended_enabled: true,
+                managed_enabled: false,
+            })
+            .await;
+
+        let response = browser_status_response_with_broker_and_token(broker, "browser-token").await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{response}"
+        );
+        assert!(response.contains("browser_transport_disabled_remotely"));
+    }
+
+    #[tokio::test]
+    async fn browser_status_counts_only_sessions_owned_by_its_context() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-2".to_string(),
+            server_name: "june_browser_routine_2".to_string(),
+            token: "browser-token-2".to_string(),
+            enabled: true,
+        });
+        broker.insert_test_session_for("attended-1", BrowserBrokerContext::Attended);
+        broker.insert_test_session_for(
+            "routine-1-a",
+            BrowserBrokerContext::Routine("routine-1".to_string()),
+        );
+        broker.insert_test_session_for(
+            "routine-1-b",
+            BrowserBrokerContext::Routine("routine-1".to_string()),
+        );
+        broker.insert_test_session_for(
+            "routine-2-a",
+            BrowserBrokerContext::Routine("routine-2".to_string()),
+        );
+
+        let attended = browser_status_response_with_broker(Arc::clone(&broker)).await;
+        let routine_1 =
+            browser_status_response_with_broker_and_token(Arc::clone(&broker), "browser-token")
+                .await;
+        let routine_2 =
+            browser_status_response_with_broker_and_token(broker, "browser-token-2").await;
+
+        assert!(attended.contains("\"activeSessions\":1"), "{attended}");
+        assert!(routine_1.contains("\"activeSessions\":2"), "{routine_1}");
+        assert!(routine_2.contains("\"activeSessions\":1"), "{routine_2}");
+    }
+
+    #[tokio::test]
+    async fn browser_status_refuses_after_the_persisted_grant_is_removed_without_a_respawn() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+
+        std::fs::remove_file(&access_flag).expect("remove browser access flag");
+        let response = browser_status_response_with_broker(broker).await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "the broker must read the persisted grant for every request: {response}"
+        );
+        assert!(response.contains("browser_access_disabled"));
+    }
+
+    #[tokio::test]
+    async fn browser_execute_route_refuses_the_correct_token_while_grant_is_off() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        let body = r#"{"callContext":"attended","tool":"start_session","arguments":{}}"#;
+        let request = format!(
+            "POST /v1/browser/execute HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer attended-browser-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+
+        let response =
+            browser_proxy_response_with_broker(broker_for_access_flag(&access_flag), &request)
+                .await;
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "grant off must refuse action routes even with the correct token: {response}"
+        );
+        assert!(response.contains("browser_access_disabled"));
+    }
+
+    struct BrowserContextTransport {
+        called: Arc<std::sync::atomic::AtomicBool>,
+        block_navigation: bool,
+    }
+
+    impl crate::browser_broker::BrowserTransport for BrowserContextTransport {
+        fn execute<'a>(
+            &'a self,
+            tool: &'a str,
+            _arguments: serde_json::Value,
+        ) -> crate::browser_broker::TransportFuture<'a> {
+            let called = Arc::clone(&self.called);
+            let block_navigation = self.block_navigation;
+            Box::pin(async move {
+                called.store(true, std::sync::atomic::Ordering::SeqCst);
+                if block_navigation && tool == "navigate" {
+                    return Err(AppError::new(
+                        "browser_policy_blocked",
+                        "Navigation blocked: the destination is not on the public web.",
+                    ));
+                }
+                Ok(crate::browser_broker::TransportResponse::data(
+                    serde_json::json!({}),
+                ))
+            })
+        }
+    }
+
+    fn browser_execute_request(body: &str) -> String {
+        browser_execute_request_with_token(body, "browser-token")
+    }
+
+    fn browser_execute_request_with_token(body: &str, token: &str) -> String {
+        format!(
+            "POST /v1/browser/execute HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    fn response_json(response: &str) -> serde_json::Value {
+        serde_json::from_str(
+            response
+                .split_once("\r\n\r\n")
+                .expect("HTTP response body")
+                .1,
+        )
+        .expect("JSON response")
+    }
+
+    #[tokio::test]
+    async fn unattended_browser_execute_route_reaches_managed_policy_end_to_end() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let attended_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let managed_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let broker = broker_for_access_flag(&access_flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&attended_called),
+                block_navigation: false,
+            }),
+            home.path().join("attended-images"),
+            home.path().join("attended-artifacts"),
+        );
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&managed_called),
+                block_navigation: true,
+            }),
+            home.path().join("managed-images"),
+            home.path().join("managed-artifacts"),
+        );
+
+        let start_body = r#"{"callContext":"routine","tool":"start_session","arguments":{}}"#;
+        let started = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request(start_body),
+        )
+        .await;
+        let session_id = response_json(&started)["data"]["sessionId"]
+            .as_str()
+            .expect("managed session id")
+            .to_string();
+
+        let navigate_body = serde_json::json!({
+            "callContext": "routine",
+            "tool": "navigate",
+            "arguments": {
+                "session_id": session_id,
+                "url": "http://127.0.0.1/private",
+            },
+        })
+        .to_string();
+        let refused = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request(&navigate_body),
+        )
+        .await;
+
+        assert!(
+            refused.starts_with("HTTP/1.1 400 Bad Request"),
+            "managed private-network policy must refuse through the real route: {refused}"
+        );
+        assert!(refused.contains("browser_policy_blocked"));
+        assert!(managed_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !attended_called.load(std::sync::atomic::Ordering::SeqCst),
+            "an unattended call must never reach the attended transport"
+        );
+
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-1".to_string(),
+            server_name: "june_browser_routine_1".to_string(),
+            token: "browser-token".to_string(),
+            enabled: false,
+        });
+        let attended_body = r#"{"callContext":"attended","tool":"start_session","arguments":{}}"#;
+        let attended = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request_with_token(attended_body, "attended-browser-token"),
+        )
+        .await;
+        assert!(attended.starts_with("HTTP/1.1 200 OK"), "{attended}");
+        assert!(attended_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn routine_browser_route_refuses_when_that_routine_has_not_opted_in() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let body = r#"{"callContext":"routine","tool":"start_session","arguments":{}}"#;
+        let response = browser_proxy_response_with_broker(
+            broker_for_access_flag_with_routine(&access_flag, false),
+            &browser_execute_request(body),
+        )
+        .await;
+
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+        assert!(
+            response.contains("browser_routine_not_opted_in"),
+            "{response}"
+        );
+        assert!(response.contains("start_session"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn routine_browser_opt_in_is_rechecked_between_requests_in_one_run() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            Arc::new(BrowserContextTransport {
+                called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                block_navigation: false,
+            }),
+            home.path().join("managed-images"),
+            home.path().join("managed-artifacts"),
+        );
+        let start = browser_proxy_response_with_broker(
+            Arc::clone(&broker),
+            &browser_execute_request(
+                r#"{"callContext":"routine","tool":"start_session","arguments":{}}"#,
+            ),
+        )
+        .await;
+        let session_id = response_json(&start)["data"]["sessionId"]
+            .as_str()
+            .expect("session id")
+            .to_string();
+
+        broker.set_routine_grant(RoutineBrowserGrant {
+            job_id: "routine-1".to_string(),
+            server_name: "june_browser_routine_1".to_string(),
+            token: "browser-token".to_string(),
+            enabled: false,
+        });
+        let second_body = serde_json::json!({
+            "callContext": "routine",
+            "tool": "snapshot",
+            "arguments": { "session_id": session_id },
+        })
+        .to_string();
+        let second =
+            browser_proxy_response_with_broker(broker, &browser_execute_request(&second_body))
+                .await;
+
+        assert!(second.starts_with("HTTP/1.1 403 Forbidden"), "{second}");
+        assert!(second.contains("browser_routine_not_opted_in"), "{second}");
+        assert!(second.contains("snapshot"), "{second}");
+    }
+
+    #[tokio::test]
+    async fn attended_browser_route_ignores_routine_opt_in_state() {
+        for routine_enabled in [false, true] {
+            let home = tempfile::tempdir().expect("tempdir");
+            let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+            std::fs::write(&access_flag, b"1").expect("write browser access flag");
+            let broker = broker_for_access_flag_with_routine(&access_flag, routine_enabled);
+            broker.configure_transport(
+                BrowserTransportKind::Attended,
+                Arc::new(BrowserContextTransport {
+                    called: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    block_navigation: false,
+                }),
+                home.path().join("attended-images"),
+                home.path().join("attended-artifacts"),
+            );
+            let body = r#"{"callContext":"attended","tool":"start_session","arguments":{}}"#;
+            let response = browser_proxy_response_with_broker(
+                broker,
+                &browser_execute_request_with_token(body, "attended-browser-token"),
+            )
+            .await;
+
+            assert!(
+                response.starts_with("HTTP/1.1 200 OK"),
+                "routine_enabled={routine_enabled}: {response}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn routine_browser_token_cannot_forge_attended_context() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let attended_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let managed_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let broker = broker_for_access_flag(&access_flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&attended_called),
+                block_navigation: false,
+            }),
+            home.path().join("attended-images"),
+            home.path().join("attended-artifacts"),
+        );
+        broker.configure_transport(
+            BrowserTransportKind::Managed,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&managed_called),
+                block_navigation: false,
+            }),
+            home.path().join("managed-images"),
+            home.path().join("managed-artifacts"),
+        );
+
+        let forged = r#"{"callContext":"attended","tool":"start_session","arguments":{}}"#;
+        let routine_request = request_with_authorization("Bearer browser-token");
+        let authenticated_context =
+            provider_proxy_browser_context(&routine_request, &broker, "attended-browser-token");
+        assert_eq!(
+            authenticated_context,
+            Some(BrowserCallerContext::Routine("routine-1".to_string()))
+        );
+        let state = ProviderProxyState {
+            token: "proxy-token".to_string(),
+            memory_token: "memory-token".to_string(),
+            recorder_token: "recorder-token".to_string(),
+            routine_browser_token: BrowserProxyToken::new("browser-token".to_string()),
+            attended_browser_token: BrowserProxyToken::new("attended-browser-token".to_string()),
+            connector_token: "connector-token".to_string(),
+            computer_use_token: "computer-use-token".to_string(),
+            obsidian_token: "obsidian-token".to_string(),
+            model_catalog_cache: Default::default(),
+            browser_broker: broker,
+            image_sources: ImageSourceCapabilities {
+                images_dir: home.path().join("images"),
+                secret: [7; IMAGE_SOURCE_CAPABILITY_SECRET_BYTES],
+            },
+            videos_dir: home.path().join("videos"),
+            video_generation_enabled: false,
+            app: None,
+            image_safe_mode_pins: Arc::new(Mutex::new(VecDeque::new())),
+            recorder_requests: Arc::new(Mutex::new(HashMap::new())),
+            memory: None,
+        };
+        let (mut response_reader, mut response_writer) = tokio::io::duplex(4096);
+        handle_browser_execute(
+            &mut response_writer,
+            &state,
+            authenticated_context,
+            forged.as_bytes(),
+        )
+        .await
+        .expect("handle browser execute");
+        let mut response = String::new();
+        response_reader
+            .read_to_string(&mut response)
+            .await
+            .expect("read browser response");
+
+        assert!(
+            response.starts_with("HTTP/1.1 403 Forbidden"),
+            "a forged attended context must be refused: {response}"
+        );
+        assert!(response.contains("browser_context_mismatch"), "{response}");
+        assert!(!managed_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            !attended_called.load(std::sync::atomic::Ordering::SeqCst),
+            "a routine-scoped browser token must never reach Attended"
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_browser_execute_context_fails_closed_before_transport_dispatch() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let attended_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let broker = broker_for_access_flag(&access_flag);
+        broker.configure_transport(
+            BrowserTransportKind::Attended,
+            Arc::new(BrowserContextTransport {
+                called: Arc::clone(&attended_called),
+                block_navigation: false,
+            }),
+            home.path().join("images"),
+            home.path().join("artifacts"),
+        );
+        let body = r#"{"tool":"start_session","arguments":{}}"#;
+
+        let response =
+            browser_proxy_response_with_broker(broker, &browser_execute_request(body)).await;
+
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"), "{response}");
+        assert!(response.contains("browser_context_unknown"));
+        assert!(!attended_called.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn render_hermes_config_always_renders_june_browser_following_the_grant() {
+        // Grant off: the entry is STILL rendered with command/args and an
+        // explicit `enabled: false`. June owns this key, so omitting it on
+        // revoke would leave stale/user-added state and fail to revoke. The
+        // disabled entry must not carry a live browser credential.
+        let disabled = test_june_browser_mcp_config(false);
+        let config = render_hermes_config(
+            "glm",
+            false,
+            "http://127.0.0.1:9/v1",
+            "proxy-tok",
+            "memory-proxy-tok",
+            "recorder-proxy-tok",
+            "browser-proxy-tok",
+            "connector-proxy-tok",
+            "computer-use-proxy-tok",
+            "obsidian-proxy-tok",
+            "web",
+            &[],
+            BuiltinMcpConfigs {
+                context: None,
+                web: None,
+                image: None,
+                video: None,
+                recorder: None,
+                browser: Some(&disabled),
+                computer_use: None,
+                gmail: None,
+                gmail_actions: None,
+                gcal: None,
+                gcal_actions: None,
+                linear: None,
+                linear_actions: None,
+                notion: None,
+                notion_actions: None,
+                obsidian: None,
+                connector_autos: &[],
+            },
+        );
+        assert!(config.contains("  june_browser:\n"));
+        assert!(config.contains("    enabled: false\n"));
+        assert!(config.contains("      - \"/tmp/june/hermes-mcp/june_browser_mcp.py\"\n"));
+        assert!(config.contains("      - \"http://127.0.0.1:9/v1\"\n"));
+        assert!(config.contains("      JUNE_BROWSER_CALL_CONTEXT: \"attended\"\n"));
+        assert!(!config.contains("${HERMES_CRON_SESSION}"));
+        assert!(!config.contains("${HERMES_GATEWAY_SESSION}"));
+        assert!(!config.contains("browser-proxy-tok"));
+        assert!(!config.contains(JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV));
+        assert!(!config.contains(JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV));
+        assert!(!config.contains("JUNE_BROWSER_PROXY_TOKEN: \"proxy-tok\""));
+        assert!(!config.contains("JUNE_BROWSER_PROXY_TOKEN: \"recorder-proxy-tok\""));
+
+        // Grant on: the same entry with `enabled: true` and the dedicated
+        // browser token, never the provider or recorder secret.
+        let enabled = test_june_browser_mcp_config(true);
+        let config = render_hermes_config(
+            "glm",
+            false,
+            "http://127.0.0.1:9/v1",
+            "proxy-tok",
+            "memory-proxy-tok",
+            "recorder-proxy-tok",
+            "browser-proxy-tok",
+            "connector-proxy-tok",
+            "computer-use-proxy-tok",
+            "obsidian-proxy-tok",
+            "web",
+            &[],
+            BuiltinMcpConfigs {
+                context: None,
+                web: None,
+                image: None,
+                video: None,
+                recorder: None,
+                browser: Some(&enabled),
+                computer_use: None,
+                gmail: None,
+                gmail_actions: None,
+                gcal: None,
+                gcal_actions: None,
+                linear: None,
+                linear_actions: None,
+                notion: None,
+                notion_actions: None,
+                obsidian: None,
+                connector_autos: &[],
+            },
+        );
+        assert!(config.contains("  june_browser:\n"));
+        assert!(config.contains("    enabled: true\n"));
+        assert!(!config.contains("browser-proxy-tok"));
+        assert!(config.contains(
+            "      JUNE_BROWSER_ATTENDED_PROXY_TOKEN: \"${JUNE_BROWSER_ATTENDED_PROXY_TOKEN}\"\n"
+        ));
+    }
+
+    #[test]
+    fn render_hermes_config_registers_only_opted_in_routine_browser_servers() {
+        let mut browser = test_june_browser_mcp_config(true);
+        browser.routine_grants = vec![
+            RoutineBrowserGrant {
+                job_id: "routine-on".to_string(),
+                server_name: "june_browser_routine_on".to_string(),
+                token: "routine-on-token".to_string(),
+                enabled: true,
+            },
+            RoutineBrowserGrant {
+                job_id: "routine-off".to_string(),
+                server_name: "june_browser_routine_off".to_string(),
+                token: "routine-off-token".to_string(),
+                enabled: false,
+            },
+        ];
+        let config = render_hermes_config(
+            "glm",
+            false,
+            "http://127.0.0.1:9/v1",
+            "proxy-tok",
+            "memory-proxy-tok",
+            "recorder-proxy-tok",
+            "unused-routine-token",
+            "connector-proxy-tok",
+            "computer-use-proxy-tok",
+            "obsidian-proxy-tok",
+            "web",
+            &[],
+            BuiltinMcpConfigs {
+                context: None,
+                web: None,
+                image: None,
+                video: None,
+                recorder: None,
+                browser: Some(&browser),
+                computer_use: None,
+                gmail: None,
+                gmail_actions: None,
+                gcal: None,
+                gcal_actions: None,
+                linear: None,
+                linear_actions: None,
+                notion: None,
+                notion_actions: None,
+                obsidian: None,
+                connector_autos: &[],
+            },
+        );
+
+        assert!(config.contains("  june_browser_routine_on:\n"));
+        assert!(config.contains("routine-on-token"));
+        assert!(config.contains("      JUNE_BROWSER_CALL_CONTEXT: \"routine\"\n"));
+        assert!(!config.contains("${HERMES_CRON_SESSION}"));
+        assert!(!config.contains("${HERMES_GATEWAY_SESSION}"));
+        assert!(!config.contains("june_browser_routine_off"));
+        assert!(!config.contains("routine-off-token"));
+    }
+
+    #[test]
+    fn upstream_browser_and_computer_use_toolsets_are_disabled_regardless_of_the_grant() {
+        // June exposes browser and computer use only through its own
+        // `june_browser` contract, where the broker is the policy choke point
+        // (ADR 0017). The runtime's own `browser` / `computer_use` toolsets
+        // bypass that choke point, so they are off unconditionally: the grant
+        // governs `june_browser`, never these. Interactive sessions carry no
+        // `enabled_toolsets`, so without this they would get the runtime's full
+        // default set.
+        for grant in [false, true] {
+            let browser = test_june_browser_mcp_config(grant);
+            let config = render_hermes_config(
+                "glm",
+                false,
+                "http://127.0.0.1:9/v1",
+                "proxy-tok",
+                "memory-proxy-tok",
+                "recorder-proxy-tok",
+                "browser-proxy-tok",
+                "connector-proxy-tok",
+                "computer-use-proxy-tok",
+                "obsidian-proxy-tok",
+                "web",
+                &[],
+                BuiltinMcpConfigs {
+                    context: None,
+                    web: None,
+                    image: None,
+                    video: None,
+                    recorder: None,
+                    browser: Some(&browser),
+                    computer_use: None,
+                    gmail: None,
+                    gmail_actions: None,
+                    gcal: None,
+                    gcal_actions: None,
+                    linear: None,
+                    linear_actions: None,
+                    notion: None,
+                    notion_actions: None,
+                    obsidian: None,
+                    connector_autos: &[],
+                },
+            );
+            assert!(
+                config.contains("  disabled_toolsets: [browser, computer_use]\n"),
+                "grant={grant}: upstream toolsets must be disabled in the rendered config"
+            );
+            // The gate is unconditional; it must not track the grant.
+            assert!(config.contains(&format!("    enabled: {grant}\n")));
+        }
+    }
+
+    #[tokio::test]
+    async fn revoking_browser_access_clears_injected_broker_sessions() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        // Test-only fixture insertion; production session creation is JUN-287's.
+        broker.insert_test_session("sess-1");
+        broker.insert_test_session("sess-2");
+        assert_eq!(broker.active_session_count(), 2);
+        assert!(broker.is_enabled());
+
+        // Revoke: the gate flips false and every session is terminated.
+        broker.set_enabled(false).await.expect("disable broker");
+        assert!(!broker.is_enabled());
+        assert_eq!(broker.active_session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn revoking_browser_access_closes_the_gate_before_removing_persisted_state() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        let mut gate_was_closed_during_persist = false;
+
+        apply_browser_access_transition(
+            &broker,
+            false,
+            || {
+                gate_was_closed_during_persist = !broker.is_enabled();
+                std::fs::remove_file(&access_flag)
+                    .map_err(|error| AppError::new("browser_access_failed", error.to_string()))?;
+                Ok(())
+            },
+            || Ok(()),
+        )
+        .await
+        .expect("revoke transition");
+
+        assert!(
+            gate_was_closed_during_persist,
+            "new broker commands must be refused before persisted grant removal begins"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_spawn_registering_after_revoke_cannot_restore_browser_access() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let access_flag = home.path().join(BROWSER_ACCESS_FLAG_FILE);
+        std::fs::write(&access_flag, b"1").expect("write browser access flag");
+        let broker = broker_for_access_flag(&access_flag);
+        assert!(broker.is_enabled());
+
+        std::fs::remove_file(&access_flag).expect("remove browser access flag");
+        // Simulate an in-flight spawn publishing the stale value it read before
+        // the revoke removed the flag.
+        broker.set_enabled(true).await.expect("enable broker");
+
+        assert!(!access_flag.exists());
+        assert!(
+            !broker.is_enabled(),
+            "a stale spawn decision must not override the persisted grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_proxy_tokens_rotate_across_every_grant_transition_and_refuse_stale_tokens() {
+        let broker = BrowserBroker::default();
+        let routine_token = BrowserProxyToken::new("stale-routine-token".to_string());
+        let attended_token = BrowserProxyToken::new("stale-attended-token".to_string());
+
+        for enabled in [true, false] {
+            let stale_routine = routine_token.current();
+            let stale_attended = attended_token.current();
+            let stale_routine_request =
+                request_with_authorization(&format!("Bearer {stale_routine}"));
+            let stale_attended_request =
+                request_with_authorization(&format!("Bearer {stale_attended}"));
+            let routine_to_rotate = routine_token.clone();
+            let attended_to_rotate = attended_token.clone();
+
+            apply_browser_access_transition(
+                &broker,
+                enabled,
+                || Ok(()),
+                || {
+                    routine_to_rotate.rotate();
+                    attended_to_rotate.rotate();
+                    Ok(())
+                },
+            )
+            .await
+            .expect("grant transition");
+
+            let current_routine = routine_token.current();
+            let current_attended = attended_token.current();
+            let browser_broker = BrowserBroker::default();
+            assert_ne!(current_routine, stale_routine, "enabled={enabled}");
+            assert_ne!(current_attended, stale_attended, "enabled={enabled}");
+            for stale_request in [&stale_routine_request, &stale_attended_request] {
+                assert_eq!(
+                    provider_proxy_browser_context(
+                        stale_request,
+                        &browser_broker,
+                        &current_attended,
+                    ),
+                    None,
+                    "enabled={enabled}: a credential captured before the transition must be refused"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn browser_mcp_script_advertises_the_transport_agnostic_contract() {
+        for tool in [
+            "status",
+            "start_session",
+            "close_session",
+            "navigate",
+            "snapshot",
+            "click",
+            "fill",
+            "press",
+            "screenshot",
+            "back",
+            "list_tabs",
+            "open_tab",
+            "switch_tab",
+            "close_tab",
+            "accept_shared_tab",
+        ] {
+            assert!(
+                JUNE_BROWSER_MCP_SCRIPT.contains(&format!("\"name\": \"{tool}\""))
+                    || JUNE_BROWSER_MCP_SCRIPT.contains(&format!("(\"{tool}\",")),
+                "browser MCP must advertise {tool}"
+            );
+        }
+        assert!(JUNE_BROWSER_MCP_SCRIPT.contains("[\"session_id\", \"tab_id\", \"ref\"]"));
+        assert!(JUNE_BROWSER_MCP_SCRIPT.contains("[\"session_id\", \"tab_id\", \"ref\", \"key\"]"));
+        assert!(!JUNE_BROWSER_MCP_SCRIPT.contains("\"name\": \"open\""));
+        assert!(!JUNE_BROWSER_MCP_SCRIPT.contains("start_recording"));
+        // It reads its dedicated token env var, kept distinct from the others.
+        assert!(JUNE_BROWSER_MCP_SCRIPT.contains(JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV));
+        assert!(JUNE_BROWSER_MCP_SCRIPT.contains(JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV));
+    }
+
+    #[test]
     fn provider_proxy_rejects_missing_or_malformed_authorization() {
         let missing = HttpRequest {
             method: "GET".to_string(),
@@ -15834,6 +18107,7 @@ assert capped["has_more"] is True, capped
             "proxy-token",
             "memory-token",
             "recorder-token",
+            "browser-token",
             "connector-token",
             "computer-use-token",
             "obsidian-token",
@@ -16796,6 +19070,7 @@ mcp_servers:
             "new-token",
             "memory-token",
             "recorder-token",
+            "browser-token",
             "connector-token",
             "computer-use-token",
             "obsidian-proxy-tok",
@@ -16808,6 +19083,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -16858,6 +19134,64 @@ mcp_servers:
 
         std::fs::write(&missing, ": not yaml : [").expect("seed corrupt");
         assert_eq!(merge_hermes_config(&missing, rendered), rendered);
+    }
+
+    #[test]
+    fn merge_hermes_config_removes_legacy_browser_session_markers() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let config_path = home.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            r#"mcp_servers:
+  june_browser:
+    env:
+      PYTHONUNBUFFERED: "1"
+      JUNE_BROWSER_CRON_SESSION: "${HERMES_CRON_SESSION}"
+      JUNE_BROWSER_GATEWAY_SESSION: "${HERMES_GATEWAY_SESSION}"
+"#,
+        )
+        .expect("seed config");
+
+        let rendered = render_hermes_config(
+            "m",
+            false,
+            "http://127.0.0.1:9/v1",
+            "t",
+            "memory",
+            "recorder",
+            "browser",
+            "connector",
+            "computer-use",
+            "obsidian",
+            "web",
+            &[],
+            BuiltinMcpConfigs {
+                context: None,
+                web: None,
+                image: None,
+                video: None,
+                recorder: None,
+                browser: Some(&test_june_browser_mcp_config(true)),
+                computer_use: None,
+                gmail: None,
+                gmail_actions: None,
+                gcal: None,
+                gcal_actions: None,
+                linear: None,
+                linear_actions: None,
+                notion: None,
+                notion_actions: None,
+                obsidian: None,
+                connector_autos: &[],
+            },
+        );
+        let merged = merge_hermes_config(&config_path, &rendered);
+
+        assert!(merged.contains("JUNE_BROWSER_CALL_CONTEXT: attended"));
+        assert!(!merged.contains("JUNE_BROWSER_CRON_SESSION"));
+        assert!(!merged.contains("JUNE_BROWSER_GATEWAY_SESSION"));
+        assert!(!merged.contains("${HERMES_CRON_SESSION}"));
+        assert!(!merged.contains("${HERMES_GATEWAY_SESSION}"));
     }
 
     #[test]
@@ -17241,6 +19575,7 @@ mcp_servers:
             "t",
             "memory",
             "recorder",
+            "browser",
             "connector",
             "computer-use",
             "obsidian",
@@ -17263,6 +19598,7 @@ mcp_servers:
                 notion: None,
                 notion_actions: None,
                 connector_autos: &[],
+                browser: None,
             },
         );
         let merged = merge_hermes_config(&config_path, &rendered);
@@ -17470,6 +19806,7 @@ mcp_servers:
             "proxy-token",
             "memory-proxy-token",
             "recorder-proxy-token",
+            "browser-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
             "obsidian-proxy-token",
@@ -17480,6 +19817,7 @@ mcp_servers:
             &test_june_image_mcp_config(),
             None,
             &test_june_recorder_mcp_config(),
+            &test_june_browser_mcp_config(false),
             &test_june_computer_use_mcp_config(false),
             None,
             std::slice::from_ref(&default_dir),
@@ -17526,6 +19864,7 @@ mcp_servers:
             "tok",
             "memory-tok",
             "recorder-tok",
+            "browser-tok",
             "connector-tok",
             "computer-use-tok",
             "obsidian-proxy-tok",
@@ -17538,6 +19877,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -17577,6 +19917,7 @@ mcp_servers:
             "tok",
             "memory-tok",
             "recorder-tok",
+            "browser-tok",
             "connector-tok",
             "computer-use-tok",
             "obsidian-proxy-tok",
@@ -17589,6 +19930,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -17640,6 +19982,15 @@ mcp_servers:
         JuneRecorderMcpConfig {
             command: "/tmp/hermes/venv/bin/python".to_string(),
             script_path: PathBuf::from("/tmp/june/hermes-mcp/june_recorder_mcp.py"),
+        }
+    }
+
+    fn test_june_browser_mcp_config(enabled: bool) -> JuneBrowserMcpConfig {
+        JuneBrowserMcpConfig {
+            command: "/tmp/hermes/venv/bin/python".to_string(),
+            script_path: PathBuf::from("/tmp/june/hermes-mcp/june_browser_mcp.py"),
+            enabled,
+            routine_grants: Vec::new(),
         }
     }
 
@@ -17706,6 +20057,7 @@ mcp_servers:
             "proxy-tok",
             "memory-proxy-tok",
             "recorder-proxy-tok",
+            "browser-proxy-tok",
             "connector-proxy-tok",
             "computer-use-proxy-tok",
             "obsidian-proxy-tok",
@@ -17718,6 +20070,7 @@ mcp_servers:
                 image: Some(&image),
                 video: Some(&video),
                 recorder: Some(&recorder),
+                browser: None,
                 computer_use: Some(&computer_use),
                 gmail: Some(&gmail),
                 gmail_actions: Some(&gmail_actions),
@@ -17879,6 +20232,7 @@ mcp_servers:
             "proxy-tok",
             "memory-proxy-tok",
             "recorder-proxy-tok",
+            "browser-proxy-tok",
             "connector-proxy-tok",
             "computer-use-proxy-tok",
             "obsidian-proxy-tok",
@@ -17901,6 +20255,7 @@ mcp_servers:
                 notion: None,
                 notion_actions: None,
                 connector_autos: &[],
+                browser: None,
             },
         );
         // Base servers present, but no per-job auto servers and no grant env.
@@ -17924,6 +20279,7 @@ mcp_servers:
             "proxy-tok",
             "memory-proxy-tok",
             "recorder-proxy-tok",
+            "browser-proxy-tok",
             "connector-proxy-tok",
             "computer-use-proxy-tok",
             "obsidian-proxy-tok",
@@ -17936,6 +20292,7 @@ mcp_servers:
                 image: Some(&image),
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -17966,6 +20323,7 @@ mcp_servers:
             "tok",
             "memory-tok",
             "recorder-tok",
+            "browser-tok",
             "connector-tok",
             "computer-use-tok",
             "obsidian-proxy-tok",
@@ -17978,6 +20336,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -18008,6 +20367,7 @@ mcp_servers:
             "proxy-token",
             "memory-proxy-token",
             "recorder-proxy-token",
+            "browser-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
             "obsidian-proxy-tok",
@@ -18020,6 +20380,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -18041,6 +20402,7 @@ mcp_servers:
             "proxy-token",
             "memory-proxy-token",
             "recorder-proxy-token",
+            "browser-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
             "obsidian-proxy-tok",
@@ -18053,6 +20415,7 @@ mcp_servers:
                 image: None,
                 video: None,
                 recorder: None,
+                browser: None,
                 computer_use: None,
                 gmail: None,
                 gmail_actions: None,
@@ -18178,18 +20541,6 @@ mcp_servers:
         assert!(!hermes_runtime_metadata_is_current(&previous));
     }
 
-    fn command_env_removals(cmd: &Command) -> std::collections::HashSet<String> {
-        cmd.get_envs()
-            .filter_map(|(key, value)| {
-                if value.is_none() {
-                    Some(key.to_string_lossy().into_owned())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     fn test_gateway_connection() -> HermesBridgeConnection {
         HermesBridgeConnection {
             base_url: "http://127.0.0.1:1".to_string(),
@@ -18209,7 +20560,11 @@ mcp_servers:
     #[test]
     fn gateway_start_spawns_the_bare_hermes_cli_outside_the_sandbox() {
         let connection = test_gateway_connection();
-        let cmd = build_hermes_gateway_start_command(&connection, Path::new("/tmp/hermes-home"));
+        let cmd = build_hermes_gateway_lifecycle_command(
+            &connection,
+            Path::new("/tmp/hermes-home"),
+            "start",
+        );
 
         // The whole point of the direct spawn: the program is the hermes CLI
         // itself, never a sandbox-exec wrapper — launchd rejects service
@@ -18239,6 +20594,8 @@ mcp_servers:
             envs.get("HERMES_NONINTERACTIVE").map(String::as_str),
             Some("1")
         );
+        assert!(!envs.contains_key(JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV));
+        assert!(!envs.contains_key(JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV));
         assert_eq!(cmd.get_current_dir(), Some(Path::new("/tmp/hermes-home")));
     }
 
@@ -18446,6 +20803,8 @@ mcp_servers:
         std::env::remove_var("HERMES_ENVIRONMENT_HINT");
         assert!(!envs_of(&bare).contains_key("HERMES_ENVIRONMENT_HINT"));
         assert!(!envs_of(&bare).contains_key("HERMES_TUI_TOOLSETS"));
+        assert!(!envs_of(&bare).contains_key(JUNE_BROWSER_MCP_ROUTINE_TOKEN_ENV));
+        assert!(!envs_of(&bare).contains_key(JUNE_BROWSER_MCP_ATTENDED_TOKEN_ENV));
     }
 
     #[test]
@@ -18540,6 +20899,7 @@ mcp_servers:
         let image = test_june_image_mcp_config();
         let video = test_june_video_mcp_config();
         let recorder = test_june_recorder_mcp_config();
+        let browser = test_june_browser_mcp_config(false);
         let computer_use = test_june_computer_use_mcp_config(false);
         let connectors = ConnectorMcpConfigs {
             base: Some(ConnectorBaseMcpConfigs {
@@ -18569,6 +20929,7 @@ mcp_servers:
             "proxy-token",
             "memory-proxy-token",
             "recorder-proxy-token",
+            "browser-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
             "obsidian-proxy-token",
@@ -18579,6 +20940,7 @@ mcp_servers:
             &image,
             Some(&video),
             &recorder,
+            &browser,
             &computer_use,
             Some(&connectors),
             &[],
@@ -18656,6 +21018,7 @@ mcp_servers:
             image: None,
             video: None,
             recorder: None,
+            browser: None,
             computer_use: None,
             gmail: None,
             gmail_actions: None,
@@ -18707,6 +21070,7 @@ mcp_servers:
             "proxy-token",
             "memory-proxy-token",
             "recorder-proxy-token",
+            "browser-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
             "obsidian-proxy-token",
@@ -18717,6 +21081,7 @@ mcp_servers:
             &image,
             None,
             &recorder,
+            &test_june_browser_mcp_config(false),
             &test_june_computer_use_mcp_config(false),
             None,
             &[],
@@ -18766,6 +21131,7 @@ mcp_servers:
             "proxy-token",
             "memory-proxy-token",
             "recorder-proxy-token",
+            "browser-proxy-token",
             "connector-proxy-token",
             "computer-use-proxy-token",
             "obsidian-proxy-token",
@@ -18776,6 +21142,7 @@ mcp_servers:
             &image,
             None,
             &recorder,
+            &test_june_browser_mcp_config(false),
             &test_june_computer_use_mcp_config(false),
             None,
             &[],
@@ -18846,7 +21213,8 @@ mcp_servers:
         )
         .expect("seed default soul");
 
-        sync_june_soul(home.path(), true, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are June"));
@@ -18869,7 +21237,8 @@ mcp_servers:
     fn june_soul_includes_memory_guidance_only_while_globally_enabled() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false, false).expect("enabled soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, false, false)
+            .expect("enabled soul");
         let enabled = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(enabled.contains("June memory tools"));
         assert!(enabled.contains("save_memory"));
@@ -18877,7 +21246,8 @@ mcp_servers:
         assert!(enabled.contains("forget_memory"));
         assert!(enabled.contains("Never save secrets, credentials"));
 
-        sync_june_soul(home.path(), false, false, false, false, false).expect("disabled soul");
+        sync_june_soul(home.path(), false, false, Some(false), false, false, false)
+            .expect("disabled soul");
         let disabled = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(!disabled.contains("June memory tools"));
         assert!(!disabled.contains("save_memory"));
@@ -18899,7 +21269,8 @@ mcp_servers:
     fn sandboxed_soul_describes_the_write_jail() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), true, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("Seatbelt"));
@@ -18924,7 +21295,8 @@ mcp_servers:
     fn june_soul_describes_local_context_tools() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_context"));
@@ -18940,7 +21312,8 @@ mcp_servers:
     fn june_soul_asks_for_clarification_before_costly_ambiguous_work() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("Clarifying questions"));
@@ -18954,7 +21327,8 @@ mcp_servers:
     fn june_soul_describes_web_tools() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_web"));
@@ -18967,7 +21341,8 @@ mcp_servers:
         let home = tempfile::tempdir().expect("tempdir");
 
         // Not registered: no connector stanza.
-        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, false)
+            .expect("sync soul");
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(!soul.contains("june_gmail"));
         assert!(!soul.contains("june_gcal"));
@@ -18976,7 +21351,8 @@ mcp_servers:
 
         // Registered: gmail/gcal/linear toolsets, the untrusted-input warning,
         // and the approval note appear.
-        sync_june_soul(home.path(), false, false, true, true, true).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, true)
+            .expect("sync soul");
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_gmail"));
         assert!(soul.contains("june_gcal"));
@@ -19297,7 +21673,8 @@ mcp_servers:
     fn june_soul_uses_image_settings_instead_of_pre_refusing() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, false, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_image"));
@@ -19323,7 +21700,8 @@ mcp_servers:
     fn june_soul_describes_recorder_tools() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, false, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_recorder"));
@@ -19337,7 +21715,7 @@ mcp_servers:
     fn sandboxed_soul_with_cli_access_describes_the_grant() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), true, true, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, true, Some(false), true, true, false).expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("the user enabled Agent CLI access"));
@@ -19350,10 +21728,78 @@ mcp_servers:
     }
 
     #[test]
+    fn soul_without_browser_access_teaches_the_request_token() {
+        let home = tempfile::tempdir().expect("tempdir");
+
+        // Grant off: the soul names the disabled state and the in-chat
+        // request token the app renders as a card. The guidance is
+        // sandbox-independent, so assert it in both soul shapes.
+        for sandbox_available in [true, false] {
+            sync_june_soul(
+                home.path(),
+                sandbox_available,
+                false,
+                Some(false),
+                true,
+                true,
+                false,
+            )
+            .expect("sync soul");
+
+            let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
+            assert!(soul.contains("Browser use"));
+            assert!(soul.contains("browser_access_disabled"));
+            assert!(soul.contains("[REQUEST:BROWSER_ACCESS]"));
+            assert!(soul.contains("Never pretend you browsed"));
+            // The manual fallback must name where the control actually lives.
+            // Browser use moved out of the Agent tab into Connectors.
+            assert!(soul.contains("Settings, Connectors"));
+            assert!(!soul.contains("Browser use\" in Settings, Agent tab"));
+        }
+    }
+
+    #[test]
+    fn soul_with_browser_access_omits_the_request_and_conditions_routine_use() {
+        let home = tempfile::tempdir().expect("tempdir");
+
+        sync_june_soul(home.path(), true, false, Some(true), true, true, false).expect("sync soul");
+
+        // Grant on: nothing to request and no stale "disabled" claim. The
+        // attended guidance must stay positively affirmative - without it the
+        // model defaults to refusing ("I can't access your browser"), the
+        // user-found bug the SOUL polish fixed - while the same shared soul
+        // must not promise browsing to a routine that has not opted in.
+        let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
+        assert!(!soul.contains("[REQUEST:BROWSER_ACCESS]"));
+        assert!(!soul.contains("browser_access_disabled"));
+        assert!(soul.contains("the user enabled Browser use"));
+        assert!(soul.contains("never tell the user you cannot access their browser"));
+        assert!(soul.contains("only when that specific routine has Browser use enabled"));
+        assert!(soul.contains("Routine browsing is anonymous"));
+        assert!(soul.contains("Consequential actions in routines are blocked"));
+    }
+
+    #[test]
+    fn soul_with_browser_use_feature_flagged_out_renders_neither_browser_section() {
+        let home = tempfile::tempdir().expect("tempdir");
+
+        // None = the feature flag hides Browser use from this build. Neither
+        // the request token (a card the UI would not show) nor the enabled
+        // guidance may render.
+        sync_june_soul(home.path(), true, false, None, true, true, false).expect("sync soul");
+
+        let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
+        assert!(!soul.contains("[REQUEST:BROWSER_ACCESS]"));
+        assert!(!soul.contains("june_browser tools"));
+        assert!(!soul.contains("the user enabled Browser use"));
+    }
+
+    #[test]
     fn unsandboxed_soul_makes_no_sandbox_claims() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are June"));
@@ -19365,7 +21811,8 @@ mcp_servers:
     fn june_soul_omits_video_tools_when_disabled() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, false, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are June"));
@@ -19379,7 +21826,8 @@ mcp_servers:
     fn sync_june_soul_seeds_character_file_and_uses_default() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, false, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are helpful, knowledgeable, and direct"));
@@ -19398,7 +21846,8 @@ mcp_servers:
         )
         .expect("seed character");
 
-        sync_june_soul(home.path(), true, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), true, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("cheerful pirate"));
@@ -19420,7 +21869,8 @@ mcp_servers:
         let home = tempfile::tempdir().expect("tempdir");
         std::fs::write(home.path().join("CHARACTER.md"), "   \n\n").expect("seed blank");
 
-        sync_june_soul(home.path(), false, false, true, false, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, false, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("You are helpful, knowledgeable, and direct"));
@@ -19459,7 +21909,8 @@ mcp_servers:
     fn june_soul_includes_video_tools_when_enabled() {
         let home = tempfile::tempdir().expect("tempdir");
 
-        sync_june_soul(home.path(), false, false, true, true, false).expect("sync soul");
+        sync_june_soul(home.path(), false, false, Some(false), true, true, false)
+            .expect("sync soul");
 
         let soul = std::fs::read_to_string(home.path().join("SOUL.md")).expect("read soul");
         assert!(soul.contains("june_video"));
@@ -19726,6 +22177,35 @@ mcp_servers:
         assert!(!profile.contains(".codex"));
         assert!(!profile.contains(".gemini"));
         assert!(!profile.contains("opencode"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn sandbox_profile_denies_reads_of_the_extension_host_descriptor() {
+        let home = PathBuf::from("/Users/test");
+        let app_data_dir =
+            PathBuf::from("/Users/test/Library/Application Support/co.opensoftware.june");
+        let workspace = app_data_dir.join("hermes");
+        let config_path = sandbox_config_write_path(&workspace);
+        let config_temp_prefix = sandbox_config_temp_prefix(&workspace);
+        let descriptor_path = crate::extension_host::descriptor_path(&app_data_dir);
+        let secret_read_paths = sandbox_secret_read_paths(&app_data_dir);
+        let profile = build_sandbox_profile(
+            &home,
+            std::slice::from_ref(&workspace),
+            &config_path,
+            &config_temp_prefix,
+            &secret_read_paths,
+            false,
+        );
+
+        assert!(
+            profile.contains(&format!(
+                "(literal {})",
+                sbpl_quote(&descriptor_path.to_string_lossy())
+            )),
+            "the jailed runtime must not read its extension listener credential"
+        );
     }
 
     #[cfg(target_os = "macos")]
