@@ -17,7 +17,15 @@ const mocks = vi.hoisted(() => ({
   browserTransportPolicy: vi.fn(),
   connectorsLinearTeams: vi.fn(),
   connectorsSetSelectedTeams: vi.fn(),
+  obsidianStatus: vi.fn(),
+  obsidianConfigure: vi.fn(),
+  obsidianDisconnect: vi.fn(),
+  openFileDialog: vi.fn(),
+  notionConnectorConnect: vi.fn(),
+  notionConnectorDisconnect: vi.fn(),
   listen: vi.fn(),
+  toastSuccess: vi.fn(),
+  toastError: vi.fn(),
 }));
 
 // Pin BROWSER_USE_ENABLED on so the Browser use capability row stays testable
@@ -42,10 +50,26 @@ vi.mock("../lib/tauri", async (importOriginal) => ({
   EXTENSION_PAIRING_CHANGED_EVENT: "june://extension-pairing-changed",
   connectorsLinearTeams: mocks.connectorsLinearTeams,
   connectorsSetSelectedTeams: mocks.connectorsSetSelectedTeams,
+  obsidianStatus: mocks.obsidianStatus,
+  obsidianConfigure: mocks.obsidianConfigure,
+  obsidianDisconnect: mocks.obsidianDisconnect,
+  notionConnectorConnect: mocks.notionConnectorConnect,
+  notionConnectorDisconnect: mocks.notionConnectorDisconnect,
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: mocks.openFileDialog,
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: mocks.listen,
+}));
+
+vi.mock("../components/ui/Toaster", () => ({
+  toast: {
+    success: mocks.toastSuccess,
+    error: mocks.toastError,
+  },
 }));
 
 const GMAIL_READONLY = "https://www.googleapis.com/auth/gmail.readonly";
@@ -108,10 +132,25 @@ beforeEach(() => {
     attendedEnabled: true,
     managedEnabled: true,
   });
+  mocks.obsidianStatus.mockResolvedValue({ connected: false });
+  mocks.obsidianConfigure.mockResolvedValue({
+    connected: true,
+    vaultPath: "/vaults/work",
+    vaultName: "work",
+  });
+  mocks.obsidianDisconnect.mockResolvedValue({ connected: false });
+  mocks.openFileDialog.mockResolvedValue(null);
   mocks.listen.mockImplementation(async (_event: string, handler: () => void) => {
     connectorsChangedListener = handler;
     return () => {};
   });
+  mocks.notionConnectorConnect.mockResolvedValue({
+    accountId: "notion-hosted-mcp",
+    endpoint: "https://mcp.notion.com/mcp",
+    preview: true,
+    selectedResourceScopingVerified: false,
+  });
+  mocks.notionConnectorDisconnect.mockResolvedValue(undefined);
 });
 
 /** Waits for the initial connectorsList load to settle. */
@@ -236,20 +275,93 @@ describe("ConnectorsSection", () => {
     expect(within(row).queryByText("Finish setup")).toBeNull();
   });
 
-  it("disconnects Browser use by revoking the shared grant", async () => {
-    mocks.hermesBrowserAccess.mockResolvedValue({ enabled: true });
-    mocks.extensionPairingStatus.mockResolvedValue({
-      paired: true,
-      listenerRunning: true,
-      extensionVersion: "0.1.0",
-    });
+  it("uses plugin terminology for Obsidian status errors", async () => {
+    mocks.obsidianStatus.mockRejectedValue(new Error("Could not read the saved vault"));
+
     render(<ConnectorsSection />);
 
-    const row = (await screen.findByText("Browser use")).closest("li") as HTMLElement;
-    await userEvent.click(await within(row).findByRole("button", { name: "Disconnect" }));
+    expect(await screen.findByLabelText("Obsidian plugin error")).toHaveTextContent(
+      "Could not read the saved vault",
+    );
+  });
 
-    await waitFor(() => expect(mocks.setHermesBrowserAccess).toHaveBeenCalledWith(false));
-    expect(await within(row).findByRole("button", { name: "Connect" })).toBeInTheDocument();
+  it("blocks duplicate Obsidian picker opens and clears busy state after cancellation", async () => {
+    let resolvePicker: (selection: string | null) => void = () => {};
+    mocks.openFileDialog.mockReturnValue(
+      new Promise((resolve) => {
+        resolvePicker = resolve;
+      }),
+    );
+
+    render(<ConnectorsSection />);
+    const connect = await findEnabledConnect("Connect Obsidian");
+
+    await userEvent.click(connect);
+    expect(connect).toBeDisabled();
+    await userEvent.click(connect);
+    expect(mocks.openFileDialog).toHaveBeenCalledTimes(1);
+
+    resolvePicker(null);
+    await waitFor(() => expect(connect).toBeEnabled());
+    expect(mocks.obsidianConfigure).not.toHaveBeenCalled();
+  });
+
+  it("connects an Obsidian vault without restarting Hermes", async () => {
+    mocks.openFileDialog.mockResolvedValue("/vaults/work");
+    mocks.obsidianStatus.mockResolvedValueOnce({ connected: false }).mockResolvedValue({
+      connected: true,
+      available: true,
+      vaultPath: "/vaults/work",
+      vaultName: "work",
+    });
+
+    render(<ConnectorsSection />);
+    await userEvent.click(await findEnabledConnect("Connect Obsidian"));
+
+    await waitFor(() => expect(mocks.obsidianConfigure).toHaveBeenCalledWith("/vaults/work"));
+    expect(await screen.findByRole("button", { name: "Change Obsidian vault" })).toBeEnabled();
+  });
+
+  it("keeps a configured unavailable Obsidian vault visible and disconnectable", async () => {
+    mocks.obsidianStatus.mockResolvedValue({
+      connected: true,
+      available: false,
+      vaultPath: "/Volumes/External/Work",
+      vaultName: "Work",
+    });
+
+    render(<ConnectorsSection />);
+
+    expect(await screen.findByText("Vault unavailable")).toBeInTheDocument();
+    expect(screen.getByText(/vault unavailable at \/Volumes\/External\/Work/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Change Obsidian vault" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Disconnect Obsidian" })).toBeEnabled();
+  });
+
+  it("shows immediate progress while disconnecting Obsidian", async () => {
+    let finishDisconnect: () => void = () => {};
+    mocks.obsidianStatus.mockResolvedValue({
+      connected: true,
+      available: true,
+      vaultPath: "/vaults/work",
+      vaultName: "work",
+    });
+    mocks.obsidianDisconnect.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishDisconnect = resolve;
+      }),
+    );
+
+    render(<ConnectorsSection />);
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect Obsidian" }));
+
+    const disconnecting = await screen.findByRole("button", { name: "Disconnect Obsidian" });
+    expect(disconnecting).toBeDisabled();
+    expect(disconnecting).toHaveTextContent("Disconnecting…");
+    expect(disconnecting).toHaveAttribute("aria-busy", "true");
+
+    finishDisconnect();
+    await waitFor(() => expect(mocks.obsidianDisconnect).toHaveBeenCalledTimes(1));
   });
 
   it("lists Google with a capability blurb", async () => {
@@ -280,6 +392,173 @@ describe("ConnectorsSection", () => {
     expect(screen.queryByText(/OpenSoftware's servers cannot read your data/i)).toBeNull();
   });
 
+  it("lists Notion as a connectable connector", async () => {
+    render(<ConnectorsSection />);
+
+    const connect = await findEnabledConnect("Connect Notion");
+    expect(screen.getByText("Notion")).toBeInTheDocument();
+    expect(screen.queryByText("Preview")).toBeNull();
+    expect(
+      screen.getByText(/Pages and workspace content for briefs, search, and approved updates/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Access may extend beyond selected pages/i)).toBeInTheDocument();
+    expect(screen.getByText(/Search may include Notion-connected sources/i)).toBeInTheDocument();
+
+    await userEvent.click(connect);
+
+    await waitFor(() => expect(mocks.notionConnectorConnect).toHaveBeenCalled());
+    expect(mocks.connectorsConnect).not.toHaveBeenCalled();
+  });
+
+  it("shows connected Notion preview state and disconnects locally", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "connected",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    render(<ConnectorsSection />);
+
+    expect(await screen.findByText("Connected")).toBeInTheDocument();
+    expect(screen.getByText(/Pages, search, and approved updates/i)).toBeInTheDocument();
+    expect(screen.getByText(/Access may extend beyond selected pages/i)).toBeInTheDocument();
+    expect(screen.getByText(/Search may include Notion-connected sources/i)).toBeInTheDocument();
+
+    mocks.connectorsList.mockResolvedValue([]);
+    await userEvent.click(screen.getByRole("button", { name: "Disconnect Notion" }));
+
+    await waitFor(() => expect(mocks.notionConnectorDisconnect).toHaveBeenCalled());
+    expect(await findEnabledConnect("Connect Notion")).toBeInTheDocument();
+  });
+
+  it("offers Notion reconnect when its grant is revoked", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "reconnect_required",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    render(<ConnectorsSection />);
+
+    expect(await screen.findByText("Reconnect needed")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Reconnect Notion to restore pages, search, and approved updates/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Access may extend beyond selected pages/i)).toBeInTheDocument();
+    expect(screen.getByText(/Search may include Notion-connected sources/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect Notion" }));
+    await waitFor(() => expect(mocks.notionConnectorConnect).toHaveBeenCalled());
+  });
+
+  it("allows disconnect recovery when Notion status is unavailable", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "unavailable",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    render(<ConnectorsSection />);
+
+    expect(await screen.findByText("Status unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("June could not confirm the Notion connection. Try again in a moment."),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Access may extend beyond selected pages/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Connect Notion" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect Notion" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Disconnect Notion" }));
+
+    await waitFor(() => expect(mocks.notionConnectorDisconnect).toHaveBeenCalled());
+    expect(mocks.connectorsApplyRuntime).toHaveBeenCalled();
+    expect(mocks.notionConnectorConnect).not.toHaveBeenCalled();
+  });
+
+  it("disables Notion disconnect while reconnect waits for the browser", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "reconnect_required",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    mocks.notionConnectorConnect.mockReturnValue(new Promise(() => {}));
+    render(<ConnectorsSection />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Reconnect Notion" }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Reconnect Notion" })).toBeDisabled(),
+    );
+    expect(screen.getByRole("button", { name: "Disconnect Notion" })).toBeDisabled();
+  });
+
+  it("does not start Notion disconnect while reconnect waits for the browser", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "reconnect_required",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    mocks.notionConnectorConnect.mockReturnValue(new Promise(() => {}));
+    render(<ConnectorsSection />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Reconnect Notion" }));
+    await userEvent.click(screen.getByRole("button", { name: "Disconnect Notion" }));
+
+    expect(mocks.notionConnectorDisconnect).not.toHaveBeenCalled();
+  });
+
+  it("does not start Notion reconnect while disconnect waits for runtime apply", async () => {
+    mocks.connectorsList.mockResolvedValue([
+      {
+        accountId: "notion-hosted-mcp",
+        provider: "notion",
+        email: "Notion",
+        scopes: [],
+        status: "reconnect_required",
+        workspaceName: null,
+        workspaceUrlKey: null,
+        selectedTeams: [],
+      },
+    ]);
+    mocks.notionConnectorDisconnect.mockReturnValue(new Promise(() => {}));
+    render(<ConnectorsSection />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Disconnect Notion" }));
+    await userEvent.click(screen.getByRole("button", { name: "Reconnect Notion" }));
+
+    expect(mocks.notionConnectorConnect).not.toHaveBeenCalled();
+  });
+
   it("lists connected accounts with feature labels and status", async () => {
     mocks.connectorsList.mockResolvedValue([account()]);
     render(<ConnectorsSection />);
@@ -300,9 +579,7 @@ describe("ConnectorsSection", () => {
     // connector servers, triggers, and grants all bind to that single account.
     expect(screen.queryByRole("button", { name: "Connect Google" })).toBeNull();
     expect(screen.getByRole("button", { name: "Add access" })).toBeInTheDocument();
-    expect(
-      screen.getByText(/Set up Browser use and connect Google and Linear/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Connect your accounts in local mode/i)).toBeInTheDocument();
   });
 
   it("connects an account from the feature-bundle dialog and applies the runtime", async () => {

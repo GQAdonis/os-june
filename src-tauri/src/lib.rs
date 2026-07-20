@@ -21,6 +21,7 @@ pub mod meeting_hud;
 pub mod menu_bar;
 mod note_audio_export;
 pub mod notifications;
+pub mod obsidian;
 pub mod os_accounts;
 pub mod p3a;
 pub mod providers;
@@ -347,6 +348,14 @@ pub fn run() {
             connectors::commands::connectors_disconnect,
             connectors::commands::connectors_linear_teams,
             connectors::commands::connectors_selected_teams_set,
+            obsidian::obsidian_status,
+            obsidian::obsidian_configure,
+            obsidian::obsidian_disconnect,
+            connectors::commands::notion_connector_status,
+            connectors::commands::notion_connector_connect,
+            connectors::commands::notion_connector_cancel_connect,
+            connectors::commands::notion_connector_disconnect,
+            connectors::commands::notion_connector_list_tools,
             connectors::commands::routine_trust_get,
             connectors::commands::routine_trust_set,
             connectors::commands::routine_trust_record_run,
@@ -380,6 +389,7 @@ pub fn run() {
         .manage(os_accounts::LoginFlow::default())
         .manage(extension_host::ExtensionHost::default())
         .manage(connectors::ConnectFlow::default())
+        .manage(connectors::NotionConnectFlow::default())
         .setup(|app| {
             browser::setup_on_app_start();
             setup_app_menu(app)?;

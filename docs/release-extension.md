@@ -5,7 +5,7 @@ The RC workflow submits changed extension bytes for Chrome review with deferred
 publication. Stable desktop promotion is blocked until Chrome approves that
 exact package, then publishes it after the desktop release succeeds.
 
-The architecture and trade-offs are recorded in [ADR 0033](adr/0033-extension-releases-follow-desktop-rc-promotion.md).
+The architecture and trade-offs are recorded in [ADR 0035](adr/0035-extension-releases-follow-desktop-rc-promotion.md).
 
 ## Current bootstrap state (2026-07-20)
 
