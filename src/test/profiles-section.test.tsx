@@ -1,16 +1,9 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useMemo, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  PROFILE_BUILDER_STEPS,
   createHermesAdminClient,
-  emptyProfileForm,
-  nextStep,
   useProfileManagerController,
-  type ProfileBuilderModel,
-  type ProfileBuilderState,
-  type ProfileBuilderStep,
   type ProfileManagerEngine,
   type ProfileManagerState,
 } from "../lib/hermes-admin";
@@ -23,10 +16,9 @@ const mocks = vi.hoisted(() => ({
   deleteProfileModelOverrides: vi.fn(),
   hermesBridgeStatus: vi.fn(),
   listSessionProfiles: vi.fn(),
-  listVeniceModels: vi.fn(),
   moveProfileDataToDefault: vi.fn(),
+  profileModelOverrides: vi.fn(),
   profileDataSummary: vi.fn(),
-  providerModelSettings: vi.fn(),
   setProfileModelOverrides: vi.fn(),
 }));
 
@@ -35,10 +27,9 @@ vi.mock("../lib/tauri", () => ({
   deleteProfileModelOverrides: mocks.deleteProfileModelOverrides,
   hermesBridgeStatus: mocks.hermesBridgeStatus,
   listSessionProfiles: mocks.listSessionProfiles,
-  listVeniceModels: mocks.listVeniceModels,
   moveProfileDataToDefault: mocks.moveProfileDataToDefault,
+  profileModelOverrides: mocks.profileModelOverrides,
   profileDataSummary: mocks.profileDataSummary,
-  providerModelSettings: mocks.providerModelSettings,
   setProfileModelOverrides: mocks.setProfileModelOverrides,
 }));
 
@@ -47,43 +38,6 @@ vi.mock("../lib/hermes-adapter", () => ({
 }));
 
 const EMPTY_SUMMARY = { notes: 0, dictation: 0, folders: 0, sessions: 0, memories: 0 };
-
-function stubBuilder(overrides: Partial<ProfileBuilderState> = {}): ProfileBuilderState {
-  return {
-    status: "ready",
-    mode: "sandboxed",
-    profile: "default",
-    retryable: false,
-    step: "identity",
-    form: emptyProfileForm(),
-    existingProfiles: [],
-    models: [],
-    voiceModels: [],
-    imageModels: [],
-    videoModels: [],
-    skills: [],
-    mcpServers: [],
-    steps: PROFILE_BUILDER_STEPS,
-    inputsLoading: false,
-    create: { phase: "idle" },
-    lifecycle: {
-      state: "clean",
-      label: "Up to date",
-      detail: "No pending changes.",
-      canRestart: false,
-    },
-    notifications: [],
-    setStep: vi.fn(),
-    goNext: vi.fn(),
-    goBack: vi.fn(),
-    update: vi.fn(),
-    reset: vi.fn(),
-    refresh: vi.fn(),
-    createProfile: vi.fn(),
-    dismissNotification: vi.fn(),
-    ...overrides,
-  };
-}
 
 function stubManager(overrides: Partial<ProfileManagerState> = {}): ProfileManagerState {
   return {
@@ -116,54 +70,14 @@ function stubManager(overrides: Partial<ProfileManagerState> = {}): ProfileManag
 
 function Harness({ engine }: { engine: ProfileManagerEngine }) {
   const managerState = useProfileManagerController(engine);
-  return <ProfilesSurfaceView managerState={managerState} builderState={stubBuilder()} />;
-}
-
-const TOOL_MODEL: ProfileBuilderModel = {
-  provider: "venice",
-  id: "tool-model",
-  name: "Tool Model",
-  capabilities: ["supportsFunctionCalling"],
-};
-
-function StatefulBuilderHarness() {
-  const [step, setStep] = useState<ProfileBuilderStep>("identity");
-  const [form, setForm] = useState(() => ({
-    ...emptyProfileForm(),
-    provider: "venice",
-    model: "tool-model",
-  }));
-  const [create, setCreate] = useState<ProfileBuilderState["create"]>({ phase: "idle" });
-
-  const builderState = useMemo(
-    () =>
-      stubBuilder({
-        step,
-        form,
-        models: [TOOL_MODEL],
-        create,
-        setStep,
-        goNext: () => setStep((current) => nextStep(current)),
-        update: (patch) => setForm((current) => ({ ...current, ...patch })),
-        reset: () => {
-          setStep("identity");
-          setForm({ ...emptyProfileForm(), provider: "venice", model: "tool-model" });
-          setCreate({ phase: "idle" });
-        },
-        createProfile: () => {
-          setCreate({
-            phase: "created",
-            createdSlug: "research-assistant",
-            activated: false,
-            message:
-              'Created "research-assistant". Could not make it active: Something went wrong.',
-          });
-        },
-      }),
-    [create, form, step],
+  return (
+    <ProfilesSurfaceView
+      managerState={managerState}
+      createProfile={async (payload) => {
+        await engine.client.profiles.create(payload);
+      }}
+    />
   );
-
-  return <ProfilesSurfaceView managerState={stubManager()} builderState={builderState} />;
 }
 
 describe("profiles settings surface", () => {
@@ -173,6 +87,7 @@ describe("profiles settings surface", () => {
     mocks.moveProfileDataToDefault.mockResolvedValue(undefined);
     mocks.deleteProfileData.mockResolvedValue(undefined);
     mocks.deleteProfileModelOverrides.mockResolvedValue(undefined);
+    mocks.profileModelOverrides.mockResolvedValue(null);
     mocks.listSessionProfiles.mockResolvedValue([]);
     mocks.deleteHermesSession.mockResolvedValue(undefined);
   });
@@ -191,7 +106,7 @@ describe("profiles settings surface", () => {
     await screen.findByText("Research profile");
     const researchRow = screen.getByText("research").closest("li");
     expect(researchRow).not.toBeNull();
-    expect(within(researchRow as HTMLElement).getByText("Active")).toBeInTheDocument();
+    expect(within(researchRow as HTMLElement).getByText("In use")).toBeInTheDocument();
   });
 
   it("makes a profile active and rerenders the badge", async () => {
@@ -209,31 +124,22 @@ describe("profiles settings surface", () => {
 
     const researchRow = screen.getByText("research").closest("li");
     expect(researchRow).not.toBeNull();
-    await user.click(
-      within(researchRow as HTMLElement).getByRole("button", { name: "Make active" }),
-    );
+    await user.click(within(researchRow as HTMLElement).getByRole("button", { name: "Use" }));
 
     await waitFor(() => {
-      expect(within(researchRow as HTMLElement).getByText("Active")).toBeInTheDocument();
+      expect(within(researchRow as HTMLElement).getByText("In use")).toBeInTheDocument();
     });
   });
 
-  it("disables guarded delete rows and deletes empty profiles without a dialog", async () => {
+  it("hides guarded delete actions and deletes empty profiles without a dialog", async () => {
     const user = userEvent.setup();
     const beginRemove = vi.fn().mockResolvedValue(true);
     render(
-      <ProfilesSurfaceView
-        managerState={stubManager({ beginRemove })}
-        builderState={stubBuilder()}
-      />,
+      <ProfilesSurfaceView managerState={stubManager({ beginRemove })} createProfile={vi.fn()} />,
     );
 
-    expect(screen.getByRole("button", { name: "Delete default" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Delete research" })).toBeDisabled();
-    expect(screen.getByText("The default profile can't be deleted.")).toBeInTheDocument();
-    expect(
-      screen.getByText("Switch to another profile before deleting this one."),
-    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete default" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Delete research" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Delete writing" }));
     expect(beginRemove).toHaveBeenCalledWith("writing");
@@ -389,59 +295,150 @@ describe("profiles settings surface", () => {
     expect(mocks.deleteProfileModelOverrides).not.toHaveBeenCalled();
   });
 
-  it("opens the wizard from New profile and returns to the refreshed list after clean create", async () => {
+  it("creates a new profile from the footer and refreshes the list", async () => {
     const user = userEvent.setup();
-    const managerState = stubManager({
-      profiles: [
-        { name: "default", description: "June default", raw: {} },
-        { name: "research-assistant", description: "Research assistant", raw: {} },
-      ],
-      activeName: "research-assistant",
+    const harness = makeAdminHarness({
+      profiles: [{ name: "default", active: true }],
+      activeProfile: "default",
     });
-    const builderState = stubBuilder();
-    const { rerender } = render(
-      <ProfilesSurfaceView managerState={managerState} builderState={builderState} />,
-    );
+    render(<Harness engine={harness as ProfileManagerEngine} />);
 
+    await screen.findByText("default");
     await user.click(screen.getByRole("button", { name: "New profile" }));
-    expect(screen.getByLabelText("Profile name")).toBeInTheDocument();
+    const input = screen.getByLabelText("Profile name");
+    expect(input).toHaveValue("Profile 2");
+    await user.type(input, "{Enter}");
 
-    rerender(
+    await screen.findByText("profile-2");
+    const createRequest = harness.server.requestLog.find(
+      (entry) => entry.method === "POST" && entry.path === "/api/profiles",
+    );
+    expect(createRequest?.body).toEqual({ name: "profile-2", clone_from_default: true });
+    expect(screen.getByText("default").closest("li")).toHaveTextContent("In use");
+  });
+
+  it("bumps the automatic name when Profile 2 already exists", async () => {
+    const user = userEvent.setup();
+    render(
       <ProfilesSurfaceView
-        managerState={managerState}
-        builderState={stubBuilder({
-          create: {
-            phase: "created",
-            createdSlug: "research-assistant",
-            activated: true,
-            message: 'Created "research-assistant".',
-          },
+        managerState={stubManager({
+          profiles: [
+            { name: "default", raw: {} },
+            { name: "Profile 2", raw: {} },
+          ],
+          activeName: "default",
         })}
+        createProfile={vi.fn()}
       />,
     );
 
-    await waitFor(() => expect(managerState.refresh).toHaveBeenCalled());
-    expect(screen.getByRole("list", { name: "Profiles" })).toBeInTheDocument();
-    const createdRow = screen.getByText("research-assistant").closest("li");
-    expect(createdRow).not.toBeNull();
-    expect(within(createdRow as HTMLElement).getByText("Active")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "New profile" }));
+    expect(screen.getByLabelText("Profile name")).toHaveValue("Profile 3");
   });
 
-  it("stays on the created panel when a profile is created but activation fails", async () => {
+  it("copies the active generation model and model overrides without touching data", async () => {
     const user = userEvent.setup();
-    render(<StatefulBuilderHarness />);
+    const createProfile = vi.fn().mockResolvedValue(undefined);
+    const overrides = {
+      transcriptionProvider: "venice",
+      transcriptionModel: "scribe",
+      imageModel: "image-model",
+      videoModel: null,
+    };
+    mocks.profileModelOverrides.mockResolvedValue(overrides);
+    render(
+      <ProfilesSurfaceView
+        managerState={stubManager({
+          profiles: [
+            { name: "default", raw: {} },
+            {
+              name: "Client work",
+              provider: "venice",
+              model: "private-model",
+              raw: {},
+            },
+          ],
+          activeName: "Client work",
+        })}
+        createProfile={createProfile}
+      />,
+    );
 
-    await user.click(screen.getByRole("button", { name: "New profile" }));
-    await user.type(screen.getByLabelText("Profile name"), "Research assistant");
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Next" }));
-    await user.click(screen.getByRole("button", { name: "Create and make active" }));
+    await user.click(screen.getByRole("button", { name: "Copy current settings" }));
+    expect(screen.getByLabelText("Profile name")).toHaveValue("Client work copy");
+    await user.click(screen.getByRole("button", { name: "Create" }));
 
-    expect(screen.getByText(/could not make it active: something went wrong/i)).toBeInTheDocument();
-    expect(screen.getByText("Profile created")).toBeInTheDocument();
-    expect(screen.queryByRole("list", { name: "Profiles" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(createProfile).toHaveBeenCalledWith({
+        name: "client-work-copy",
+        clone_from_default: true,
+        provider: "venice",
+        model: "private-model",
+      }),
+    );
+    expect(mocks.profileModelOverrides).toHaveBeenCalledWith("Client work");
+    expect(mocks.setProfileModelOverrides).toHaveBeenCalledWith("client-work-copy", overrides);
+    expect(mocks.profileDataSummary).not.toHaveBeenCalled();
+    expect(mocks.moveProfileDataToDefault).not.toHaveBeenCalled();
+    expect(mocks.deleteProfileData).not.toHaveBeenCalled();
+  });
+
+  it("skips writing model overrides when the active profile has none", async () => {
+    const user = userEvent.setup();
+    const createProfile = vi.fn().mockResolvedValue(undefined);
+    mocks.profileModelOverrides.mockResolvedValue(null);
+    render(<ProfilesSurfaceView managerState={stubManager()} createProfile={createProfile} />);
+
+    await user.click(screen.getByRole("button", { name: "Copy current settings" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(mocks.profileModelOverrides).toHaveBeenCalledWith("research"));
+    expect(mocks.setProfileModelOverrides).not.toHaveBeenCalled();
+  });
+
+  it("bumps a colliding copy name", async () => {
+    const user = userEvent.setup();
+    render(
+      <ProfilesSurfaceView
+        managerState={stubManager({
+          profiles: [
+            { name: "default", raw: {} },
+            { name: "Client work", raw: {} },
+            { name: "Client work copy", raw: {} },
+          ],
+          activeName: "Client work",
+        })}
+        createProfile={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Copy current settings" }));
+    expect(screen.getByLabelText("Profile name")).toHaveValue("Client work copy 2");
+  });
+
+  it("keeps a created profile and shows a non-fatal model settings copy error", async () => {
+    const user = userEvent.setup();
+    const harness = makeAdminHarness({
+      profiles: [
+        { name: "default", active: false },
+        { name: "research", active: true, provider: "venice", model: "tool-model" },
+      ],
+      activeProfile: "research",
+    });
+    mocks.profileModelOverrides.mockResolvedValue({ imageModel: "image-model" });
+    mocks.setProfileModelOverrides.mockRejectedValue(new Error("disk unavailable"));
+    render(<Harness engine={harness as ProfileManagerEngine} />);
+
+    await screen.findByText("research");
+    await user.click(screen.getByRole("button", { name: "Copy current settings" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    expect(await screen.findByText("research-copy")).toBeInTheDocument();
+    expect(
+      await screen.findByText(
+        'Created "research-copy", but copying model settings failed: disk unavailable',
+      ),
+    ).toBeInTheDocument();
   });
 
   it("keeps the delete dialog open with an error when removal fails", async () => {
@@ -503,7 +500,7 @@ describe("profiles settings surface", () => {
     const { rerender } = render(
       <ProfilesSurfaceView
         managerState={stubManager({ pendingRemoval, cancelRemoval })}
-        builderState={stubBuilder()}
+        createProfile={vi.fn()}
       />,
     );
 
@@ -519,7 +516,7 @@ describe("profiles settings surface", () => {
           pendingRemoval,
           cancelRemoval,
         })}
-        builderState={stubBuilder()}
+        createProfile={vi.fn()}
       />,
     );
 
@@ -530,7 +527,7 @@ describe("profiles settings surface", () => {
     render(
       <ProfilesSurfaceView
         managerState={stubManager({ status: "unavailable", profiles: [], activeConfirmed: false })}
-        builderState={stubBuilder({ status: "unavailable" })}
+        createProfile={vi.fn()}
       />,
     );
 
