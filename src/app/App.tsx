@@ -445,10 +445,6 @@ export function App() {
   // snapshot of the pre-toggle database, so those ids must survive it, while
   // every other row it carries still applies (see the boot effect).
   const sessionCompletionTouchedRef = useRef(new Set<string>());
-  // Bumped on every local completion toggle. A failure-recovery reload captures
-  // the value at issue time and discards itself if a newer toggle has landed
-  // since, so a stale pre-toggle snapshot never overwrites the latest action.
-  const sessionCompletionSeqRef = useRef(0);
   const [moveDialogSessionIds, setMoveDialogSessionIds] = useState<string[] | null>(null);
   // Where an open agent session was drilled into from — a project or the
   // Routines run history — drives the breadcrumb above the agent workspace,
@@ -2811,11 +2807,12 @@ export function App() {
   }
 
   async function handleToggleSessionCompleted(sessionId: string, completed: boolean) {
-    // A local toggle outranks the initial load's pre-toggle snapshot for this id,
-    // and supersedes any earlier failure-recovery reload still in flight.
+    // A local toggle outranks the initial load's pre-toggle snapshot for this id.
     sessionCompletionTouchedRef.current.add(sessionId);
-    sessionCompletionSeqRef.current += 1;
-    const seq = sessionCompletionSeqRef.current;
+    // The exact prior value for this one session, so a failed write can be rolled
+    // back precisely (restoring the original completed_at on a failed unmark)
+    // without touching any other session's optimistic state.
+    const priorValue = completedSessions[sessionId];
     setCompletedSessions((prev) => {
       const next = { ...prev };
       if (completed) next[sessionId] = new Date().toISOString();
@@ -2836,21 +2833,20 @@ export function App() {
     try {
       await write;
     } catch (err: unknown) {
-      // Restore authoritative state, then tell the user: completion is a direct
-      // context-menu action, so a silent revert would look like the menu simply
-      // did nothing, with no way to know it never persisted (JUN-203 review).
-      void listCompletedSessions()
-        .then((rows) => {
-          // Drop this snapshot if a newer toggle landed after the write failed:
-          // it predates that toggle, so applying it would revert the latest
-          // action (e.g. complete -> active -> complete where the first fails).
-          if (sessionCompletionSeqRef.current !== seq) return;
-          const fresh: Record<string, string> = {};
-          for (const row of rows) fresh[row.sessionId] = row.completedAt;
-          setCompletedSessions(fresh);
-        })
-        .catch(() => {})
-        .finally(() => setError(messageFromError(err)));
+      // Roll back only this session to its captured prior value, and only if no
+      // newer toggle for it has queued behind us (that newer write now owns the
+      // session). Reverting just this id leaves every other session's optimistic
+      // and in-flight state intact, and surfacing the error keeps a failed
+      // context-menu action from looking like it silently did nothing.
+      if (pending.get(sessionId) === chained) {
+        setCompletedSessions((prev) => {
+          const next = { ...prev };
+          if (priorValue === undefined) delete next[sessionId];
+          else next[sessionId] = priorValue;
+          return next;
+        });
+      }
+      setError(messageFromError(err));
     } finally {
       // Drop the chain only when no newer toggle queued behind this one.
       if (pending.get(sessionId) === chained) pending.delete(sessionId);
