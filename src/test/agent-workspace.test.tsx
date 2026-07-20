@@ -10008,7 +10008,8 @@ describe("AgentWorkspace", () => {
 
     // Find-in-file highlights matches inside the rendered document.
     await user.click(within(panel).getByRole("button", { name: "Find in file" }));
-    await user.type(within(panel).getByLabelText("Find in file"), "revenue");
+    const findInput = within(panel).getByLabelText("Find in file");
+    await user.type(findInput, "revenue");
     // Highlighting trails typing by a short debounce.
     await waitFor(() => expect(panel.querySelectorAll("mark")).toHaveLength(3));
     const marks = panel.querySelectorAll("mark");
@@ -10016,6 +10017,13 @@ describe("AgentWorkspace", () => {
     expect(marks[0]).toHaveTextContent(/revenue/i);
     expect(marks[0]).toHaveClass("agent-search-match-active");
     expect(within(panel).getByText("1 of 3")).toBeInTheDocument();
+
+    // A whitespace-only query edit preserves the trimmed match set, but still
+    // recounts after the debounce instead of leaving navigation at 0 of 0.
+    await user.type(findInput, " ");
+    expect(within(panel).getByText("0 of 0")).toBeInTheDocument();
+    await waitFor(() => expect(within(panel).getByText("1 of 3")).toBeInTheDocument());
+    expect(panel.querySelectorAll("mark")).toHaveLength(3);
 
     // Enter/Shift+Enter and the buttons wrap through matches while the input
     // keeps focus. The active class follows the stable document-wide ordinal.
@@ -10035,7 +10043,7 @@ describe("AgentWorkspace", () => {
     await waitFor(() => expect(within(panel).getByText("1 of 3")).toBeInTheDocument());
     expect(panel.querySelectorAll("mark")[0]).toHaveClass("agent-search-match-active");
 
-    await user.click(within(panel).getByLabelText("Find in file"));
+    await user.click(findInput);
     await user.keyboard("{Escape}"); // clear
     await user.keyboard("{Escape}"); // collapse
     expect(panel.querySelectorAll("mark")).toHaveLength(0);

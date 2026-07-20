@@ -15986,7 +15986,7 @@ function AgentArtifactPanel({
       : undefined;
     setMatchCount(matches?.length ?? 0);
     setActiveMatchIndex(0);
-  }, [artifactPath, docHighlight, preview, showSource]);
+  }, [artifactPath, debouncedQuery, docHighlight, preview, showSource]);
 
   useEffect(() => {
     if (matchCount === 0) return;
