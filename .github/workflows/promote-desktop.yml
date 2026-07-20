@@ -177,7 +177,7 @@ jobs:
           path: ${{ runner.temp }}/release-candidate
           if-no-files-found: error
           overwrite: true
-          retention-days: 7
+          retention-days: 30
 
   promote:
     name: Promote rc macOS app to stable
@@ -618,7 +618,7 @@ jobs:
           path: ${{ runner.temp }}/stable-release-assets/stable-build.json
           if-no-files-found: error
           overwrite: true
-          retention-days: 7
+          retention-days: 30
 
   publish-desktop:
     name: Publish verified desktop release

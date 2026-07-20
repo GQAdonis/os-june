@@ -157,6 +157,14 @@ staged.
   cancel only the exact earlier version named in RC metadata. If a higher RC
   restores the already-published stable bytes, it cancels that same correlated
   active submission before verifying the unchanged published version.
+- **`extension-rc` failed before publishing its assets** (extension test or
+  build break, store outage mid-submit) - the fixed `rc` release now holds
+  the new `rc-build.json` next to the previous RC's `extension-build.json`,
+  and stable preflight fails the correlation check for the new RC. Rerun the
+  failed job once the cause is fixed. If the break is persistent and the
+  desktop must ship, delete both `extension-build.json` and
+  `June-extension.zip` from the `rc` release
+  (`gh release delete-asset rc <asset> --yes`) to promote desktop-only.
 - **Submission succeeded but RC asset upload failed** - rerun the failed job.
   Live state for the current version is treated as non-reusable prior metadata;
   the current package is rebuilt deterministically and submission is idempotent.
@@ -168,6 +176,10 @@ staged.
   `publish-desktop` job in the original workflow run. It accepts an
   already-public release only when every asset and the public metadata match the
   immutable pre-publication artifact. Do not start a new promotion run.
+- **Rerun window** - every "rerun the failed job" recovery depends on the
+  run's immutable artifacts, which are retained for 30 days. A failure
+  noticed after that cannot be retried through the original run and needs
+  manual release surgery; do not let a half-published release sit.
 - **Store API says visibility changed** - complete one manual dashboard publish,
   then rerun.
 
