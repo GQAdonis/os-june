@@ -63,7 +63,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::{sync::OnceCell, time::sleep};
 
 const MEMORY_CONTENT_MAX_CHARS: usize = 4_000;
@@ -1423,6 +1423,7 @@ pub async fn start_recording(
     finish_active_capture_before_start(&repos).await?;
     let capture_paths = paths.clone();
     let capture_note_id = note.id.clone();
+    let calendar_app = app.clone();
     let started = start_capture_with_timeout(move |abandoned| {
         start_capture_with_cancel(app, &capture_paths, capture_note_id, source_mode, abandoned)
     })
@@ -1437,6 +1438,39 @@ pub async fn start_recording(
             started.device_label.clone(),
         )
         .await?;
+    let calendar_repos = repos.clone();
+    let calendar_note_id = note.id.clone();
+    let expected_title = note.title.clone();
+    let recording_started_at = Utc::now();
+    tokio::spawn(async move {
+        let enrichment = crate::meeting_calendar_context::enrich_note_for_recording(
+            &calendar_app,
+            calendar_repos.clone(),
+            calendar_note_id.clone(),
+            expected_title,
+            recording_started_at,
+        )
+        .await;
+        match enrichment {
+            Ok(true) => match calendar_repos.get_note(&calendar_note_id).await {
+                Ok(mut note) => {
+                    note.queued_recordings = processing_queue::queued_behind(&calendar_note_id);
+                    let _ = calendar_app.emit(
+                        crate::meeting_calendar_context::NOTE_CALENDAR_CONTEXT_UPDATED_EVENT,
+                        note,
+                    );
+                }
+                Err(error) => {
+                    eprintln!("calendar context was saved but could not be reloaded: {error}")
+                }
+            },
+            Ok(false) => {}
+            Err(error) => eprintln!(
+                "calendar context lookup failed without interrupting recording: {}: {}",
+                error.code, error.message
+            ),
+        }
+    });
     if let Err(error) = repos
         .add_checkpoint(
             &started.session_id,

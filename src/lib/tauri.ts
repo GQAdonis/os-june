@@ -105,6 +105,7 @@ export type TranscriptDto = {
 };
 
 export const LIVE_TRANSCRIPT_EVENT = "live-transcript-event";
+export const NOTE_CALENDAR_CONTEXT_UPDATED_EVENT = "june://note-calendar-context-updated";
 
 export type LiveTranscriptEventDto = {
   noteId: string;
@@ -429,6 +430,7 @@ export type DownloadNoteAudioResponse = {
 };
 
 export type NoteDto = NoteListItemDto & {
+  calendarEvent?: NoteCalendarEventDto;
   generatedContent?: string;
   editedContent?: string;
   transcript?: TranscriptDto;
@@ -443,6 +445,14 @@ export type NoteDto = NoteListItemDto & {
   retryRecordingSessionId?: string;
   /** Recordings queued behind the one currently processing (0 when none). */
   queuedRecordings?: number;
+};
+
+export type NoteCalendarEventDto = {
+  eventId: string;
+  title: string;
+  startAt: string;
+  endAt: string;
+  accountEmail: string;
 };
 
 export type TranscriptCoverageDto = {
