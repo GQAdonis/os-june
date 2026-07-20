@@ -646,6 +646,7 @@ describe("agent HUD", () => {
         sessionId: "session-settled",
         title: "Summarize this",
         summary: "June finished.",
+        activeCount: 0,
       },
     });
     await flushPromises();
@@ -654,6 +655,32 @@ describe("agent HUD", () => {
     expect(pillLabelElement()).toHaveTextContent("Done");
     expect(markElement().dataset.status).toBe("completed");
     expect(stackElement()).toHaveTextContent("Summarize this");
+  });
+
+  it("settles every anonymous pending row when the run monitor reports no active work", async () => {
+    await loadAgentHud();
+
+    emitStatus({ status: "running", title: "Draft launch notes", summary: "Working" });
+    emitStatus({ status: "running", title: "Review launch notes", summary: "Working" });
+    await flushPromises();
+    expect(pillLabelElement()).toHaveTextContent("2");
+
+    const handleRunSettled = mocks.listeners.get(AGENT_RUN_SETTLED_EVENT);
+    expect(handleRunSettled).toBeDefined();
+    handleRunSettled?.({
+      payload: {
+        sessionId: "session-settled",
+        title: "Generated session title",
+        summary: "June finished.",
+        activeCount: 0,
+      },
+    });
+    await flushPromises();
+
+    expect(pillLabelElement()).toHaveTextContent("Done");
+    expect(stackElement()).toHaveTextContent("Draft launch notes");
+    expect(stackElement()).toHaveTextContent("Review launch notes");
+    expect(stackElement()).not.toHaveTextContent("Generated session title");
   });
 
   it("turns a pending running entry into Done when the completed session title differs", async () => {

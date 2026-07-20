@@ -79,7 +79,7 @@ export async function notifyAgentSessionStatus(
 }
 
 export async function notifyAgentRunSettled(
-  detail: AgentRunSettledDetail,
+  detail: Pick<AgentRunSettledDetail, "sessionId" | "title" | "summary">,
   context: AgentAttentionContext,
 ) {
   return deliverAgentAttention({
