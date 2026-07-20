@@ -48,10 +48,10 @@ pub fn validate_import_path(home: &Path, path: &str) -> Option<PathBuf> {
 
 fn discover_from_config(home: &Path, discovered: &mut BTreeMap<PathBuf, Option<SystemTime>>) {
     let config_path = home.join(".claude.json");
-    if fs::metadata(&config_path)
-        .map(|metadata| metadata.len() > MAX_CONFIG_BYTES)
-        .unwrap_or(false)
-    {
+    let Ok(metadata) = fs::metadata(&config_path) else {
+        return;
+    };
+    if metadata.len() > MAX_CONFIG_BYTES {
         return;
     }
     let Ok(bytes) = fs::read(&config_path) else {
@@ -60,14 +60,11 @@ fn discover_from_config(home: &Path, discovered: &mut BTreeMap<PathBuf, Option<S
     let Ok(config) = serde_json::from_slice::<Value>(&bytes) else {
         return;
     };
-    let modified = fs::metadata(config_path)
-        .and_then(|metadata| metadata.modified())
-        .ok();
     let Some(projects) = config.get("projects").and_then(Value::as_object) else {
         return;
     };
     for path in projects.keys() {
-        remember(discovered, PathBuf::from(path), modified);
+        remember(discovered, PathBuf::from(path), None);
     }
 }
 
@@ -190,6 +187,18 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(alpha.to_string_lossy().as_ref()));
         assert!(paths.contains(beta.to_string_lossy().as_ref()));
+        assert!(candidates
+            .iter()
+            .find(|candidate| candidate.path == alpha.to_string_lossy())
+            .expect("alpha candidate")
+            .last_used_at
+            .is_none());
+        assert!(candidates
+            .iter()
+            .find(|candidate| candidate.path == beta.to_string_lossy())
+            .expect("beta candidate")
+            .last_used_at
+            .is_some());
     }
 
     #[test]

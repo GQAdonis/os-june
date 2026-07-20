@@ -1,7 +1,7 @@
 import { IconCheckmark2 } from "central-icons-filled/IconCheckmark2";
 import { IconCodeAssistant } from "central-icons/IconCodeAssistant";
 import { IconFolder1 } from "central-icons/IconFolder1";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { messageFromError } from "../../lib/errors";
 import { useScrollFade } from "../../lib/use-scroll-fade";
 import {
@@ -26,27 +26,35 @@ export function ImportClaudeProjectsDialog({
   const [error, setError] = useState<string>();
   const [importing, setImporting] = useState(false);
   const listRef = useRef<HTMLUListElement>(null);
+  const discoveryRequestRef = useRef(0);
   const listFade = useScrollFade(listRef);
 
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
+  const loadCandidates = useCallback(() => {
+    const request = ++discoveryRequestRef.current;
     setCandidates(null);
     setSelected(new Set());
     setError(undefined);
     discoverClaudeProjects()
       .then((items) => {
-        if (cancelled) return;
+        if (request !== discoveryRequestRef.current) return;
         setCandidates(items);
         setSelected(new Set(items.filter((item) => !item.alreadyAdded).map((item) => item.path)));
       })
       .catch((caught: unknown) => {
-        if (!cancelled) setError(messageFromError(caught));
+        if (request === discoveryRequestRef.current) setError(messageFromError(caught));
       });
+  }, []);
+
+  useEffect(() => {
+    if (!open) {
+      discoveryRequestRef.current += 1;
+      return;
+    }
+    loadCandidates();
     return () => {
-      cancelled = true;
+      discoveryRequestRef.current += 1;
     };
-  }, [open]);
+  }, [loadCandidates, open]);
 
   const available = useMemo(
     () => candidates?.filter((candidate) => !candidate.alreadyAdded) ?? [],
@@ -117,20 +125,7 @@ export function ImportClaudeProjectsDialog({
               <button
                 type="button"
                 className="btn"
-                onClick={() => {
-                  setError(undefined);
-                  setCandidates(null);
-                  discoverClaudeProjects()
-                    .then((items) => {
-                      setCandidates(items);
-                      setSelected(
-                        new Set(
-                          items.filter((item) => !item.alreadyAdded).map((item) => item.path),
-                        ),
-                      );
-                    })
-                    .catch((caught: unknown) => setError(messageFromError(caught)));
-                }}
+                onClick={loadCandidates}
               >
                 Try again
               </button>

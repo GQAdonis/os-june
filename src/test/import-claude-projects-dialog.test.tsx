@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImportClaudeProjectsDialog } from "../components/folders/ImportClaudeProjectsDialog";
 import { discoverClaudeProjects, importClaudeProjects, type FolderDto } from "../lib/tauri";
@@ -85,5 +85,32 @@ describe("ImportClaudeProjectsDialog", () => {
 
     expect(await screen.findByText("Everything is already here")).toBeInTheDocument();
     expect(screen.getByText(/All available Claude Code projects/)).toBeInTheDocument();
+  });
+
+  it("ignores a retry result after the dialog closes and reopens", async () => {
+    let resolveRetry: (value: Awaited<ReturnType<typeof discoverClaudeProjects>>) => void = () => {};
+    const retry = new Promise<Awaited<ReturnType<typeof discoverClaudeProjects>>>((resolve) => {
+      resolveRetry = resolve;
+    });
+    vi.mocked(discoverClaudeProjects)
+      .mockRejectedValueOnce(new Error("Scan failed"))
+      .mockReturnValueOnce(retry)
+      .mockResolvedValueOnce([
+        { name: "new project", path: "/Users/alex/code/new-project", alreadyAdded: false },
+      ]);
+    const props = { onClose: vi.fn(), onImported: vi.fn() };
+    const { rerender } = render(<ImportClaudeProjectsDialog open {...props} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Try again" }));
+    rerender(<ImportClaudeProjectsDialog open={false} {...props} />);
+    rerender(<ImportClaudeProjectsDialog open {...props} />);
+    expect(await screen.findByText("new project")).toBeInTheDocument();
+
+    await act(async () => {
+      resolveRetry([
+        { name: "stale project", path: "/Users/alex/code/stale-project", alreadyAdded: false },
+      ]);
+    });
+    expect(screen.queryByText("stale project")).not.toBeInTheDocument();
   });
 });
