@@ -683,6 +683,32 @@ describe("agent HUD", () => {
     expect(stackElement()).not.toHaveTextContent("Generated session title");
   });
 
+  it("settles unmatched anonymous rows at idle when one row matches the settled title", async () => {
+    await loadAgentHud();
+
+    emitStatus({ status: "running", title: "Draft launch notes", summary: "Working" });
+    emitStatus({ status: "running", title: "Review launch notes", summary: "Working" });
+    await flushPromises();
+    expect(pillLabelElement()).toHaveTextContent("2");
+
+    const handleRunSettled = mocks.listeners.get(AGENT_RUN_SETTLED_EVENT);
+    expect(handleRunSettled).toBeDefined();
+    handleRunSettled?.({
+      payload: {
+        sessionId: "session-settled",
+        title: "Review launch notes",
+        summary: "June finished.",
+        activeCount: 0,
+      },
+    });
+    await flushPromises();
+
+    expect(pillLabelElement()).toHaveTextContent("Done");
+    expect(stackElement()).toHaveTextContent("Draft launch notes");
+    expect(stackElement()).toHaveTextContent("Review launch notes");
+    expect(stackElement()).not.toHaveTextContent("running");
+  });
+
   it("turns a pending running entry into Done when the completed session title differs", async () => {
     vi.useFakeTimers();
     await loadAgentHud();
