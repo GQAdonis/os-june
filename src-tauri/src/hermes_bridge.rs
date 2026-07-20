@@ -6801,13 +6801,6 @@ fn attach_gateway_lifecycle_log(cmd: &mut Command, hermes_home: &Path) {
 
 /// Pure command construction so a test can assert the spawn is the bare hermes
 /// executable (no `sandbox-exec` wrapper) with the isolated environment.
-fn build_hermes_gateway_start_command(
-    connection: &HermesBridgeConnection,
-    hermes_home: &Path,
-) -> Command {
-    build_hermes_gateway_lifecycle_command(connection, hermes_home, "start")
-}
-
 fn build_hermes_gateway_lifecycle_command(
     connection: &HermesBridgeConnection,
     hermes_home: &Path,
@@ -10279,6 +10272,7 @@ skills:
 
 /// registers. Built-in entries live under one key so Hermes deep-merges a
 /// single map; an empty map is emitted when none are configured.
+#[allow(clippy::too_many_arguments)]
 fn render_mcp_servers_config(
     configs: BuiltinMcpConfigs<'_>,
     base_url: &str,
@@ -20547,18 +20541,6 @@ mcp_servers:
         assert!(!hermes_runtime_metadata_is_current(&previous));
     }
 
-    fn command_env_removals(cmd: &Command) -> std::collections::HashSet<String> {
-        cmd.get_envs()
-            .filter_map(|(key, value)| {
-                if value.is_none() {
-                    Some(key.to_string_lossy().into_owned())
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
-
     fn test_gateway_connection() -> HermesBridgeConnection {
         HermesBridgeConnection {
             base_url: "http://127.0.0.1:1".to_string(),
@@ -20578,7 +20560,11 @@ mcp_servers:
     #[test]
     fn gateway_start_spawns_the_bare_hermes_cli_outside_the_sandbox() {
         let connection = test_gateway_connection();
-        let cmd = build_hermes_gateway_start_command(&connection, Path::new("/tmp/hermes-home"));
+        let cmd = build_hermes_gateway_lifecycle_command(
+            &connection,
+            Path::new("/tmp/hermes-home"),
+            "start",
+        );
 
         // The whole point of the direct spawn: the program is the hermes CLI
         // itself, never a sandbox-exec wrapper — launchd rejects service
