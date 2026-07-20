@@ -61,6 +61,11 @@ workspace file references rather than native-messaging payloads.
   socket to the broker.
 - Browser-owned debugging banner plus June tab grouping as visible indicators.
 - Extension detaches and clears state on broker/native-host loss.
+- Transport loss (extension reload or store update, browser exit, shim or
+  broker death) ends every attended session; a reconnect is a fresh pairing,
+  and session-restored tabs are orphaned, never re-adopted.
+- Parked approvals are bound to their tab; tab loss discards the action and
+  resolves the approval as not executed.
 
 ## Routine transport
 
@@ -109,8 +114,10 @@ workspace file references rather than native-messaging payloads.
   protocol fixtures, and the MCP schema fixtures.
 - MCP schema fixtures plus pinned-runtime live smoke.
 - Live macOS walkthrough: install, pair, create task tab, share one tab, approve
-  an action, deny an action, human takeover, stop, disconnect, and crash the
-  broker while attached.
+  an action, deny an action, human takeover, stop, disconnect, crash the broker
+  while attached, close a task tab mid-action, detach the debugger from the
+  banner, rename or ungroup the June tab group, restart the browser mid-task,
+  and update the extension mid-task.
 - Security test that unrelated tabs, local network targets, and sensitive
   fields stay unreachable.
 
@@ -123,6 +130,8 @@ transport. Do not log URLs, page text, screenshots, or field values.
 
 ## Open gate
 
-Public release depends on publisher verification and store approval. The
-implementation direction itself requires no new ADR unless the work departs
-from ADR-0017.
+Public release depends on publisher verification and store approval. A
+debugger-permission rejection holds the attended launch; the answer is a
+revised submission, not a reduced-permission build (the canonical PRD's
+distribution section). The implementation direction itself requires no new
+ADR unless the work departs from ADR-0017.

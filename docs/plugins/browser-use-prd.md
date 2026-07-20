@@ -40,7 +40,9 @@ profile would solve the capability problem by creating a larger trust problem.
 June works only in clearly marked tabs it creates or a tab the user explicitly
 shares. It pauses before sending, submitting, publishing, purchasing, deleting,
 or making another consequential change. Disconnect means the browser is no
-longer under June's control.
+longer under June's control. A crash, browser restart, or extension update ends
+automation immediately; June never keeps driving a browser it has lost contact
+with, and a task fails rather than resuming silently.
 
 ## V1 experience
 
@@ -95,6 +97,9 @@ an action receipt. Agent self-reported completion does not count.
 ## Strategic risks
 
 - Extension-store approval and independent update cadence are release risks.
+  A rejection of the debugger permission holds the attended launch; there is
+  no reduced-permission fallback. A store update can also land mid-task, so
+  tasks must fail safely when the extension reloads.
 - Browser DOMs change constantly; recovery quality matters more than demo-path
   success.
 - Signed-in pages contain prompt injection and high-value actions. Structural
