@@ -480,6 +480,9 @@ export function App() {
   // snapshot of the pre-toggle database, so those ids must survive it, while
   // every other row it carries still applies (see the boot effect).
   const sessionCompletionTouchedRef = useRef(new Set<string>());
+  // Mirrors `completedSessions` for the menu-bar publisher, which is a stable
+  // callback and so cannot close over the state directly.
+  const completedSessionsRef = useRef<Record<string, string>>({});
   // `null` means the mapping has never loaded. An empty object is meaningful:
   // it confirms every unmapped Hermes session belongs to Default. Keeping
   // those states distinct lets failed reads retain a known-good map while the
@@ -1060,7 +1063,12 @@ export function App() {
   const publishAgentMenuBarState = useCallback(() => {
     void emitAgentMenuBarState(
       buildAgentMenuBarState({
-        sessions: agentMenuBarSessionsRef.current,
+        // Completed sessions are filed away in the app, so they must not stay
+        // openable from the native menu bar's recent-session shortcuts
+        // (JUN-203 review).
+        sessions: agentMenuBarSessionsRef.current.filter(
+          (session) => !completedSessionsRef.current[session.id],
+        ),
         workingSessionIds: agentMenuBarWorkingSessionIdsRef.current,
         waitingSessionIds: agentMenuBarWaitingSessionIdsRef.current,
         lastStatus: agentMenuBarLastStatusRef.current,
@@ -1069,6 +1077,13 @@ export function App() {
       }),
     );
   }, []);
+  // Keep the menu bar in step with completion changes: marking a session
+  // complete (or active again) must add/remove it from the native shortcuts,
+  // not just the in-app lists.
+  useEffect(() => {
+    completedSessionsRef.current = completedSessions;
+    publishAgentMenuBarState();
+  }, [completedSessions, publishAgentMenuBarState]);
   const profileScopedAgentSessions = useCallback(
     (sessions: readonly HermesSessionInfo[], profiles = sessionProfilesRef.current) => {
       if (profiles === null) return [];
@@ -3048,11 +3063,13 @@ export function App() {
       // and in-flight state intact, and surfacing the error keeps a failed
       // context-menu action from looking like it silently did nothing.
       if (pending.get(sessionId) === chained) {
-        // This toggle never persisted, so it must not keep shadowing the
-        // initial load: un-tracking the id lets a still-in-flight boot snapshot
-        // restore the session's true completed state (matters when the toggle
-        // was made before that load settled).
-        sessionCompletionTouchedRef.current.delete(sessionId);
+        // Un-track only when the rollback leaves the session with no local
+        // completion: then a still-in-flight boot snapshot restoring its true
+        // state is exactly what we want. If the rollback restores an earlier
+        // successful completion, keep it tracked — a pre-toggle snapshot that
+        // predates that completion would otherwise wipe the row from the UI
+        // while SQLite still has it completed.
+        if (priorValue === undefined) sessionCompletionTouchedRef.current.delete(sessionId);
         setCompletedSessions((prev) => {
           const next = { ...prev };
           if (priorValue === undefined) delete next[sessionId];
