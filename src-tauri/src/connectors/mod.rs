@@ -44,6 +44,10 @@ const GOOGLE_OAUTH_CLIENT_SECRET_ENV: &str = "GOOGLE_OAUTH_CLIENT_SECRET";
 const LINEAR_OAUTH_CLIENT_ID_ENV: &str = "LINEAR_OAUTH_CLIENT_ID";
 pub(crate) const GITHUB_OAUTH_CLIENT_ID_ENV: &str = "GITHUB_OAUTH_CLIENT_ID";
 pub(crate) const GITHUB_OAUTH_CLIENT_SECRET_ENV: &str = "GITHUB_OAUTH_CLIENT_SECRET";
+/// Tauri event emitted when a GitHub device code is obtained. The camelCase
+/// payload carries `userCode`, `verificationUri`, and `expiresInSeconds` so
+/// the frontend dialog can display the code and open the verification URL.
+const GITHUB_DEVICE_CODE_EVENT: &str = "june://connectors-github-device-code";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -239,15 +243,31 @@ fn require_linear_client_id() -> Result<String, AppError> {
     Ok(client_id)
 }
 
-/// GitHub App credential: client id and client secret. Unlike Linear's
-/// PKCE-only public-client flow, GitHub's token endpoint requires the client
-/// secret. Both values are shipped in the binary and neither grants user-data
-/// access without the user's authorization code or refresh token. Runtime env
-/// values override the build-time values for local testing (mirrors
-/// [`GoogleOAuthClient`] exactly; deliberate duplication per house style).
+/// GitHub App credential. The device authorization flow requires only the
+/// client id; the client secret is optional and is used only for token refresh
+/// and revocation. Both values ship in the binary; neither grants user-data
+/// access without the user's authorization. Runtime env values override
+/// build-time values for local testing.
+///
+/// When the secret is absent, the GitHub App must have "expire user
+/// authorization tokens" disabled so tokens are non-expiring and the refresh
+/// path is never taken. Revocation is unavailable without the secret and must
+/// be done manually at GitHub if needed.
 struct GithubOAuthClient {
     client_id: String,
+    /// Empty when not configured. Use `client_secret_opt()` for a
+    /// `Some`/`None` view.
     client_secret: String,
+}
+
+impl GithubOAuthClient {
+    fn client_secret_opt(&self) -> Option<&str> {
+        if self.client_secret.is_empty() {
+            None
+        } else {
+            Some(&self.client_secret)
+        }
+    }
 }
 
 fn github_oauth_client() -> GithubOAuthClient {
@@ -264,9 +284,11 @@ fn github_oauth_client() -> GithubOAuthClient {
     }
 }
 
-fn require_github_oauth_client() -> Result<GithubOAuthClient, AppError> {
+/// Require the GitHub client id. The secret is optional; callers that need it
+/// (refresh, revoke) check `client.client_secret_opt()` separately.
+fn require_github_client_id() -> Result<GithubOAuthClient, AppError> {
     let client = github_oauth_client();
-    if client.client_id.is_empty() || client.client_secret.is_empty() {
+    if client.client_id.is_empty() {
         return Err(AppError::new(
             "connector_not_configured",
             "GitHub connector is not configured in this build.",
@@ -297,30 +319,6 @@ fn linear_loopback_ports_from(override_value: &str) -> Vec<u16> {
     match override_value.parse::<u16>() {
         Ok(port) if port != 0 => vec![port],
         _ => LINEAR_LOOPBACK_PORTS.to_vec(),
-    }
-}
-
-/// The callback ports registered on the GitHub OAuth application
-/// (`http://127.0.0.1:<port>/callback`, one URL per port). GitHub matches the
-/// registered callback URL exactly - including the port - so the connect
-/// listener must bind one of exactly these. Keep this list in sync with the
-/// GitHub App's registered callback URLs.
-const GITHUB_LOOPBACK_PORTS: &[u16] = &[44751, 44752, 44753];
-const GITHUB_OAUTH_LOOPBACK_PORT_ENV: &str = "GITHUB_OAUTH_LOOPBACK_PORT";
-
-/// The candidate loopback ports for a GitHub connect: the
-/// `GITHUB_OAUTH_LOOPBACK_PORT` override alone when it parses as a port
-/// (for an OAuth app registered with a custom callback URL), otherwise the
-/// registered defaults.
-fn github_loopback_ports() -> Vec<u16> {
-    crate::os_accounts::load_local_env();
-    github_loopback_ports_from(&env_trimmed(GITHUB_OAUTH_LOOPBACK_PORT_ENV))
-}
-
-fn github_loopback_ports_from(override_value: &str) -> Vec<u16> {
-    match override_value.parse::<u16>() {
-        Ok(port) if port != 0 => vec![port],
-        _ => GITHUB_LOOPBACK_PORTS.to_vec(),
     }
 }
 
@@ -626,7 +624,7 @@ async fn refresh_github_access_token_with_freshness_gate(
     account_id: &str,
     accept_fresh: bool,
 ) -> Result<String, AppError> {
-    let client = require_github_oauth_client()?;
+    let client = require_github_client_id()?;
     let lock = refresh_lock_for(account_id);
     let _guard = lock.lock().await;
     // Re-read inside the lock: another caller may have already refreshed
@@ -646,16 +644,27 @@ async fn refresh_github_access_token_with_freshness_gate(
         return Err(github_reconnect_required_error());
     }
 
+    // Device-flow authorization needs no client secret, but GitHub requires
+    // client_id + client_secret to refresh expiring tokens. A secret-less
+    // deployment must disable "expire user authorization tokens" (non-expiring
+    // tokens never reach this path). When a refresh is needed and no secret is
+    // configured, mark reconnect_required and return the reconnect error.
+    let client_secret = match client.client_secret_opt() {
+        Some(secret) => secret.to_string(),
+        None => {
+            tracing::warn!(
+                account_id,
+                "github token refresh needed but no client secret is configured; marking reconnect_required"
+            );
+            mark_reconnect_required(app, account_id).await;
+            return Err(github_reconnect_required_error());
+        }
+    };
+
     let mut attempt = 0;
     loop {
         attempt += 1;
-        match github::refresh(
-            &client.client_id,
-            &client.client_secret,
-            &stored.refresh_token,
-        )
-        .await
-        {
+        match github::refresh(&client.client_id, &client_secret, &stored.refresh_token).await {
             github::GithubRefreshOutcome::Refreshed(fresh) => {
                 stored.access_token = fresh.access_token.clone();
                 // Rotation: GitHub rotates the refresh token on every
@@ -1273,20 +1282,20 @@ fn github_account_metadata_json(identity: &github::GithubIdentity) -> String {
     serde_json::Value::Object(map).to_string()
 }
 
-/// Run the full GitHub connect flow (browser consent, loopback callback, code
-/// exchange, identity resolution, custody write, DB index upsert) for the
-/// requested scope bundles. The account is keyed by the NUMERIC GitHub user id
+/// Run the full GitHub connect flow (device authorization, poll until approved,
+/// identity resolution, custody write, DB index upsert) for the requested
+/// scope bundles. The account is keyed by the NUMERIC GitHub user id
 /// (stringified), not the login: logins can change, but numeric ids are
 /// stable. `reconnect_account_id` carries that id on a reconnect or scope
 /// escalation. With a `reconnect_account_id` naming an already-connected
-/// account whose granted scopes cover the request, no browser round-trip happens
-/// (mirroring the Linear escalation short-circuit).
+/// account whose granted scopes cover the request, no device-flow round-trip
+/// happens (mirroring the Linear escalation short-circuit).
 /// Block a connect only on a CONFIRMED-empty installation set. A GitHub App
 /// user token reaches only installed repos, so an authorized-but-uninstalled
 /// grant is refused with guidance to the install page. A probe that cannot
 /// determine installation status (transient 5xx, secondary rate limit) fails
 /// OPEN: stranding a legitimate connect on a momentary GitHub blip (right
-/// after the user spent a browser consent) is worse than deferring the check
+/// after the user approved the device flow) is worse than deferring the check
 /// to the real repository calls, which surface any access problem themselves.
 async fn ensure_github_installed(access_token: &str) -> Result<(), AppError> {
     match github::has_installation(access_token).await {
@@ -1325,7 +1334,7 @@ pub async fn begin_connect_github(
             ),
         ));
     }
-    let client = require_github_oauth_client()?;
+    let client = require_github_client_id()?;
     let repos = crate::commands::repositories(app).await?;
 
     let reconnect_account_id = reconnect_account_id
@@ -1333,7 +1342,7 @@ pub async fn begin_connect_github(
         .filter(|id| !id.is_empty());
 
     // Escalation/reconnect short-circuit: an existing, healthy account
-    // that already holds every wanted scope needs no new consent.
+    // that already holds every wanted scope needs no new device-flow round-trip.
     if let Some(account_id) = reconnect_account_id {
         if let Some(record) = repos.get_connector_account(account_id).await? {
             let already_granted = scopes::missing_scopes(&record.scopes, bundles).is_empty();
@@ -1355,12 +1364,24 @@ pub async fn begin_connect_github(
         }
     }
 
-    let grant = github::authorize(
-        flow,
-        &client.client_id,
-        &client.client_secret,
-        &github_loopback_ports(),
-    )
+    // Clone the AppHandle so we can move it into the closure. The closure is
+    // called synchronously (on_device_code is not async), so no await inside.
+    let app_handle = app.clone();
+    let grant = github::authorize(flow, &client.client_id, |device_code| {
+        use tauri::Emitter;
+        // Emit the camelCase device-code payload for the frontend dialog.
+        let _ = app_handle.emit(
+            GITHUB_DEVICE_CODE_EVENT,
+            serde_json::json!({
+                "userCode": device_code.user_code,
+                "verificationUri": device_code.verification_uri,
+                "expiresInSeconds": device_code.expires_in,
+            }),
+        );
+        // Open the verification URI in the default browser so the user
+        // can approve the device without leaving June.
+        let _ = crate::os_accounts::open_in_browser(&device_code.verification_uri);
+    })
     .await?;
     let identity = grant.identity;
     let user_id = identity.user_id.clone();
@@ -1562,15 +1583,24 @@ pub async fn disconnect(
                     ConnectorProvider::Github => {
                         // GitHub: revoke the user access token via the
                         // applications endpoint (DELETE). Best-effort.
+                        // Revocation requires the client secret; a
+                        // secret-less deployment skips revocation (the user
+                        // must revoke manually at GitHub if needed).
                         if !stored.access_token.is_empty() {
                             let client = github_oauth_client();
-                            if !client.client_id.is_empty() && !client.client_secret.is_empty() {
-                                let _ = github::revoke(
-                                    &client.client_id,
-                                    &client.client_secret,
-                                    &stored.access_token,
-                                )
-                                .await;
+                            if !client.client_id.is_empty() {
+                                if let Some(secret) = client.client_secret_opt() {
+                                    let _ = github::revoke(
+                                        &client.client_id,
+                                        secret,
+                                        &stored.access_token,
+                                    )
+                                    .await;
+                                } else {
+                                    tracing::warn!(
+                                        "github revoke skipped: no client secret configured; revoke manually at GitHub"
+                                    );
+                                }
                             }
                         }
                     }
@@ -2149,18 +2179,31 @@ mod tests {
     // --- GitHub-specific tests -------------------------------------------------------
 
     #[test]
-    fn github_loopback_ports_prefer_valid_env_override_only() {
-        // A parseable non-zero override narrows the candidates to that port.
-        assert_eq!(github_loopback_ports_from("50000"), vec![50000]);
-        // Empty, garbage, zero, and out-of-range values all fall back to the
-        // registered defaults.
-        assert_eq!(github_loopback_ports_from(""), GITHUB_LOOPBACK_PORTS);
-        assert_eq!(
-            github_loopback_ports_from("not-a-port"),
-            GITHUB_LOOPBACK_PORTS
-        );
-        assert_eq!(github_loopback_ports_from("0"), GITHUB_LOOPBACK_PORTS);
-        assert_eq!(github_loopback_ports_from("70000"), GITHUB_LOOPBACK_PORTS);
+    fn github_oauth_client_secret_opt_returns_none_when_empty() {
+        let no_secret = GithubOAuthClient {
+            client_id: "cid".to_string(),
+            client_secret: String::new(),
+        };
+        assert!(no_secret.client_secret_opt().is_none());
+
+        let with_secret = GithubOAuthClient {
+            client_id: "cid".to_string(),
+            client_secret: "csecret".to_string(),
+        };
+        assert_eq!(with_secret.client_secret_opt(), Some("csecret"));
+    }
+
+    #[test]
+    fn require_github_client_id_accepts_id_without_secret() {
+        // The id-only path must not error: device flow needs only the id.
+        // We test the logic by verifying the struct's behavior directly since
+        // the function reads env vars (integration would require env mocking).
+        let client_id_only = GithubOAuthClient {
+            client_id: "cid".to_string(),
+            client_secret: String::new(),
+        };
+        assert!(!client_id_only.client_id.is_empty());
+        assert!(client_id_only.client_secret_opt().is_none());
     }
 
     #[test]

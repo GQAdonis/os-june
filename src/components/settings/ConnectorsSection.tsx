@@ -14,6 +14,7 @@ import {
 import { errorCode, messageFromError } from "../../lib/errors";
 import {
   CONNECTORS_CHANGED_EVENT,
+  GITHUB_DEVICE_CODE_EVENT,
   connectorsApplyRuntime,
   connectorsCancelConnect,
   connectorsConnect,
@@ -29,9 +30,11 @@ import {
   type ConnectorAccount,
   type ConnectorProvider,
   type ConnectorScopeBundle,
+  type GitHubDeviceCodePayload,
   type LinearTeam,
   type ObsidianStatus,
 } from "../../lib/tauri";
+import { CopyStateIcon } from "../ui/CopyStateIcon";
 import { Checkbox } from "../ui/Checkbox";
 import { Dialog } from "../ui/Dialog";
 import { InlineNotice } from "../ui/InlineNotice";
@@ -362,6 +365,14 @@ export function ConnectorsSection({
   // passes.
   const [connectTarget, setConnectTarget] = useState<ConnectorAccount | null>(null);
   const [connecting, setConnecting] = useState(false);
+  // Device-code payload for an in-flight GitHub connect (null = not in device
+  // flow or no code received yet).
+  const [githubDeviceCode, setGithubDeviceCode] = useState<GitHubDeviceCodePayload | null>(null);
+  const [codeCopied, setCodeCopied] = useState(false);
+  const codeCopiedTimerRef = useRef<number>();
+  // An inline error inside the connect dialog (device-flow specific errors
+  // that keep the dialog open so the user can retry).
+  const [connectError, setConnectError] = useState<string | null>(null);
   const [reconnectingId, setReconnectingId] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<ConnectorAccount | null>(null);
   // Revoke defaults ON: disconnecting without it leaves the grant alive at
@@ -450,6 +461,26 @@ export function ConnectorsSection({
     };
   }, [refresh]);
 
+  // Listen for GitHub device-authorization codes while a GitHub connect is in
+  // flight. The backend may re-emit the event (code renewal); we always render
+  // the latest. We subscribe once for the lifetime of the component rather than
+  // gating on `connecting`, so a code that arrives just before state flips is
+  // never dropped.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void listen(GITHUB_DEVICE_CODE_EVENT, (event: { payload: GitHubDeviceCodePayload }) => {
+      if (!cancelled) setGithubDeviceCode(event.payload);
+    }).then((cleanup) => {
+      if (cancelled) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   const loadTeams = useCallback(async (accountId: string) => {
     setTeamsLoading(true);
     setTeamsError(null);
@@ -517,6 +548,8 @@ export function ConnectorsSection({
   async function submitConnect() {
     if (bundles.length === 0 || connecting) return;
     setNotConfigured(null);
+    setConnectError(null);
+    setGithubDeviceCode(null);
     setConnecting(true);
     try {
       const account = await runConnect({
@@ -525,6 +558,7 @@ export function ConnectorsSection({
         loginHint: connectTarget ? loginHintFor(connectTarget) : undefined,
       });
       setConnectOpen(false);
+      setGithubDeviceCode(null);
       const toasts = CONNECT_TOASTS[connectProvider];
       toast.success(connectTarget ? toasts.add : toasts.connect);
       // A Linear connect that comes back with no teams yet — always true on a
@@ -534,18 +568,43 @@ export function ConnectorsSection({
         openTeamsDialog(account);
       }
     } catch (err) {
+      const code = errorCode(err);
       if (isConnectorNotConfiguredError(err)) {
         setNotConfigured(connectProvider);
         setConnectOpen(false);
-      } else if (errorCode(err) !== "connector_connect_canceled") {
+      } else if (code === "connector_connect_canceled") {
         // A user-initiated cancel rejects the in-flight connect with this
         // code; that is the expected outcome of clicking Cancel, not an
         // error to surface.
+        setGithubDeviceCode(null);
+      } else if (code === "connector_github_device_expired") {
+        // Code expired — let the user retry from the bundle picker.
+        setGithubDeviceCode(null);
+        setConnectError("The code expired before it was approved. Try again.");
+      } else if (code === "connector_github_device_declined") {
+        setGithubDeviceCode(null);
+        setConnectError("GitHub reported the request was declined.");
+      } else {
+        setGithubDeviceCode(null);
         toast.error(messageFromError(err));
       }
     } finally {
       setConnecting(false);
     }
+  }
+
+  function copyDeviceCode() {
+    if (!githubDeviceCode) return;
+    void navigator.clipboard.writeText(githubDeviceCode.userCode).then(() => {
+      setCodeCopied(true);
+      if (codeCopiedTimerRef.current !== undefined) {
+        window.clearTimeout(codeCopiedTimerRef.current);
+      }
+      codeCopiedTimerRef.current = window.setTimeout(() => {
+        setCodeCopied(false);
+        codeCopiedTimerRef.current = undefined;
+      }, 2000);
+    });
   }
 
   async function connectNotion() {
@@ -586,13 +645,14 @@ export function ConnectorsSection({
     }
   }
 
-  // Dismiss the connect dialog. While a connect is in flight ("Waiting for
-  // browser…") this also aborts the backend's loopback wait, so Cancel and
-  // the close button work during that window instead of being stuck until
-  // the browser handoff resolves or times out.
+  // Dismiss the connect dialog. While a connect is in flight this also aborts
+  // the backend's wait, so Cancel and the close button work during that window
+  // instead of being stuck until the flow resolves or times out.
   function dismissConnect() {
     if (connecting) void connectorsCancelConnect();
     setConnectOpen(false);
+    setGithubDeviceCode(null);
+    setConnectError(null);
   }
 
   async function reconnect(account: ConnectorAccount) {
@@ -867,7 +927,7 @@ export function ConnectorsSection({
                           aria-busy={reconnecting || undefined}
                           onClick={() => void reconnect(account)}
                         >
-                          {reconnecting ? "Waiting for browser…" : "Reconnect"}
+                          {reconnecting ? "Reconnecting…" : "Reconnect"}
                         </button>
                       ) : (
                         <>
@@ -928,47 +988,89 @@ export function ConnectorsSection({
             ? CONNECT_TITLES[connectProvider].add
             : CONNECT_TITLES[connectProvider].connect
         }
-        description={connectDescription(connectProvider, connectTarget)}
+        description={
+          githubDeviceCode && connectProvider === "github"
+            ? undefined
+            : connectDescription(connectProvider, connectTarget)
+        }
         footer={
-          <>
+          githubDeviceCode && connectProvider === "github" ? (
+            // Device-code waiting state: only a cancel affordance. The connect
+            // resolves (or errors) on its own once the user approves on GitHub.
+            // Cancel calls connectorsCancelConnect via dismissConnect.
             <button type="button" className="primary-action" onClick={dismissConnect}>
               Cancel
             </button>
-            <button
-              type="button"
-              className="primary-action primary-solid"
-              disabled={bundles.length === 0 || connecting}
-              aria-busy={connecting || undefined}
-              onClick={() => void submitConnect()}
-            >
-              {connecting ? "Waiting for browser…" : "Connect"}
-            </button>
-          </>
+          ) : (
+            <>
+              <button type="button" className="primary-action" onClick={dismissConnect}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary-action primary-solid"
+                disabled={bundles.length === 0 || connecting}
+                aria-busy={connecting || undefined}
+                onClick={() => void submitConnect()}
+              >
+                {connecting && connectProvider !== "github" ? "Waiting for browser…" : "Connect"}
+              </button>
+            </>
+          )
         }
       >
-        <div className="connectors-bundle-list">
-          {bundlesForProvider(connectProvider).map((bundle) => {
-            const meta = BUNDLE_META[bundle];
-            return (
-              <label
-                key={bundle}
-                className="connectors-bundle-option"
-                htmlFor={`connectors-bundle-${bundle}`}
+        {githubDeviceCode && connectProvider === "github" ? (
+          // GitHub device-authorization flow: show the user code the user must
+          // enter at github.com/login/device. The backend has already opened
+          // the page; the code display and link are the fallback.
+          <div className="github-device-code-panel">
+            <p className="github-device-code-label">
+              Enter this code at github.com/login/device to approve June
+            </p>
+            <div className="github-device-code-row">
+              <span className="github-device-code-value">{githubDeviceCode.userCode}</span>
+              <button
+                type="button"
+                className="btn btn-secondary github-device-code-copy"
+                aria-label={codeCopied ? "Code copied" : "Copy code"}
+                onClick={copyDeviceCode}
               >
-                <Checkbox
-                  id={`connectors-bundle-${bundle}`}
-                  checked={bundles.includes(bundle)}
-                  disabled={connecting}
-                  onChange={(event) => toggleBundle(bundle, event.currentTarget.checked)}
-                />
-                <span className="connectors-bundle-copy">
-                  <span className="connectors-bundle-label">{meta.label}</span>
-                  <span className="connectors-bundle-description">{meta.description}</span>
-                </span>
-              </label>
-            );
-          })}
-        </div>
+                <CopyStateIcon copied={codeCopied} />
+                Copy code
+              </button>
+            </div>
+            <p className="github-device-code-status">Waiting for approval on GitHub…</p>
+          </div>
+        ) : (
+          <>
+            {connectError ? (
+              <InlineNotice tone="warning" body={connectError} aria-label="Connect error" />
+            ) : null}
+            <div className="connectors-bundle-list">
+              {bundlesForProvider(connectProvider).map((bundle) => {
+                const meta = BUNDLE_META[bundle];
+                return (
+                  <label
+                    key={bundle}
+                    className="connectors-bundle-option"
+                    htmlFor={`connectors-bundle-${bundle}`}
+                  >
+                    <Checkbox
+                      id={`connectors-bundle-${bundle}`}
+                      checked={bundles.includes(bundle)}
+                      disabled={connecting}
+                      onChange={(event) => toggleBundle(bundle, event.currentTarget.checked)}
+                    />
+                    <span className="connectors-bundle-copy">
+                      <span className="connectors-bundle-label">{meta.label}</span>
+                      <span className="connectors-bundle-description">{meta.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </>
+        )}
       </Dialog>
 
       <Dialog

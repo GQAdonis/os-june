@@ -1,10 +1,11 @@
-//! GitHub App user access tokens, web application flow.
+//! GitHub App user access tokens, device authorization flow.
 //!
-//! GitHub does NOT support PKCE-only public clients: the token endpoint
-//! requires the client secret. The consent flow uses the user's default browser
-//! and a loopback callback on a fixed registered port (GitHub matches the
-//! callback URL exactly, port included). A random `state` value replaces the
-//! PKCE code challenge for CSRF protection.
+//! GitHub does NOT support PKCE-only public clients for the web flow, but
+//! the device authorization flow (RFC 8628) needs only the client id: no
+//! callback URL is registered, no loopback listener is required, and no
+//! client secret is used during authorization. The user is shown a short
+//! `user_code` and directed to `verification_uri`; the app polls GitHub
+//! until the user approves, declines, or the code expires.
 //!
 //! Token lifetime: when the GitHub App has "expire user authorization tokens"
 //! enabled, the exchange returns an `expires_in` and a `refresh_token` that
@@ -12,6 +13,11 @@
 //! returns a non-expiring token with no `expires_in` and no `refresh_token`;
 //! June stores it with a far-future expiry so the freshness gate never triggers
 //! an unnecessary refresh.
+//!
+//! Refresh requires the client secret. A deployment that ships only the client
+//! id (and therefore no secret) must disable "expire user authorization tokens"
+//! on the GitHub App so tokens are non-expiring and the refresh path is never
+//! triggered.
 //!
 //! NEVER log, print, or serialize tokens (or authorization codes) into errors.
 //! Error messages carry stable codes and short human text only.
@@ -23,7 +29,7 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::oauth::{self, ConnectFlow};
 
-const AUTH_ENDPOINT: &str = "https://github.com/login/oauth/authorize";
+const DEVICE_CODE_ENDPOINT: &str = "https://github.com/login/device/code";
 const TOKEN_ENDPOINT: &str = "https://github.com/login/oauth/access_token";
 /// GitHub requires a User-Agent header on every API call; mirror the shared
 /// http_client's value.
@@ -33,6 +39,12 @@ const GITHUB_API_VERSION: &str = "2022-11-28";
 /// For GitHub Apps that do not expire user tokens: store a far-future expiry
 /// so the freshness gate never triggers. ~100 years in seconds.
 pub(super) const NON_EXPIRING_TOKEN_LIFETIME_SECS: i64 = 3_153_600_000;
+
+/// How many extra seconds to add to the polling interval on `slow_down`.
+const SLOW_DOWN_INCREMENT_SECS: u64 = 5;
+
+/// Maximum transient network failures tolerated before aborting the poll loop.
+const POLL_MAX_NETWORK_ERRORS: usize = 5;
 
 // ----- Token exchange & refresh -----------------------------------------------
 
@@ -84,7 +96,7 @@ pub struct GithubIdentity {
     pub name: String,
 }
 
-/// Outcome of the full browser handoff.
+/// Outcome of the full device flow handoff.
 pub struct GithubAuthorizedGrant {
     pub tokens: GithubTokenResponse,
     pub identity: GithubIdentity,
@@ -101,106 +113,271 @@ pub enum GithubRefreshOutcome {
     Transient,
 }
 
-/// Run the full GitHub authorization handoff: open the consent screen in the
-/// default browser, wait on the loopback listener for the redirect, exchange
-/// the code for tokens, and resolve the user identity. No PKCE (GitHub does
-/// not support it); CSRF protection via the random `state` value that
-/// [`oauth::loopback_authorize`] mints.
-pub async fn authorize(
-    flow: &ConnectFlow,
-    client_id: &str,
-    client_secret: &str,
-    loopback_ports: &[u16],
-) -> Result<GithubAuthorizedGrant, AppError> {
-    let authorization = oauth::loopback_authorize(
-        flow,
-        "GitHub",
-        oauth::LoopbackPort::Candidates(loopback_ports.to_vec()),
-        |redirect_uri, _code_challenge, state| {
-            // No PKCE: the code_challenge is ignored; the state is the CSRF token.
-            // No scope param: GitHub Apps ignore scopes on the authorize URL.
-            build_auth_url(client_id, redirect_uri, state)
-        },
-    )
-    .await?;
+// ----- Device code request ----------------------------------------------------
 
-    let tokens = exchange_code(
-        client_id,
-        client_secret,
-        &authorization.code,
-        &authorization.redirect_uri,
-    )
-    .await?;
-    let identity = fetch_identity(&tokens.access_token).await?;
-    Ok(GithubAuthorizedGrant { tokens, identity })
+/// The device code response from GitHub. Contains everything needed to display
+/// the prompt to the user and drive the poll loop.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GithubDeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    #[serde(default)]
+    pub expires_in: u64,
+    #[serde(default)]
+    pub interval: u64,
+    /// Present when GitHub returns an error on HTTP 200.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_description: Option<String>,
 }
 
-fn build_auth_url(client_id: &str, redirect_uri: &str, state: &str) -> String {
-    // No scope param: GitHub Apps' user tokens carry permissions derived from
-    // the app's configured permissions and the installation's repository
-    // selection; scopes on the authorize URL are ignored.
-    // No code_challenge: GitHub does not support PKCE for App user tokens.
-    format!(
-        "{AUTH_ENDPOINT}?client_id={}&redirect_uri={}&state={}",
-        urlencoding::encode(client_id),
-        urlencoding::encode(redirect_uri),
-        urlencoding::encode(state),
-    )
-}
-
-/// Exchange the authorization code for tokens. GitHub requires the client
-/// secret (unlike Linear's PKCE-only flow). The response is always HTTP 200;
-/// failure is signaled by an `error` field in the JSON body.
-async fn exchange_code(
-    client_id: &str,
-    client_secret: &str,
-    code: &str,
-    redirect_uri: &str,
-) -> Result<GithubTokenResponse, AppError> {
+/// Request a device code from GitHub. The form carries only `client_id` — no
+/// scope, no client_secret. GitHub Apps ignore scopes on user-token requests;
+/// the token's capabilities are determined by the app's configured permissions
+/// and the installation's repository selection.
+async fn request_device_code(client_id: &str) -> Result<GithubDeviceCode, AppError> {
     let response = oauth::http_client()
-        .post(TOKEN_ENDPOINT)
+        .post(DEVICE_CODE_ENDPOINT)
         .header("Accept", "application/json")
-        .form(&exchange_form(client_id, client_secret, code, redirect_uri))
+        .form(&[("client_id", client_id)])
         .send()
         .await
-        .map_err(|_| exchange_failed(None))?;
+        .map_err(|_| device_code_failed(None))?;
     let status = response.status().as_u16();
-    let body = response.text().await.map_err(|_| exchange_failed(None))?;
-    match serde_json::from_str::<GithubTokenResponse>(&body) {
-        Ok(resp) if resp.is_success() => Ok(resp),
+    let body = response
+        .text()
+        .await
+        .map_err(|_| device_code_failed(None))?;
+    match serde_json::from_str::<GithubDeviceCode>(&body) {
+        Ok(resp) if resp.error.is_none() && !resp.device_code.is_empty() => Ok(resp),
         Ok(resp) => {
-            // GitHub returns HTTP 200 with an error field.
             let error_code = resp.error.clone();
-            tracing::warn!(status, error_code = ?error_code, "github token exchange returned error");
-            Err(exchange_failed(error_code))
+            tracing::warn!(status, error_code = ?error_code, "github device code request returned error");
+            Err(classify_device_code_error(error_code))
         }
         Err(_) => {
-            tracing::warn!(status, "github token exchange response unparseable");
-            Err(exchange_failed(None))
+            tracing::warn!(status, "github device code response unparseable");
+            Err(device_code_failed(None))
         }
     }
 }
 
-fn exchange_form<'a>(
-    client_id: &'a str,
-    client_secret: &'a str,
-    code: &'a str,
-    redirect_uri: &'a str,
-) -> [(&'static str, &'a str); 4] {
+fn device_code_failed(error_code: Option<String>) -> AppError {
+    let message = match error_code {
+        Some(code) => format!("Could not start the GitHub device flow ({code})."),
+        None => "Could not start the GitHub device flow.".to_string(),
+    };
+    AppError::new("connector_token_exchange_failed", message)
+}
+
+fn classify_device_code_error(error_code: Option<String>) -> AppError {
+    match error_code.as_deref() {
+        Some("unauthorized_client") | Some("device_flow_not_enabled") => {
+            AppError::new(
+                "connector_github_device_flow_disabled",
+                "Device flow is not enabled on the GitHub App. Enable it in the App's settings and try again.",
+            )
+        }
+        _ => device_code_failed(error_code),
+    }
+}
+
+// ----- Poll decision (pure, unit-testable) ------------------------------------
+
+/// Decision returned by [`device_poll_action`] for one poll iteration.
+#[derive(Debug, PartialEq)]
+pub enum DevicePollAction {
+    /// The poll succeeded; the response contains the token.
+    Token,
+    /// Keep polling after `next_interval_secs`.
+    Pending { next_interval_secs: u64 },
+    /// The code expired before the user approved.
+    Expired,
+    /// The user explicitly declined.
+    Declined,
+    /// Device flow is not enabled on the GitHub App.
+    Disabled,
+}
+
+/// Pure decision function: map an `error` field from the GitHub poll response
+/// to the next action. The `interval_secs` is the current polling interval;
+/// `slow_down` adds [`SLOW_DOWN_INCREMENT_SECS`] to it.
+///
+/// Factored as a pure function so poll-action classification is unit-testable
+/// without any HTTP.
+pub fn device_poll_action(error: Option<&str>, interval_secs: u64) -> DevicePollAction {
+    match error {
+        None => DevicePollAction::Token,
+        Some("authorization_pending") => DevicePollAction::Pending {
+            next_interval_secs: interval_secs,
+        },
+        Some("slow_down") => DevicePollAction::Pending {
+            next_interval_secs: interval_secs + SLOW_DOWN_INCREMENT_SECS,
+        },
+        Some("expired_token") => DevicePollAction::Expired,
+        Some("access_denied") => DevicePollAction::Declined,
+        Some("unauthorized_client") | Some("device_flow_not_enabled") => DevicePollAction::Disabled,
+        Some(_) => DevicePollAction::Pending {
+            next_interval_secs: interval_secs,
+        },
+    }
+}
+
+// ----- Poll loop --------------------------------------------------------------
+
+/// Poll the token endpoint until the user approves, declines, or the code
+/// expires. Honors the `ConnectFlow` cancellation signal between polls so
+/// closing the dialog cleanly aborts the wait. Bounded network-error retries
+/// prevent a momentary blip from aborting a long-lived poll loop.
+async fn poll_for_token(
+    flow: &ConnectFlow,
+    client_id: &str,
+    device_code: &GithubDeviceCode,
+) -> Result<GithubTokenResponse, AppError> {
+    let mut interval_secs = device_code.interval.max(5);
+    let mut network_errors = 0usize;
+
+    // Register a cancellation sender for the duration of the poll.
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    flow.register_cancel_sender(cancel_tx);
+
+    let result = loop {
+        // Wait for the polling interval, racing against cancellation.
+        let sleep = tokio::time::sleep(std::time::Duration::from_secs(interval_secs));
+        tokio::select! {
+            _ = sleep => {}
+            _ = &mut cancel_rx => {
+                break Err(AppError::new(
+                    "connector_connect_canceled",
+                    "Connecting to GitHub was canceled.",
+                ));
+            }
+        }
+
+        let response = match oauth::http_client()
+            .post(TOKEN_ENDPOINT)
+            .header("Accept", "application/json")
+            .form(&poll_form(client_id, &device_code.device_code))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(_) => {
+                network_errors += 1;
+                if network_errors >= POLL_MAX_NETWORK_ERRORS {
+                    break Err(AppError::new(
+                        "connector_refresh_unavailable",
+                        "Couldn't reach GitHub to complete the connection. Try again in a moment.",
+                    ));
+                }
+                continue;
+            }
+        };
+
+        let status = response.status().as_u16();
+        let body = match response.text().await {
+            Ok(b) => b,
+            Err(_) => {
+                network_errors += 1;
+                if network_errors >= POLL_MAX_NETWORK_ERRORS {
+                    break Err(AppError::new(
+                        "connector_refresh_unavailable",
+                        "Couldn't reach GitHub to complete the connection. Try again in a moment.",
+                    ));
+                }
+                continue;
+            }
+        };
+        // Reset the transient-error counter on any parseable response.
+        network_errors = 0;
+
+        match serde_json::from_str::<GithubTokenResponse>(&body) {
+            Ok(resp) if resp.is_success() => break Ok(resp),
+            Ok(resp) => {
+                let error_code = resp.error.as_deref();
+                match device_poll_action(error_code, interval_secs) {
+                    DevicePollAction::Token => {
+                        // is_success() would have caught this; shouldn't reach here.
+                        break Ok(resp);
+                    }
+                    DevicePollAction::Pending { next_interval_secs } => {
+                        interval_secs = next_interval_secs;
+                    }
+                    DevicePollAction::Expired => {
+                        break Err(AppError::new(
+                            "connector_github_device_expired",
+                            "The code expired before it was approved. Try again.",
+                        ));
+                    }
+                    DevicePollAction::Declined => {
+                        break Err(AppError::new(
+                            "connector_github_device_declined",
+                            "GitHub reported the request was declined.",
+                        ));
+                    }
+                    DevicePollAction::Disabled => {
+                        break Err(AppError::new(
+                            "connector_github_device_flow_disabled",
+                            "Device flow is not enabled on the GitHub App. Enable it in the App's settings and try again.",
+                        ));
+                    }
+                }
+            }
+            Err(_) => {
+                tracing::warn!(
+                    status,
+                    "github device poll response unparseable; treating as transient"
+                );
+                network_errors += 1;
+                if network_errors >= POLL_MAX_NETWORK_ERRORS {
+                    break Err(AppError::new(
+                        "connector_refresh_unavailable",
+                        "Couldn't reach GitHub to complete the connection. Try again in a moment.",
+                    ));
+                }
+            }
+        }
+    };
+
+    // Clear the cancel slot so a later connect starts clean.
+    flow.clear_cancel_sender();
+    result
+}
+
+fn poll_form<'a>(client_id: &'a str, device_code: &'a str) -> [(&'static str, &'a str); 3] {
+    // NO client_secret: the device flow specification does not use it at the
+    // token endpoint. NO scope: GitHub Apps ignore scopes on user tokens.
     [
         ("client_id", client_id),
-        ("client_secret", client_secret),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
+        ("device_code", device_code),
+        ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
     ]
 }
 
-fn exchange_failed(error_code: Option<String>) -> AppError {
-    let message = match error_code {
-        Some(code) => format!("Could not complete the GitHub connection ({code})."),
-        None => "Could not complete the GitHub connection.".to_string(),
-    };
-    AppError::new("connector_token_exchange_failed", message)
+// ----- authorize --------------------------------------------------------------
+
+/// Run the full GitHub device authorization flow: request a device code,
+/// invoke `on_device_code` so the caller can show the `user_code` and open
+/// the `verification_uri` in the browser, then poll GitHub until the user
+/// approves or the code expires. Cancellation is honored between polls via
+/// the `ConnectFlow` cancel slot.
+///
+/// `github.rs` is intentionally tauri-free; `on_device_code` lets the caller
+/// (mod.rs) emit the Tauri event and open the browser without this module
+/// taking a dependency on `tauri`.
+pub async fn authorize(
+    flow: &ConnectFlow,
+    client_id: &str,
+    on_device_code: impl Fn(&GithubDeviceCode),
+) -> Result<GithubAuthorizedGrant, AppError> {
+    let device_code = request_device_code(client_id).await?;
+    on_device_code(&device_code);
+
+    let tokens = poll_for_token(flow, client_id, &device_code).await?;
+    let identity = fetch_identity(&tokens.access_token).await?;
+    Ok(GithubAuthorizedGrant { tokens, identity })
 }
 
 /// One refresh attempt. `bad_refresh_token` is the definitive invalid-grant
@@ -347,9 +524,14 @@ pub async fn has_installation(access_token: &str) -> Result<bool, GithubApiError
 // ----- Revoke -----------------------------------------------------------------
 
 /// Best-effort revocation of a user access token at GitHub (used by
-/// `disconnect(revoke_grant = true)`). Uses HTTP Basic auth (client_id:client_secret)
-/// and a JSON body, as GitHub requires for this endpoint. Failures are logged
-/// and swallowed; local custody removal is the real disconnect.
+/// `disconnect(revoke_grant = true)` when the client secret is available).
+/// Uses HTTP Basic auth (client_id:client_secret) and a JSON body, as GitHub
+/// requires for this endpoint. Failures are logged and swallowed; local
+/// custody removal is the real disconnect.
+///
+/// Revoke is only possible when the client secret is configured. Device-flow
+/// authorization needs no secret, but revocation requires it. A deployment
+/// that omits the secret must revoke manually at GitHub if needed.
 pub async fn revoke(client_id: &str, client_secret: &str, access_token: &str) -> bool {
     let url = format!("https://api.github.com/applications/{client_id}/token");
     match oauth::http_client()
@@ -1366,38 +1548,94 @@ mod tests {
         );
     }
 
+    // ----- device_poll_action classification ----------------------------------
+
     #[test]
-    fn auth_url_has_no_scope_and_no_code_challenge() {
-        let url = build_auth_url(
-            "client-id-123",
-            "http://127.0.0.1:44751/callback",
-            "state-abc",
-        );
-        assert!(url.starts_with("https://github.com/login/oauth/authorize?"));
-        assert!(url.contains("client_id=client-id-123"));
-        assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A44751%2Fcallback"));
-        assert!(url.contains("state=state-abc"));
-        // No scope (GitHub Apps ignore scopes on the authorize URL).
-        assert!(!url.contains("scope"));
-        // No PKCE (GitHub does not support it).
-        assert!(!url.contains("code_challenge"));
-        assert!(!url.contains("code_challenge_method"));
+    fn device_poll_action_success_when_no_error() {
+        assert_eq!(device_poll_action(None, 5), DevicePollAction::Token);
     }
 
     #[test]
-    fn exchange_form_carries_client_secret_and_no_code_verifier() {
-        let form = exchange_form(
-            "cid",
-            "csecret",
-            "auth-code",
-            "http://127.0.0.1:44751/callback",
+    fn device_poll_action_pending_keeps_interval() {
+        assert_eq!(
+            device_poll_action(Some("authorization_pending"), 5),
+            DevicePollAction::Pending {
+                next_interval_secs: 5
+            }
         );
-        assert!(form.contains(&("client_id", "cid")));
-        assert!(form.contains(&("client_secret", "csecret")));
-        assert!(form.contains(&("code", "auth-code")));
-        // No code_verifier: this is not PKCE.
-        assert!(!form.iter().any(|(k, _)| *k == "code_verifier"));
     }
+
+    #[test]
+    fn device_poll_action_slow_down_increments_by_5() {
+        assert_eq!(
+            device_poll_action(Some("slow_down"), 5),
+            DevicePollAction::Pending {
+                next_interval_secs: 10
+            }
+        );
+        // Slow down from a higher base.
+        assert_eq!(
+            device_poll_action(Some("slow_down"), 12),
+            DevicePollAction::Pending {
+                next_interval_secs: 17
+            }
+        );
+    }
+
+    #[test]
+    fn device_poll_action_expired_token_maps_to_expired() {
+        assert_eq!(
+            device_poll_action(Some("expired_token"), 5),
+            DevicePollAction::Expired
+        );
+    }
+
+    #[test]
+    fn device_poll_action_access_denied_maps_to_declined() {
+        assert_eq!(
+            device_poll_action(Some("access_denied"), 5),
+            DevicePollAction::Declined
+        );
+    }
+
+    #[test]
+    fn device_poll_action_device_flow_disabled_variants() {
+        assert_eq!(
+            device_poll_action(Some("unauthorized_client"), 5),
+            DevicePollAction::Disabled
+        );
+        assert_eq!(
+            device_poll_action(Some("device_flow_not_enabled"), 5),
+            DevicePollAction::Disabled
+        );
+    }
+
+    #[test]
+    fn device_poll_action_unknown_error_treated_as_pending() {
+        // Unknown errors are treated as transient pending rather than aborting.
+        assert_eq!(
+            device_poll_action(Some("some_future_error"), 5),
+            DevicePollAction::Pending {
+                next_interval_secs: 5
+            }
+        );
+    }
+
+    // ----- poll_form: no client_secret, no scope ------------------------------
+
+    #[test]
+    fn poll_form_carries_no_client_secret_and_correct_grant_type() {
+        let form = poll_form("cid", "device-code-abc");
+        assert!(form.contains(&("client_id", "cid")));
+        assert!(form.contains(&("grant_type", "urn:ietf:params:oauth:grant-type:device_code")));
+        assert!(form.contains(&("device_code", "device-code-abc")));
+        // No client_secret in the device flow token request.
+        assert!(!form.iter().any(|(k, _)| *k == "client_secret"));
+        // No scope: GitHub Apps ignore scopes on user-token requests.
+        assert!(!form.iter().any(|(k, _)| *k == "scope"));
+    }
+
+    // ----- refresh_form carries client_secret ---------------------------------
 
     #[test]
     fn refresh_form_carries_rotation_fields() {
@@ -1697,5 +1935,29 @@ mod tests {
             result.is_err(),
             "non-base64 encoding should always be rejected, even with size=0"
         );
+    }
+
+    // ----- device error code stable strings -----------------------------------
+
+    #[test]
+    fn device_error_codes_are_stable() {
+        // Verify the exact error codes the frontend contract specifies.
+        let declined = AppError::new(
+            "connector_github_device_declined",
+            "GitHub reported the request was declined.",
+        );
+        assert_eq!(declined.code, "connector_github_device_declined");
+
+        let expired = AppError::new(
+            "connector_github_device_expired",
+            "The code expired before it was approved. Try again.",
+        );
+        assert_eq!(expired.code, "connector_github_device_expired");
+
+        let disabled = AppError::new(
+            "connector_github_device_flow_disabled",
+            "Device flow is not enabled on the GitHub App. Enable it in the App's settings and try again.",
+        );
+        assert_eq!(disabled.code, "connector_github_device_flow_disabled");
     }
 }

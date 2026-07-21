@@ -24,10 +24,12 @@ differs from Google's and Linear's in three load-bearing ways:
    gate in the proxy layer for every repo-scoped route (amended below;
    unlike Linear's selected-teams gate, the June gate here is required
    to uphold the PRD's privacy promise, not merely to reflect a UI choice).
-3. **The app's private key is only needed for installation (server-to-server)
-   tokens.** The user-token flow needs the client id and client secret at the
-   token endpoint - GitHub does not support PKCE-only public clients - and
-   GitHub matches the registered callback URL exactly, including the port.
+3. **Authorization uses GitHub's device authorization flow (RFC 8628).** No
+   callback URLs, no loopback listener. The user is shown a short `user_code`
+   and directed to `verification_uri`; the app polls GitHub until the user
+   approves, declines, or the code expires. Authorization needs only the
+   client id — no client secret is required at the device-code or token
+   endpoints. Device flow must be enabled on the GitHub App settings page.
 
 The implementation plan's Phase 0 asked where a private key could live and
 whether installation-token minting needs a TEE signer.
@@ -40,15 +42,25 @@ whether installation-token minting needs a TEE signer.
    user's token, resolved from the Keychain in Rust
    (`co.opensoftware.june.github`, `-dev` in debug). June API stays out of the
    connector data path, extending ADR-0016 unchanged.
-2. **Installed-app credential, Google precedent.** The client id and client
-   secret load from `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET`
-   (runtime env overriding build-time `option_env!`), exactly like the Google
-   Desktop credential: shipped values that cannot keep confidentiality in an
-   installed app and grant nothing without the user's authorization code or
-   refresh token. The consent flow uses the default browser and a loopback
-   callback on the registered ports 44751-44753 (GitHub, like Linear, matches
-   the callback URL exactly), with a random `state` check; there is no PKCE
-   because GitHub does not support it.
+2. **Client id required; client secret optional.** Both load from
+   `GITHUB_OAUTH_CLIENT_ID` / `GITHUB_OAUTH_CLIENT_SECRET` (runtime env
+   overriding build-time `option_env!`). The client id is required to start
+   the device flow; the client secret is optional.
+   - Secret present (recommended): GitHub App should have "expire user
+     authorization tokens" enabled; expiring tokens refresh normally using
+     client_id + client_secret, and API revocation is available.
+   - Secret absent: the GitHub App must have "expire user authorization
+     tokens" disabled so tokens are non-expiring and the refresh path is never
+     triggered. API revocation is unavailable; users must revoke manually at
+     GitHub if needed.
+   The authorization flow uses GitHub's device authorization flow (RFC 8628)
+   from the Tauri event `june://connectors-github-device-code` (camelCase
+   payload: `userCode`, `verificationUri`, `expiresInSeconds`) to display the
+   code in the connect dialog while opening the verification URL in the browser.
+   Two new user-facing error codes: `connector_github_device_declined` (user
+   declined at GitHub) and `connector_github_device_expired` (code expired
+   before approval). Device flow must be enabled on the GitHub App settings
+   page; `connector_github_device_flow_disabled` surfaces if it is not.
 3. **June-side read/write gating AND installed-repository boundary.** Because
    GitHub has no per-grant scopes, the `connector_accounts.scopes` column
    stores June-side markers (`read`, `write`) chosen by the user in the
@@ -92,11 +104,14 @@ whether installation-token minting needs a TEE signer.
 
 - The privacy claim of ADR-0016 holds verbatim for GitHub: no OpenSoftware
   system ever holds a credential that can read the user's repositories.
-- Refresh follows the Linear rotation pattern: GitHub rotates the refresh
-  token on every refresh when "expire user authorization tokens" is enabled on
-  the app. When that setting is off, GitHub returns a non-expiring token and
-  no refresh token; June stores it with a far-future expiry and the refresh
-  path is never taken.
+- Refresh follows the Linear rotation pattern when the client secret is
+  present: GitHub rotates the refresh token on every refresh when "expire user
+  authorization tokens" is enabled on the app. When that setting is off,
+  GitHub returns a non-expiring token and no refresh token; June stores it
+  with a far-future expiry and the refresh path is never taken. When a refresh
+  is needed and no secret is configured, June marks the account
+  `reconnect_required` and surfaces `connector_reconnect_required` rather than
+  calling GitHub with a missing credential.
 - Read-only connects exist only as June-side enforcement. The GitHub consent
   screen shows the app's full permission set regardless; the connect dialog
   copy must not imply GitHub granted less.
