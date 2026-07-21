@@ -14341,6 +14341,9 @@ describe("AgentWorkspace", () => {
   it("disables an older provider retry while the session is running", async () => {
     const user = userEvent.setup();
     let resolveNewerRun: (() => void) | undefined;
+    mocks.listHermesSessions.mockResolvedValue([
+      { ...existingSession, id: "busy-provider-session" },
+    ]);
     mocks.gatewayRequest.mockImplementation((method: string, params?: { text?: string }) =>
       method === "session.resume"
         ? Promise.resolve({ session_id: "runtime-session-1" })
