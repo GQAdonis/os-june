@@ -1281,6 +1281,30 @@ fn github_account_metadata_json(identity: &github::GithubIdentity) -> String {
 /// escalation. With a `reconnect_account_id` naming an already-connected
 /// account whose granted scopes cover the request, no browser round-trip happens
 /// (mirroring the Linear escalation short-circuit).
+/// Block a connect only on a CONFIRMED-empty installation set. A GitHub App
+/// user token reaches only installed repos, so an authorized-but-uninstalled
+/// grant is refused with guidance to the install page. A probe that cannot
+/// determine installation status (transient 5xx, secondary rate limit) fails
+/// OPEN: stranding a legitimate connect on a momentary GitHub blip (right
+/// after the user spent a browser consent) is worse than deferring the check
+/// to the real repository calls, which surface any access problem themselves.
+async fn ensure_github_installed(access_token: &str) -> Result<(), AppError> {
+    match github::has_installation(access_token).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(AppError::new(
+            "connector_github_not_installed",
+            "Install the June GitHub App on at least one repository, then connect again. Open github.com/apps/open-software-network to choose repositories.",
+        )),
+        Err(error) => {
+            tracing::warn!(
+                error_code = %AppError::from(error).code,
+                "could not verify github installation during connect; proceeding"
+            );
+            Ok(())
+        }
+    }
+}
+
 pub async fn begin_connect_github(
     app: &tauri::AppHandle,
     flow: &ConnectFlow,
@@ -1317,6 +1341,15 @@ pub async fn begin_connect_github(
                 && already_granted
                 && record.status == ConnectorAccountStatus::Connected.as_str()
             {
+                // Re-verify the installation before honoring a no-op reconnect:
+                // a user who uninstalled the app on GitHub (which does not
+                // invalidate the token) must surface the not-installed error
+                // here instead of silently reaffirming a hollow account. Skip
+                // the check only when a fresh token cannot be resolved (a real
+                // reconnect is needed anyway); the check itself fails open.
+                if let Ok(token) = github_access_token(app, account_id).await {
+                    ensure_github_installed(&token).await?;
+                }
                 return account_dto(&repos, record).await;
             }
         }
@@ -1337,14 +1370,8 @@ pub async fn begin_connect_github(
     // installation are separate GitHub steps. A user who authorized but never
     // installed the app would otherwise get a "connected" row and MCP servers
     // backed by a token that lists zero repositories. Refuse it here, before
-    // any custody write, and point them at the install flow. Reconnecting an
-    // account that already installed still passes (it has installations).
-    if !github::has_installation(&grant.tokens.access_token).await? {
-        return Err(AppError::new(
-            "connector_github_not_installed",
-            "Install the June GitHub App on at least one repository, then connect again. Open github.com/apps/open-software-network to choose repositories.",
-        ));
-    }
+    // any custody write, and point them at the install flow.
+    ensure_github_installed(&grant.tokens.access_token).await?;
 
     // A reconnect id means the user asked to (re)connect one specific account.
     // The browser can still consent for a different one; abort on mismatch

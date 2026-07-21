@@ -66,11 +66,17 @@ whether installation-token minting needs a TEE signer.
 6. **Connect refuses a grant with no installation.** Authorization and
    installation are separate GitHub steps, and a user-to-server token reaches
    only repositories the app is installed on. So `begin_connect_github`
-   checks `GET /user/installations` after resolving identity and, when the
-   user has authorized but not installed the app, returns
-   `connector_github_not_installed` (pointing at the install page) instead of
-   storing a "connected" account whose token can read nothing. Repository
-   selection itself still lives on GitHub, not in June.
+   checks `GET /user/installations` and, when the user has authorized but not
+   installed the app, returns `connector_github_not_installed` (pointing at
+   the install page) instead of storing a "connected" account whose token can
+   read nothing. The check runs both after a fresh authorization and inside
+   the no-op reconnect short-circuit, so a user who uninstalls the app on
+   GitHub (which does not invalidate the token) surfaces the error on their
+   next reconnect rather than silently reaffirming a hollow account. It fails
+   open on an indeterminate probe (transient 5xx / rate limit): the real
+   repository calls surface access problems, and blocking a legitimate
+   connect on a momentary blip is the worse failure. Repository selection
+   itself still lives on GitHub, not in June.
 
 ## Consequences
 
