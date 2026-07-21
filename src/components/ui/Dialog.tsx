@@ -92,7 +92,7 @@ export function Dialog({
       document.body.style.overflow = previousOverflow;
       previousFocusRef.current?.focus?.();
     };
-  }, [open]);
+  }, [open, closeDisabled]);
 
   useLayoutEffect(() => {
     if (!open || !cardRef.current) return;
@@ -128,9 +128,14 @@ export function Dialog({
           <h2 id={titleId} className="dialog-title">
             {title}
           </h2>
-          <button type="button" className="dialog-close" aria-label="Close" onClick={onClose}>
+          <button
+            type="button"
+            className="dialog-close"
+            aria-label="Close"
+            onClick={onClose}
             disabled={closeDisabled}
             aria-disabled={closeDisabled || undefined}
+          >
             <IconCrossMedium size={14} />
           </button>
         </header>
