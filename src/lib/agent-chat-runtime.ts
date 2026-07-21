@@ -15,6 +15,15 @@ import { displayedSkillInvocationText } from "./skill-slash-commands";
 import type { JuneHermesEvent } from "./hermes-control-plane";
 import { generatedMediaToolKind, toolActivityLabel } from "./agent-tool-labels";
 import { stripProjectContext } from "./agent-project-context";
+import {
+  displayedUpstreamProviderRecoveryText,
+  UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+} from "./upstream-provider-recovery";
+
+export {
+  UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY,
+  UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT,
+} from "./upstream-provider-recovery";
 
 const HERMES_LIVE_EVENT_LIMIT = 200;
 
@@ -149,14 +158,6 @@ export type AgentChatNoticePart = {
   kind: "credits" | "context-overflow" | "upstream-provider";
   text: string;
 };
-
-export const UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY =
-  "The model service is temporarily unavailable. Your answer is saved.";
-export const UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT = [
-  "[June upstream provider recovery]",
-  "Continue from the last failed step using the clarification answer already recorded in this session. Do not repeat the clarification.",
-  "[/June upstream provider recovery]",
-].join("\n");
 
 const UPSTREAM_PROVIDER_FAILURE_MARKER = "upstream_provider_failed";
 const PERSISTED_UPSTREAM_PROVIDER_FAILURE =
@@ -1640,7 +1641,8 @@ function displayedUserPromptText(content: string) {
 }
 
 export function displayedComposerUserMessageText(content: string): string {
-  if (content.trim() === UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT) return "Try again";
+  const recoveryText = displayedUpstreamProviderRecoveryText(content);
+  if (recoveryText !== content) return recoveryText;
   return stripSyntheticImageAttachmentMarker(
     stripAttachmentPromptBlock(displayedUserPromptText(stripImageAnalysisFailureNotice(content))),
   );

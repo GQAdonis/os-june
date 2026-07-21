@@ -1,5 +1,31 @@
 import type { AgentChatTurn } from "./agent-chat-runtime";
 
+export const UPSTREAM_PROVIDER_FAILURE_NOTICE_BODY =
+  "The model service is temporarily unavailable. Your answer is saved.";
+
+const UPSTREAM_PROVIDER_RECOVERY_OPEN = "[June upstream provider recovery]";
+
+export const UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT = [
+  UPSTREAM_PROVIDER_RECOVERY_OPEN,
+  "Continue from the last failed step using the clarification answer already recorded in this session. Do not repeat the clarification.",
+  "[/June upstream provider recovery]",
+].join("\n");
+
+export function displayedUpstreamProviderRecoveryText(content: string) {
+  return content.trim() === UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT ? "Try again" : content;
+}
+
+/** Hermes can truncate a session preview mid-prompt. The private opener is
+ * therefore the stable boundary for replacing both complete and truncated
+ * recovery instructions before any session-list surface receives them. */
+export function displayedUpstreamProviderRecoveryPreview(preview: string | undefined) {
+  const trimmed = preview?.trimStart();
+  return trimmed === UPSTREAM_PROVIDER_RECOVERY_OPEN ||
+    trimmed?.startsWith(`${UPSTREAM_PROVIDER_RECOVERY_OPEN}\n`)
+    ? "Try again"
+    : preview;
+}
+
 export type UpstreamProviderRecoveryStore = {
   attempted(storedSessionId: string, recoveryId: string): boolean;
   reserve(storedSessionId: string, recoveryId: string): boolean;

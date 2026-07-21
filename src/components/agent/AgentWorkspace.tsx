@@ -7866,6 +7866,12 @@ export function AgentWorkspace({
     recoveryId: string | undefined,
   ) {
     if (!storedSessionId || isProvisionalHermesSessionId(storedSessionId)) return;
+    if (
+      workingSessionIdsRef.current.has(storedSessionId) ||
+      waitingSessionIdsRef.current.has(storedSessionId)
+    ) {
+      return;
+    }
     if (!recoveryId || !upstreamProviderRecoveryStore.reserve(storedSessionId, recoveryId)) return;
     const session = hermesSessionItemsRef.current.find((item) => item.id === storedSessionId);
     if (!session) {
@@ -11446,6 +11452,10 @@ export function AgentWorkspace({
             selectedHermesSessionId,
             upstreamFailureRecoveryIds.get(turn.id) ?? "",
           )}
+          upstreamFailureRetryDisabled={
+            workingSessionIds.has(selectedHermesSessionId) ||
+            waitingSessionIds.has(selectedHermesSessionId)
+          }
           creditActionsDisabledReason={creditActionsDisabledReason}
           onApproval={(part, choice) =>
             void respondToApproval(
@@ -13473,6 +13483,7 @@ function AgentChatTurnRow({
   onRetryVideo,
   onRetryUpstreamFailure,
   upstreamFailureRetryAttempted,
+  upstreamFailureRetryDisabled,
   creditActionsDisabledReason,
   onThinkingOpenChange,
   onTopUp,
@@ -13514,6 +13525,7 @@ function AgentChatTurnRow({
   onRetryVideo?: (assistantTurnId: string, part: Extract<AgentChatPart, { type: "video" }>) => void;
   onRetryUpstreamFailure?: (assistantTurnId: string) => void;
   upstreamFailureRetryAttempted?: boolean;
+  upstreamFailureRetryDisabled?: boolean;
   creditActionsDisabledReason?: string;
   onThinkingOpenChange: (key: string, open: boolean) => void;
   onTopUp?: () => void;
@@ -13839,6 +13851,7 @@ function AgentChatTurnRow({
               <UpstreamProviderFailureNoticePart
                 key={`${turn.id}:notice:${index}`}
                 attempted={upstreamFailureRetryAttempted}
+                disabled={upstreamFailureRetryDisabled}
                 onRetry={onRetryUpstreamFailure ? () => onRetryUpstreamFailure(turn.id) : undefined}
               />
             ) : (
@@ -14260,9 +14273,11 @@ function CreditsNoticePart({
 
 function UpstreamProviderFailureNoticePart({
   attempted = false,
+  disabled = false,
   onRetry,
 }: {
   attempted?: boolean;
+  disabled?: boolean;
   onRetry?: () => void;
 }) {
   return (
@@ -14277,7 +14292,7 @@ function UpstreamProviderFailureNoticePart({
           <button
             type="button"
             className="btn btn-secondary"
-            disabled={attempted}
+            disabled={attempted || disabled}
             onClick={onRetry}
           >
             Try again

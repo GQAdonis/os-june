@@ -14338,6 +14338,64 @@ describe("AgentWorkspace", () => {
     ).toHaveLength(1);
   });
 
+  it("disables an older provider retry while the session is running", async () => {
+    const user = userEvent.setup();
+    let resolveNewerRun: (() => void) | undefined;
+    mocks.gatewayRequest.mockImplementation((method: string, params?: { text?: string }) =>
+      method === "session.resume"
+        ? Promise.resolve({ session_id: "runtime-session-1" })
+        : method === "prompt.submit" && params?.text === "Start a newer run"
+          ? new Promise((resolve) => {
+              resolveNewerRun = () => resolve({});
+            })
+          : Promise.resolve({}),
+    );
+
+    render(<AgentWorkspace />);
+    expect(await screen.findByText("Existing session")).toBeInTheDocument();
+    await user.type(screen.getByRole("textbox"), "Start the first run");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "Start the first run",
+      }),
+    );
+
+    act(() => {
+      for (const handler of mocks.gatewayEventHandlers) {
+        handler({
+          type: "message.complete",
+          session_id: "runtime-session-1",
+          payload: {
+            status: "error",
+            text: "API call failed after 3 retries: HTTP 502: upstream_provider_failed",
+          },
+        });
+      }
+    });
+
+    const retry = await screen.findByRole("button", { name: "Try again" });
+    await waitFor(() => expect(retry).toBeEnabled());
+
+    await user.type(screen.getByRole("textbox"), "Start a newer run");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+    await waitFor(() =>
+      expect(mocks.gatewayRequest).toHaveBeenCalledWith("prompt.submit", {
+        session_id: "runtime-session-1",
+        text: "Start a newer run",
+      }),
+    );
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Try again" })).toBeDisabled());
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(mocks.gatewayRequest).not.toHaveBeenCalledWith("prompt.submit", {
+      session_id: "runtime-session-1",
+      text: UPSTREAM_PROVIDER_FAILURE_RETRY_PROMPT,
+    });
+    await act(async () => resolveNewerRun?.());
+  });
+
   it("renders an out-of-credits notice with an upgrade action instead of the raw 402 error", async () => {
     const user = userEvent.setup();
     mocks.osAccountsUpgrade.mockResolvedValue(undefined);
