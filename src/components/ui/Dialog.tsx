@@ -15,6 +15,10 @@ type DialogProps = {
   footer?: ReactNode;
   /** Disable closing on backdrop click (still closes on Esc). */
   disableBackdropClose?: boolean;
+  /** Disable all close affordances (X button, Esc, backdrop) while a
+   * consumer-side operation is in flight. The X button renders disabled;
+   * Esc and backdrop clicks are ignored. */
+  closeDisabled?: boolean;
   /** Disables default focus management when the consumer wants to take over. */
   initialFocusSelector?: string;
   /** Optional width override. Defaults to the comfortable 460px form width. */
@@ -40,6 +44,7 @@ export function Dialog({
   children,
   footer,
   disableBackdropClose = false,
+  closeDisabled = false,
   initialFocusSelector,
   width,
   className,
@@ -63,7 +68,7 @@ export function Dialog({
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
-        onCloseRef.current();
+        if (!closeDisabled) onCloseRef.current();
         return;
       }
       if (event.key !== "Tab" || !cardRef.current) return;
@@ -105,6 +110,7 @@ export function Dialog({
       data-open="true"
       onMouseDown={(event) => {
         if (disableBackdropClose) return;
+        if (closeDisabled) return;
         if (event.target === event.currentTarget) onClose();
       }}
     >
@@ -123,6 +129,8 @@ export function Dialog({
             {title}
           </h2>
           <button type="button" className="dialog-close" aria-label="Close" onClick={onClose}>
+            disabled={closeDisabled}
+            aria-disabled={closeDisabled || undefined}
             <IconCrossMedium size={14} />
           </button>
         </header>

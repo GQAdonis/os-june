@@ -426,6 +426,7 @@ describe("ConnectorsSection", () => {
     await userEvent.click(connect);
 
     expect(mocks.notionConnectorConnect).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Connect Notion" })).toBeInTheDocument();
     expect(
       screen.getByText(/You'll sign in to Notion and approve June's access/i),
     ).toBeInTheDocument();
@@ -436,10 +437,33 @@ describe("ConnectorsSection", () => {
       screen.getAllByText(/Search may include Notion-connected sources/i).length,
     ).toBeGreaterThanOrEqual(2);
 
+    // The (i) button's aria-describedby must resolve to exactly one element
+    // containing both disclosure strings, so screen readers encounter the
+    // caveat when navigating the row.
+    const infoButton = screen.getByRole("button", { name: "Notion privacy and access scope" });
+    const describedById = infoButton.getAttribute("aria-describedby");
+    expect(describedById).toBe("notion-scope-disclosure");
+    const describedByTarget = document.getElementById("notion-scope-disclosure");
+    expect(describedByTarget).not.toBeNull();
+    expect(describedByTarget).toHaveTextContent(/Access may extend beyond selected pages/i);
+    expect(describedByTarget).toHaveTextContent(/Search may include Notion-connected sources/i);
+
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
 
     await waitFor(() => expect(mocks.notionConnectorConnect).toHaveBeenCalled());
     expect(mocks.connectorsConnect).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Notion dialog open and shows an error when OAuth fails", async () => {
+    mocks.notionConnectorConnect.mockRejectedValue(new Error("OAuth rejected"));
+    render(<ConnectorsSection />);
+
+    await userEvent.click(await findEnabledConnect("Connect Notion"));
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    await waitFor(() => expect(mocks.notionConnectorConnect).toHaveBeenCalled());
+    // Dialog stays open after an OAuth failure so the user can retry.
+    expect(screen.getByRole("dialog", { name: "Connect Notion" })).toBeInTheDocument();
   });
 
   it("shows connected Notion preview state and disconnects locally", async () => {
@@ -502,6 +526,7 @@ describe("ConnectorsSection", () => {
     );
     await userEvent.click(screen.getByRole("button", { name: "Reconnect Notion" }));
     expect(mocks.notionConnectorConnect).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: "Reconnect Notion" })).toBeInTheDocument();
     expect(
       screen.getByText(/You'll sign in to Notion and approve June's access/i),
     ).toBeInTheDocument();

@@ -569,12 +569,16 @@ export function ConnectorsSection({
     setNotionConnecting(true);
     try {
       await notionConnectorConnect();
-      await connectorsApplyRuntime();
-      await refresh();
+      // OAuth succeeded: tokens are stored. Close the consent dialog now,
+      // before the runtime apply/refresh that can fail independently. A
+      // runtime-apply failure after a successful grant is a transient
+      // infra issue, not a reason to re-prompt for OAuth.
       if (operationId === notionOperationIdRef.current) {
         setNotionConnectOpen(false);
         toast.success("Notion connected");
       }
+      await connectorsApplyRuntime();
+      await refresh();
     } catch (err) {
       if (operationId === notionOperationIdRef.current) toast.error(messageFromError(err));
     } finally {
@@ -1146,6 +1150,7 @@ export function ConnectorsSection({
         }
         description={NOTION_CONNECT_DIALOG_DESCRIPTION}
         disableBackdropClose={notionConnecting}
+        closeDisabled={notionConnecting}
         footer={
           <Fragment>
             <button

@@ -22064,6 +22064,11 @@ button.memory-project:hover {
   color: var(--foreground);
 }
 
+.dialog-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .dialog-description {
   margin: calc(-1 * var(--sp-3)) 0 0;
   color: var(--muted-foreground);
