@@ -297,6 +297,31 @@ fn require_github_client_id() -> Result<GithubOAuthClient, AppError> {
     Ok(client)
 }
 
+/// The GitHub App's public slug (the `foo` in `github.com/apps/foo`), used
+/// only to point the user at the app's install page. Env-configured like the
+/// client id so switching apps (staging vs production) never needs a code
+/// change; empty means the not-installed message falls back to the user's
+/// own installation settings page.
+const GITHUB_APP_SLUG_ENV: &str = "GITHUB_APP_SLUG";
+
+fn github_app_slug() -> String {
+    crate::os_accounts::load_local_env();
+    env_or_build_trimmed(GITHUB_APP_SLUG_ENV, option_env!("GITHUB_APP_SLUG"))
+}
+
+/// The `connector_github_not_installed` message, pointing at the app's
+/// install page when the slug is configured and at the user's installation
+/// settings otherwise.
+fn github_not_installed_message(slug: &str) -> String {
+    if slug.is_empty() {
+        "Install the June GitHub App on at least one repository, then connect again. You can manage app installations at github.com/settings/installations.".to_string()
+    } else {
+        format!(
+            "Install the June GitHub App on at least one repository, then connect again. Open github.com/apps/{slug} to choose repositories."
+        )
+    }
+}
+
 /// The callback ports registered on the Linear OAuth application
 /// (`http://127.0.0.1:<port>/callback`, one URL per port). Linear matches
 /// the registered callback URL exactly - it does not ignore the loopback
@@ -1302,7 +1327,7 @@ async fn ensure_github_installed(access_token: &str) -> Result<(), AppError> {
         Ok(true) => Ok(()),
         Ok(false) => Err(AppError::new(
             "connector_github_not_installed",
-            "Install the June GitHub App on at least one repository, then connect again. Open github.com/apps/open-software-network to choose repositories.",
+            github_not_installed_message(&github_app_slug()),
         )),
         Err(error) => {
             tracing::warn!(
@@ -2177,6 +2202,17 @@ mod tests {
     }
 
     // --- GitHub-specific tests -------------------------------------------------------
+
+    #[test]
+    fn github_not_installed_message_uses_slug_when_configured() {
+        let with_slug = github_not_installed_message("june-staging");
+        assert!(with_slug.contains("github.com/apps/june-staging"));
+        // No slug configured: point at the user's own installations page
+        // instead of a broken github.com/apps/ URL.
+        let without = github_not_installed_message("");
+        assert!(without.contains("github.com/settings/installations"));
+        assert!(!without.contains("github.com/apps/"));
+    }
 
     #[test]
     fn github_oauth_client_secret_opt_returns_none_when_empty() {
