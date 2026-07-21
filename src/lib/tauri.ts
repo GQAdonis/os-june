@@ -2259,11 +2259,13 @@ export type ConnectorScopeBundle =
   | "calendar_read"
   | "calendar_events"
   | "linear_read"
-  | "linear_write";
+  | "linear_write"
+  | "github_read"
+  | "github_write";
 
 export type ConnectorAccountStatus = "connected" | "reconnect_required" | "unavailable";
 
-export type ConnectorProvider = "google" | "linear" | "notion";
+export type ConnectorProvider = "google" | "linear" | "notion" | "github";
 
 /** One Linear team: the granularity June's Linear read/write access is
  * scoped to. Returned both by the live team list and on the account once
@@ -2394,6 +2396,20 @@ export type PendingComputerUseApprovalDto = {
  * a reconnect_required transition). Payload carries no account data; listeners
  * re-fetch via connectorsList(). */
 export const CONNECTORS_CHANGED_EVENT = "june://connectors-changed";
+
+/** Payload emitted by `june://connectors-github-device-code` while a GitHub
+ * device-flow connect is in progress. May be emitted more than once (a
+ * restarted poll re-emits the latest code). The backend opens the
+ * verification page itself; the UI still shows the code as a fallback. */
+export type GitHubDeviceCodePayload = {
+  userCode: string;
+  verificationUri: string;
+  expiresInSeconds: number;
+};
+
+/** Tauri event: a GitHub device-authorization code is ready to display.
+ * Emitted while `connectors_connect` is pending for provider "github". */
+export const GITHUB_DEVICE_CODE_EVENT = "june://connectors-github-device-code";
 
 /** Tauri event: the pending connector-approval set changed.
  * Payload: `{ pendingCount: number }`. */
